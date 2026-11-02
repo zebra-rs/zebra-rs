@@ -11,6 +11,81 @@
 # Fields "distribution" and "urgency" are optional per-entry; if you omit them,
 # changelog-gen.sh defaults to distribution "unstable" and urgency "medium".
 
+- semver: 26.11.1
+  date: 2026-11-02T18:00:00+09:00
+  distribution: unstable
+  urgency: medium
+  packager: Kunihiro Ishiguro <kunihiro@zebra.rs>
+  changes:
+    - note: |
+        ### BGP: no churn from UPDATEs that change nothing
+        * A looped UPDATE for a prefix another peer's path wins no
+          longer reinstalls that path and re-sends it to every peer
+          (kurokiyokiyo). In a Clos whose spines share one AS, the
+          leaf loopbacks were reinstalled and re-advertised every 30 s.
+          IPv4, IPv6, VPNv4, VPNv6 and labeled unicast all skip it, so
+          a route reflector or Option B ASBR rejecting its own looped
+          copies (ORIGINATOR_ID, CLUSTER_LIST) is spared too
+        * An inbound-policy deny of a route the peer had no path for
+          changes nothing. With a deny on one peer, every UPDATE it
+          sent for the prefix re-sent the best path to every peer
+        * A redistribute or `network` withdraw that removes nothing
+          leaves a peer-learned best alone; each one reinstalled it
+          and re-sent it to every peer
+        * Labeled unicast withdraws a route when a deny removes its
+          last path; peers used to keep it
+        * With `router bgp sharding rib-sharding` above 1,
+          redistributed IPv4 routes go through the shard pool: a
+          neighbor that comes up later is sent them, and they stay
+          best over a peer's path for the same prefix instead of
+          losing to it. Their metric is sent as MED, as with one shard
+    - note: |
+        ### RIB: make-before-break route replacement
+        * A route that replaces another is installed before the old
+          one is removed, so the prefix no longer goes missing from
+          the kernel in between. This covers a protocol re-sending a
+          route unchanged or moving it to another next hop, and a
+          route of another protocol taking over (such as a static
+          route outranking BGP) or handing it back
+        * The kernel route is replaced in place; only the old route's
+          priorities the new one does not use are deleted, and the old
+          next hop is released last. FPM and cradle-rs see an update
+          instead of a delete and an add
+    - note: |
+        ### IPv6 router advertisements
+        * RA is held until the interface has a usable link-local
+          (kurokiyokiyo). After an administrative down/up or a VRF
+          move the kernel re-adds the link-local tentative, the first
+          RA failed with EADDRNOTAVAIL and the next went out 16 s
+          later, so a BGP unnumbered peer waiting for it stayed down
+          that long. The initial RAs now restart once DAD completes,
+          on VRF interfaces too
+        * A failed RA send is retried after 0.5 s, doubling up to
+          16 s, instead of being counted as sent (kurokiyokiyo)
+        * Each RA is sent from the interface's lowest usable
+          link-local. The kernel could pick a global source, which
+          receivers discard (RFC 4861 §6.1.2)
+        * `show ipv6 nd interface` says why RA is held: `held (no
+          link-local)`, `held (link-local not ready)` or `held
+          (link-local failed DAD)`; its JSON gains
+          `ra_scheduler.link_local_hold`. A link-local that fails DAD
+          is logged as a warning once
+    - note: |
+        ### vty and build
+        * The vty shell carries GNU's official bash-5.3 patches
+          001–020 and reports 5.3.20. They fix a crash on SIGINT
+          during reverse i-search, a readline crash on a prompt over
+          256 wrapped lines, and memory errors in `read` and `mapfile`,
+          among others. The patches are vendored verbatim under
+          `vty/patches/upstream/`, each checked against its GNU
+          signature
+        * `make install` installs the `vtypam` PAM helper to
+          `/usr/sbin` with its capabilities, as the package does; a
+          dev host ran a fresh daemon against whatever helper was
+          installed last
+        * New BDD features cover a looped UPDATE in a Clos, in-place
+          route replacement (IPv4 and IPv6) and redistribution with
+          four RIB shards
 - semver: 26.10.3
   date: 2026-10-19T18:00:00+09:00
   distribution: unstable
