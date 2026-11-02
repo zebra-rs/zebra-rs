@@ -6380,22 +6380,15 @@ fn is_seg6local_entry(entry: &RibEntry) -> bool {
 /// Returns `None` when the neighbor isn't a publishable FDB row:
 ///   - non-`AF_BRIDGE` family (covered by `RibRx::FdbAdd` only)
 ///   - no MAC address attached
-///   - the slave port has no resolvable bridge master
+///   - a row of a device's own FDB rather than a bridge's: only a
+///     bridge row places a station on a port. The kernel names the
+///     bridge in `NDA_MASTER` on every bridge row it reports, learned
+///     or added (`fdb_fill_info`, br_fdb.c), and on no vxlan row
+///     (`vxlan_fdb_info`).
 ///   - the master bridge has no VXLAN slave with a known VNI — until
 ///     the bridge is wired to VXLAN, an EVPN advertise consumer
 ///     wouldn't have anywhere to put the route, so dropping early
 ///     keeps the message stream tidy.
-///
-/// **Bridge resolution is two-tier**: try `NDA_MASTER` from the FDB
-/// message first (set by userland tools — e.g. `bridge fdb add ...
-/// master <br>` — and by some sticky/permanent path), then fall back
-/// to the slave port's `IFLA_MASTER` (which we cached when the link
-/// came up). Without the fallback, data-plane-learned MACs that the
-/// kernel broadcasts WITHOUT `NDA_MASTER` are silently dropped here
-/// — matched user-visible bug: `bridge fdb show` lists the MAC but
-/// `show bgp evpn` doesn't, because the operator-added MACs
-/// (which carry NDA_MASTER) succeed and the data-plane-learned ones
-/// don't.
 fn fdb_entry_from_neighbor(rib: &Rib, nbr: &FibNeighbor) -> Option<FdbEntry> {
     use netlink_packet_route::AddressFamily;
     use netlink_packet_route::neighbour::{NeighbourFlags, NeighbourState};
@@ -6439,6 +6432,7 @@ fn fdb_entry_from_neighbor(rib: &Rib, nbr: &FibNeighbor) -> Option<FdbEntry> {
     if nbr.family != AddressFamily::Bridge {
         return None;
     }
+    let bridge_ifindex = nbr.master?;
     let mac = nbr.lladdr?;
     // Skip multicast / broadcast MACs. The kernel's bridge FDB
     // contains rows for every multicast group the local device
@@ -6478,9 +6472,6 @@ fn fdb_entry_from_neighbor(rib: &Rib, nbr: &FibNeighbor) -> Option<FdbEntry> {
     {
         return None;
     }
-    let bridge_ifindex = nbr
-        .master
-        .or_else(|| rib.links.get(&nbr.ifindex).and_then(|link| link.master))?;
     let vni = rib.vni_for_bridge(bridge_ifindex)?;
     let vxlan_local = rib.vxlan_local_for_bridge(bridge_ifindex);
     Some(FdbEntry {
@@ -7192,6 +7183,22 @@ mod local_device_mac_tests {
         assert!(rib.local_bindings.is_empty());
         rib.process_fib_msg(FibMessage::DelNeighbor(operator)).await;
         assert!(rib.neighbors.is_empty());
+    }
+
+    /// A station's bridge comes from the row's `NDA_MASTER`, never from
+    /// the port's master: a row without it is not the bridge's.
+    #[tokio::test]
+    async fn the_bridge_comes_from_nda_master_only() {
+        let mut rib = Rib::new(false).unwrap();
+        rib.links = tables().0;
+        let station = row(HOST0, "aa:bb:cc:dd:ee:01", None, NeighbourState::Noarp);
+        let entry = fdb_entry_from_neighbor(&rib, &station).unwrap();
+        assert_eq!(entry.bridge_ifindex, BR10);
+        let unnamed = FibNeighbor {
+            master: None,
+            ..station
+        };
+        assert!(fdb_entry_from_neighbor(&rib, &unnamed).is_none());
     }
 
     /// A port without a VLAN lists a station's MAC in its unicast address
