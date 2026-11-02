@@ -176,6 +176,9 @@ pub struct FibNeighbor {
     pub dst: Option<IpAddr>,
     pub vlan: Option<u16>,
     pub vni: Option<u32>,
+    /// `NDA_SRC_VNI`: the VNI a VXLAN device in metadata mode keys the row
+    /// by. Absent on a device with a fixed VNI and on a bridge row.
+    pub src_vni: Option<u32>,
     pub master: Option<u32>,
     /// An AF_BRIDGE row without `NDA_CACHEINFO`: rtnetlink's generic
     /// summary rather than a bridge or vxlan driver's own report, which

@@ -2329,24 +2329,25 @@ pub struct L2NeighborTable {
 
 pub fn l2_neighbor_show(rib: &Rib, _args: Args, json: bool) -> String {
     use super::inst::NeighborKey;
+    let ifname = |ifindex: u32| {
+        rib.links
+            .get(&ifindex)
+            .map(|l| l.name.clone())
+            .unwrap_or_else(|| format!("if#{ifindex}"))
+    };
+    // The FDB rows in key order: the bridges' rows, then the devices' own.
+    // The port of a bridge row is its value, not its key.
+    let rows = rib.neighbors.iter().filter_map(|(key, nbr)| match key {
+        NeighborKey::Bridge { mac, .. } | NeighborKey::Device { mac, .. } => Some((mac, nbr)),
+        NeighborKey::Inet { .. } => None,
+    });
     if json {
         let mut entries = Vec::new();
-        for (key, nbr) in rib.neighbors.iter() {
-            let NeighborKey::Bridge {
-                ifindex, mac, vlan, ..
-            } = key
-            else {
-                continue;
-            };
-            let interface = rib
-                .links
-                .get(ifindex)
-                .map(|l| l.name.clone())
-                .unwrap_or_else(|| format!("if#{ifindex}"));
+        for (mac, nbr) in rows {
             entries.push(L2NeighborJson {
                 mac: mac.to_string(),
-                interface,
-                vlan: *vlan,
+                interface: ifname(nbr.ifindex),
+                vlan: nbr.vlan,
                 vni: nbr.vni,
                 dst: nbr.dst.map(|d| d.to_string()),
                 state: format!("{:?}", nbr.state),
@@ -2377,19 +2378,11 @@ pub fn l2_neighbor_show(rib: &Rib, _args: Args, json: bool) -> String {
         "", "", "", "", "", "", "",
     )
     .unwrap();
-    for (key, nbr) in rib.neighbors.iter() {
-        let NeighborKey::Bridge {
-            ifindex, mac, vlan, ..
-        } = key
-        else {
-            continue;
-        };
-        let ifname = rib
-            .links
-            .get(ifindex)
-            .map(|l| l.name.clone())
-            .unwrap_or_else(|| format!("if#{ifindex}"));
-        let vlan_s = vlan.map(|v| v.to_string()).unwrap_or_else(|| "-".into());
+    for (mac, nbr) in rows {
+        let vlan_s = nbr
+            .vlan
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "-".into());
         let vni_s = nbr.vni.map(|v| v.to_string()).unwrap_or_else(|| "-".into());
         let dst_s = nbr.dst.map(|d| d.to_string()).unwrap_or_else(|| "-".into());
         // Format `flags` via `.bits()` rather than Debug so the field
@@ -2402,7 +2395,7 @@ pub fn l2_neighbor_show(rib: &Rib, _args: Args, json: bool) -> String {
             buf,
             " {:<18} {:<16} {:>5}  {:>10}  {:<40} {:<14} 0x{:02x}",
             mac.to_string(),
-            ifname,
+            ifname(nbr.ifindex),
             vlan_s,
             vni_s,
             dst_s,
@@ -2971,11 +2964,11 @@ mod tests {
         let mut rib = Rib::new(false).expect("rib");
         let mac: crate::rib::MacAddr = "aa:bb:cc:dd:ee:01".parse().unwrap();
         rib.neighbors.insert(
-            NeighborKey::Bridge {
+            NeighborKey::Device {
                 ifindex: 7,
                 mac,
                 vlan: None,
-                own: false,
+                src_vni: None,
             },
             FibNeighbor {
                 family: AddressFamily::Bridge,

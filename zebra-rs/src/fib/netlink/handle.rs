@@ -6475,6 +6475,7 @@ pub fn neighbor_from_msg(msg: NeighbourMessage) -> FibNeighbor {
             }
             NeighbourAttribute::Vlan(vlan) => nbr.vlan = Some(vlan),
             NeighbourAttribute::Vni(vni) => nbr.vni = Some(vni),
+            NeighbourAttribute::SourceVni(vni) => nbr.src_vni = Some(vni),
             NeighbourAttribute::Controller(idx) => nbr.master = Some(idx),
             _ => {}
         }
@@ -7389,8 +7390,9 @@ mod tests {
     }
 
     /// A VXLAN device's FDB report names the VTEP, which the fork parses
-    /// as `TunnelEndpoint`, and carries `NDA_CACHEINFO`. The kernel's
-    /// generic copy of the same `self` add carries neither.
+    /// as `TunnelEndpoint`, carries `NDA_CACHEINFO`, and in metadata mode
+    /// the source VNI. The kernel's generic copy of the same `self` add
+    /// carries none of them.
     #[test]
     fn neighbor_from_msg_reads_the_vtep_and_marks_the_generic_copy() {
         use netlink_packet_route::neighbour::{NeighbourCacheInfo, NeighbourCacheInfoBuffer};
@@ -7412,14 +7414,15 @@ mod tests {
                 "192.0.2.2".parse().unwrap(),
             )));
         report.attributes.push(NeighbourAttribute::Vni(10));
+        report.attributes.push(NeighbourAttribute::SourceVni(20));
         let ci = NeighbourCacheInfo::parse(&NeighbourCacheInfoBuffer::new(&[0u8; 16])).unwrap();
         report.attributes.push(NeighbourAttribute::CacheInfo(ci));
         let report = neighbor_from_msg(report);
         assert_eq!(report.dst, Some("192.0.2.2".parse().unwrap()));
-        assert_eq!(report.vni, Some(10));
+        assert_eq!((report.vni, report.src_vni), (Some(10), Some(20)));
         assert!(!report.generic);
         let copy = neighbor_from_msg(generic());
-        assert_eq!((copy.dst, copy.vni), (None, None));
+        assert_eq!((copy.dst, copy.vni, copy.src_vni), (None, None, None));
         assert!(copy.generic);
         // Only an FDB row is ever a generic copy.
         let mut arp = generic();
