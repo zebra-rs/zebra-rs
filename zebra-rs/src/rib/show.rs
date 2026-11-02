@@ -2305,16 +2305,28 @@ pub fn vrf_show(rib: &Rib, _args: Args, json: bool) -> String {
 }
 
 /// Render the bridge FDB slice of `rib.neighbors` (the AF_BRIDGE entries).
-/// Modelled on `bridge fdb show` — one row per (ifindex, mac, vlan)
-/// triple, with the resolved interface name and any per-FDB-entry
-/// attributes (VLAN, VNI, remote VTEP IP) the kernel supplied. ARP/NDP
-/// (AF_INET / AF_INET6) lives in the same map but isn't shown here —
+/// Modelled on `bridge fdb show`, one row per row of the kernel's two kinds
+/// of FDB: a bridge's, one row per (bridge, mac, vlan) whatever the port,
+/// and a device's own, one row per (device, mac, vlan, source VNI) whatever
+/// the remote VTEP. A vxlan row carries no VLAN. Generic rows (a NIC's
+/// address lists) are not cached, so not shown. ARP/NDP (AF_INET /
+/// AF_INET6) lives in the same map but isn't shown here —
 /// `show ip arp` / `show ipv6 neighbor` will surface those separately.
 #[derive(Serialize)]
 pub struct L2NeighborJson {
     pub mac: String,
+    /// The port of a bridge row, or the device of a device row.
     pub interface: String,
+    /// `"bridge"` or `"device"`: which FDB the row is in.
+    pub table: &'static str,
+    /// The bridge of a bridge row; null for a device row.
+    pub bridge: Option<String>,
     pub vlan: Option<u16>,
+    /// `NDA_SRC_VNI` of a device row, which the kernel reports only for a
+    /// VXLAN device in metadata mode and a nonzero VNI; null otherwise.
+    pub src_vni: Option<u32>,
+    /// `NDA_VNI`, the destination VNI. The kernel leaves it out when it
+    /// equals the device's default, so null too.
     pub vni: Option<u32>,
     pub dst: Option<String>,
     pub state: String,
@@ -2338,16 +2350,23 @@ pub fn l2_neighbor_show(rib: &Rib, _args: Args, json: bool) -> String {
     // The FDB rows in key order: the bridges' rows, then the devices' own.
     // The port of a bridge row is its value, not its key.
     let rows = rib.neighbors.iter().filter_map(|(key, nbr)| match key {
-        NeighborKey::Bridge { mac, .. } | NeighborKey::Device { mac, .. } => Some((mac, nbr)),
+        NeighborKey::Bridge { mac, .. } | NeighborKey::Device { mac, .. } => Some((key, mac, nbr)),
         NeighborKey::Inet { .. } => None,
     });
     if json {
         let mut entries = Vec::new();
-        for (mac, nbr) in rows {
+        for (key, mac, nbr) in rows {
+            let (table, bridge, src_vni) = match key {
+                NeighborKey::Bridge { bridge, .. } => ("bridge", Some(ifname(*bridge)), None),
+                _ => ("device", None, nbr.src_vni),
+            };
             entries.push(L2NeighborJson {
                 mac: mac.to_string(),
                 interface: ifname(nbr.ifindex),
+                table,
+                bridge,
                 vlan: nbr.vlan,
+                src_vni,
                 vni: nbr.vni,
                 dst: nbr.dst.map(|d| d.to_string()),
                 state: format!("{:?}", nbr.state),
@@ -2378,7 +2397,7 @@ pub fn l2_neighbor_show(rib: &Rib, _args: Args, json: bool) -> String {
         "", "", "", "", "", "", "",
     )
     .unwrap();
-    for (mac, nbr) in rows {
+    for (_, mac, nbr) in rows {
         let vlan_s = nbr
             .vlan
             .map(|v| v.to_string())
@@ -2983,6 +3002,85 @@ mod tests {
         assert_underlined(
             &out,
             &["MAC", "Interface", "VLAN", "VNI", "Dst", "State", "Flags"],
+        );
+    }
+
+    /// The JSON names the FDB each row is in, and the fields its key has
+    /// beyond the MAC and VLAN: a bridge row's bridge (its interface is
+    /// the port), a device row's source VNI.
+    #[tokio::test]
+    async fn l2_neighbor_json_names_each_row_table() {
+        use crate::fib::message::FibNeighbor;
+        use crate::rib::inst::NeighborKey;
+        use netlink_packet_route::AddressFamily;
+        let mut rib = Rib::new(false).expect("rib");
+        let mac: crate::rib::MacAddr = "aa:bb:cc:dd:ee:01".parse().unwrap();
+        let row = |ifindex, src_vni| FibNeighbor {
+            family: AddressFamily::Bridge,
+            ifindex,
+            lladdr: Some(mac),
+            src_vni,
+            ..Default::default()
+        };
+        rib.neighbors.insert(
+            NeighborKey::Bridge {
+                bridge: 3,
+                mac,
+                vlan: None,
+            },
+            FibNeighbor {
+                master: Some(3),
+                ..row(4, None)
+            },
+        );
+        for src_vni in [None, Some(20)] {
+            rib.neighbors.insert(
+                NeighborKey::Device {
+                    ifindex: 4,
+                    mac,
+                    vlan: None,
+                    src_vni,
+                },
+                row(4, src_vni),
+            );
+        }
+        let out = l2_neighbor_show(&rib, Args(Default::default()), true);
+        let json: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let fields: Vec<_> = json["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| {
+                (
+                    e["table"].as_str().unwrap().to_string(),
+                    e["interface"].as_str().unwrap().to_string(),
+                    e["bridge"].clone(),
+                    e["src_vni"].clone(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            fields,
+            [
+                (
+                    "bridge".into(),
+                    "if#4".into(),
+                    "if#3".into(),
+                    serde_json::Value::Null
+                ),
+                (
+                    "device".into(),
+                    "if#4".into(),
+                    serde_json::Value::Null,
+                    serde_json::Value::Null
+                ),
+                (
+                    "device".into(),
+                    "if#4".into(),
+                    serde_json::Value::Null,
+                    20.into()
+                ),
+            ]
         );
     }
 
