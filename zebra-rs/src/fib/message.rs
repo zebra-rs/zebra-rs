@@ -178,11 +178,13 @@ pub struct FibNeighbor {
     pub vni: Option<u32>,
     pub master: Option<u32>,
     /// An AF_BRIDGE row without `NDA_CACHEINFO`: rtnetlink's generic
-    /// summary of the entry rather than the device's own report. Before
-    /// Linux 6.13 the kernel sends one after the device's report of every
-    /// `self` FDB add (`rtnl_fdb_notify`), carrying only the MAC, the VLAN
-    /// and the request's state — no VTEP, no VNI, no flags beyond
-    /// `NTF_SELF`.
+    /// summary rather than a bridge or vxlan driver's own report, which
+    /// always carries it. Before Linux 6.13 the kernel sends one after the
+    /// device's report of every `self` FDB add and delete
+    /// (`rtnl_fdb_notify`), carrying only the MAC, the VLAN and the
+    /// request's state; a NIC's unicast and multicast address lists are
+    /// dumped in the same form (`ndo_dflt_fdb_dump`). The rib drops these
+    /// rows on arrival.
     pub generic: bool,
 }
 

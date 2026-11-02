@@ -1909,14 +1909,6 @@ impl Rib {
         }
     }
 
-    /// Whether `nbr` is a generic FDB summary of a row already cached. The
-    /// device's own report of a `self` add comes first; the generic copy
-    /// that follows says nothing new. A row only ever reported in generic
-    /// form (a NIC's address list) is still cached the first time.
-    fn is_fdb_echo(&self, nbr: &FibNeighbor) -> bool {
-        nbr.generic && neighbor_key(nbr).is_some_and(|key| self.neighbors.contains_key(&key))
-    }
-
     fn cache_neighbor(&mut self, nbr: FibNeighbor, add: bool) -> Option<FibNeighbor> {
         use netlink_packet_route::neighbour::NeighbourFlags;
         let key = neighbor_key(&nbr)?;
@@ -5093,11 +5085,15 @@ impl Rib {
             FibMessage::KernelNexthop(nexthop) => {
                 self.nmap.reserve(nexthop.id);
             }
-            // The kernel's generic copy of a row the device has just
-            // reported in full. Caching it would drop the VTEP, the VNI and
-            // the `NTF_EXT_LEARNED` flag of every VXLAN row installed with
-            // `self`, and file a remote MAC as a local learn.
-            FibMessage::NewNeighbor(nbr) if self.is_fdb_echo(&nbr) => {}
+            // Generic AF_BRIDGE rows are not FDB rows of the bridge or a
+            // vxlan device: the copy rtnetlink sends after a driver's own
+            // report of a `self` add or delete, a NIC's address lists, or
+            // a `self` change on a driver that keeps no FDB. Caching one
+            // would file a remote MAC as a local learn or keep a NIC
+            // address as a station; deleting by one would remove the
+            // driver's row it copies.
+            FibMessage::NewNeighbor(nbr) | FibMessage::DelNeighbor(nbr)
+                if nbr.family == netlink_packet_route::AddressFamily::Bridge && nbr.generic => {}
             FibMessage::NewNeighbor(nbr) => {
                 // Tee resolved ARP/ND to the cradle eBPF data plane — its
                 // MPLS egress rewrite resolves next-hop MACs from this state.
@@ -7017,40 +7013,115 @@ mod local_device_mac_tests {
         assert!(rib.vxlan_fdb_row_sticky(10, mac));
     }
 
-    /// The kernel follows its report of a `self` FDB add with a generic
-    /// copy: no VTEP, no VNI, `NTF_SELF` only. The cache keeps the report,
-    /// so the MAC stays remote with the reported flags. A generic row seen
-    /// first, as a NIC's address list only ever is, is still cached.
-    #[tokio::test]
-    async fn a_generic_fdb_copy_leaves_the_reported_row() {
-        let mac = mac("aa:bb:cc:dd:ee:01");
-        let report = FibNeighbor {
+    /// The generic copy of a `self` FDB add: no VTEP, no VNI, `NTF_SELF`
+    /// only.
+    fn generic_copy(ifindex: u32, mac: &str) -> FibNeighbor {
+        FibNeighbor {
+            flags: NeighbourFlags::Own,
+            generic: true,
+            ..self_row(ifindex, mac)
+        }
+    }
+
+    /// The vxlan driver's report of a remote MAC `mac_add` installed.
+    fn vxlan_report(mac: &str) -> FibNeighbor {
+        FibNeighbor {
             flags: NeighbourFlags::Own | NeighbourFlags::ExtLearned | NeighbourFlags::Sticky,
             dst: Some("192.0.2.2".parse().unwrap()),
             vni: Some(10),
-            ..self_row(VXLAN10, "aa:bb:cc:dd:ee:01")
-        };
-        let copy = FibNeighbor {
-            flags: NeighbourFlags::Own,
-            generic: true,
-            ..self_row(VXLAN10, "aa:bb:cc:dd:ee:01")
-        };
+            ..self_row(VXLAN10, mac)
+        }
+    }
+
+    /// A generic FDB row is never cached, whether it follows the driver's
+    /// report of the same `self` add or comes first, so the MAC stays
+    /// remote with the reported VTEP, VNI and flags.
+    #[tokio::test]
+    async fn a_generic_fdb_row_is_never_cached() {
+        let mac = mac("aa:bb:cc:dd:ee:01");
+        let report = vxlan_report("aa:bb:cc:dd:ee:01");
+        let copy = generic_copy(VXLAN10, "aa:bb:cc:dd:ee:01");
+        let key = neighbor_key(&report).unwrap();
+        for copy_first in [false, true] {
+            let mut rib = Rib::new(false).unwrap();
+            rib.links = tables().0;
+            let order = if copy_first {
+                [copy.clone(), report.clone()]
+            } else {
+                [report.clone(), copy.clone()]
+            };
+            for nbr in order {
+                rib.process_fib_msg(FibMessage::NewNeighbor(nbr)).await;
+            }
+            assert_eq!(rib.neighbors.len(), 1, "{copy_first}");
+            let cached = &rib.neighbors[&key];
+            assert_eq!((cached.dst, cached.vni), (report.dst, Some(10)));
+            assert_eq!(cached.flags, report.flags);
+            assert!(!rib.local_neighbors.contains_key(&mac));
+        }
+        let mut rib = Rib::new(false).unwrap();
+        rib.links = tables().0;
+        rib.process_fib_msg(FibMessage::NewNeighbor(copy)).await;
+        assert!(rib.neighbors.is_empty());
+    }
+
+    /// The generic copy of a `self` delete, or of a delete on another
+    /// device, removes nothing: only the driver's own report does.
+    #[tokio::test]
+    async fn a_generic_fdb_delete_leaves_the_reported_row() {
+        let report = vxlan_report("aa:bb:cc:dd:ee:01");
         let key = neighbor_key(&report).unwrap();
         let mut rib = Rib::new(false).unwrap();
         rib.links = tables().0;
         rib.process_fib_msg(FibMessage::NewNeighbor(report.clone()))
             .await;
-        rib.process_fib_msg(FibMessage::NewNeighbor(copy.clone()))
-            .await;
-        let cached = &rib.neighbors[&key];
-        assert_eq!((cached.dst, cached.vni), (report.dst, Some(10)));
-        assert_eq!(cached.flags, report.flags);
-        assert!(!rib.local_neighbors.contains_key(&mac));
-
-        let mut rib = Rib::new(false).unwrap();
-        rib.links = tables().0;
-        rib.process_fib_msg(FibMessage::NewNeighbor(copy)).await;
+        rib.process_fib_msg(FibMessage::DelNeighbor(generic_copy(
+            VXLAN10,
+            "aa:bb:cc:dd:ee:01",
+        )))
+        .await;
         assert!(rib.neighbors.contains_key(&key));
+        rib.process_fib_msg(FibMessage::DelNeighbor(report)).await;
+        assert!(rib.neighbors.is_empty());
+    }
+
+    /// A port without a VLAN lists a station's MAC in its unicast address
+    /// list, which the kernel dumps as a generic `self` row and never
+    /// reports deleted. The station's sticky static bridge row alone backs
+    /// the binding: it stays sticky in either dump order, and goes when
+    /// that row is deleted.
+    #[tokio::test]
+    async fn a_nic_address_list_row_backs_no_binding() {
+        let mac = mac("aa:bb:cc:dd:ee:01");
+        let station = FibNeighbor {
+            flags: NeighbourFlags::Sticky,
+            ..row(HOST0, "aa:bb:cc:dd:ee:01", None, NeighbourState::Noarp)
+        };
+        let listed = FibNeighbor {
+            state: NeighbourState::Permanent,
+            ..generic_copy(HOST0, "aa:bb:cc:dd:ee:01")
+        };
+        for listed_first in [false, true] {
+            let mut rib = Rib::new(false).unwrap();
+            rib.links = tables().0;
+            let order = if listed_first {
+                [listed.clone(), station.clone()]
+            } else {
+                [station.clone(), listed.clone()]
+            };
+            for nbr in order {
+                rib.process_fib_msg(FibMessage::NewNeighbor(nbr)).await;
+            }
+            let binding = &rib.local_bindings[&(mac, 10, None)];
+            assert_ne!(
+                binding.flags & NeighbourFlags::Sticky.bits(),
+                0,
+                "{listed_first}"
+            );
+            rib.process_fib_msg(FibMessage::DelNeighbor(station.clone()))
+                .await;
+            assert!(rib.local_bindings.is_empty(), "{listed_first}");
+        }
     }
 
     /// With no VLAN on the VXLAN port, the bridge's row for a remote MAC
