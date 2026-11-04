@@ -5207,7 +5207,6 @@ impl FibHandle {
         // Entry 1 — bridge master FDB. No VXLAN-specific attrs.
         const NTF_SELF: u8 = 0x02;
         const NTF_EXT_LEARNED: u8 = 0x10;
-        const NTF_STICKY: u8 = 0x40;
         const NUD_PERMANENT: u16 = 0x80;
 
         // BGP signaled MAC mobility "sticky" (RFC 7432 §15.2).
@@ -5232,10 +5231,12 @@ impl FibHandle {
             .await;
 
         // Entry 2 — VXLAN self FDB. Carries the encap target and VNI.
-        let mut self_flags: u8 = NTF_SELF | NTF_EXT_LEARNED;
-        if sticky {
-            self_flags |= NTF_STICKY;
-        }
+        // Written without `NTF_STICKY`: the vxlan driver does not read it,
+        // and it keeps the flags of an entry added over netlink when an
+        // `NTF_EXT_LEARNED` request updates it
+        // (`vxlan_fdb_update_existing()`), so the flag could not be cleared
+        // once the MAC stops being sticky. Entry 1 carries the stickiness.
+        let self_flags: u8 = NTF_SELF | NTF_EXT_LEARNED;
         let self_ok = self
             .fdb_neigh_send(
                 vxlan_ifindex,
@@ -5488,9 +5489,12 @@ impl FibHandle {
     /// longer sticky, before `mac_add` installs it again. The bridge keeps
     /// `NTF_STICKY` when an `NTF_EXT_LEARNED` upsert overwrites a sticky
     /// entry (`br_fdb_external_learn_add()` takes no sticky argument), so
-    /// the MAC would stay static and pinned to the VXLAN port. Only that
-    /// entry needs it: the VXLAN self entry's flags are replaced on upsert,
-    /// and with cradle no kernel entry is installed.
+    /// the MAC would stay static and pinned to the VXLAN port. Only the
+    /// bridge master entry needs to be removed, and with cradle no kernel
+    /// entry is installed. `vxlan_fdb_row_sticky()` ignores the VXLAN self
+    /// entry: `mac_add` no longer sets `NTF_STICKY` there, but an entry
+    /// installed by an earlier build can retain the flag across updates
+    /// until it is deleted.
     pub async fn mac_unstick(&self, vni: u32, mac: &MacAddr) {
         if self.cradle.is_some() {
             return;
@@ -6471,6 +6475,7 @@ pub fn neighbor_from_msg(msg: NeighbourMessage) -> FibNeighbor {
             }
             NeighbourAttribute::Vlan(vlan) => nbr.vlan = Some(vlan),
             NeighbourAttribute::Vni(vni) => nbr.vni = Some(vni),
+            NeighbourAttribute::SourceVni(vni) => nbr.src_vni = Some(vni),
             NeighbourAttribute::Controller(idx) => nbr.master = Some(idx),
             _ => {}
         }
@@ -7385,8 +7390,9 @@ mod tests {
     }
 
     /// A VXLAN device's FDB report names the VTEP, which the fork parses
-    /// as `TunnelEndpoint`, and carries `NDA_CACHEINFO`. The kernel's
-    /// generic copy of the same `self` add carries neither.
+    /// as `TunnelEndpoint`, carries `NDA_CACHEINFO`, and in metadata mode
+    /// the source VNI. The kernel's generic copy of the same `self` add
+    /// carries none of them.
     #[test]
     fn neighbor_from_msg_reads_the_vtep_and_marks_the_generic_copy() {
         use netlink_packet_route::neighbour::{NeighbourCacheInfo, NeighbourCacheInfoBuffer};
@@ -7408,14 +7414,15 @@ mod tests {
                 "192.0.2.2".parse().unwrap(),
             )));
         report.attributes.push(NeighbourAttribute::Vni(10));
+        report.attributes.push(NeighbourAttribute::SourceVni(20));
         let ci = NeighbourCacheInfo::parse(&NeighbourCacheInfoBuffer::new(&[0u8; 16])).unwrap();
         report.attributes.push(NeighbourAttribute::CacheInfo(ci));
         let report = neighbor_from_msg(report);
         assert_eq!(report.dst, Some("192.0.2.2".parse().unwrap()));
-        assert_eq!(report.vni, Some(10));
+        assert_eq!((report.vni, report.src_vni), (Some(10), Some(20)));
         assert!(!report.generic);
         let copy = neighbor_from_msg(generic());
-        assert_eq!((copy.dst, copy.vni), (None, None));
+        assert_eq!((copy.dst, copy.vni, copy.src_vni), (None, None, None));
         assert!(copy.generic);
         // Only an FDB row is ever a generic copy.
         let mut arp = generic();

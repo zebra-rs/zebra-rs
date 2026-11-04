@@ -140,29 +140,37 @@ For one line per VNI instead of per MAC, use
 
 ### `show l2 neighbor`
 
-The kernel's bridge forwarding database (FDB), as zebra-rs sees it: one
-row per MAC, interface and VLAN, with its VNI, remote VTEP, neighbor
-state and `NTF_*` flags in hex (`0x02` self, `0x10` externally learned).
-Where `show l2 mac table` is EVPN's view, this is the kernel's. It
-includes the bridge's and the ports' own addresses, the VXLAN device's
-rows, and the multicast addresses of other interfaces.
+The kernel's forwarding databases (FDB), as zebra-rs sees them, with
+each row's VNI, remote VTEP, neighbor state and `NTF_*` flags in hex
+(`0x02` self, `0x10` externally learned). Where `show l2 mac table` is
+EVPN's view, this is the kernel's. The kernel keeps two kinds of FDB,
+and the rows come in that order:
+
+- The bridge's FDB: one row per bridge, MAC and VLAN, on the port the
+  MAC is behind. It includes the bridge's and the ports' own addresses.
+  A MAC moving to another port keeps its one row.
+- A device's own FDB: on the VXLAN device, one row per MAC and source
+  VNI, carrying the remote VTEP. A VXLAN row has no VLAN.
+
+A NIC's own address lists, which `bridge fdb show` also prints, are not
+FDB rows and are not shown.
 
 ```
 r1> show l2 neighbor
  MAC                Interface         VLAN         VNI  Dst                                      State          Flags
  ------------------ ---------------- -----  ----------  ---------------------------------------- -------------- ----------
 ...
- 00:00:00:00:00:00  vxlan10              -          10  192.168.0.2                              Permanent      0x12
- 92:ba:75:d4:40:d0  vxlan10              -           -  -                                        Permanent      0x00
- 92:ba:75:d4:40:d0  vxlan10              1           -  -                                        Permanent      0x00
- aa:bb:cc:dd:ee:02  vxlan10              -          10  192.168.0.2                              Permanent      0x12
- aa:bb:cc:dd:ee:02  vxlan10              1           -  -                                        Reachable      0x10
- 02:00:00:00:fe:01  br10                 -           -  -                                        Permanent      0x00
- 02:00:00:00:fe:01  br10                 1           -  -                                        Permanent      0x00
  02:00:00:00:0a:01  host0                -           -  -                                        Permanent      0x00
  02:00:00:00:0a:01  host0                1           -  -                                        Permanent      0x00
+ 02:00:00:00:fe:01  br10                 -           -  -                                        Permanent      0x00
+ 02:00:00:00:fe:01  br10                 1           -  -                                        Permanent      0x00
+ 92:ba:75:d4:40:d0  vxlan10              -           -  -                                        Permanent      0x00
+ 92:ba:75:d4:40:d0  vxlan10              1           -  -                                        Permanent      0x00
  aa:bb:cc:dd:ee:01  host0                -           -  -                                        Noarp          0x00
  aa:bb:cc:dd:ee:01  host0                1           -  -                                        Noarp          0x00
+ aa:bb:cc:dd:ee:02  vxlan10              1           -  -                                        Reachable      0x10
+ 00:00:00:00:00:00  vxlan10              -          10  192.168.0.2                              Permanent      0x12
+ aa:bb:cc:dd:ee:02  vxlan10              -          10  192.168.0.2                              Permanent      0x12
 ```
 
 The VXLAN device's own rows (`0x12`: self, externally learned) carry
@@ -170,8 +178,13 @@ the VNI and the remote VTEP: `00:00:00:00:00:00` sends broadcast,
 unknown-unicast and multicast traffic to r2, and `aa:bb:cc:dd:ee:02` is
 r2's station.
 
-JSON: `{ "entries": [ { "mac", "interface", "vlan", "vni", "dst",
-"state", "flags" } ] }`, with `flags` as a number.
+JSON: `{ "entries": [ { "mac", "interface", "table", "bridge", "vlan",
+"src_vni", "vni", "dst", "state", "flags" } ] }`, with `flags` as a
+number. `table` is `"bridge"` or `"device"`. A bridge row's `interface`
+is its port and `bridge` its bridge; a device row has no `bridge`.
+`src_vni` is the source VNI the kernel reports for a VXLAN device in
+metadata mode, null otherwise. `vni` is the destination VNI, null when
+it is the device's default.
 
 ## Cross-reference — iproute2
 
