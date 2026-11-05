@@ -6549,8 +6549,8 @@ fn process_msg(msg: NetlinkMessage<RouteNetlinkMessage>, tx: UnboundedSender<Fib
                 }
             }
             RouteNetlinkMessage::NewNexthop(msg) => {
-                if let Some(id) = nexthop_id_from_msg(&msg) {
-                    let _ = tx.send(FibMessage::NewNexthop(id));
+                if let Some(nexthop) = nexthop_from_msg(&msg) {
+                    let _ = tx.send(FibMessage::NewNexthop(nexthop));
                 }
             }
             RouteNetlinkMessage::DelNexthop(msg) => {
