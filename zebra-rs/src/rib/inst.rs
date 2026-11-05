@@ -7989,15 +7989,15 @@ mod kernel_nexthop_tests {
     use crate::fib::FibNexthop;
     use crate::rib::NexthopUni;
 
-    /// A next-hop object the kernel held at startup keeps its id: the
-    /// groups this run makes are numbered above it. An earlier run's
-    /// routes still forward through such objects, and `NLM_F_REPLACE` on
-    /// the same id would have re-pointed them at ours.
+    /// A next-hop object the kernel held at startup keeps its id: no
+    /// group this run makes is given it. An earlier run's routes still
+    /// forward through such objects, and `NLM_F_REPLACE` on the same id
+    /// would have re-pointed them at ours.
     #[tokio::test]
     async fn a_kernel_nexthop_keeps_its_id() {
         let mut rib = Rib::new(false).expect("rib");
         let nexthop = FibNexthop {
-            id: 40,
+            id: 1,
             ours: true,
             gateway: Some("192.0.2.2".parse().unwrap()),
             ifindex: Some(3),
@@ -8013,10 +8013,7 @@ mod kernel_nexthop_tests {
             .nmap
             .fetch_uni(&uni, RT_TABLE_MAIN)
             .map(|group| group.gid());
-        assert!(
-            gid.is_some_and(|gid| gid > 40),
-            "above the kernel's: {gid:?}"
-        );
+        assert_eq!(gid, Some(2), "past the kernel's");
     }
 }
 
