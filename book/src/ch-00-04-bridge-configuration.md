@@ -150,7 +150,8 @@ and the rows come in that order:
   MAC is behind. It includes the bridge's and the ports' own addresses.
   A MAC moving to another port keeps its one row.
 - A device's own FDB: on the VXLAN device, one row per MAC and source
-  VNI, carrying the remote VTEP. A VXLAN row has no VLAN.
+  VNI, carrying the remote VTEP. The all-zero MAC and multicast MACs
+  list a remote VTEP per peer, one row each. A VXLAN row has no VLAN.
 
 A NIC's own address lists, which `bridge fdb show` also prints, are not
 FDB rows and are not shown.
@@ -179,12 +180,16 @@ unknown-unicast and multicast traffic to r2, and `aa:bb:cc:dd:ee:02` is
 r2's station.
 
 JSON: `{ "entries": [ { "mac", "interface", "table", "bridge", "vlan",
-"src_vni", "vni", "dst", "state", "flags" } ] }`, with `flags` as a
-number. `table` is `"bridge"` or `"device"`. A bridge row's `interface`
-is its port and `bridge` its bridge; a device row has no `bridge`.
-`src_vni` is the source VNI the kernel reports for a VXLAN device in
-metadata mode, null otherwise. `vni` is the destination VNI, null when
-it is the device's default.
+"src_vni", "vni", "dst", "port", "via", "state", "flags" } ] }`, with
+`flags` as a number. `table` is `"bridge"` or `"device"`. A bridge row's
+`interface` is its port and `bridge` its bridge; a device row has no
+`bridge`. `src_vni` is the source VNI the kernel reports for a VXLAN
+device in metadata mode, null otherwise. `vni` is the destination VNI,
+null when it is the device's default. `port` is the remote VTEP's UDP
+port, null when it is the device's own, and `via` the interface the
+VTEP is reached through, null when the row names none. Two rows of the
+same MAC that differ only in `port` or `via` look alike in the table
+above; the JSON tells them apart.
 
 ## Cross-reference — iproute2
 

@@ -125,6 +125,26 @@ Feature: BGP EVPN — a node's own MAC addresses are neither originated nor over
     And bridge fdb "br10" in namespace "z1" should eventually contain "02:00:00:00:fe:01 vlan 1 master br10 permanent"
     And bridge fdb "vxlan10" in namespace "z1" should not contain "02:00:00:00:fe:01"
 
+  Scenario: Each remote VTEP of the all-zero row is a row of its own
+    Given the test topology exists
+    # z2's Type-3 put 192.168.0.2 on z1's all-zero entry (ingress
+    # replication). An operator appends a second VTEP to the same entry and
+    # removes it again. The kernel reports and deletes each destination on
+    # its own; the two used to share one cached row, so the append replaced
+    # z2's row and the delete left none while z2's stayed in the kernel.
+    # The append also sets the entry's state (iproute2's `permanent` is
+    # NUD_PERMANENT|NUD_NOARP, shown as Other(192)) and drops its
+    # extern_learn. The kernel reports that only on the new destination,
+    # so z2's row (Permanent 0x12 before) must follow.
+    When I execute "bridge fdb append 00:00:00:00:00:00 dev vxlan10 dst 192.0.2.99 vni 10 src_vni 10 self permanent" in namespace "z1"
+    Then show command "show l2 neighbor" in namespace "z1" should eventually contain "00:00:00:00:00:00  vxlan10              -          10  192.0.2.99                               Other(192)     0x02"
+    And show command "show l2 neighbor" in namespace "z1" should contain "00:00:00:00:00:00  vxlan10              -          10  192.168.0.2                              Other(192)     0x02"
+    And bridge fdb "vxlan10" in namespace "z1" should eventually contain "00:00:00:00:00:00 dst 192.168.0.2 vni 10 src_vni 10 self permanent"
+    When I execute "bridge fdb del 00:00:00:00:00:00 dev vxlan10 dst 192.0.2.99 vni 10 src_vni 10 self" in namespace "z1"
+    Then show command "show l2 neighbor" in namespace "z1" should eventually not contain "192.0.2.99"
+    And show command "show l2 neighbor" in namespace "z1" should contain "00:00:00:00:00:00  vxlan10              -          10  192.168.0.2                              Other(192)     0x02"
+    And bridge fdb "vxlan10" in namespace "z1" should eventually contain "00:00:00:00:00:00 dst 192.168.0.2 vni 10 src_vni 10 self permanent"
+
   Scenario: Teardown topology
     Given the test topology exists
     When I stop zebra-rs in namespace "z1"

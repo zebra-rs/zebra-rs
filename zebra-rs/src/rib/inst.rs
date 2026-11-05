@@ -1160,10 +1160,14 @@ impl MacDest {
 ///   its row. The bridge device's own addresses are rows here too.
 /// - `Device` is a row of a device's own FDB (`self`), reported without
 ///   `NDA_MASTER`: on a VXLAN device, a MAC's remote VTEP. The vxlan
-///   driver keys it by `(mac, source VNI)`; the VTEP and the destination
-///   VNI are the row's value, so a unicast row re-pointed at another VTEP
-///   replaces itself. `src_vni` is `NDA_SRC_VNI`, which only a device in
-///   metadata mode reports. A vxlan row never carries a VLAN.
+///   driver keys an entry by `(mac, source VNI)`. A unicast entry has one
+///   destination, the row's value, so a row re-pointed at another VTEP
+///   replaces itself. An all-zero or multicast entry lists destinations
+///   (ingress replication: one per remote VTEP), and the kernel reports
+///   and deletes each on its own, so each is a row of its own: `remote`
+///   names it, and is `None` for every other row. `src_vni` is
+///   `NDA_SRC_VNI`, which only a device in metadata mode reports. A
+///   vxlan row never carries a VLAN.
 ///
 /// A MAC on a VXLAN port has a row in each table: `mac_add` installs
 /// both, and they carry different flags.
@@ -1183,7 +1187,38 @@ pub enum NeighborKey {
         mac: MacAddr,
         vlan: Option<u16>,
         src_vni: Option<u32>,
+        remote: Option<FdbRemote>,
     },
+}
+
+/// One destination of a VXLAN device's all-zero or multicast FDB entry,
+/// as the kernel reports it: the VTEP, plus the UDP port, VNI and
+/// interface towards it when they are not the device's own. The vxlan
+/// driver tells two destinations of an entry apart by all four
+/// (`vxlan_fdb_find_rdst`). It leaves the port and VNI out of a report
+/// when they equal the device's, and refuses to change either on a live
+/// device, so a destination is reported the same way every time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct FdbRemote {
+    pub dst: Option<IpAddr>,
+    pub port: Option<u16>,
+    pub vni: Option<u32>,
+    pub via: Option<u32>,
+}
+
+impl FdbRemote {
+    /// The destination `nbr` reports, if its MAC is one whose entry lists
+    /// several: the all-zero MAC (unknown unicast and broadcast) or a
+    /// multicast one. The kernel appends destinations to these entries
+    /// only (`NLM_F_APPEND`); a unicast entry has one.
+    fn of(mac: MacAddr, nbr: &FibNeighbor) -> Option<Self> {
+        (mac.is_multicast() || mac.octets() == [0; 6]).then_some(Self {
+            dst: nbr.dst,
+            port: nbr.port,
+            vni: nbr.vni,
+            via: nbr.via,
+        })
+    }
 }
 
 /// RFC 3443 MPLS label-TTL processing model (`set mpls ttl propagate`).
@@ -1931,6 +1966,7 @@ impl Rib {
             }
         }
         if add {
+            share_entry_state(&mut self.neighbors, &key, &nbr);
             if is_local_row(&key, &nbr)
                 && let Some(mac) = nbr.lladdr
             {
@@ -6543,6 +6579,48 @@ fn local_device_mac_bridge(
         .then_some(bridge)
 }
 
+/// A VXLAN entry's state and flags belong to the entry, not to one of its
+/// destinations, yet the kernel reports a change to them against a single
+/// destination: the one just appended, or else the first. When `nbr`
+/// reports a destination of an all-zero or multicast entry, copy its state
+/// and flags onto the entry's other cached rows. `NTF_OFFLOADED` is the
+/// exception: the vxlan driver keeps it per destination, so each row keeps
+/// its own.
+fn share_entry_state(
+    neighbors: &mut BTreeMap<NeighborKey, FibNeighbor>,
+    key: &NeighborKey,
+    nbr: &FibNeighbor,
+) {
+    use netlink_packet_route::neighbour::NeighbourFlags;
+    let NeighborKey::Device {
+        ifindex,
+        mac,
+        vlan,
+        src_vni,
+        remote: Some(_),
+    } = *key
+    else {
+        return;
+    };
+    let entry = (ifindex, mac, vlan, src_vni);
+    let first = NeighborKey::Device {
+        ifindex,
+        mac,
+        vlan,
+        src_vni,
+        remote: None,
+    };
+    let shared = nbr.flags - NeighbourFlags::Offloaded;
+    let rows = neighbors.range_mut(first..).take_while(|(key, _)| {
+        matches!(key, NeighborKey::Device { ifindex, mac, vlan, src_vni, .. }
+            if (*ifindex, *mac, *vlan, *src_vni) == entry)
+    });
+    for (_, row) in rows {
+        row.state = nbr.state;
+        row.flags = shared | (row.flags & NeighbourFlags::Offloaded);
+    }
+}
+
 /// Every VLAN's row for `mac` in the FDB of `bridge`: the key orders
 /// `vlan` last, with `None` (the untagged row) first.
 fn bridge_rows(bridge: u32, mac: MacAddr) -> std::ops::RangeInclusive<NeighborKey> {
@@ -6573,6 +6651,7 @@ fn neighbor_key(nbr: &FibNeighbor) -> Option<NeighborKey> {
                     mac,
                     vlan: nbr.vlan,
                     src_vni: nbr.src_vni,
+                    remote: FdbRemote::of(mac, nbr),
                 },
             })
         }
@@ -6850,6 +6929,119 @@ mod local_device_mac_tests {
             .await;
         let left: Vec<_> = rib.neighbors.values().map(|row| row.src_vni).collect();
         assert_eq!(left, [Some(20)]);
+    }
+
+    /// An all-zero or multicast VXLAN entry lists a destination per remote
+    /// VTEP, and the kernel reports and deletes each on its own: one row
+    /// each, and deleting one leaves the rest.
+    #[tokio::test]
+    async fn a_bum_entry_keeps_a_row_per_remote() {
+        for bum in ["00:00:00:00:00:00", "01:00:5e:00:00:01"] {
+            let to = |vtep: &str| FibNeighbor {
+                dst: Some(vtep.parse().unwrap()),
+                ..self_row(VXLAN10, bum)
+            };
+            let mut rib = Rib::new(false).unwrap();
+            rib.links = tables().0;
+            for vtep in ["192.0.2.2", "192.0.2.3"] {
+                rib.process_fib_msg(FibMessage::NewNeighbor(to(vtep))).await;
+            }
+            assert_eq!(rib.neighbors.len(), 2, "{bum}");
+            rib.process_fib_msg(FibMessage::DelNeighbor(to("192.0.2.2")))
+                .await;
+            let left: Vec<_> = rib.neighbors.values().map(|row| row.dst).collect();
+            assert_eq!(left, [Some("192.0.2.3".parse().unwrap())], "{bum}");
+            assert!(rib.local_bindings.is_empty());
+        }
+    }
+
+    /// Two destinations of an entry can share the VTEP and differ only in
+    /// the UDP port, the VNI or the interface towards it.
+    #[tokio::test]
+    async fn bum_remotes_differing_in_port_vni_or_via_are_apart() {
+        let base = FibNeighbor {
+            dst: Some("192.0.2.2".parse().unwrap()),
+            ..self_row(VXLAN10, "00:00:00:00:00:00")
+        };
+        let variants = [
+            base.clone(),
+            FibNeighbor {
+                port: Some(4790),
+                ..base.clone()
+            },
+            FibNeighbor {
+                vni: Some(20),
+                ..base.clone()
+            },
+            FibNeighbor {
+                via: Some(HOST0),
+                ..base.clone()
+            },
+        ];
+        let mut rib = Rib::new(false).unwrap();
+        rib.links = tables().0;
+        for row in &variants {
+            rib.process_fib_msg(FibMessage::NewNeighbor(row.clone()))
+                .await;
+        }
+        assert_eq!(rib.neighbors.len(), 4);
+        rib.process_fib_msg(FibMessage::DelNeighbor(variants[1].clone()))
+            .await;
+        let left: Vec<_> = rib
+            .neighbors
+            .values()
+            .map(|row| (row.port, row.vni, row.via))
+            .collect();
+        assert_eq!(
+            left,
+            [
+                (None, None, None),
+                (None, None, Some(HOST0)),
+                (None, Some(20), None)
+            ]
+        );
+    }
+
+    /// A change of an entry's state or flags is reported against one of
+    /// its destinations only, but holds for all of them; `NTF_OFFLOADED`
+    /// is per destination and stays with its row.
+    #[tokio::test]
+    async fn a_bum_entry_change_reaches_every_remote() {
+        let to = |vtep: &str| FibNeighbor {
+            dst: Some(vtep.parse().unwrap()),
+            ..self_row(VXLAN10, "00:00:00:00:00:00")
+        };
+        let mut rib = Rib::new(false).unwrap();
+        rib.links = tables().0;
+        rib.process_fib_msg(FibMessage::NewNeighbor(to("192.0.2.2")))
+            .await;
+        let offloaded = FibNeighbor {
+            flags: NeighbourFlags::Own | NeighbourFlags::ExtLearned | NeighbourFlags::Offloaded,
+            ..to("192.0.2.3")
+        };
+        rib.process_fib_msg(FibMessage::NewNeighbor(offloaded))
+            .await;
+        let changed = FibNeighbor {
+            state: NeighbourState::Noarp,
+            flags: NeighbourFlags::Own,
+            ..to("192.0.2.2")
+        };
+        rib.process_fib_msg(FibMessage::NewNeighbor(changed)).await;
+        let rows: Vec<_> = rib
+            .neighbors
+            .values()
+            .map(|row| (row.state, row.flags))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                (NeighbourState::Noarp, NeighbourFlags::Own),
+                (
+                    NeighbourState::Noarp,
+                    NeighbourFlags::Own | NeighbourFlags::Offloaded
+                ),
+            ]
+        );
     }
 
     /// The bridge's own report of a `self` add on itself is a row of its
