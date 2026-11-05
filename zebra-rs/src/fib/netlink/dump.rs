@@ -2,8 +2,10 @@ use std::collections::BTreeMap;
 use std::net::{Ipv4Addr, Ipv6Addr};
 
 use anyhow::Result;
-use futures::stream::{StreamExt, TryStreamExt};
-use netlink_packet_core::{NLM_F_DUMP, NLM_F_REQUEST, NetlinkPayload};
+use futures::stream::{Stream, StreamExt, TryStreamExt};
+use netlink_packet_core::{
+    NLM_F_DUMP, NLM_F_DUMP_INTR, NLM_F_REQUEST, NetlinkMessage, NetlinkPayload,
+};
 use netlink_packet_route::mdb::{MdbHeader, MdbMessage};
 use netlink_packet_route::nexthop::NexthopMessage;
 use netlink_packet_route::{AddressFamily, RouteNetlinkMessage};
@@ -158,35 +160,43 @@ async fn address_dump(rib: &mut Rib, handle: rtnetlink::Handle) -> Result<()> {
     Ok(())
 }
 
+/// How many times the startup dump of next-hop objects is tried while
+/// the kernel reports it inconsistent.
+const NEXTHOP_DUMP_ATTEMPTS: usize = 3;
+
+/// How one dump of the next-hop objects ended.
+#[derive(Debug, PartialEq, Eq)]
+enum DumpEnd {
+    Complete,
+    /// The objects changed during the dump (`NLM_F_DUMP_INTR`), so some
+    /// may be missing from it.
+    Interrupted,
+    /// The kernel answered with an error: one without next-hop objects
+    /// does.
+    Failed(String),
+}
+
 /// Dump the kernel's next-hop objects (`RTM_GETNEXTHOP`) and report each
 /// to the RIB, which never reuses their ids. An earlier run of zebra-rs
 /// that stopped without withdrawing its routes (a graceful restart, a
 /// crash) left its own behind, and its routes still forward through
-/// them. Best-effort: a kernel without next-hop objects returns nothing,
-/// or an error we log.
-async fn nexthop_dump(rib: &mut Rib, mut handle: rtnetlink::Handle) -> BTreeMap<u32, FibNexthop> {
-    let mut nexthops = BTreeMap::new();
-    let mut req = netlink_packet_core::NetlinkMessage::from(RouteNetlinkMessage::GetNexthop(
-        NexthopMessage::default(),
-    ));
-    req.header.flags = NLM_F_REQUEST | NLM_F_DUMP;
-    req.finalize();
-
-    let mut resp = match handle.request(req) {
-        Ok(resp) => resp,
-        Err(e) => {
-            tracing::warn!("fib: RTM_GETNEXTHOP dump request failed ({e}); skipping");
-            return nexthops;
-        }
-    };
-    while let Some(msg) = resp.next().await {
-        if let NetlinkPayload::InnerMessage(RouteNetlinkMessage::NewNexthop(m)) = msg.payload
-            && let Some(nexthop) = nexthop_from_msg(&m)
-        {
-            nexthops.insert(nexthop.id, nexthop.clone());
-            rib.process_fib_msg(FibMessage::KernelNexthop(nexthop))
-                .await;
-        }
+/// them; other programs, systemd-networkd say, make their own. The dump
+/// is the only place these ids are learned, and an object it missed
+/// would be taken over by the first group given its id, so a dump the
+/// kernel reports inconsistent is tried again. Best-effort: a kernel
+/// without next-hop objects returns nothing, or an error we log.
+async fn nexthop_dump(rib: &mut Rib, handle: rtnetlink::Handle) -> BTreeMap<u32, FibNexthop> {
+    let nexthops = nexthop_objects_retrying(|| {
+        let mut req =
+            NetlinkMessage::from(RouteNetlinkMessage::GetNexthop(NexthopMessage::default()));
+        req.header.flags = NLM_F_REQUEST | NLM_F_DUMP;
+        req.finalize();
+        handle.clone().request(req)
+    })
+    .await;
+    for nexthop in nexthops.values() {
+        rib.process_fib_msg(FibMessage::KernelNexthop(nexthop.clone()))
+            .await;
     }
     let ours = nexthops.values().filter(|nexthop| nexthop.ours).count();
     if ours > 0 {
@@ -195,6 +205,74 @@ async fn nexthop_dump(rib: &mut Rib, mut handle: rtnetlink::Handle) -> BTreeMap<
         );
     }
     nexthops
+}
+
+/// The next-hop objects from the dumps `dump` starts, tried again while
+/// one ends interrupted, up to [`NEXTHOP_DUMP_ATTEMPTS`] times. The
+/// objects every attempt saw are kept: each existed, and keeping the id
+/// of one gone since costs nothing.
+async fn nexthop_objects_retrying<S, E>(
+    mut dump: impl FnMut() -> Result<S, E>,
+) -> BTreeMap<u32, FibNexthop>
+where
+    S: Stream<Item = NetlinkMessage<RouteNetlinkMessage>> + Unpin,
+    E: std::fmt::Display,
+{
+    let mut nexthops = BTreeMap::new();
+    for attempt in 1..=NEXTHOP_DUMP_ATTEMPTS {
+        let resp = match dump() {
+            Ok(resp) => resp,
+            Err(e) => {
+                tracing::warn!("fib: RTM_GETNEXTHOP dump request failed ({e}); skipping");
+                break;
+            }
+        };
+        let (objects, end) = nexthop_objects(resp).await;
+        nexthops.extend(objects);
+        match end {
+            DumpEnd::Complete => break,
+            DumpEnd::Failed(e) => {
+                tracing::info!("fib: RTM_GETNEXTHOP dump failed ({e})");
+                break;
+            }
+            DumpEnd::Interrupted if attempt < NEXTHOP_DUMP_ATTEMPTS => {
+                tracing::info!("fib: next-hop objects changed during the dump; dumping them again");
+            }
+            DumpEnd::Interrupted => {
+                tracing::warn!(
+                    "fib: next-hop objects changed during each of {NEXTHOP_DUMP_ATTEMPTS} dumps; \
+                     the id of one missed may be given to a group of ours"
+                );
+            }
+        }
+    }
+    nexthops
+}
+
+/// Read one dump of the next-hop objects to its end.
+async fn nexthop_objects<S>(mut resp: S) -> (BTreeMap<u32, FibNexthop>, DumpEnd)
+where
+    S: Stream<Item = NetlinkMessage<RouteNetlinkMessage>> + Unpin,
+{
+    let mut objects = BTreeMap::new();
+    let mut end = DumpEnd::Complete;
+    while let Some(msg) = resp.next().await {
+        // The kernel flags the messages that follow a change, the final
+        // NLMSG_DONE among them.
+        if msg.header.flags & NLM_F_DUMP_INTR != 0 && end == DumpEnd::Complete {
+            end = DumpEnd::Interrupted;
+        }
+        match msg.payload {
+            NetlinkPayload::InnerMessage(RouteNetlinkMessage::NewNexthop(m)) => {
+                if let Some(nexthop) = nexthop_from_msg(&m) {
+                    objects.insert(nexthop.id, nexthop);
+                }
+            }
+            NetlinkPayload::Error(e) if e.code.is_some() => end = DumpEnd::Failed(e.to_string()),
+            _ => {}
+        }
+    }
+    (objects, end)
 }
 
 async fn route_dump(
@@ -242,4 +320,95 @@ async fn neighbor_dump(
         rib.process_fib_msg(msg).await;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::num::NonZeroI32;
+
+    use netlink_packet_core::{ErrorMessage, NetlinkHeader};
+    use netlink_packet_route::nexthop::NexthopAttribute;
+
+    use super::*;
+
+    fn object(id: u32, flags: u16) -> NetlinkMessage<RouteNetlinkMessage> {
+        let mut nexthop = NexthopMessage::default();
+        nexthop.attributes.push(NexthopAttribute::Id(id));
+        let mut msg = NetlinkMessage::from(RouteNetlinkMessage::NewNexthop(nexthop));
+        msg.header.flags = flags;
+        msg
+    }
+
+    fn failure() -> NetlinkMessage<RouteNetlinkMessage> {
+        let mut error = ErrorMessage::default();
+        error.code = NonZeroI32::new(-95);
+        NetlinkMessage::new(NetlinkHeader::default(), NetlinkPayload::Error(error))
+    }
+
+    /// Run the retrying dump over `dumps`, one per attempt; returns the
+    /// ids found and how many dumps were started.
+    async fn retrying(dumps: Vec<Vec<NetlinkMessage<RouteNetlinkMessage>>>) -> (Vec<u32>, usize) {
+        let mut dumps = dumps.into_iter();
+        let mut started = 0;
+        let nexthops = nexthop_objects_retrying(|| {
+            started += 1;
+            dumps
+                .next()
+                .map(futures::stream::iter)
+                .ok_or("no dump left")
+        })
+        .await;
+        (nexthops.into_keys().collect(), started)
+    }
+
+    /// A dump the kernel does not flag is read once.
+    #[tokio::test]
+    async fn a_complete_dump_is_read_once() {
+        let found = retrying(vec![vec![object(7, 0), object(9, 0)]]).await;
+        assert_eq!(found, (vec![7, 9], 1));
+    }
+
+    /// A dump flagged `NLM_F_DUMP_INTR` may have missed an object, so it is
+    /// tried again; what the interrupted one saw is kept.
+    #[tokio::test]
+    async fn an_interrupted_dump_is_tried_again() {
+        let found = retrying(vec![
+            vec![object(7, 0), object(8, NLM_F_DUMP_INTR)],
+            vec![object(7, 0), object(9, 0)],
+        ])
+        .await;
+        assert_eq!(found, (vec![7, 8, 9], 2));
+    }
+
+    /// The tries stop after [`NEXTHOP_DUMP_ATTEMPTS`] interrupted dumps.
+    #[tokio::test]
+    async fn the_tries_are_bounded() {
+        let interrupted = |id| vec![object(id, NLM_F_DUMP_INTR)];
+        let found = retrying((1..=5).map(interrupted).collect()).await;
+        assert_eq!(found, (vec![1, 2, 3], NEXTHOP_DUMP_ATTEMPTS));
+    }
+
+    /// An error, from a kernel without next-hop objects say, is not tried
+    /// again.
+    #[tokio::test]
+    async fn a_failed_dump_is_not_tried_again() {
+        let found = retrying(vec![vec![failure()], vec![object(7, 0)]]).await;
+        assert_eq!(found, (vec![], 1));
+    }
+
+    /// One dump ends interrupted when any message carries the flag, and
+    /// failed on an error.
+    #[tokio::test]
+    async fn a_dump_ends_as_its_messages_say() {
+        let end = |msgs| async { nexthop_objects(futures::stream::iter(msgs)).await.1 };
+        assert_eq!(end(vec![object(1, 0)]).await, DumpEnd::Complete);
+        assert_eq!(
+            end(vec![object(1, NLM_F_DUMP_INTR), object(2, 0)]).await,
+            DumpEnd::Interrupted
+        );
+        assert!(matches!(
+            end(vec![object(1, 0), failure()]).await,
+            DumpEnd::Failed(_)
+        ));
+    }
 }
