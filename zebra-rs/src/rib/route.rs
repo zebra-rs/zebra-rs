@@ -1751,7 +1751,7 @@ pub async fn ipv4_nexthop_sync(
     fib: &FibHandle,
 ) {
     // Update Group::Uni first, then check Group::Multi.
-    for nhop in nmap.groups.iter_mut().flatten() {
+    for nhop in nmap.iter_mut() {
         if let Group::Uni(uni) = nhop {
             // Origin shortcut: when the source pinned an egress link
             // (IGP adjacency, seg6local install, connected, configured
@@ -1818,22 +1818,22 @@ pub async fn ipv4_nexthop_sync(
 
     let mut multi_cache: BTreeMap<usize, BTreeSet<(usize, u8)>> = BTreeMap::new();
 
-    for (idx, nhop) in nmap.groups.iter().enumerate() {
-        if let Some(Group::Multi(multi)) = nhop {
+    for nhop in nmap.iter() {
+        if let Group::Multi(multi) = nhop {
             let mut set = BTreeSet::<(usize, u8)>::new();
             for (m, v) in multi.set.iter() {
-                if let Some(Some(group)) = nmap.groups.get(*m)
+                if let Some(group) = nmap.get(*m)
                     && group.is_valid()
                 {
                     set.insert((*m, *v));
                 }
             }
-            multi_cache.insert(idx, set);
+            multi_cache.insert(multi.gid(), set);
         }
     }
 
     for (idx, set) in multi_cache {
-        if let Some(Some(Group::Multi(multi))) = nmap.groups.get_mut(idx) {
+        if let Some(Group::Multi(multi)) = nmap.get_mut(idx) {
             if set.is_empty() {
                 if multi.is_valid() {
                     // Uninstall.
@@ -1874,16 +1874,16 @@ pub async fn ipv4_nexthop_sync(
 /// protect group synced only there would lag a cycle behind.
 async fn protect_groups_sync(nmap: &mut NexthopMap, fib: &FibHandle) {
     let mut cache: Vec<(usize, bool)> = Vec::new();
-    for (idx, nhop) in nmap.groups.iter().enumerate() {
-        if let Some(Group::Protect(pro)) = nhop {
+    for nhop in nmap.iter() {
+        if let Group::Protect(pro) = nhop {
             // Validity follows whichever member the kernel group
             // holds — after a switchover that's the repair.
             let valid = nmap.get(pro.active_gid()).is_some_and(|g| g.is_valid());
-            cache.push((idx, valid));
+            cache.push((pro.gid(), valid));
         }
     }
     for (idx, valid) in cache {
-        if let Some(Some(Group::Protect(pro))) = nmap.groups.get_mut(idx) {
+        if let Some(Group::Protect(pro)) = nmap.get_mut(idx) {
             if valid {
                 pro.set_valid(true);
                 if !pro.is_installed() {
@@ -3353,7 +3353,7 @@ pub async fn ipv6_nexthop_sync(
     if rib_nexthop() {
         println!("[ipv6_nexthop_sync] start; v6 table size={}", table.len());
     }
-    for nhop in nmap.groups.iter_mut().flatten() {
+    for nhop in nmap.iter_mut() {
         if let Group::Uni(uni) = nhop {
             if rib_nexthop() {
                 println!(
@@ -3435,9 +3435,9 @@ pub async fn ipv6_nexthop_sync(
 /// referenced them: a nexthop object can't be deleted while a route
 /// still points at it without the kernel cascade-removing that route.
 /// Address-family-agnostic — the kernel object is keyed by `gid`, so a
-/// single pass over `nmap.groups` covers both families.
+/// single pass over the group table covers both families.
 pub async fn nexthop_orphan_gc(nmap: &mut NexthopMap, fib: &FibHandle) {
-    for nhop in nmap.groups.iter_mut().flatten() {
+    for nhop in nmap.iter_mut() {
         if let Group::Uni(uni) = nhop
             && !uni.is_valid()
             && uni.is_installed()

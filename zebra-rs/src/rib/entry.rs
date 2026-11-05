@@ -230,7 +230,7 @@ impl RibEntry {
                     fib.nexthop_del(group).await;
                 }
                 // Remove nexthop group since it's no longer referenced
-                nmap.groups[gid] = None;
+                nmap.remove(gid);
             }
         }
     }

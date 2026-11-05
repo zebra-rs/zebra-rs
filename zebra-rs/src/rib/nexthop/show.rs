@@ -64,7 +64,7 @@ fn group_uni_via_json(uni: &GroupUni) -> (Option<String>, Option<Vec<String>>) {
 
 fn nexthop_show_json(rib: &Rib) -> String {
     let mut groups = Vec::new();
-    for grp in rib.nmap.groups.iter().flatten() {
+    for grp in rib.nmap.iter() {
         let mut entry = NexthopGroupJson {
             id: grp.gid(),
             refcnt: grp.refcnt(),
@@ -174,7 +174,7 @@ pub fn nexthop_show(rib: &Rib, _args: Args, json: bool) -> String {
     }
     let mut buf = String::new();
 
-    for grp in rib.nmap.groups.iter().flatten() {
+    for grp in rib.nmap.iter() {
         write_group_detail(&mut buf, grp);
         match grp {
             Group::Uni(uni) => {
