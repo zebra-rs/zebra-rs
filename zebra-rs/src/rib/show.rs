@@ -2308,7 +2308,8 @@ pub fn vrf_show(rib: &Rib, _args: Args, json: bool) -> String {
 /// Modelled on `bridge fdb show`, one row per row of the kernel's two kinds
 /// of FDB: a bridge's, one row per (bridge, mac, vlan) whatever the port,
 /// and a device's own, one row per (device, mac, vlan, source VNI) whatever
-/// the remote VTEP. A vxlan row carries no VLAN. Generic rows (a NIC's
+/// the remote VTEP, except that an all-zero or multicast MAC has a row per
+/// remote VTEP it lists. A vxlan row carries no VLAN. Generic rows (a NIC's
 /// address lists) are not cached, so not shown. ARP/NDP (AF_INET /
 /// AF_INET6) lives in the same map but isn't shown here —
 /// `show ip arp` / `show ipv6 neighbor` will surface those separately.
@@ -2329,6 +2330,12 @@ pub struct L2NeighborJson {
     /// equals the device's default, so null too.
     pub vni: Option<u32>,
     pub dst: Option<String>,
+    /// `NDA_PORT`, the remote VTEP's UDP port; null when it is the
+    /// device's own.
+    pub port: Option<u16>,
+    /// `NDA_IFINDEX`, the interface the remote VTEP is reached through;
+    /// null when the row names none.
+    pub via: Option<String>,
     pub state: String,
     /// `NTF_*` flags as a raw bitmask (mirrors the `0x..` text column).
     pub flags: u8,
@@ -2369,6 +2376,8 @@ pub fn l2_neighbor_show(rib: &Rib, _args: Args, json: bool) -> String {
                 src_vni,
                 vni: nbr.vni,
                 dst: nbr.dst.map(|d| d.to_string()),
+                port: nbr.port,
+                via: nbr.via.map(ifname),
                 state: format!("{:?}", nbr.state),
                 flags: nbr.flags.bits(),
             });
@@ -2988,6 +2997,7 @@ mod tests {
                 mac,
                 vlan: None,
                 src_vni: None,
+                remote: None,
             },
             FibNeighbor {
                 family: AddressFamily::Bridge,
@@ -3040,6 +3050,7 @@ mod tests {
                     mac,
                     vlan: None,
                     src_vni,
+                    remote: None,
                 },
                 row(4, src_vni),
             );
@@ -3080,6 +3091,64 @@ mod tests {
                     serde_json::Value::Null,
                     20.into()
                 ),
+            ]
+        );
+    }
+
+    /// A remote VTEP of an all-zero row is told apart by its port and
+    /// interface as well as its address; the JSON names both, and leaves
+    /// them null when the kernel reports the device's own.
+    #[tokio::test]
+    async fn l2_neighbor_json_names_a_remote_port_and_interface() {
+        use crate::fib::message::FibNeighbor;
+        use crate::rib::inst::FdbRemote;
+        use crate::rib::inst::NeighborKey;
+        use netlink_packet_route::AddressFamily;
+        let mut rib = Rib::new(false).expect("rib");
+        let mac: crate::rib::MacAddr = "00:00:00:00:00:00".parse().unwrap();
+        let dst: Option<std::net::IpAddr> = Some("192.0.2.2".parse().unwrap());
+        for (port, via) in [(None, None), (Some(4790), Some(5))] {
+            rib.neighbors.insert(
+                NeighborKey::Device {
+                    ifindex: 4,
+                    mac,
+                    vlan: None,
+                    src_vni: None,
+                    remote: Some(FdbRemote {
+                        dst,
+                        port,
+                        vni: None,
+                        via,
+                    }),
+                },
+                FibNeighbor {
+                    family: AddressFamily::Bridge,
+                    ifindex: 4,
+                    lladdr: Some(mac),
+                    dst,
+                    port,
+                    via,
+                    ..Default::default()
+                },
+            );
+        }
+        let out = l2_neighbor_show(&rib, Args(Default::default()), true);
+        let json: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let fields: Vec<_> = json["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| (e["dst"].clone(), e["port"].clone(), e["via"].clone()))
+            .collect();
+        assert_eq!(
+            fields,
+            [
+                (
+                    "192.0.2.2".into(),
+                    serde_json::Value::Null,
+                    serde_json::Value::Null
+                ),
+                ("192.0.2.2".into(), 4790.into(), "if#5".into()),
             ]
         );
     }

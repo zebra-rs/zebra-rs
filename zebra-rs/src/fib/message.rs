@@ -176,6 +176,12 @@ pub struct FibNeighbor {
     pub dst: Option<IpAddr>,
     pub vlan: Option<u16>,
     pub vni: Option<u32>,
+    /// `NDA_PORT`: the UDP port of a VXLAN row's remote VTEP. The kernel
+    /// leaves it out when it is the device's own destination port.
+    pub port: Option<u16>,
+    /// `NDA_IFINDEX`: the interface a VXLAN row's remote VTEP is reached
+    /// through (`bridge fdb ... via`), when the row names one.
+    pub via: Option<u32>,
     /// `NDA_SRC_VNI`: the VNI a VXLAN device in metadata mode keys the row
     /// by. Absent on a device with a fixed VNI and on a bridge row.
     pub src_vni: Option<u32>,
