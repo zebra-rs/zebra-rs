@@ -20,8 +20,8 @@ maintainer = "Kunihiro Ishiguro <kunihiro@zebra.rs>"
 section = "net"
 priority = "optional"
 # Automatic shared-library Depends (libc6, libpam, ...) via dpkg-shlibdeps
-# over the built binaries.
-depends = "$auto"
+# over the built binaries, plus libcap2-bin for the setcap calls in postinst.
+depends = "$auto, libcap2-bin"
 # The eBPF data-plane engine `system ebpf enabled` spawns (/usr/bin/cradle).
 # Optional: everything else works without it. The floor is the cradle release
 # this zebra-rs targets (the proto/cradle.proto contract), kept in step with
