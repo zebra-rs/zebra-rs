@@ -40,6 +40,7 @@ pub struct NexthopMap {
     // repairs get distinct groups so each switches to its own repair.
     protect: BTreeMap<(usize, usize), usize>,
     pub groups: Vec<Option<Group>>,
+    reserved: BTreeSet<u32>,
 }
 
 impl Group {
@@ -58,6 +59,7 @@ impl Default for NexthopMap {
             seg6local: BTreeMap::new(),
             protect: BTreeMap::new(),
             groups: Vec::new(),
+            reserved: BTreeSet::new(),
         };
         nmap.groups.push(None);
         nmap
@@ -94,7 +96,10 @@ impl NexthopMap {
         }
     }
 
-    fn new_gid(&self) -> usize {
+    fn new_gid(&mut self) -> usize {
+        while u32::try_from(self.groups.len()).is_ok_and(|id| self.reserved.remove(&id)) {
+            self.groups.push(None);
+        }
         self.groups.len()
     }
 
@@ -102,11 +107,12 @@ impl NexthopMap {
     /// Groups are installed with `NLM_F_REPLACE`, so one of ours given
     /// that id would take the object over, and every route still
     /// forwarding through it — an earlier run's, say — would follow ours.
-    /// Ids are handed out in order, so it is enough to start above it.
+    /// The id is skipped only when the gids reach it, because other
+    /// programs pick ids anywhere in the u32 range: systemd-networkd hashes
+    /// the ids of the objects it makes for RA routes.
     pub fn reserve(&mut self, id: u32) {
-        let id = id as usize;
-        if self.groups.len() <= id {
-            self.groups.resize_with(id + 1, || None);
+        if id as usize >= self.groups.len() {
+            self.reserved.insert(id);
         }
     }
 
@@ -686,24 +692,39 @@ mod tests {
         assert!(nmap.seg6.is_empty());
     }
 
+    fn uni_to(last: u8) -> NexthopUni {
+        NexthopUni {
+            addr: IpAddr::V4(std::net::Ipv4Addr::new(192, 0, 2, last)),
+            ..Default::default()
+        }
+    }
+
     /// A reserved id — a kernel next-hop object that exists already — is
-    /// never handed out: groups are made above it. Reserving one below
-    /// those already handed out changes nothing.
+    /// never handed out. Reserving one below those already handed out
+    /// changes nothing.
     #[test]
     fn a_reserved_id_is_not_handed_out() {
         let mut nmap = NexthopMap::default();
+        nmap.reserve(1);
+        nmap.reserve(2);
+        let gid = nmap.fetch_uni(&uni_to(2), 254).map(|group| group.gid());
+        assert_eq!(gid, Some(3), "past the reserved ids");
+        nmap.reserve(1);
+        let gid = nmap.fetch_uni(&uni_to(3), 254).map(|group| group.gid());
+        assert_eq!(gid, Some(4), "the next one");
         nmap.reserve(5);
-        let uni = |last| NexthopUni {
-            addr: IpAddr::V4(std::net::Ipv4Addr::new(192, 0, 2, last)),
-            ..Default::default()
-        };
-        let gid = nmap.fetch_uni(&uni(2), 254).map(|group| group.gid());
-        assert_eq!(gid, Some(6), "above the reserved id");
-        nmap.reserve(3);
-        let gid = nmap.fetch_uni(&uni(3), 254).map(|group| group.gid());
-        assert_eq!(gid, Some(7), "the next one");
-        nmap.reserve(8);
-        let gid = nmap.fetch_uni(&uni(4), 254).map(|group| group.gid());
-        assert_eq!(gid, Some(9), "not the one reserved next");
+        let gid = nmap.fetch_uni(&uni_to(4), 254).map(|group| group.gid());
+        assert_eq!(gid, Some(6), "not the one reserved next");
+    }
+
+    /// Other programs pick next-hop ids anywhere in the u32 range. Reserving
+    /// a large one must not size the group table by it.
+    #[test]
+    fn a_large_reserved_id_takes_no_room() {
+        let mut nmap = NexthopMap::default();
+        nmap.reserve(1_000_000);
+        assert_eq!(nmap.groups.len(), 1, "the table does not grow");
+        let gid = nmap.fetch_uni(&uni_to(2), 254).map(|group| group.gid());
+        assert_eq!(gid, Some(1), "ids below a reserved one are free");
     }
 }
