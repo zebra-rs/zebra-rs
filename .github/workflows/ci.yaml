@@ -10,10 +10,18 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+# Every job carries timeout-minutes. Without it a hung runner holds a PR for
+# the 6-hour default: cradle-rs#223 had a clippy job sit 46 minutes in
+# `apt-get` before it was cancelled. In ~1000 runs since 2026-07-30 no job
+# took more than 8 min (the slowest were cargo test 7.8, clippy 3.4, lua
+# 3.8). The 30-minute caps on the Rust build jobs leave room for a cold
+# build after a stable toolchain release, which forces a full rebuild. The
+# 10-minute caps cover jobs that finish in under a minute.
 jobs:
   fmt:
     name: cargo fmt
     runs-on: ubuntu-22.04
+    timeout-minutes: 10
     steps:
       - name: Checkout code
         uses: actions/checkout@v5
@@ -27,6 +35,7 @@ jobs:
   clippy:
     name: cargo clippy
     runs-on: ubuntu-22.04
+    timeout-minutes: 30
     steps:
       - name: Checkout code
         uses: actions/checkout@v5
@@ -50,6 +59,7 @@ jobs:
   vty-exit-hook:
     name: vty exit hook
     runs-on: ubuntu-22.04
+    timeout-minutes: 10
     steps:
       - name: Checkout code
         uses: actions/checkout@v5
@@ -65,6 +75,7 @@ jobs:
   test:
     name: cargo test
     runs-on: ubuntu-22.04
+    timeout-minutes: 30
     steps:
       - name: Checkout code
         uses: actions/checkout@v5
@@ -89,6 +100,7 @@ jobs:
   lua:
     name: cargo clippy (lua)
     runs-on: ubuntu-22.04
+    timeout-minutes: 30
     # The `lua` feature is DISABLED by default for now, so the fmt /
     # clippy / test jobs build the feature-OFF path (the hooks'
     # `#[cfg(not(feature = "lua"))]` no-op stubs). This lane guards the
@@ -118,6 +130,7 @@ jobs:
   playset-assets:
     name: playset packaging assets
     runs-on: ubuntu-22.04
+    timeout-minutes: 10
     # The .deb is built only by nightly.yaml / release.yaml (and the
     # push-to-main build jobs) — never on a pull request. So a playset file
     # with an extension no cargo-deb asset glob claims used to reach main
