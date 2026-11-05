@@ -124,10 +124,10 @@ pub struct FibRoute {
     pub table_id: u32,
 }
 
-/// A next-hop object the kernel already held at startup
+/// A kernel next-hop object: one the kernel already held at startup
 /// (`RTM_GETNEXTHOP` dump), such as one an earlier run of zebra-rs left
-/// behind when it stopped without withdrawing its routes: a graceful
-/// restart, or a crash.
+/// behind when it stopped without withdrawing its routes (a graceful
+/// restart, or a crash), or one made since (`RTM_NEWNEXTHOP`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FibNexthop {
     /// `NHA_ID`.
@@ -236,9 +236,10 @@ pub enum FibMessage {
     DelAddr(FibAddr),
     NewRoute(FibRoute),
     DelRoute(FibRoute),
-    /// Kernel nexthop-object id from RTM_NEWNEXTHOP — usually the echo
-    /// of our own install; reconciled in `Rib::process_fib_msg`.
-    NewNexthop(u32),
+    /// A kernel next-hop object from RTM_NEWNEXTHOP: usually the echo of
+    /// our own install, else one another program made. Reconciled in
+    /// `Rib::process_fib_msg`.
+    NewNexthop(FibNexthop),
     /// Kernel nexthop-object id from RTM_DELNEXTHOP. Signals the kernel
     /// dropped a nexthop (link down / gateway unreachable / manual
     /// delete); drives `NexthopMap` reconciliation so the group gets

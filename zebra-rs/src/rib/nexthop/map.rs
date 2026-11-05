@@ -148,6 +148,31 @@ impl NexthopMap {
         }
     }
 
+    /// Another program made kernel next-hop object `id` while we run.
+    /// Returns the gid of our group that has its id, if one does: that
+    /// group's install would take the object over, or already did.
+    ///
+    /// An id past the gids is reserved, as one found at startup is. A
+    /// freed gid is handed out again only to the next hop it was freed
+    /// from, whose dedupe key still names it; that key is dropped, so the
+    /// next hop gets a new gid when it comes back.
+    pub fn foreign_object(&mut self, id: u32) -> Option<usize> {
+        let gid = id as usize;
+        match self.groups.get(gid) {
+            None => self.reserve(id),
+            Some(Some(_)) => return Some(gid),
+            Some(None) => {
+                self.map.retain(|_, named| *named != gid);
+                self.set.retain(|_, named| *named != gid);
+                self.mpls.retain(|_, named| *named != gid);
+                self.seg6.retain(|_, named| *named != gid);
+                self.seg6local.retain(|_, named| *named != gid);
+                self.protect.retain(|_, named| *named != gid);
+            }
+        }
+        None
+    }
+
     pub fn fetch_uni(&mut self, uni: &NexthopUni, table_id: u32) -> Option<&mut Group> {
         let key: UniKey = (table_id, uni.addr, uni.ifindex_origin);
         if let Some(&gid) = self.map.get(&key) {
@@ -798,5 +823,41 @@ mod tests {
         assert!(nmap.reserved.is_empty());
         nmap.reserve(3);
         assert_eq!(nmap.reserved, BTreeSet::from([3]));
+    }
+
+    /// An object another program makes past the gids keeps its id, as
+    /// one found at startup does.
+    #[test]
+    fn a_foreign_object_past_the_gids_is_skipped() {
+        let mut nmap = NexthopMap::default();
+        assert_eq!(nmap.foreign_object(2), None);
+        let gids: Vec<_> = (2..5)
+            .map(|last| group_gid(nmap.fetch(&uni_to(last), 254).expect("uni")))
+            .collect();
+        assert_eq!(gids, [1, 3, 4]);
+    }
+
+    /// A freed gid goes back to the next hop it was freed from, unless
+    /// another program has made an object with its id meanwhile.
+    #[test]
+    fn a_freed_gid_another_program_took_is_not_given_back() {
+        let mut nmap = NexthopMap::default();
+        let gid = group_gid(nmap.fetch(&uni_to(2), 254).expect("uni"));
+        nmap.remove(gid);
+        let again = group_gid(nmap.fetch(&uni_to(2), 254).expect("uni"));
+        assert_eq!(again, gid, "the same next hop gets its gid back");
+        nmap.remove(gid);
+        assert_eq!(nmap.foreign_object(gid as u32), None);
+        let moved = group_gid(nmap.fetch(&uni_to(2), 254).expect("uni"));
+        assert_ne!(moved, gid, "not once another program has it");
+        assert!(nmap.get(gid).is_none());
+    }
+
+    /// An object with the gid of a group we have is reported.
+    #[test]
+    fn a_foreign_object_with_a_live_gid_is_reported() {
+        let mut nmap = NexthopMap::default();
+        let gid = group_gid(nmap.fetch(&uni_to(2), 254).expect("uni"));
+        assert_eq!(nmap.foreign_object(gid as u32), Some(gid));
     }
 }

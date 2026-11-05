@@ -14,7 +14,7 @@ use crate::config::{Args, path_from_command};
 use crate::config::{ConfigChannel, ConfigOp, ConfigRequest, DisplayRequest, ShowChannel};
 use crate::context::{Timer, TimerType};
 use crate::fib::sysctl::sysctl_enable;
-use crate::fib::{FibChannel, FibHandle, FibMessage, FibNeighbor};
+use crate::fib::{FibChannel, FibHandle, FibMessage, FibNeighbor, FibNexthop};
 use crate::fib::{fib_dump, fib_resync};
 use crate::rib::route::{
     AddrRecoveryState, ipv4_nexthop_sync, ipv6_nexthop_sync, nexthop_orphan_gc,
@@ -4791,12 +4791,24 @@ impl Rib {
     }
 
     /// Kernel reported a nexthop object exists (RTM_NEWNEXTHOP). This
-    /// is almost always the echo of our own install. We only keep our
-    /// view consistent for a gid we own: if we thought it uninstalled,
-    /// record that the kernel now has it so the next sync doesn't issue
-    /// a redundant add. External nexthop ids we don't track are
-    /// ignored (the gid space here is RIB-managed).
-    fn fib_nexthop_added(&mut self, id: u32) {
+    /// is almost always the echo of our own install: if we thought that
+    /// group uninstalled, record that the kernel now has it so the next
+    /// sync doesn't issue a redundant add.
+    ///
+    /// One another program made (not `RTPROT_ZEBRA`) is not ours to
+    /// mark installed, even with the id of one of our groups: our routes
+    /// would forward through it. Its id is kept from the groups made
+    /// later.
+    fn fib_nexthop_added(&mut self, nexthop: FibNexthop) {
+        let id = nexthop.id;
+        if !nexthop.ours {
+            if let Some(gid) = self.nmap.foreign_object(id) {
+                tracing::warn!(
+                    "fib: another program made next-hop object {id}, the id of our group {gid}"
+                );
+            }
+            return;
+        }
         if let Some(group) = self.nmap.get_mut(id as usize)
             && !group.is_installed()
         {
@@ -5078,8 +5090,8 @@ impl Rib {
                     }
                 }
             }
-            FibMessage::NewNexthop(id) => {
-                self.fib_nexthop_added(id);
+            FibMessage::NewNexthop(nexthop) => {
+                self.fib_nexthop_added(nexthop);
             }
             FibMessage::DelNexthop(id) => {
                 self.fib_nexthop_removed(id);
@@ -7986,7 +7998,6 @@ mod mac_entry_tests {
 #[cfg(test)]
 mod kernel_nexthop_tests {
     use super::*;
-    use crate::fib::FibNexthop;
     use crate::rib::NexthopUni;
 
     /// A next-hop object the kernel held at startup keeps its id: no
@@ -8017,6 +8028,61 @@ mod kernel_nexthop_tests {
             })
             .collect();
         assert_eq!(gids, [Some(1), Some(2), Some(4)], "3 is the kernel's");
+    }
+
+    fn object(id: u32, ours: bool) -> FibNexthop {
+        FibNexthop {
+            id,
+            ours,
+            gateway: None,
+            ifindex: Some(3),
+            group: vec![],
+        }
+    }
+
+    /// Only our own object marks a group installed. Another program's
+    /// object with the same id does not: the group would never be
+    /// installed, and our routes would forward through that object.
+    #[tokio::test]
+    async fn another_programs_object_does_not_mark_ours_installed() {
+        let mut rib = Rib::new(false).expect("rib");
+        let uni = NexthopUni {
+            addr: "192.0.2.2".parse().unwrap(),
+            ..Default::default()
+        };
+        let gid = rib
+            .nmap
+            .fetch_uni(&uni, RT_TABLE_MAIN)
+            .map(|group| group.gid())
+            .expect("a group");
+        let installed = |rib: &Rib| rib.nmap.get(gid).is_some_and(|group| group.is_installed());
+        rib.process_fib_msg(FibMessage::NewNexthop(object(gid as u32, false)))
+            .await;
+        assert!(!installed(&rib), "another program's");
+        rib.process_fib_msg(FibMessage::NewNexthop(object(gid as u32, true)))
+            .await;
+        assert!(installed(&rib), "the echo of ours");
+    }
+
+    /// An object another program makes while we run keeps its id from
+    /// the groups made after it.
+    #[tokio::test]
+    async fn another_programs_object_keeps_its_id() {
+        let mut rib = Rib::new(false).expect("rib");
+        rib.process_fib_msg(FibMessage::NewNexthop(object(2, false)))
+            .await;
+        let gids: Vec<_> = (3..6)
+            .map(|last| {
+                let uni = NexthopUni {
+                    addr: std::net::IpAddr::V4(std::net::Ipv4Addr::new(192, 0, 2, last)),
+                    ..Default::default()
+                };
+                rib.nmap
+                    .fetch_uni(&uni, RT_TABLE_MAIN)
+                    .map(|group| group.gid())
+            })
+            .collect();
+        assert_eq!(gids, [Some(1), Some(3), Some(4)], "2 is another's");
     }
 }
 
