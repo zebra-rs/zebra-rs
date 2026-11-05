@@ -7992,12 +7992,12 @@ mod kernel_nexthop_tests {
     /// A next-hop object the kernel held at startup keeps its id: no
     /// group this run makes is given it. An earlier run's routes still
     /// forward through such objects, and `NLM_F_REPLACE` on the same id
-    /// would have re-pointed them at ours.
+    /// would have re-pointed them at ours. The ids below it are free.
     #[tokio::test]
     async fn a_kernel_nexthop_keeps_its_id() {
         let mut rib = Rib::new(false).expect("rib");
         let nexthop = FibNexthop {
-            id: 1,
+            id: 3,
             ours: true,
             gateway: Some("192.0.2.2".parse().unwrap()),
             ifindex: Some(3),
@@ -8005,15 +8005,18 @@ mod kernel_nexthop_tests {
         };
         rib.process_fib_msg(FibMessage::KernelNexthop(nexthop))
             .await;
-        let uni = NexthopUni {
-            addr: "192.0.2.3".parse().unwrap(),
-            ..Default::default()
-        };
-        let gid = rib
-            .nmap
-            .fetch_uni(&uni, RT_TABLE_MAIN)
-            .map(|group| group.gid());
-        assert_eq!(gid, Some(2), "past the kernel's");
+        let gids: Vec<_> = (3..6)
+            .map(|last| {
+                let uni = NexthopUni {
+                    addr: std::net::IpAddr::V4(std::net::Ipv4Addr::new(192, 0, 2, last)),
+                    ..Default::default()
+                };
+                rib.nmap
+                    .fetch_uni(&uni, RT_TABLE_MAIN)
+                    .map(|group| group.gid())
+            })
+            .collect();
+        assert_eq!(gids, [Some(1), Some(2), Some(4)], "3 is the kernel's");
     }
 }
 

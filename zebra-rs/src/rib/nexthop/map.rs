@@ -39,7 +39,15 @@ pub struct NexthopMap {
     // backup gid). Two prefixes sharing a primary but with different
     // repairs get distinct groups so each switches to its own repair.
     protect: BTreeMap<(usize, usize), usize>,
-    pub groups: Vec<Option<Group>>,
+    // Indexed by gid, which is also the kernel next-hop id. Only
+    // `new_gid` may pick the next index, because it skips `reserved`
+    // ids; that is why this stays private. A `None` slot is either a
+    // freed group (its dedupe key still names it) or a kernel object's
+    // id that was skipped, and the two look alike: never hand a `None`
+    // slot out again.
+    groups: Vec<Option<Group>>,
+    // Ids of kernel next-hop objects we must not take, all at or above
+    // `groups.len()`.
     reserved: BTreeSet<u32>,
 }
 
@@ -96,8 +104,32 @@ impl NexthopMap {
         }
     }
 
+    /// Every group, by ascending gid.
+    pub fn iter(&self) -> impl Iterator<Item = &Group> {
+        self.groups.iter().flatten()
+    }
+
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut Group> {
+        self.groups.iter_mut().flatten()
+    }
+
+    /// Drop group `gid`. Its dedupe key keeps the gid, so the same
+    /// next hop later gets the same gid back.
+    pub fn remove(&mut self, gid: usize) {
+        if let Some(slot) = self.groups.get_mut(gid) {
+            *slot = None;
+        }
+    }
+
     fn new_gid(&mut self) -> usize {
-        while u32::try_from(self.groups.len()).is_ok_and(|id| self.reserved.remove(&id)) {
+        // `reserve` keeps every reserved id at or above the table's
+        // length, so the smallest is the only one the next gid can be.
+        while self
+            .reserved
+            .first()
+            .is_some_and(|&id| id as usize == self.groups.len())
+        {
+            self.reserved.pop_first();
             self.groups.push(None);
         }
         self.groups.len()
@@ -268,9 +300,7 @@ impl NexthopMap {
     /// "inline-in-group black-hole" claim was refuted by kfree_skb
     /// drop-reason tracing — see the design doc correction).
     pub fn protect_switch_candidates(&self, table_id: u32, addr: IpAddr) -> Vec<usize> {
-        self.groups
-            .iter()
-            .flatten()
+        self.iter()
             .filter_map(|grp| {
                 let Group::Protect(pro) = grp else {
                     return None;
@@ -303,9 +333,7 @@ impl NexthopMap {
     /// caller didn't know about: they lose the same dead leg, which
     /// is the correct outcome (design doc, shared-group note).
     pub fn protect_evict_candidates(&self, table_id: u32, addr: IpAddr) -> Vec<(usize, usize)> {
-        self.groups
-            .iter()
-            .flatten()
+        self.iter()
             .filter_map(|grp| {
                 let Group::Multi(multi) = grp else {
                     return None;
@@ -335,9 +363,7 @@ impl NexthopMap {
     /// validity from link and route state before deciding what to
     /// install, and leaves such a group alone.
     pub fn protect_restore_candidates(&self, table_id: u32, addr: IpAddr) -> Vec<(usize, usize)> {
-        self.groups
-            .iter()
-            .flatten()
+        self.iter()
             .filter_map(|grp| {
                 let Group::Multi(multi) = grp else {
                     return None;
@@ -726,5 +752,51 @@ mod tests {
         assert_eq!(nmap.groups.len(), 1, "the table does not grow");
         let gid = nmap.fetch_uni(&uni_to(2), 254).map(|group| group.gid());
         assert_eq!(gid, Some(1), "ids below a reserved one are free");
+    }
+
+    /// A reserved id some way above the table is skipped only when the
+    /// gids reach it, whichever kind of group is made then, and is
+    /// skipped once.
+    #[test]
+    fn the_gids_step_over_a_reserved_id_when_they_reach_it() {
+        let mut nmap = NexthopMap::default();
+        nmap.reserve(5);
+        nmap.reserve(7);
+        let uni = group_gid(nmap.fetch(&uni_to(2), 254).expect("uni"));
+        let labeled = NexthopUni {
+            mpls_label: vec![100],
+            ..uni_to(3)
+        };
+        let mpls = group_gid(nmap.fetch(&labeled, 254).expect("mpls"));
+        let other = group_gid(nmap.fetch(&uni_to(4), 254).expect("uni"));
+        let multi = nmap
+            .fetch_multi(&BTreeSet::from([(uni, 1), (other, 1)]))
+            .map(|group| group.gid());
+        let protect = nmap.fetch_protect(uni, other).map(|group| group.gid());
+        let next = group_gid(nmap.fetch(&uni_to(5), 254).expect("uni"));
+        assert_eq!(
+            [uni, mpls, other],
+            [1, 2, 3],
+            "below the reserved ids, nothing is skipped"
+        );
+        assert_eq!(multi, Some(4));
+        assert_eq!(protect, Some(6), "5 is the kernel's");
+        assert_eq!(next, 8, "and so is 7");
+        assert!(nmap.reserved.is_empty(), "each is skipped once");
+        assert!(nmap.get(5).is_none() && nmap.get(7).is_none());
+    }
+
+    /// An id below the gids already handed out is not kept: the gids
+    /// never come back to it.
+    #[test]
+    fn a_reserved_id_below_the_gids_is_not_kept() {
+        let mut nmap = NexthopMap::default();
+        nmap.fetch(&uni_to(2), 254);
+        nmap.fetch(&uni_to(3), 254);
+        nmap.reserve(1);
+        nmap.reserve(2);
+        assert!(nmap.reserved.is_empty());
+        nmap.reserve(3);
+        assert_eq!(nmap.reserved, BTreeSet::from([3]));
     }
 }
