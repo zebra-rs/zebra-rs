@@ -2156,9 +2156,9 @@ impl Rib {
         }
 
         if need_install {
-            self.fib_handle.nexthop_add(group).await;
+            let installed = self.fib_handle.nexthop_add(group).await;
             if let Some(g) = self.nmap.get_mut(gid) {
-                g.set_installed(true);
+                g.set_installed(installed);
             }
         }
         let ifindex = sid.ifindex;

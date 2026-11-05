@@ -243,8 +243,8 @@ async fn uni_group_sync(uni: &NexthopUni, nmap: &mut NexthopMap, fib: &FibHandle
     if !group.is_valid() || group.is_installed() {
         return;
     }
-    fib.nexthop_add(group).await;
-    group.set_installed(true);
+    let installed = fib.nexthop_add(group).await;
+    group.set_installed(installed);
 }
 
 /// Install the protection indirection group once it's valid — same
@@ -260,8 +260,8 @@ async fn protect_group_sync(gid: usize, nmap: &mut NexthopMap, fib: &FibHandle) 
     if !group.is_valid() || group.is_installed() {
         return;
     }
-    fib.nexthop_add(group).await;
-    group.set_installed(true);
+    let installed = fib.nexthop_add(group).await;
+    group.set_installed(installed);
 }
 
 async fn member_group_sync(member: &mut NexthopMember, nmap: &mut NexthopMap, fib: &FibHandle) {
@@ -283,8 +283,8 @@ async fn multi_group_sync(multi: &NexthopMulti, nmap: &mut NexthopMap, fib: &Fib
     if !group.is_valid() || group.is_installed() {
         return;
     }
-    fib.nexthop_add(group).await;
-    group.set_installed(true);
+    let installed = fib.nexthop_add(group).await;
+    group.set_installed(installed);
 }
 
 impl PartialEq for RibEntry {

@@ -1767,8 +1767,8 @@ pub async fn ipv4_nexthop_sync(
                 if link_up {
                     uni.set_valid(true);
                     if !uni.is_installed() {
-                        uni.set_installed(true);
-                        fib.nexthop_add(&Group::Uni(uni.clone())).await;
+                        let installed = fib.nexthop_add(&Group::Uni(uni.clone())).await;
+                        uni.set_installed(installed);
                     }
                 } else {
                     uni.set_valid(false);
@@ -1809,8 +1809,8 @@ pub async fn ipv4_nexthop_sync(
                 uni.ifindex_resolved = Some(ifindex);
                 uni.set_valid(true);
                 if !uni.is_installed() {
-                    uni.set_installed(true);
-                    fib.nexthop_add(&Group::Uni(uni.clone())).await;
+                    let installed = fib.nexthop_add(&Group::Uni(uni.clone())).await;
+                    uni.set_installed(installed);
                 }
             }
         }
@@ -1887,8 +1887,8 @@ async fn protect_groups_sync(nmap: &mut NexthopMap, fib: &FibHandle) {
             if valid {
                 pro.set_valid(true);
                 if !pro.is_installed() {
-                    fib.nexthop_add(&Group::Protect(pro.clone())).await;
-                    pro.set_installed(true);
+                    let installed = fib.nexthop_add(&Group::Protect(pro.clone())).await;
+                    pro.set_installed(installed);
                 }
             } else {
                 // The member died (link down) — the kernel flushed it,
@@ -3377,8 +3377,8 @@ pub async fn ipv6_nexthop_sync(
                 if link_up {
                     uni.set_valid(true);
                     if !uni.is_installed() {
-                        uni.set_installed(true);
-                        fib.nexthop_add(&Group::Uni(uni.clone())).await;
+                        let installed = fib.nexthop_add(&Group::Uni(uni.clone())).await;
+                        uni.set_installed(installed);
                     }
                 } else {
                     uni.set_valid(false);
@@ -3416,8 +3416,8 @@ pub async fn ipv6_nexthop_sync(
                 uni.ifindex_resolved = Some(ifindex);
                 uni.set_valid(true);
                 if !uni.is_installed() {
-                    uni.set_installed(true);
-                    fib.nexthop_add(&Group::Uni(uni.clone())).await;
+                    let installed = fib.nexthop_add(&Group::Uni(uni.clone())).await;
+                    uni.set_installed(installed);
                 }
             }
         }

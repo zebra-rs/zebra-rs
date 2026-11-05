@@ -2664,10 +2664,15 @@ impl FibHandle {
         }
     }
 
-    pub async fn nexthop_add(&self, nexthop: &Group) {
+    /// Install `nexthop` as kernel next-hop object `gid`, or update the
+    /// one installed. True when the kernel holds it as asked, or when it
+    /// needs no object (a kernel before 5.3, a seg6local or unspecified
+    /// next hop); false when the kernel refused it, so the caller leaves
+    /// the group uninstalled and the next sync tries again.
+    pub async fn nexthop_add(&self, nexthop: &Group) -> bool {
         // Skip nexthop table management for kernels < 5.3
         if !self.use_nhid {
-            return;
+            return true;
         }
 
         // Nexthop message.
@@ -2711,7 +2716,7 @@ impl FibHandle {
                             uni.gid(),
                         );
                     }
-                    return;
+                    return true;
                 }
 
                 // On-link nexthops with an unspecified gateway
@@ -2729,7 +2734,7 @@ impl FibHandle {
                         "[nexthop_add Uni] gid={gid} skipped — addr={} is unspecified, no kernel nh_id needed",
                         uni.addr,
                     );
-                    return;
+                    return true;
                 }
 
                 // Address family follows the gateway address.
@@ -2808,7 +2813,7 @@ impl FibHandle {
                                 uni.gid(),
                                 e
                             );
-                            return;
+                            return false;
                         }
                     }
                 }
@@ -2873,10 +2878,19 @@ impl FibHandle {
         let group_summary = fmt_group_for_trace(nexthop);
         tracing::debug!("RTM_NEWNEXTHOP {}", group_summary);
 
-        let mut response = self.handle.clone().request(req).unwrap();
+        let mut response = match self.handle.clone().request(req) {
+            Ok(response) => response,
+            Err(e) => {
+                tracing::warn!("NewNexthop request failed: {e} gid: {gid}");
+                return false;
+            }
+        };
+        let mut ok = true;
         while let Some(msg) = response.next().await {
             match msg.payload {
-                NetlinkPayload::Error(e) => {
+                // An ACK is an error message without a code.
+                NetlinkPayload::Error(e) if e.code.is_some() => {
+                    ok = false;
                     if fib_nexthop() {
                         tracing::info!(
                             "NewNexthop error: {e} gid: {gid} refcnt: {refcnt} {}",
@@ -2884,6 +2898,7 @@ impl FibHandle {
                         );
                     }
                 }
+                NetlinkPayload::Error(_) => {}
                 // Non-error payloads here are mostly the RTNLGRP_NEXTHOP
                 // multicast echoes the kernel delivers on the shared
                 // socket while our request is in flight — not real
@@ -2906,6 +2921,7 @@ impl FibHandle {
                 }
             }
         }
+        ok
     }
 
     pub async fn nexthop_del(&self, nexthop: &Group) {

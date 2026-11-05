@@ -1503,3 +1503,47 @@ async fn a_mac_no_longer_sticky_is_installed_extern_learned() {
     ip(&["link", "del", "vxpin"]);
     ip(&["link", "del", "brpin"]);
 }
+
+/// The kernel's answer to a next-hop install reaches the caller, which
+/// marks the group installed only when it is true: an object refused
+/// once used to stay marked installed, and so missing, for good.
+#[tokio::test]
+#[ignore = "requires root in an isolated network namespace"]
+async fn a_refused_nexthop_install_is_reported() {
+    require_netns();
+    ip(&["link", "add", "nhrefuse", "type", "dummy"]);
+    ip(&["link", "set", "nhrefuse", "up"]);
+    ip(&["addr", "add", "192.0.2.1/24", "dev", "nhrefuse"]);
+    let ifindex: u32 = std::fs::read_to_string("/sys/class/net/nhrefuse/ifindex")
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let rib = Rib::new(false).unwrap();
+    let uni = crate::rib::NexthopUni {
+        addr: "192.0.2.2".parse().unwrap(),
+        ifindex_origin: Some(ifindex),
+        ..Default::default()
+    };
+    let group = crate::rib::Group::Uni(crate::rib::GroupUni::new(900, &uni, RT_TABLE_MAIN));
+    assert!(rib.fib_handle.nexthop_add(&group).await, "accepted");
+    assert!(ip(&["nexthop", "show", "id", "900"]).contains("192.0.2.2"));
+
+    // A group object cannot be replaced by a single next hop.
+    ip(&["nexthop", "del", "id", "900"]);
+    ip(&[
+        "nexthop",
+        "add",
+        "id",
+        "901",
+        "via",
+        "192.0.2.3",
+        "dev",
+        "nhrefuse",
+    ]);
+    ip(&["nexthop", "add", "id", "900", "group", "901"]);
+    assert!(!rib.fib_handle.nexthop_add(&group).await, "refused");
+    assert!(ip(&["nexthop", "show", "id", "900"]).contains("group"));
+
+    ip(&["link", "del", "nhrefuse"]);
+}
