@@ -118,6 +118,7 @@
 /router/bgp/neighbor-group/afi-safi
 /router/bgp/neighbor-group/afi-safi/add-path
 /router/bgp/neighbor-group/afi-safi/enabled
+/router/bgp/neighbor-group/afi-safi/maximum-prefix/force
 /router/bgp/neighbor-group/afi-safi/maximum-prefix/limit
 /router/bgp/neighbor-group/afi-safi/maximum-prefix/restart
 /router/bgp/neighbor-group/afi-safi/maximum-prefix/warning-only
@@ -158,6 +159,7 @@
 /router/bgp/neighbor/afi-safi/graceful-restart/enabled
 /router/bgp/neighbor/afi-safi/long-lived-graceful-restart/enabled
 /router/bgp/neighbor/afi-safi/long-lived-graceful-restart/restart-time
+/router/bgp/neighbor/afi-safi/maximum-prefix/force
 /router/bgp/neighbor/afi-safi/maximum-prefix/limit
 /router/bgp/neighbor/afi-safi/maximum-prefix/restart
 /router/bgp/neighbor/afi-safi/maximum-prefix/warning-only

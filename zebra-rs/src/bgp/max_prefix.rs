@@ -6,6 +6,10 @@
 //! are the peer's Loc-RIB rows ([`PeerPathCounts`]). PfxRcd cannot be used
 //! because Adj-RIB-In also keeps denied routes.
 //!
+//! `force` also counts denied routes, which hold memory all the same, using the
+//! larger of PfxRcd and the accepted paths. Neither requires a route-table scan,
+//! but with add-path this undercounts: PfxRcd counts prefixes.
+//!
 //! Past the limit the session ends with Cease/1 (RFC 4486) and the peer stays
 //! in Idle ([`MaxPrefixState::overflow`]) until `clear bgp`, a change to its
 //! effective block, or `restart`. A dynamic peer is held the same way, unlike
@@ -57,6 +61,19 @@ pub struct MaxPrefixConfig {
     pub warning_only: bool,
     /// Minutes.
     pub restart: Option<u16>,
+    /// Count the routes inbound policy denied as well.
+    pub force: bool,
+}
+
+impl MaxPrefixConfig {
+    /// The count `limit` applies to.
+    fn counted(&self, accepted: usize, received: usize) -> u64 {
+        if self.force {
+            accepted.max(received) as u64
+        } else {
+            accepted as u64
+        }
+    }
 }
 
 /// Sets or clears one leaf of a block.
@@ -78,6 +95,11 @@ pub fn set_warning_threshold(
 
 pub fn set_warning_only(block: &mut MaxPrefixConfig, op: ConfigOp, _: &mut Args) -> Option<()> {
     block.warning_only = op.is_set();
+    Some(())
+}
+
+pub fn set_force(block: &mut MaxPrefixConfig, op: ConfigOp, _: &mut Args) -> Option<()> {
+    block.force = op.is_set();
     Some(())
 }
 
@@ -193,9 +215,10 @@ pub struct BarrierV4 {
     seq: u64,
     pending: usize,
     rerun: bool,
-    /// Sum of the counts the round's answers carried. Main's `mirror_v4` will
+    /// Sums of the counts the round's answers carried. Main's `mirror_v4` will
     /// not do: deltas from past the barrier can overtake a slower shard's answer.
     accepted: usize,
+    received: usize,
 }
 
 impl BarrierV4 {
@@ -223,6 +246,9 @@ pub struct MaxPrefixState {
     /// Set by any block change; it only holds checks back while a commit is
     /// open ([`PeerMap::commit_open`]).
     block_in_commit: bool,
+    /// PfxRcd as the last check read it, for `show` under `force`: at N>1 the
+    /// IPv4 Adj-RIB-In is on the pool shards, out of `show`'s reach.
+    received: BTreeMap<AfiSafi, u64>,
     /// A dynamic peer left the hold with no session: [`reap_released`]
     /// removes it.
     released: bool,
@@ -234,6 +260,7 @@ impl MaxPrefixState {
     pub fn session_down(&mut self) {
         self.limit_warned.clear();
         self.threshold_warned.clear();
+        self.received.clear();
         self.barrier.invalidate();
     }
 }
@@ -310,6 +337,7 @@ fn start_barrier(ident: usize, peer: &mut Peer, pool: &ShardPool) {
     barrier.pending = pool.n();
     barrier.rerun = false;
     barrier.accepted = 0;
+    barrier.received = 0;
     let seq = barrier.seq;
     for idx in 0..pool.n() {
         pool.dispatch(idx, ShardMsg::MaxPrefixBarrierV4 { ident, seq });
@@ -340,7 +368,16 @@ pub fn check_limits(
             need_barrier = true;
             continue;
         }
-        let count = shard.accepted_paths(ident, family.afi, family.safi) as u64;
+        let accepted = shard.accepted_paths(ident, family.afi, family.safi);
+        let received = if cfg.force {
+            shard.adj_in_count(ident, family.afi, family.safi)
+        } else {
+            0
+        };
+        let count = cfg.counted(accepted, received);
+        if cfg.force {
+            peer.max_prefix.received.insert(*family, received as u64);
+        }
         let over = check_family(&mut peer.max_prefix, &name, *family, cfg, count);
         exceeded = exceeded.or(over);
     }
@@ -360,6 +397,7 @@ pub fn barrier_answer(
     ident: usize,
     seq: u64,
     accepted: usize,
+    received: usize,
     peers: &mut PeerMap,
     pool: Option<&ShardPool>,
 ) -> Option<Event> {
@@ -370,11 +408,12 @@ pub fn barrier_answer(
     }
     barrier.pending -= 1;
     barrier.accepted += accepted;
+    barrier.received += received;
     if barrier.pending > 0 {
         return None;
     }
     let rerun = barrier.rerun;
-    let accepted = barrier.accepted;
+    let (accepted, received) = (barrier.accepted, barrier.received);
     barrier.rerun = false;
     if peer.state != State::Established {
         return None;
@@ -382,7 +421,10 @@ pub fn barrier_answer(
     let family = AfiSafi::new(Afi::Ip, Safi::Unicast);
     if let Some(cfg) = peer.config.max_prefix.get(&family).copied() {
         let name = peer.display_name();
-        let count = accepted as u64;
+        let count = cfg.counted(accepted, received);
+        if cfg.force {
+            peer.max_prefix.received.insert(family, received as u64);
+        }
         if let Some(over) = check_family(&mut peer.max_prefix, &name, family, &cfg, count) {
             return Some(Event::MaxPrefixExceeded(over));
         }
@@ -495,9 +537,13 @@ pub fn commit_end(peers: &mut PeerMap) {
 pub struct MaxPrefixShow {
     family: &'static str,
     accepted: u64,
+    /// Only under `force`, which also counts these.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    received: Option<u64>,
     limit: u32,
     warning_threshold: u8,
     warning_only: bool,
+    force: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     restart_minutes: Option<u16>,
 }
@@ -519,9 +565,13 @@ pub fn show(peer: &Peer, shard: &BgpShard) -> Vec<MaxPrefixShow> {
             Some(MaxPrefixShow {
                 family: super::show::afi_safi_config_name(family),
                 accepted: shard.accepted_paths(peer.ident, family.afi, family.safi) as u64,
+                received: cfg
+                    .force
+                    .then(|| peer.max_prefix.received.get(family).copied().unwrap_or(0)),
                 limit: cfg.limit?,
                 warning_threshold: cfg.warning_threshold.unwrap_or(WARNING_THRESHOLD_DEFAULT),
                 warning_only: cfg.warning_only,
+                force: cfg.force,
                 restart_minutes: cfg.restart,
             })
         })
@@ -547,10 +597,18 @@ pub fn render(
     for l in limits {
         writeln!(
             out,
-            "  Maximum prefix {}: {} accepted, limit {}, warning at {}%{}{}",
+            "  Maximum prefix {}: {} accepted{}, limit {}{}, warning at {}%{}{}",
             l.family,
             l.accepted,
+            l.received
+                .map(|r| format!(", {r} received"))
+                .unwrap_or_default(),
             l.limit,
+            if l.force {
+                " (denied routes count)"
+            } else {
+                ""
+            },
             l.warning_threshold,
             if l.warning_only { ", warning only" } else { "" },
             l.restart_minutes
@@ -989,21 +1047,56 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn only_force_counts_what_the_policy_denied() {
+        assert_eq!(limit(10).counted(5, 100), 5);
+        let forced = MaxPrefixConfig {
+            force: true,
+            ..limit(10)
+        };
+        assert_eq!(forced.counted(5, 100), 100, "denied routes count");
+        assert_eq!(
+            forced.counted(3, 1),
+            3,
+            "add-path paths of one prefix count"
+        );
+    }
+
+    #[tokio::test]
+    async fn force_trips_on_routes_the_policy_denied() {
+        let (mut peers, ident) = peers_with(established(MaxPrefixConfig {
+            force: true,
+            ..limit(1)
+        }));
+        let mut shard = BgpShard::default();
+        let adj_in = shard.adj_in_mut(ident);
+        adj_in.add(None, "10.0.0.0/24".parse().unwrap(), row(ident, 0));
+        assert!(check_limits(ident, &shard, &mut peers, None).is_none());
+        let state = &peers.get_by_idx(ident).unwrap().max_prefix;
+        assert_eq!(state.received.get(&v4()), Some(&1), "kept for show");
+        let adj_in = shard.adj_in_mut(ident);
+        adj_in.add(None, "10.0.1.0/24".parse().unwrap(), row(ident, 0));
+        assert!(matches!(
+            check_limits(ident, &shard, &mut peers, None),
+            Some(Event::MaxPrefixExceeded(_))
+        ));
+    }
+
     #[tokio::test]
     async fn a_barrier_round_checks_only_on_its_last_answer() {
         let mut peer = established(limit(1));
         peer.max_prefix.barrier = round(7, 2);
         let (mut peers, ident) = peers_with(peer);
         assert!(
-            barrier_answer(ident, 6, 9, &mut peers, None).is_none(),
+            barrier_answer(ident, 6, 9, 9, &mut peers, None).is_none(),
             "an answer to an older round is ignored"
         );
         assert!(
-            barrier_answer(ident, 7, 1, &mut peers, None).is_none(),
+            barrier_answer(ident, 7, 1, 1, &mut peers, None).is_none(),
             "one shard has not answered yet"
         );
         assert!(matches!(
-            barrier_answer(ident, 7, 1, &mut peers, None),
+            barrier_answer(ident, 7, 1, 1, &mut peers, None),
             Some(Event::MaxPrefixExceeded(_))
         ));
     }
@@ -1034,17 +1127,57 @@ mod tests {
         let mut peer = established(limit(400));
         peer.max_prefix.barrier = round(7, 2);
         let (mut peers, ident) = peers_with(peer);
-        assert!(barrier_answer(ident, 7, 150, &mut peers, None).is_none());
+        assert!(barrier_answer(ident, 7, 150, 150, &mut peers, None).is_none());
         let peer = peers.get_mut_by_idx(ident).unwrap();
         peer.config.max_prefix.insert(v4(), limit(150));
         block_changed(peer);
         assert!(
-            barrier_answer(ident, 7, 150, &mut peers, None).is_none(),
+            barrier_answer(ident, 7, 150, 150, &mut peers, None).is_none(),
             "300 taken before the change must not end the session at 150"
         );
         assert_eq!(
             peers.get_by_idx(ident).unwrap().max_prefix.barrier.pending,
             0
+        );
+    }
+
+    /// Pool shards hold Adj-RIB-In at N>1, so `force` sums what they report.
+    #[tokio::test]
+    async fn a_barrier_round_sums_the_received_counts() {
+        let mut peer = established(MaxPrefixConfig {
+            force: true,
+            ..limit(10)
+        });
+        peer.max_prefix.barrier = round(7, 2);
+        let (mut peers, ident) = peers_with(peer);
+        assert!(barrier_answer(ident, 7, 0, 6, &mut peers, None).is_none());
+        match barrier_answer(ident, 7, 0, 5, &mut peers, None) {
+            Some(Event::MaxPrefixExceeded(over)) => assert_eq!(over.count, 11),
+            _ => panic!("6 + 5 received is over the limit of 10"),
+        }
+        let state = &peers.get_by_idx(ident).unwrap().max_prefix;
+        assert_eq!(state.received.get(&v4()), Some(&11), "kept for show");
+    }
+
+    #[test]
+    fn show_prints_the_received_count_only_with_force() {
+        let line = |force, received| MaxPrefixShow {
+            family: "ipv4",
+            accepted: 5,
+            received,
+            limit: 10,
+            warning_threshold: 75,
+            warning_only: false,
+            force,
+            restart_minutes: None,
+        };
+        let mut out = String::new();
+        render(&mut out, &[line(false, None), line(true, Some(100))], None).unwrap();
+        assert_eq!(
+            out,
+            "  Maximum prefix ipv4: 5 accepted, limit 10, warning at 75%\n  \
+             Maximum prefix ipv4: 5 accepted, 100 received, limit 10 (denied routes count), \
+             warning at 75%\n"
         );
     }
 
@@ -1056,15 +1189,18 @@ mod tests {
                 pending: 2,
                 rerun: true,
                 accepted: 5,
+                received: 5,
             },
             ..Default::default()
         };
         state.limit_warned.insert(v4());
+        state.received.insert(v4(), 5);
         state.session_down();
         assert_eq!(state.barrier.seq, 8);
         assert_eq!(state.barrier.pending, 0);
         assert!(!state.barrier.rerun);
         assert!(state.limit_warned.is_empty());
+        assert!(state.received.is_empty());
     }
 
     #[test]

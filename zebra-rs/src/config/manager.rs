@@ -7380,6 +7380,7 @@ mod bgp_config_audit_tests {
         ("maximum-prefix/limit", MAX_PREFIX_VRF_EXCLUSION),
         ("maximum-prefix/warning-threshold", MAX_PREFIX_VRF_EXCLUSION),
         ("maximum-prefix/warning-only", MAX_PREFIX_VRF_EXCLUSION),
+        ("maximum-prefix/force", MAX_PREFIX_VRF_EXCLUSION),
         ("maximum-prefix/restart", MAX_PREFIX_VRF_EXCLUSION),
     ];
     const MAX_PREFIX_VRF_EXCLUSION: &str =

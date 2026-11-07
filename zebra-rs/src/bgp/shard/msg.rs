@@ -389,11 +389,12 @@ pub struct ShardUpdateLu {
 #[derive(Debug)]
 pub enum ShardOut {
     /// Answer to a [`ShardMsg::MaxPrefixBarrierV4`]: the peer's accepted paths
-    /// on this shard.
+    /// and Adj-RIB-In prefixes on this shard.
     MaxPrefixBarrierV4 {
         ident: usize,
         seq: u64,
         accepted: usize,
+        received: usize,
     },
 
     /// Best-path outcome for an IPv4 / VPNv4 prefix after an

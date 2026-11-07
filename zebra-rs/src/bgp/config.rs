@@ -4105,6 +4105,7 @@ super::max_prefix::max_prefix_callbacks! { config_maximum_prefix:
     config_maximum_prefix_limit => set_limit,
     config_maximum_prefix_warning_threshold => set_warning_threshold,
     config_maximum_prefix_warning_only => set_warning_only,
+    config_maximum_prefix_force => set_force,
     config_maximum_prefix_restart => set_restart,
 }
 
@@ -5404,6 +5405,10 @@ impl Bgp {
             super::neighbor_group::config_neighbor_group_maximum_prefix_restart,
         );
         self.callback_add(
+            "/router/bgp/neighbor-group/afi-safi/maximum-prefix/force",
+            super::neighbor_group::config_neighbor_group_maximum_prefix_force,
+        );
+        self.callback_add(
             "/router/bgp/neighbor-group/ttl-security",
             super::neighbor_group::config_neighbor_group_ttl_security,
         );
@@ -6037,6 +6042,10 @@ impl Bgp {
         self.callback_peer(
             "/afi-safi/maximum-prefix/restart",
             config_maximum_prefix_restart,
+        );
+        self.callback_peer(
+            "/afi-safi/maximum-prefix/force",
+            config_maximum_prefix_force,
         );
         self.callback_peer("/afi-safi/encapsulation-type", config_encapsulation_type);
         self.callback_peer("/afi-safi/next-hop-self", config_next_hop_self);

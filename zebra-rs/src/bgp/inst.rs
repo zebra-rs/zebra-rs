@@ -8041,8 +8041,9 @@ impl Bgp {
                     ident,
                     seq,
                     accepted,
+                    received,
                 } => {
-                    barrier_answers.push((ident, seq, accepted));
+                    barrier_answers.push((ident, seq, accepted, received));
                 }
                 super::shard::ShardOut::DumpDoneV4 {
                     req_id,
@@ -8169,12 +8170,13 @@ impl Bgp {
 
     /// `maximum-prefix` at N>1: the last answer of a barrier round may end the
     /// session.
-    fn max_prefix_barrier_answers(&mut self, answers: Vec<(usize, u64, usize)>) {
-        for (ident, seq, accepted) in answers {
+    fn max_prefix_barrier_answers(&mut self, answers: Vec<(usize, u64, usize, usize)>) {
+        for (ident, seq, accepted, received) in answers {
             let event = super::max_prefix::barrier_answer(
                 ident,
                 seq,
                 accepted,
+                received,
                 &mut self.peers,
                 self.shards.as_ref(),
             );

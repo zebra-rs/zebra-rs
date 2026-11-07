@@ -163,6 +163,7 @@ impl BgpShard {
                     ident,
                     seq,
                     accepted: self.accepted_paths(ident, Afi::Ip, Safi::Unicast),
+                    received: self.adj_in_count(ident, Afi::Ip, Safi::Unicast),
                 }]
             }
             ShardMsg::Show(_) | ShardMsg::Shutdown => Vec::new(),
@@ -1938,6 +1939,7 @@ mod tests {
                     ident: 3,
                     seq: 9,
                     accepted: 1,
+                    received: 2,
                 }]
             ),
             "the answer reports the shard's counts: {out:?}"

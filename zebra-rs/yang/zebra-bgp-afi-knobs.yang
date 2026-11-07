@@ -64,7 +64,7 @@ module zebra-bgp-afi-knobs {
       description
         "FRR's `neighbor X maximum-prefix`. Counts the paths that passed
          inbound policy, so a route the policy denies does not count even
-         though Adj-RIB-In keeps it. Past the limit
+         though Adj-RIB-In keeps it, unless `force` is set. Past the limit
          the session ends with Cease/Maximum Number of Prefixes Reached
          (RFC 4486) and the peer stays in Idle until `clear bgp`, a change to
          its effective block, or `restart`. A commit is refused for a block
@@ -99,6 +99,16 @@ module zebra-bgp-afi-knobs {
         description
           "Log once when the limit is exceeded and keep the session up.
            Takes precedence over `restart`.";
+      }
+      leaf force {
+        ext:help "Count the routes inbound policy denied as well";
+        type empty;
+        description
+          "Apply the limit to the larger of the received prefixes (PfxRcd)
+           and the accepted paths, because a denied route still takes memory
+           in Adj-RIB-In. Does not scan routes, but with add-path it undercounts:
+           PfxRcd counts prefixes. `show bgp neighbor` then prints PfxRcd
+           as the last check read it.";
       }
       leaf restart {
         ext:help "Minutes in Idle before reconnecting";

@@ -583,6 +583,7 @@ super::max_prefix::max_prefix_callbacks! { config_neighbor_group_maximum_prefix:
     config_neighbor_group_maximum_prefix_limit => set_limit,
     config_neighbor_group_maximum_prefix_warning_threshold => set_warning_threshold,
     config_neighbor_group_maximum_prefix_warning_only => set_warning_only,
+    config_neighbor_group_maximum_prefix_force => set_force,
     config_neighbor_group_maximum_prefix_restart => set_restart,
 }
 
