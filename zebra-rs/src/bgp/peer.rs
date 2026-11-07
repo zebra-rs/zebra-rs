@@ -160,6 +160,13 @@ pub enum Event {
     /// subcode, and Data field. The reader emits it before the
     /// connection drops; the FSM sends the NOTIFICATION and goes Idle.
     UpdateError(NotifyCode, u8, Vec<u8>),
+    /// `maximum-prefix`: the accepted count passed the limit. The FSM sends
+    /// Cease/1 and holds the peer in Idle.
+    MaxPrefixExceeded(super::max_prefix::MaxPrefixExceeded),
+    /// Re-judge `maximum-prefix`: its config or the inbound policy changed.
+    MaxPrefixCheck,
+    /// The `maximum-prefix restart` hold is over.
+    MaxPrefixRestartExpires,
     // RFC 2918 Route Refresh receive. Carries the AFI/SAFI from the
     // wire (raw u16/u8) so unknown-AF refreshes still dispatch
     // through the FSM rather than tearing the session down.
@@ -197,6 +204,8 @@ pub enum PeerDownReason {
     /// Our BGP router-id changed: the session is reset so the neighbor
     /// learns the new identifier from our next OPEN.
     RouterIdChange,
+    /// The neighbor exceeded `maximum-prefix` (NOTIFICATION sent).
+    MaximumPrefix,
     /// The FSM left Established on an event with no self-evident cause.
     Unknown,
 }
@@ -213,6 +222,7 @@ impl PeerDownReason {
             Self::AdminReset => "Admin. reset",
             Self::ConfigChange => "Config change",
             Self::RouterIdChange => "Router ID changed",
+            Self::MaximumPrefix => "Maximum prefix exceeded",
             Self::Unknown => "Unknown",
         }
     }
@@ -229,6 +239,7 @@ impl PeerDownReason {
             Event::ConnFail(_) | Event::DialFail => Some(Self::ConnectionFailed),
             Event::NotifMsg(..) => Some(Self::NotificationReceived),
             Event::UpdateError(..) => Some(Self::UpdateError),
+            Event::MaxPrefixExceeded(..) => Some(Self::MaximumPrefix),
             _ => None,
         }
     }
@@ -246,6 +257,7 @@ pub enum FsmEffect {
     // (afi, safi) pair is kept in the variant so a future revision
     // can do the targeted version without an FSM change.
     RouteRefreshRecv { afi: u16, safi: u8 },
+    MaxPrefixCheck,
 }
 
 #[derive(Debug, Default)]
@@ -264,6 +276,8 @@ pub struct PeerTimer {
     pub min_as_origin: Option<Timer>,
     pub min_route_adv: Option<Timer>,
     pub stale_timer: BTreeMap<AfiSafi, Timer>,
+    /// Ends the Idle hold after a `maximum-prefix` overflow.
+    pub max_prefix_restart: Option<Timer>,
 }
 
 #[derive(Serialize, Debug, Default, Clone, Copy)]
@@ -606,6 +620,11 @@ pub struct PeerConfig {
     /// Per-neighbor `allowas-in` (zebra-bgp-allowas-in.yang). `None`
     /// keeps the strict RFC 4271 inbound AS_PATH loop check.
     pub allowas_in: Option<AllowAsIn>,
+    /// Effective per-family `maximum-prefix`: the explicit block below,
+    /// else the neighbor-group's. Empty when no limit applies.
+    pub max_prefix: BTreeMap<AfiSafi, super::max_prefix::MaxPrefixConfig>,
+    /// The neighbor's own `maximum-prefix` statements, verbatim.
+    pub max_prefix_explicit: BTreeMap<AfiSafi, super::max_prefix::MaxPrefixConfig>,
     /// Per-neighbor `as-override` (zebra-bgp-as-override.yang). When
     /// `true`, the peer's own AS is replaced with the local AS in the
     /// AS_PATH of every outbound eBGP UPDATE (before the local-AS
@@ -796,6 +815,8 @@ impl Default for PeerConfig {
             remote_as_external: false,
             bfd: PeerBfdConfig::default(),
             allowas_in: None,
+            max_prefix: BTreeMap::new(),
+            max_prefix_explicit: BTreeMap::new(),
             as_override: false,
             remove_private_as: None,
             enforce_first_as: false,
@@ -1129,6 +1150,8 @@ pub struct Peer {
     /// Survives re-establishment (FRR semantics: it describes the
     /// *last* reset, not the current session).
     pub last_reset: Option<(PeerDownReason, Instant)>,
+    /// `maximum-prefix` runtime state.
+    pub max_prefix: super::max_prefix::MaxPrefixState,
     /// Why the last received OPEN failed the RFC 9234 role check (a
     /// Role Mismatch NOTIFICATION was sent). Cleared when an OPEN passes
     /// the check. Surfaced by `show bgp neighbor`, since a session that
@@ -1441,6 +1464,7 @@ impl Peer {
             cap_map: CapAfiMap::new(),
             adj_in: MainAdjIn::new(),
             adj_out: AdjRib::new(),
+            max_prefix: Default::default(),
             sync_v4: None,
             pet: None,
             enhe_next_hop: super::route::EnheNextHop::Off,
@@ -2182,6 +2206,14 @@ pub fn fsm_next_state(peer: &mut Peer, event: Event) -> (State, FsmEffect) {
             fsm_update_error(peer, code, sub_code, data),
             FsmEffect::None,
         ),
+        Event::MaxPrefixExceeded(exceeded) => {
+            (fsm_max_prefix_exceeded(peer, exceeded), FsmEffect::None)
+        }
+        Event::MaxPrefixCheck => (peer.state, FsmEffect::MaxPrefixCheck),
+        Event::MaxPrefixRestartExpires => {
+            super::max_prefix::clear_overflow(peer);
+            (peer.state, FsmEffect::None)
+        }
         Event::RouteRefreshMsg(afi, safi) => {
             peer.counter[BgpType::RouteRefresh as usize].rcvd += 1;
             timer::refresh_hold_timer(peer);
@@ -2215,6 +2247,8 @@ fn fsm_effect(
         FsmEffect::RouteRefreshRecv { afi: _, safi: _ } => {
             super::route::route_soft_out_peer(id, bgp, peers);
         }
+        // Judged by `fsm` right after the effect, like a received UPDATE.
+        FsmEffect::MaxPrefixCheck => {}
     }
 }
 
@@ -2269,7 +2303,21 @@ pub fn fsm(
     }
 
     // Execute side effects that need peer_map.
+    let check_limits = matches!(
+        effect,
+        FsmEffect::RouteUpdate(_) | FsmEffect::MaxPrefixCheck
+    );
     fsm_effect(id, effect, bgp_ref, peer_map, shards);
+
+    // Direct call rather than a queued event: UPDATEs already queued for this
+    // peer must not be ingested past the limit. The return skips nothing: this
+    // event left the state as it was.
+    if check_limits
+        && let Some(event) = super::max_prefix::check_limits(id, bgp_ref.shard, peer_map, shards)
+    {
+        fsm(bgp_ref, peer_map, id, event, shards);
+        return;
+    }
 
     // Handle state-transition consequences.
     {
@@ -2288,6 +2336,7 @@ pub fn fsm(
                     .unwrap_or(PeerDownReason::Unknown),
                 Instant::now(),
             ));
+            peer.max_prefix.session_down();
         }
         if !prev_state.is_established() && peer.state.is_established() {
             peer.instant = Some(Instant::now());
@@ -2396,6 +2445,9 @@ fn addr_is_v6_link_local(addr: &IpAddr) -> bool {
 }
 
 pub fn fsm_start(peer: &mut Peer) -> State {
+    if peer.max_prefix.overflow.is_some() {
+        return State::Idle;
+    }
     peer.first_start = false;
     // eBGP directly-connected-network check: a single-hop eBGP peer that
     // is not on a connected subnet must not be dialed unless the operator
@@ -3059,8 +3111,44 @@ pub fn fsm_update_error(peer: &mut Peer, code: NotifyCode, sub_code: u8, data: V
     State::Idle
 }
 
+/// RFC 4486 Cease/1. Like [`fsm_update_error`], the Established to Idle
+/// teardown drains the NOTIFICATION and cleans the Adj-RIBs. A stale event for
+/// a session that already ended changes nothing.
+fn fsm_max_prefix_exceeded(
+    peer: &mut Peer,
+    exceeded: super::max_prefix::MaxPrefixExceeded,
+) -> State {
+    if peer.state != State::Established {
+        return peer.state;
+    }
+    peer_send_notification(
+        peer,
+        NotifyCode::Cease,
+        CeaseError::MaximumNumberOfPrefixReached.into(),
+        exceeded.cease_data(),
+    );
+    peer.max_prefix.overflow = Some(exceeded);
+    let restart = peer
+        .config
+        .max_prefix
+        .get(&exceeded.afi_safi)
+        .and_then(|cfg| cfg.restart);
+    peer.timer.max_prefix_restart =
+        restart.map(|minutes| timer::start_max_prefix_restart_timer(peer, minutes));
+    tracing::warn!(
+        peer = peer.display_name(),
+        restart_minutes = restart,
+        "bgp: maximum-prefix ended the session; held in Idle until clear bgp, a config change or restart",
+    );
+    State::Idle
+}
+
 pub fn fsm_idle_hold_timer_expires(peer: &mut Peer) -> State {
     peer.timer.idle_hold_timer = None;
+    // An expiry already queued when the session ended.
+    if peer.max_prefix.overflow.is_some() {
+        return State::Idle;
+    }
     peer.task.connect = Some(peer_start_connection(peer));
     State::Connect
 }
@@ -4031,6 +4119,9 @@ pub(super) fn try_dynamic_accept(
     // up: `gc_dynamic_peer_if_session_ended` reclaims a peer whose
     // session ended, and `dynamic_neighbors::sweep_range_peers`
     // reclaims every peer of a deleted (or group-unbound) range.
+    // `dynamic_neighbors::remove_dynamic_peers` reclaims those with no
+    // session to end: held past `maximum-prefix`, then released or left
+    // without their group.
     if bgp.dynamic_peer_count >= bgp.dynamic_neighbors.listen_limit {
         return Some(stream);
     }
@@ -4146,6 +4237,13 @@ pub fn apply_soft_in_peer(bgp: &mut Bgp, peer_idx: usize) {
         .keys()
         .map(|af| (u16::from(af.afi), u8::from(af.safi)))
         .collect();
+    // The re-run policy can change the accepted count. Queued, so it is judged
+    // after this replay.
+    if let Some(peer) = bgp.peers.get_mut_by_idx(peer_idx)
+        && !peer.config.max_prefix.is_empty()
+    {
+        super::max_prefix::queue_check(peer);
+    }
 
     if soft_in {
         let mut bgp_ref = BgpTop {
@@ -4279,7 +4377,13 @@ pub fn clear_bgp_action(
             .iter_all()
             .filter_map(|(_, p)| {
                 afi_safi
-                    .is_none_or(|(afi, safi)| p.is_afi_safi(afi, safi))
+                    .is_none_or(|(afi, safi)| {
+                        // A held peer has negotiated nothing, so go by its config.
+                        p.is_afi_safi(afi, safi)
+                            || (p.max_prefix.overflow.is_some()
+                                && op == BgpClearOp::Hard
+                                && p.config.mp.has(&AfiSafi::new(afi, safi)))
+                    })
                     .then_some(p.ident)
             })
             .collect()
@@ -4305,8 +4409,12 @@ pub fn clear_bgp_action(
             BgpClearOp::Hard => {
                 if let Some(peer) = bgp.peers.get_mut_by_idx(peer_idx) {
                     peer.down_reason = Some(PeerDownReason::AdminReset);
+                    super::max_prefix::clear_overflow(peer);
                 }
-                let _ = bgp.tx.try_send(Message::Event(peer_idx, Event::Stop));
+                super::max_prefix::reap_released(bgp, peer_idx);
+                if bgp.peers.get_by_idx(peer_idx).is_some() {
+                    let _ = bgp.tx.try_send(Message::Event(peer_idx, Event::Stop));
+                }
             }
             BgpClearOp::SoftBoth => {
                 apply_soft_in_peer(bgp, peer_idx);
@@ -4424,29 +4532,37 @@ mod bfd_config_tests {
     }
 }
 
+/// A peer and the receiving end of its event channel.
+#[cfg(test)]
+pub(super) fn test_peer_with_rx(passive: bool) -> (Peer, mpsc::Receiver<Message>) {
+    let (tx, rx) = mpsc::channel::<Message>(64);
+    let mut peer = Peer::new(
+        1,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        65002,
+        "10.0.0.2".parse().unwrap(),
+        None,
+        tx,
+        crate::context::ProtoContext::default_table_no_rib(),
+    );
+    peer.config.transport.passive = passive;
+    peer.first_start = false;
+    (peer, rx)
+}
+
+/// Peer wired to a parked event channel — timer callbacks and
+/// dial tasks can send without erroring, and nothing reads.
+#[cfg(test)]
+pub(super) fn test_peer(passive: bool) -> Peer {
+    let (peer, rx) = test_peer_with_rx(passive);
+    Box::leak(Box::new(rx));
+    peer
+}
+
 #[cfg(test)]
 mod fsm_idle_hold_tests {
     use super::*;
-
-    /// Peer wired to a parked event channel — timer callbacks and
-    /// dial tasks can send without erroring, and nothing reads.
-    fn test_peer(passive: bool) -> Peer {
-        let (tx, rx) = mpsc::channel::<Message>(64);
-        Box::leak(Box::new(rx));
-        let mut peer = Peer::new(
-            1,
-            65001,
-            Ipv4Addr::new(10, 0, 0, 1),
-            65002,
-            "10.0.0.2".parse().unwrap(),
-            None,
-            tx,
-            crate::context::ProtoContext::default_table_no_rib(),
-        );
-        peer.config.transport.passive = passive;
-        peer.first_start = false;
-        peer
-    }
 
     /// RFC 4271 OpenConfirm/Established TcpConnectionFails: the
     /// session lands back in Idle, where `update_timers` re-arms the
@@ -6035,6 +6151,76 @@ mod adv_timer_phantom_tests {
             peer.cache_vpnv6_timer.is_none(),
             "route_clean must cancel the VPNv6 advertise timer"
         );
+    }
+
+    /// Past `maximum-prefix` a pic-retention peer keeps nothing, in any family:
+    /// the session reset is a Hard Reset.
+    #[tokio::test]
+    async fn route_clean_retains_nothing_past_the_limit() {
+        use bgp_packet::{Afi, Safi};
+
+        for (exceeded, kept) in [(false, 1), (true, 0)] {
+            let (tx, rx) = mpsc::channel::<Message>(64);
+            Box::leak(Box::new(rx));
+            let mut peers = PeerMap::new();
+            let mut peer = idle_peer();
+            peer.config.pic_retention = true;
+            if exceeded {
+                peer.max_prefix.overflow = Some(super::super::max_prefix::MaxPrefixExceeded {
+                    afi_safi: AfiSafi::new(Afi::Ip, Safi::Unicast),
+                    count: 2,
+                    limit: 1,
+                });
+            }
+            peers.insert("10.0.0.2".parse().unwrap(), peer);
+            let ident = peers.get(&"10.0.0.2".parse().unwrap()).unwrap().ident;
+
+            let router_id = Ipv4Addr::new(10, 0, 0, 1);
+            let ctx = crate::context::ProtoContext::default_table_no_rib();
+            let mut local_rib = super::super::route::LocalRib::default();
+            let mut shard = crate::bgp::shard::BgpShard::default();
+            let rd: bgp_packet::RouteDistinguisher = "65000:1".parse().unwrap();
+            let prefix: ipnet::Ipv4Net = "10.9.0.0/24".parse().unwrap();
+            let row = crate::bgp::route::BgpRib::new_arc(
+                ident,
+                Ipv4Addr::new(10, 0, 0, 2),
+                crate::bgp::route::BgpRibType::IBGP,
+                0,
+                0,
+                std::sync::Arc::new(Default::default()),
+                None,
+                None,
+                false,
+            );
+            shard.update(Some(rd), prefix, row.clone());
+            shard.adj_in_mut(ident).add(Some(rd), prefix, row);
+            let mut attr_store = BgpAttrStore::default();
+            let mut update_groups = crate::bgp::update_group::empty_map();
+            let interface_addrs = crate::bgp::interface_addrs::InterfaceAddrs::default();
+            let mut top = BgpTop {
+                router_id: &router_id,
+                srv6_ipv6_export: None,
+                local_rib: &mut local_rib,
+                shard: &mut shard,
+                tx: &tx,
+                rib_client: &ctx.rib,
+                attr_store: &mut attr_store,
+                update_groups: &mut update_groups,
+                interface_addrs: &interface_addrs,
+                vrf_export: None,
+                color_policy: None,
+                flex_algo_routes: None,
+                flex_algo_srv6_routes: None,
+                vrf_import: None,
+                nexthop_cache: None,
+                vrf_transport_v4: None,
+                vrf_transport_v6: None,
+                as_sets_withdraw: false,
+            };
+            route_clean(ident, &mut top, &mut peers, None);
+            let retained: usize = shard.v4vpn.values().map(|t| t.3.get(ident)).sum();
+            assert_eq!(retained, kept, "exceeded: {exceeded}");
+        }
     }
 
     // ── adv-interval 0: immediate flush, no timer ──

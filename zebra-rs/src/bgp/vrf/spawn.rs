@@ -648,6 +648,20 @@ pub(super) fn resolve_vrf_peer_config(
     for fam in addpath_families {
         super::super::neighbor_group::apply_resolved_add_path(groups, &mut config, fam);
     }
+    // A CE peer has no `maximum-prefix`: `clear bgp` does not reach its task,
+    // so a held peer could not be cleared. Say so rather than let a group's
+    // limit look applied.
+    if config
+        .neighbor_group
+        .as_deref()
+        .and_then(|name| groups.get(name))
+        .is_some_and(|group| group.afi_safi.values().any(|e| e.maximum_prefix.is_some()))
+    {
+        tracing::warn!(
+            group = config.neighbor_group.as_deref(),
+            "bgp: a neighbor-group's maximum-prefix does not apply to a VRF neighbor",
+        );
+    }
 
     // Resolve the inheritable session knobs (passive, ebgp-multihop,
     // ttl-security, …) the same way the global neighbor does, layering
@@ -1807,6 +1821,7 @@ mod tests {
             GroupAfiSafi {
                 enabled: true,
                 add_path: None,
+                maximum_prefix: None,
                 next_hop_self: Some(true),
             },
         );
@@ -1912,6 +1927,7 @@ mod tests {
             GroupAfiSafi {
                 enabled: true,
                 add_path: None,
+                maximum_prefix: None,
                 next_hop_self: None,
             },
         );

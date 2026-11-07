@@ -28,6 +28,10 @@ module zebra-bgp-neighbor-group {
     prefix zbai;
   }
 
+  import zebra-bgp-afi-knobs {
+    prefix zbak;
+  }
+
   import zebra-bgp-as-override {
     prefix zbao;
   }
@@ -271,6 +275,7 @@ module zebra-bgp-neighbor-group {
              Applies to routes advertised after the change (no
              session bounce).";
         }
+        uses zbak:bgp-neighbor-maximum-prefix;
       }
     }
   }

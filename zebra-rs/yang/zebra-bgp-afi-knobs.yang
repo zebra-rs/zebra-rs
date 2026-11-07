@@ -54,6 +54,62 @@ module zebra-bgp-afi-knobs {
      That exclusion is also recorded, with its reason, in
      VRF_AFI_KNOB_EXCLUSIONS / docs/orphan-report.txt.";
 
+  grouping bgp-neighbor-maximum-prefix {
+    description
+      "Per-family limit on the routes accepted from a neighbor. Shared with
+       the neighbor-group, whose block a member's own replaces whole.";
+
+    container maximum-prefix {
+      ext:help "Limit the routes accepted from this neighbor";
+      description
+        "FRR's `neighbor X maximum-prefix`. Counts the paths that passed
+         inbound policy, so a route the policy denies does not count even
+         though Adj-RIB-In keeps it. Past the limit
+         the session ends with Cease/Maximum Number of Prefixes Reached
+         (RFC 4486) and the peer stays in Idle until `clear bgp`, a change to
+         its effective block, or `restart`. A commit is refused for a block
+         without `limit`, and for a family other than ipv4 and ipv6. A VRF
+         neighbor has no such block, and a neighbor-group's does not apply to
+         one.";
+
+      leaf limit {
+        ext:help "Maximum number of accepted paths";
+        type uint32 {
+          range "1..4294967295";
+        }
+        description
+          "The session ends when the accepted count goes above this value.
+           Required by the rest of the block.";
+      }
+      leaf warning-threshold {
+        ext:help "Percentage of the limit that logs a warning (default 75)";
+        type uint8 {
+          range "1..100";
+        }
+        description
+          "Log once when the accepted count goes above this percentage of
+           the limit. Default 75.";
+      }
+      leaf warning-only {
+        ext:help "Log instead of ending the session";
+        type empty;
+        description
+          "Log once when the limit is exceeded and keep the session up.
+           Takes precedence over `restart`.";
+      }
+      leaf restart {
+        ext:help "Minutes in Idle before reconnecting";
+        type uint16 {
+          range "1..65535";
+        }
+        units "minutes";
+        description
+          "Leave Idle after this many minutes. Without it only `clear bgp`
+           or a change to the block brings the peer back.";
+      }
+    }
+  }
+
   grouping bgp-neighbor-afi-knobs {
     description
       "Per-address-family knobs common to the global and per-VRF BGP

@@ -881,6 +881,12 @@ impl ConfigManager {
         self.checked_lines(text, check::dhcpv6_pd_line)
     }
 
+    /// The `maximum-prefix` leaves among config `text`'s lines
+    /// (`check::maximum_prefix`), as callback paths and arguments.
+    fn maximum_prefix_entries(&self, text: &str) -> Vec<(String, Vec<String>)> {
+        self.checked_lines(text, check::maximum_prefix_line)
+    }
+
     /// Commit the candidate. Refuses it, dispatching nothing, when it
     /// fails validation: mandatory nodes, the leaf value checks, or a label
     /// check it would newly break.
@@ -994,6 +1000,18 @@ impl ConfigManager {
                 if !before.warnings.contains(warning) {
                     tracing::warn!("{warning}");
                 }
+            }
+        }
+
+        // BGP `maximum-prefix`: a block that would silently leave the peer
+        // without the limit it asks for. Warned about at startup, as above.
+        let max_prefix = check::maximum_prefix(&self.maximum_prefix_entries(&candidate));
+        if !max_prefix.is_empty() {
+            if !startup {
+                return Err(anyhow::anyhow!(max_prefix.join("\n")));
+            }
+            for error in &max_prefix {
+                tracing::warn!("startup config: {error}");
             }
         }
 
@@ -7355,10 +7373,17 @@ mod bgp_config_audit_tests {
     /// expected to exist in both subtrees. Entries are the path suffix
     /// below `afi-safi`.
     ///
-    /// Empty: every per-AFI knob the global neighbor exposes is now
-    /// mirrored. Keep the list (and this test) — it is what makes the
-    /// next divergence fail CI instead of going unnoticed for a release.
-    const VRF_AFI_KNOB_EXCLUSIONS: &[(&str, &str)] = &[];
+    /// Only `maximum-prefix` is left out. Keep the list (and this test) —
+    /// it is what makes the next divergence fail CI instead of going
+    /// unnoticed for a release.
+    const VRF_AFI_KNOB_EXCLUSIONS: &[(&str, &str)] = &[
+        ("maximum-prefix/limit", MAX_PREFIX_VRF_EXCLUSION),
+        ("maximum-prefix/warning-threshold", MAX_PREFIX_VRF_EXCLUSION),
+        ("maximum-prefix/warning-only", MAX_PREFIX_VRF_EXCLUSION),
+        ("maximum-prefix/restart", MAX_PREFIX_VRF_EXCLUSION),
+    ];
+    const MAX_PREFIX_VRF_EXCLUSION: &str =
+        "`clear bgp` does not reach a CE peer's task, so a peer held in Idle could not be cleared";
 
     /// The per-VRF neighbor's `afi-safi` knob set must equal the global
     /// neighbor's, modulo [`VRF_AFI_KNOB_EXCLUSIONS`].

@@ -127,6 +127,11 @@
 /router/bgp/neighbor-group/afi-safi	list keys=name
 /router/bgp/neighbor-group/afi-safi/add-path	leaf
 /router/bgp/neighbor-group/afi-safi/enabled	leaf
+/router/bgp/neighbor-group/afi-safi/maximum-prefix	container
+/router/bgp/neighbor-group/afi-safi/maximum-prefix/limit	leaf
+/router/bgp/neighbor-group/afi-safi/maximum-prefix/restart	leaf
+/router/bgp/neighbor-group/afi-safi/maximum-prefix/warning-only	leaf
+/router/bgp/neighbor-group/afi-safi/maximum-prefix/warning-threshold	leaf
 /router/bgp/neighbor-group/afi-safi/next-hop-self	leaf
 /router/bgp/neighbor-group/allowas-in	p-container
 /router/bgp/neighbor-group/allowas-in/count	leaf
@@ -170,6 +175,11 @@
 /router/bgp/neighbor/afi-safi/long-lived-graceful-restart	container
 /router/bgp/neighbor/afi-safi/long-lived-graceful-restart/enabled	leaf
 /router/bgp/neighbor/afi-safi/long-lived-graceful-restart/restart-time	leaf
+/router/bgp/neighbor/afi-safi/maximum-prefix	container
+/router/bgp/neighbor/afi-safi/maximum-prefix/limit	leaf
+/router/bgp/neighbor/afi-safi/maximum-prefix/restart	leaf
+/router/bgp/neighbor/afi-safi/maximum-prefix/warning-only	leaf
+/router/bgp/neighbor/afi-safi/maximum-prefix/warning-threshold	leaf
 /router/bgp/neighbor/afi-safi/next-hop-self	leaf
 /router/bgp/neighbor/afi-safi/next-hop-unchanged	leaf
 /router/bgp/neighbor/afi-safi/policy	container

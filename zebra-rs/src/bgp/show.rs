@@ -241,6 +241,16 @@ fn summary_pfx_counts(
     }
 }
 
+/// The summary's state word. FRR's `Idle (PfxCt)` tells an operator that this
+/// peer stays down until it is cleared.
+fn summary_state(peer: &Peer) -> &'static str {
+    if peer.max_prefix.overflow.is_some() {
+        "Idle (PfxCt)"
+    } else {
+        peer.state.to_str()
+    }
+}
+
 fn write_summary_header_row(buf: &mut String) -> std::fmt::Result {
     writeln!(
         buf,
@@ -277,7 +287,7 @@ fn write_summary_peer_row(
     let up_down = uptime(&peer.instant);
     let negotiated = peer_has_negotiated(peer, afi, safi);
 
-    let state_str = peer.state.to_str().to_string();
+    let state_str = summary_state(peer).to_string();
     let pfx_str = if peer.state != State::Established {
         "N/A".to_string()
     } else if !negotiated {
@@ -2404,7 +2414,7 @@ fn summary_peer_row_json(
     // FRR-style State/PfxRcd column: an Established session shows its
     // received-prefix count in place of the state word.
     let state = if peer.state != State::Established {
-        peer.state.to_str().to_string()
+        summary_state(peer).to_string()
     } else {
         pfx_rcvd.to_string()
     };
@@ -3844,6 +3854,10 @@ struct Neighbor<'a> {
     /// reset at least once; survives re-establishment.
     #[serde(skip_serializing_if = "Option::is_none")]
     last_reset: Option<LastReset>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    maximum_prefix: Vec<super::max_prefix::MaxPrefixShow>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    maximum_prefix_overflow: Option<super::max_prefix::MaxPrefixOverflowShow>,
     timer: PeerParam,
     timer_sent: PeerParam,
     timer_recv: PeerParam,
@@ -4161,7 +4175,7 @@ struct LastReset {
     reason: &'static str,
 }
 
-fn fetch(peer: &Peer) -> Neighbor<'_> {
+fn fetch<'a>(peer: &'a Peer, shard: &super::shard::BgpShard) -> Neighbor<'a> {
     // Get remaining time for keepalive and hold timers
     let keepalive_timer_rem = peer.timer.keepalive.as_ref().map(|t| t.rem_sec());
     let hold_timer_rem = peer.timer.hold_timer.as_ref().map(|t| t.rem_sec());
@@ -4209,6 +4223,8 @@ fn fetch(peer: &Peer) -> Neighbor<'_> {
             ago: uptime(&Some(at)),
             reason: reason.as_str(),
         }),
+        maximum_prefix: super::max_prefix::show(peer, shard),
+        maximum_prefix_overflow: super::max_prefix::overflow_show(peer),
         timer: peer.param.clone(),
         timer_sent: peer.param_tx.clone(),
         timer_recv: peer.param_rx.clone(),
@@ -4378,6 +4394,11 @@ fn render(out: &mut String, neighbor: &Neighbor) -> std::fmt::Result {
             last_reset.ago, last_reset.reason
         )?;
     }
+    super::max_prefix::render(
+        out,
+        &neighbor.maximum_prefix,
+        neighbor.maximum_prefix_overflow.as_ref(),
+    )?;
 
     // ND discovery block — interface-keyed (unnumbered) peers only.
     if let Some(discovered_secs) = neighbor.nd_discovered_secs_ago {
@@ -5012,7 +5033,7 @@ fn show_bgp_neighbor<V: BgpShowView>(
         // peers are listed too — they're invisible to the address-keyed
         // `iter`, and an operator has no remote address to query them by.
         for (_, peer) in bgp.peers().iter_all() {
-            neighbors.push(fetch(peer));
+            neighbors.push(fetch(peer, bgp.shard()));
         }
         if json {
             return Ok(serde_json::to_string_pretty(&neighbors)
@@ -5042,7 +5063,7 @@ fn show_bgp_neighbor<V: BgpShowView>(
                 .find(|peer| peer.ifname.as_deref() == Some(target.as_str())),
         };
         if let Some(peer) = peer {
-            let neighbor = fetch(peer);
+            let neighbor = fetch(peer, bgp.shard());
             if json {
                 return Ok(serde_json::to_string_pretty(&neighbor)
                     .unwrap_or_else(|e| format!("{{\"error\": \"Failed to serialize: {}\"}}", e)));
@@ -7340,6 +7361,8 @@ Neighbor        V         AS   MsgRcvd   MsgSent   TblVer  InQ OutQ  Up/Down Sta
     fn minimal_neighbor(interface: Option<&'static str>) -> Neighbor<'static> {
         use std::collections::HashMap as HM;
         Neighbor {
+            maximum_prefix: Vec::new(),
+            maximum_prefix_overflow: None,
             address: "10.0.0.1".parse().unwrap(),
             interface,
             description: None,
@@ -8818,7 +8841,7 @@ fn show_bgp_vrf_detail(
 
 /// Map an [`AfiSafi`] to the zebra-rs config-layer token name used in
 /// `zebra-afi-safi.yang` and `Args::afi_safi`.
-fn afi_safi_config_name(afi_safi: &AfiSafi) -> &'static str {
+pub(super) fn afi_safi_config_name(afi_safi: &AfiSafi) -> &'static str {
     match (afi_safi.afi, afi_safi.safi) {
         (Afi::Ip, Safi::Unicast) => "ipv4",
         (Afi::Ip6, Safi::Unicast) => "ipv6",

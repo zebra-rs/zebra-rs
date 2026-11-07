@@ -24,11 +24,23 @@ pub struct PeerMap {
     /// Established boundary and purged on removal — see
     /// [`super::membership`] for why it lives inside `PeerMap`.
     membership: PeerMembership,
+    /// Between a config transaction's `CommitStart` and `CommitEnd`, for
+    /// the checks that must not see a half-applied block (`max_prefix`).
+    /// `Bgp` sets it with its own `commit_open`.
+    commit_open: bool,
 }
 
 impl PeerMap {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn set_commit_open(&mut self, open: bool) {
+        self.commit_open = open;
+    }
+
+    pub fn commit_open(&self) -> bool {
+        self.commit_open
     }
 
     pub fn get(&self, addr: &IpAddr) -> Option<&Peer> {

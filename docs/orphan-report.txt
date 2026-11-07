@@ -23,8 +23,8 @@ in src/bgp/config.rs (an empty relative path, easy to miss when
 grepping for registrations), and it creates/tears down the peer when
 the list entry itself is set/deleted.
 
-Total settable schema nodes: 369
-Handled: 354
+Total settable schema nodes: 377
+Handled: 362
 Orphans: 3
 
 Note: these orphans have no config callback but are kept intentionally.
@@ -74,10 +74,12 @@ completes the non-AFI knob import. The `neighbor-group` leaf was
 renamed from `peer-group` to match the global neighbor and the list it
 resolves against.
 
-Note: /router/bgp/vrf/neighbor/afi-safi now mirrors the global neighbor's
-per-AFI knob set in full -- VRF_AFI_KNOB_EXCLUSIONS is empty and the
-`vrf_afi_knob_parity` test keeps it that way: a knob added to one subtree
-without the other fails CI unless it is listed there with a reason.
+Note: /router/bgp/vrf/neighbor/afi-safi mirrors the global neighbor's
+per-AFI knob set except maximum-prefix, the only entry in
+VRF_AFI_KNOB_EXCLUSIONS: `clear bgp` does not reach a per-VRF CE peer, so a
+peer held in Idle could not be cleared. The `vrf_afi_knob_parity` test keeps
+it that way: a knob added to one subtree without the other fails CI unless it
+is listed there with a reason.
 
 The leaves themselves live in zebra-bgp-afi-knobs.yang and are `uses`d by
 both subtrees, so they cannot diverge in TYPE either. graceful-restart is

@@ -184,6 +184,9 @@ submodule ietf-bgp-neighbor {
       // are bound by name and resolved by the policy actor, which the
       // per-VRF task now subscribes to under its own proto.
       uses zbak:bgp-neighbor-afi-knobs;
+      // Not in the shared grouping: `clear bgp` does not reach a per-VRF CE
+      // peer's task, so a peer held in Idle could not be cleared.
+      uses zbak:bgp-neighbor-maximum-prefix;
     }
   }
 }

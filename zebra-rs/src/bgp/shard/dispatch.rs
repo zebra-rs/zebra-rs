@@ -281,16 +281,25 @@ impl BgpShard {
     ) {
         if !replaced.is_empty() || added.is_some() {
             let cands = self.v4.0.entry(prefix).or_default();
-            if !replaced.is_empty() {
+            let counts = &mut self.v4.3;
+            let mut drop_rows = |gone: &dyn Fn(&BgpRib) -> bool| {
                 cands.retain(|r| {
-                    !replaced
-                        .iter()
-                        .any(|rr| rr.ident == r.ident && rr.remote_id == r.remote_id)
+                    let drop_row = gone(r);
+                    if drop_row {
+                        counts.sub(r.ident, 1);
+                    }
+                    !drop_row
                 });
-            }
+            };
+            drop_rows(&|r| {
+                replaced
+                    .iter()
+                    .any(|rr| rr.ident == r.ident && rr.remote_id == r.remote_id)
+            });
             if let Some(a) = added {
-                cands.retain(|r| !(r.ident == a.ident && r.remote_id == a.remote_id));
+                drop_rows(&|r| r.ident == a.ident && r.remote_id == a.remote_id);
                 cands.push(a.clone());
+                counts.add(a.ident);
             }
             if cands.is_empty() {
                 self.v4.0.remove(&prefix);
@@ -1789,6 +1798,121 @@ mod tests {
         assert_eq!(reeval(&mut shard, false), vec![(1, false)]);
         assert_eq!(reeval(&mut shard, false), vec![], "nothing flipped");
         assert_eq!(reeval(&mut shard, true), vec![(1, true)]);
+    }
+
+    /// The counter `maximum-prefix` reads, against a full scan of the rows.
+    fn scanned_v4(shard: &BgpShard, ident: usize) -> usize {
+        shard
+            .v4
+            .0
+            .iter()
+            .map(|(_, rows)| rows.iter().filter(|r| r.ident == ident).count())
+            .sum()
+    }
+
+    fn accepted_v4(shard: &BgpShard, ident: usize) -> usize {
+        let count = shard.accepted_paths(ident, bgp_packet::Afi::Ip, bgp_packet::Safi::Unicast);
+        assert_eq!(count, scanned_v4(shard, ident), "counter drifted from rows");
+        count
+    }
+
+    #[test]
+    fn accepted_paths_follows_every_loc_rib_change() {
+        let mut shard = BgpShard::default();
+        shard.handle(update_v4(1, "10.0.0.0/24", "192.0.2.1", true));
+        shard.handle(update_v4(1, "10.0.1.0/24", "192.0.2.1", true));
+        shard.handle(update_v4(2, "10.0.1.0/24", "192.0.2.2", true));
+        assert_eq!(accepted_v4(&shard, 1), 2);
+        assert_eq!(accepted_v4(&shard, 2), 1, "each peer counts its own rows");
+
+        // Re-announcing replaces the row.
+        shard.handle(update_v4(1, "10.0.0.0/24", "192.0.2.9", true));
+        assert_eq!(accepted_v4(&shard, 1), 2);
+
+        // A denied route stays in Adj-RIB-In but no longer counts.
+        shard.handle(update_v4(1, "10.0.0.0/24", "192.0.2.9", false));
+        assert_eq!(accepted_v4(&shard, 1), 1);
+        assert_eq!(
+            shard.adj_in_count(1, bgp_packet::Afi::Ip, bgp_packet::Safi::Unicast),
+            2
+        );
+
+        // A route denied from the start never counts.
+        shard.handle(update_v4(1, "10.0.2.0/24", "192.0.2.1", false));
+        assert_eq!(accepted_v4(&shard, 1), 1);
+
+        shard.handle(ShardMsg::WithdrawV4 {
+            ident: 1,
+            rd: None,
+            nlri: v4("10.0.1.0/24"),
+            rib_in: true,
+        });
+        assert_eq!(accepted_v4(&shard, 1), 0);
+        assert_eq!(accepted_v4(&shard, 2), 1);
+
+        shard.handle(ShardMsg::PeerDown { ident: 2 });
+        assert_eq!(accepted_v4(&shard, 2), 0);
+    }
+
+    /// FRR counts per path, so path ids cannot get around the limit.
+    #[test]
+    fn accepted_paths_counts_each_add_path_path() {
+        let mut shard = BgpShard::default();
+        for id in 1..=3 {
+            let mut msg = update_v4(1, "10.0.0.0/24", "192.0.2.1", true);
+            if let ShardMsg::UpdateV4(u) = &mut msg {
+                u.nlri.id = id;
+            }
+            shard.handle(msg);
+        }
+        assert_eq!(accepted_v4(&shard, 1), 3);
+    }
+
+    #[test]
+    fn accepted_paths_counts_ipv6_on_its_own() {
+        use bgp_packet::{Afi, Safi};
+        let mut shard = BgpShard::default();
+        shard.handle(update_v6(1, "2001:db8::/48"));
+        assert_eq!(shard.accepted_paths(1, Afi::Ip6, Safi::Unicast), 1);
+        assert_eq!(shard.accepted_paths(1, Afi::Ip, Safi::Unicast), 0);
+    }
+
+    /// `show` reads the read replica at N>1, so it must count like the pool.
+    #[test]
+    fn mirror_v4_keeps_the_same_count_as_the_pool_table() {
+        let mut mirror = BgpShard::default();
+        let mut pool = BgpShard::default();
+        let apply = |mirror: &mut BgpShard, out: Vec<ShardOut>| {
+            for o in out {
+                if let ShardOut::BestPathV4 {
+                    prefix,
+                    selected,
+                    replaced,
+                    added,
+                    ..
+                } = o
+                {
+                    mirror.mirror_v4(prefix.prefix, added.as_ref(), &replaced, selected.first());
+                }
+            }
+        };
+        let out = pool.handle(update_v4(1, "10.0.0.0/24", "192.0.2.1", true));
+        apply(&mut mirror, out);
+        let out = pool.handle(update_v4(1, "10.0.1.0/24", "192.0.2.1", true));
+        apply(&mut mirror, out);
+        assert_eq!(accepted_v4(&mirror, 1), accepted_v4(&pool, 1));
+
+        let out = pool.handle(update_v4(1, "10.0.0.0/24", "192.0.2.9", true));
+        apply(&mut mirror, out);
+        assert_eq!(accepted_v4(&mirror, 1), 2, "a replace does not add");
+
+        let out = pool.handle(update_v4(1, "10.0.0.0/24", "192.0.2.9", false));
+        apply(&mut mirror, out);
+        assert_eq!(accepted_v4(&mirror, 1), 1, "a deny removes");
+
+        let out = pool.handle(ShardMsg::PeerDown { ident: 1 });
+        apply(&mut mirror, out);
+        assert_eq!(accepted_v4(&mirror, 1), 0, "a peer-down sweep removes");
     }
 
     /// The read replica refreshes a flipped candidate in place.

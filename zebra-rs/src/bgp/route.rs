@@ -2179,9 +2179,10 @@ impl BgpRib {
 /// `P: Prefix + Debug`, and `derive` would instead demand the wrong
 /// `P: Debug`/`P: Default` bounds on `LocalRibTable`).
 pub struct LocalRibTable<P>(
-    pub PrefixMap<P, Vec<BgpRib>>, // Cands.
-    pub PrefixMap<P, BgpRib>,      // Selected.
-    pub MultipathCfg,              // Per-family multipath policy.
+    pub PrefixMap<P, Vec<BgpRib>>,         // Cands.
+    pub PrefixMap<P, BgpRib>,              // Selected.
+    pub MultipathCfg,                      // Per-family multipath policy.
+    pub super::max_prefix::PeerPathCounts, // Candidate rows per source peer.
 );
 
 impl<P> Default for LocalRibTable<P> {
@@ -2190,6 +2191,7 @@ impl<P> Default for LocalRibTable<P> {
             PrefixMap::default(),
             PrefixMap::default(),
             MultipathCfg::default(),
+            Default::default(),
         )
     }
 }
@@ -2431,6 +2433,8 @@ impl<P: Prefix + Copy> LocalRibTable<P> {
         let replaced: Vec<BgpRib> = cands
             .extract_if(.., |r| r.ident == rib.ident && r.remote_id == rib.remote_id)
             .collect();
+        self.3.add(rib.ident);
+        self.3.sub(rib.ident, replaced.len());
 
         // Allocate local_id for the new/updated rib
         let mut next_id = 1u32;
@@ -2467,6 +2471,7 @@ impl<P: Prefix + Copy> LocalRibTable<P> {
         let removed: Vec<BgpRib> = cands
             .extract_if(.., |r| r.ident == ident && r.remote_id == id)
             .collect();
+        self.3.sub(ident, removed.len());
         removed
     }
 
@@ -14557,6 +14562,15 @@ pub fn route_clean(
     peers: &mut PeerMap,
     shards: Option<&super::shard::pool::ShardPool>,
 ) {
+    // Past `maximum-prefix` nothing is retained: the routes are what the limit
+    // exists to keep out, and RFC 8538 section 5.1 suggests a Hard Reset for
+    // this Cease. The guard below skips the LLGR and pic-retention stale
+    // marking of VPN and EVPN; IPv4 and IPv6 unicast are withdrawn on every
+    // session down.
+    let exceeded_limit = peers
+        .get_by_idx(peer_id)
+        .is_some_and(|peer| peer.max_prefix.overflow.is_some());
+
     // IPv4 unicast. At N>1 the peer's v4-unicast routes live on the pool
     // shards, not `bgp.shard`; dispatch a PeerDown to each so it sweeps
     // its own slice (drops Adj-RIB-In + re-runs best-path), and the async
@@ -14640,7 +14654,7 @@ pub fn route_clean(
     // neighbors (see the VPNv6 block below for the rationale).
     let llgr_active =
         peer.cap_send.llgr.contains_key(&afi_safi) && peer.cap_recv.llgr.contains_key(&afi_safi);
-    if llgr_active || peer.config.pic_retention {
+    if (llgr_active || peer.config.pic_retention) && !exceeded_limit {
         let stale_secs = if llgr_active {
             peer.cap_recv
                 .llgr
@@ -14824,7 +14838,7 @@ pub fn route_clean(
     // (`nexthop_reachable`) to withdraw once the next hop goes away.
     let llgr_active =
         peer.cap_send.llgr.contains_key(&afi_safi) && peer.cap_recv.llgr.contains_key(&afi_safi);
-    if llgr_active || peer.config.pic_retention {
+    if (llgr_active || peer.config.pic_retention) && !exceeded_limit {
         let stale_secs = if llgr_active {
             peer.cap_recv
                 .llgr
@@ -14985,7 +14999,7 @@ pub fn route_clean(
     let afi_safi_evpn = AfiSafi::new(Afi::L2vpn, Safi::Evpn);
     let llgr_evpn = peer.cap_send.llgr.contains_key(&afi_safi_evpn)
         && peer.cap_recv.llgr.contains_key(&afi_safi_evpn);
-    if llgr_evpn {
+    if llgr_evpn && !exceeded_limit {
         let stale_time = peer
             .cap_recv
             .llgr
@@ -35988,6 +36002,7 @@ mod multipath_tests {
                 max_paths_ibgp: None,
                 relax,
             },
+            Default::default(),
         )
     }
 

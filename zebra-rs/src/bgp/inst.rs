@@ -2814,6 +2814,7 @@ impl Bgp {
                 }
 
                 self.gc_dynamic_peer_if_session_ended(ident, prev_state);
+                super::max_prefix::reap_released(self, ident);
             }
             Message::Accept(socket, sockaddr) => {
                 // If the source IP is claimed by a per-VRF task,
@@ -3029,6 +3030,11 @@ impl Bgp {
             return;
         };
         if !matches!(peer.origin, PeerOrigin::Dynamic { .. }) {
+            return;
+        }
+        // Past `maximum-prefix` the peer is held like a static one. Reaping
+        // it would let every reconnect install routes up to the limit again.
+        if peer.max_prefix.overflow.is_some() {
             return;
         }
         if !matches!(peer.state, State::Idle | State::Active) {
@@ -3698,10 +3704,17 @@ impl Bgp {
         self.reconcile_mup_segment();
     }
 
+    /// The commit window, kept in step with the copy `PeerMap` holds for the
+    /// `maximum-prefix` check, which sees no `Bgp`.
+    fn set_commit_open(&mut self, open: bool) {
+        self.commit_open = open;
+        self.peers.set_commit_open(open);
+    }
+
     pub fn process_cm_msg(&mut self, msg: ConfigRequest) {
         match msg.op {
             ConfigOp::CommitStart => {
-                self.commit_open = true;
+                self.set_commit_open(true);
                 self.vrf_commit_baseline.clone_from(&self.vrfs);
                 self.vrf_neighbor_group_commit_baseline
                     .clone_from(&self.neighbor_groups);
@@ -3726,10 +3739,12 @@ impl Bgp {
                 // removals. Spawn-time structural edits to an existing VRF
                 // use the same full teardown/spawn path.
                 super::vrf_config::log_commit_diff(self);
+                super::max_prefix::commit_end(&mut self.peers);
+                super::max_prefix::reap_all_released(self);
                 self.apply_vrf_commit_diff();
                 self.vrf_commit_baseline.clear();
                 self.vrf_neighbor_group_commit_baseline.clear();
-                self.commit_open = false;
+                self.set_commit_open(false);
                 self.apply_mup_c_commit_diff();
                 // Peer-derived: whether any VPNv4 / Labeled-Unicast peer is
                 // sent routes with the next-hop rewritten to us (Option B /
