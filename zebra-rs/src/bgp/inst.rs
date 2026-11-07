@@ -8033,8 +8033,17 @@ impl Bgp {
         // else is a best-path delta for the reduce below.
         let mut deltas = Vec::with_capacity(result.out.len());
         let mut multipath = Vec::new();
+        // Handled after the deltas, which a teardown must not overtake.
+        let mut barrier_answers = Vec::new();
         for out in result.out {
             match out {
+                super::shard::ShardOut::MaxPrefixBarrierV4 {
+                    ident,
+                    seq,
+                    accepted,
+                } => {
+                    barrier_answers.push((ident, seq, accepted));
+                }
                 super::shard::ShardOut::DumpDoneV4 {
                     req_id,
                     ident,
@@ -8122,6 +8131,7 @@ impl Bgp {
             }
         }
         if deltas.is_empty() && multipath.is_empty() {
+            self.max_prefix_barrier_answers(barrier_answers);
             return;
         }
         let import_dispatcher = super::vrf::VrfImportDispatcher {
@@ -8153,6 +8163,24 @@ impl Bgp {
         }
         if !deltas.is_empty() {
             super::route::route_apply_bestpath_v4_batch(&mut bgp_ref, &mut self.peers, deltas);
+        }
+        self.max_prefix_barrier_answers(barrier_answers);
+    }
+
+    /// `maximum-prefix` at N>1: the last answer of a barrier round may end the
+    /// session.
+    fn max_prefix_barrier_answers(&mut self, answers: Vec<(usize, u64, usize)>) {
+        for (ident, seq, accepted) in answers {
+            let event = super::max_prefix::barrier_answer(
+                ident,
+                seq,
+                accepted,
+                &mut self.peers,
+                self.shards.as_ref(),
+            );
+            if let Some(event) = event {
+                self.process_msg(Message::Event(ident, event));
+            }
         }
     }
 

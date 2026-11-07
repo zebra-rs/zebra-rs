@@ -233,6 +233,12 @@ pub enum ShardMsg {
         reply: tokio::sync::oneshot::Sender<std::collections::BTreeMap<usize, usize>>,
     },
 
+    /// `maximum-prefix` barrier: answered with this shard's counts once
+    /// everything main sent it earlier has been processed. Main checks the
+    /// limit against the sums, a consistent cut: no shard's count can include
+    /// a withdraw or an add from past the barrier.
+    MaxPrefixBarrierV4 { ident: usize, seq: u64 },
+
     /// Tear the shard task down; its event loop exits on the next
     /// iteration. Used at daemon shutdown.
     Shutdown,
@@ -382,6 +388,14 @@ pub struct ShardUpdateLu {
 /// `Arc` is `Send`, so it crosses the channel without a re-intern.
 #[derive(Debug)]
 pub enum ShardOut {
+    /// Answer to a [`ShardMsg::MaxPrefixBarrierV4`]: the peer's accepted paths
+    /// on this shard.
+    MaxPrefixBarrierV4 {
+        ident: usize,
+        seq: u64,
+        accepted: usize,
+    },
+
     /// Best-path outcome for an IPv4 / VPNv4 prefix after an
     /// [`ShardMsg::UpdateV4`], [`ShardMsg::WithdrawV4`], or a
     /// [`ShardMsg::PeerDown`] sweep. `selected` are the new winners

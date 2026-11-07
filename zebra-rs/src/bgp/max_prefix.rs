@@ -15,8 +15,10 @@
 //! The limit is checked per UPDATE, unlike FRR's per NLRI: the routes of the
 //! UPDATE that crosses it enter the Loc-RIB before the teardown removes them.
 //!
-//! With `rib-sharding` above 1 IPv4 unicast is not checked: main cannot read
-//! the count the pool shards hold.
+//! At N>1 IPv4 unicast is checked once every pool shard has answered a barrier,
+//! with the counts the shards took at that barrier. UPDATEs keep being ingested
+//! meanwhile, with no back-pressure, so the limit is soft: how far it overshoots
+//! has no bound beyond how long the round takes.
 //!
 //! A VRF neighbor has no `maximum-prefix`: `clear bgp` does not reach a CE
 //! peer's task, so a peer held in Idle could not be cleared.
@@ -33,8 +35,8 @@ use super::neighbor_group::NeighborGroup;
 use super::peer::{Event, Peer, PeerConfig, State};
 use super::peer_key::PeerOrigin;
 use super::peer_map::PeerMap;
-use super::shard::BgpShard;
 use super::shard::pool::ShardPool;
+use super::shard::{BgpShard, ShardMsg};
 use super::timer;
 use crate::config::{Args, ConfigOp};
 
@@ -183,6 +185,29 @@ impl MaxPrefixExceeded {
     }
 }
 
+/// One barrier round across the pool shards at N>1. Only one runs at a time,
+/// and a request during a round asks for one more afterwards: restarting the
+/// round instead would never finish under a steady stream of UPDATEs.
+#[derive(Debug, Default)]
+pub struct BarrierV4 {
+    seq: u64,
+    pending: usize,
+    rerun: bool,
+    /// Sum of the counts the round's answers carried. Main's `mirror_v4` will
+    /// not do: deltas from past the barrier can overtake a slower shard's answer.
+    accepted: usize,
+}
+
+impl BarrierV4 {
+    /// Drop the round in flight. A `seq` bump makes the answers still on their
+    /// way harmless.
+    fn invalidate(&mut self) {
+        self.seq += 1;
+        self.pending = 0;
+        self.rerun = false;
+    }
+}
+
 /// Per-peer runtime state.
 #[derive(Debug, Default)]
 pub struct MaxPrefixState {
@@ -190,10 +215,9 @@ pub struct MaxPrefixState {
     pub overflow: Option<MaxPrefixExceeded>,
     limit_warned: BTreeSet<AfiSafi>,
     threshold_warned: BTreeSet<AfiSafi>,
+    barrier: BarrierV4,
     /// A commit changed the block: check it when the commit ends.
     check_at_commit_end: bool,
-    /// The warning that IPv4 goes unchecked at N>1 went out this session.
-    pool_warned: bool,
     /// The block changed in a commit that has not ended and may be half
     /// applied, so UPDATEs are not checked against it until [`commit_end`].
     /// Set by any block change; it only holds checks back while a commit is
@@ -205,11 +229,12 @@ pub struct MaxPrefixState {
 }
 
 impl MaxPrefixState {
-    /// The session ended: its log latches go with it.
+    /// The session ended: its log latches and barrier round go with it. A
+    /// `seq` bump makes the answers still on their way harmless.
     pub fn session_down(&mut self) {
         self.limit_warned.clear();
         self.threshold_warned.clear();
-        self.pool_warned = false;
+        self.barrier.invalidate();
     }
 }
 
@@ -275,8 +300,24 @@ fn is_pooled(family: AfiSafi) -> bool {
     family.afi == Afi::Ip && family.safi == Safi::Unicast
 }
 
-/// Check every limit of an Established peer. Returns the event that ends the
-/// session.
+fn start_barrier(ident: usize, peer: &mut Peer, pool: &ShardPool) {
+    let barrier = &mut peer.max_prefix.barrier;
+    if barrier.pending > 0 {
+        barrier.rerun = true;
+        return;
+    }
+    barrier.seq += 1;
+    barrier.pending = pool.n();
+    barrier.rerun = false;
+    barrier.accepted = 0;
+    let seq = barrier.seq;
+    for idx in 0..pool.n() {
+        pool.dispatch(idx, ShardMsg::MaxPrefixBarrierV4 { ident, seq });
+    }
+}
+
+/// Check every limit of an Established peer, or start the barrier round the
+/// N>1 IPv4-unicast count needs first. Returns the event that ends the session.
 pub fn check_limits(
     ident: usize,
     shard: &BgpShard,
@@ -293,21 +334,63 @@ pub fn check_limits(
     }
     let name = peer.display_name();
     let mut exceeded = None;
+    let mut need_barrier = false;
     for (family, cfg) in &peer.config.max_prefix {
         if pool.is_some() && is_pooled(*family) {
-            if !std::mem::replace(&mut peer.max_prefix.pool_warned, true) {
-                tracing::warn!(
-                    peer = name,
-                    "bgp: maximum-prefix does not check IPv4 with rib-sharding above 1",
-                );
-            }
+            need_barrier = true;
             continue;
         }
         let count = shard.accepted_paths(ident, family.afi, family.safi) as u64;
         let over = check_family(&mut peer.max_prefix, &name, *family, cfg, count);
         exceeded = exceeded.or(over);
     }
+    if exceeded.is_none()
+        && need_barrier
+        && let Some(pool) = pool
+    {
+        start_barrier(ident, peer, pool);
+    }
     exceeded.map(Event::MaxPrefixExceeded)
+}
+
+/// One shard's answer. The last of a round checks IPv4 unicast against the sums.
+/// It reads no table: the sums are what the shards held at the barrier, not
+/// what main's mirror has taken in since.
+pub fn barrier_answer(
+    ident: usize,
+    seq: u64,
+    accepted: usize,
+    peers: &mut PeerMap,
+    pool: Option<&ShardPool>,
+) -> Option<Event> {
+    let peer = peers.get_mut_by_idx(ident)?;
+    let barrier = &mut peer.max_prefix.barrier;
+    if seq != barrier.seq || barrier.pending == 0 {
+        return None;
+    }
+    barrier.pending -= 1;
+    barrier.accepted += accepted;
+    if barrier.pending > 0 {
+        return None;
+    }
+    let rerun = barrier.rerun;
+    let accepted = barrier.accepted;
+    barrier.rerun = false;
+    if peer.state != State::Established {
+        return None;
+    }
+    let family = AfiSafi::new(Afi::Ip, Safi::Unicast);
+    if let Some(cfg) = peer.config.max_prefix.get(&family).copied() {
+        let name = peer.display_name();
+        let count = accepted as u64;
+        if let Some(over) = check_family(&mut peer.max_prefix, &name, family, &cfg, count) {
+            return Some(Event::MaxPrefixExceeded(over));
+        }
+    }
+    if rerun && let Some(pool) = pool {
+        start_barrier(ident, peer, pool);
+    }
+    None
 }
 
 /// Leave the overflow hold. Stop alone would not: Idle to Idle returns early
@@ -365,6 +448,9 @@ pub fn block_changed(peer: &mut Peer) {
     clear_overflow(peer);
     peer.max_prefix.limit_warned.clear();
     peer.max_prefix.threshold_warned.clear();
+    // A round in flight took its counts before this change: drop it, so the
+    // check this change queues judges the new block against fresh counts.
+    peer.max_prefix.barrier.invalidate();
     peer.max_prefix.check_at_commit_end = true;
     // Whatever the state: a peer can come up before the commit ends. A new
     // peer inheriting its block outside a commit is not held back, as no
@@ -550,6 +636,14 @@ mod tests {
             None,
             false,
         )
+    }
+
+    fn round(seq: u64, pending: usize) -> BarrierV4 {
+        BarrierV4 {
+            seq,
+            pending,
+            ..Default::default()
+        }
     }
 
     fn eval(state: &mut MaxPrefixState, cfg: &MaxPrefixConfig, count: u64) -> bool {
@@ -893,6 +987,84 @@ mod tests {
             check_limits(ident, &shard, &mut peers, None),
             Some(Event::MaxPrefixExceeded(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn a_barrier_round_checks_only_on_its_last_answer() {
+        let mut peer = established(limit(1));
+        peer.max_prefix.barrier = round(7, 2);
+        let (mut peers, ident) = peers_with(peer);
+        assert!(
+            barrier_answer(ident, 6, 9, &mut peers, None).is_none(),
+            "an answer to an older round is ignored"
+        );
+        assert!(
+            barrier_answer(ident, 7, 1, &mut peers, None).is_none(),
+            "one shard has not answered yet"
+        );
+        assert!(matches!(
+            barrier_answer(ident, 7, 1, &mut peers, None),
+            Some(Event::MaxPrefixExceeded(_))
+        ));
+    }
+
+    /// An RFC 8950 peer's IPv4 unicast lives on the pool at N>1 like any
+    /// other's (its MP_REACH NLRI take `route_ipv4_update_batch` to the
+    /// shards), so its check starts a barrier round too. Guards against
+    /// setting these peers apart again.
+    #[tokio::test]
+    async fn an_rfc_8950_peer_starts_a_barrier_round_at_n_above_1() {
+        use crate::bgp::route::EnheNextHop;
+        let mut peer = established(limit(1));
+        peer.enhe_next_hop = EnheNextHop::Missing;
+        let (mut peers, ident) = peers_with(peer);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let pool = ShardPool::spawn((0..2).map(|_| Default::default()).collect(), tx);
+        assert!(check_limits(ident, &BgpShard::default(), &mut peers, Some(&pool)).is_none());
+        assert_eq!(
+            peers.get_by_idx(ident).unwrap().max_prefix.barrier.pending,
+            2
+        );
+    }
+
+    /// A round taken before a block change does not judge the new block: its
+    /// late answers are dropped and the change's own check starts a new round.
+    #[tokio::test]
+    async fn a_block_change_drops_the_round_in_flight() {
+        let mut peer = established(limit(400));
+        peer.max_prefix.barrier = round(7, 2);
+        let (mut peers, ident) = peers_with(peer);
+        assert!(barrier_answer(ident, 7, 150, &mut peers, None).is_none());
+        let peer = peers.get_mut_by_idx(ident).unwrap();
+        peer.config.max_prefix.insert(v4(), limit(150));
+        block_changed(peer);
+        assert!(
+            barrier_answer(ident, 7, 150, &mut peers, None).is_none(),
+            "300 taken before the change must not end the session at 150"
+        );
+        assert_eq!(
+            peers.get_by_idx(ident).unwrap().max_prefix.barrier.pending,
+            0
+        );
+    }
+
+    #[test]
+    fn session_down_invalidates_the_round_in_flight() {
+        let mut state = MaxPrefixState {
+            barrier: BarrierV4 {
+                seq: 7,
+                pending: 2,
+                rerun: true,
+                accepted: 5,
+            },
+            ..Default::default()
+        };
+        state.limit_warned.insert(v4());
+        state.session_down();
+        assert_eq!(state.barrier.seq, 8);
+        assert_eq!(state.barrier.pending, 0);
+        assert!(!state.barrier.rerun);
+        assert!(state.limit_warned.is_empty());
     }
 
     #[test]

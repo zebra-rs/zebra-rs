@@ -70,7 +70,10 @@ module zebra-bgp-afi-knobs {
          its effective block, or `restart`. A commit is refused for a block
          without `limit`, and for a family other than ipv4 and ipv6. A VRF
          neighbor has no such block, and a neighbor-group's does not apply to
-         one.";
+         one. The limit is checked after each UPDATE and when a commit that
+         changes it ends. Above rib-sharding 1 the IPv4 unicast check waits
+         for the pool shards while routes keep arriving, so more routes than
+         the limit can be accepted before the session ends.";
 
       leaf limit {
         ext:help "Maximum number of accepted paths";

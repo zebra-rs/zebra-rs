@@ -157,6 +157,14 @@ impl BgpShard {
                 let _ = reply.send(counts);
                 Vec::new()
             }
+            ShardMsg::MaxPrefixBarrierV4 { ident, seq } => {
+                use bgp_packet::{Afi, Safi};
+                vec![ShardOut::MaxPrefixBarrierV4 {
+                    ident,
+                    seq,
+                    accepted: self.accepted_paths(ident, Afi::Ip, Safi::Unicast),
+                }]
+            }
             ShardMsg::Show(_) | ShardMsg::Shutdown => Vec::new(),
         }
     }
@@ -291,11 +299,13 @@ impl BgpShard {
                     !drop_row
                 });
             };
-            drop_rows(&|r| {
-                replaced
-                    .iter()
-                    .any(|rr| rr.ident == r.ident && rr.remote_id == r.remote_id)
-            });
+            if !replaced.is_empty() {
+                drop_rows(&|r| {
+                    replaced
+                        .iter()
+                        .any(|rr| rr.ident == r.ident && rr.remote_id == r.remote_id)
+                });
+            }
             if let Some(a) = added {
                 drop_rows(&|r| r.ident == a.ident && r.remote_id == a.remote_id);
                 cands.push(a.clone());
@@ -1913,6 +1923,25 @@ mod tests {
         let out = pool.handle(ShardMsg::PeerDown { ident: 1 });
         apply(&mut mirror, out);
         assert_eq!(accepted_v4(&mirror, 1), 0, "a peer-down sweep removes");
+    }
+
+    #[test]
+    fn a_barrier_is_answered_with_the_counts() {
+        let mut shard = BgpShard::default();
+        shard.handle(update_v4(3, "10.0.0.0/24", "192.0.2.1", false));
+        shard.handle(update_v4(3, "10.0.1.0/24", "192.0.2.1", true));
+        let out = shard.handle(ShardMsg::MaxPrefixBarrierV4 { ident: 3, seq: 9 });
+        assert!(
+            matches!(
+                out[..],
+                [ShardOut::MaxPrefixBarrierV4 {
+                    ident: 3,
+                    seq: 9,
+                    accepted: 1,
+                }]
+            ),
+            "the answer reports the shard's counts: {out:?}"
+        );
     }
 
     /// The read replica refreshes a flipped candidate in place.
