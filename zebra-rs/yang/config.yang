@@ -5698,10 +5698,24 @@ module config {
 
     // VyOS-derived VRRP (see vrrp.yang): VyOS's `high-availability`
     // wrapper is dropped, `vrrp` is a top-level node. insomnia-only.
+    // The top level is the global table; `vrrp vrf <name> …` is the same
+    // tree for a VRF (zebra-rs's `<feature> vrf <name>` convention;
+    // VyOS has no per-VRF VRRP). `default` is refused as a name at
+    // commit (config::check::reserved_vrf).
     container vrrp {
       if-feature feat:insomnia;
       ext:help "Virtual Router Redundancy Protocol (VRRP)";
       uses "vrrp:vrrp";
+      list vrf {
+        ext:help "VRRP in a VRF";
+        key "name";
+        leaf name {
+          ext:help "VRF name";
+          ext:dynamic "rib:vrf";
+          type string;
+        }
+        uses "vrrp:vrrp";
+      }
     }
 
     // VyOS-derived system services (see dhcp.yang), under VyOS's own

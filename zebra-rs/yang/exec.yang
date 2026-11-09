@@ -506,6 +506,19 @@ module exec {
       ext:help "VRRP information";
       presence "VRRP group summary";
       uses vrrp-show-views;
+      // `show vrrp vrf <name> [statistics|detail [group <name>]]`: the
+      // keepalived instance of a VRF (`show <feature> vrf <name> <view>`).
+      list vrf {
+        ext:help "VRRP in a VRF";
+        ext:presence "VRRP group summary of a VRF";
+        key "name";
+        leaf name {
+          ext:help "VRF name";
+          ext:dynamic "rib:vrf";
+          type string;
+        }
+        uses vrrp-show-views;
+      }
     }
     // `show dhcp …` / `show dhcpv6 …` — served by the external insomnia
     // provider (zebra.show.v1 name "dhcp"); insomnia-gated like the
