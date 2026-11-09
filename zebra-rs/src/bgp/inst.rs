@@ -7812,6 +7812,16 @@ impl Bgp {
             (afi @ (Afi::Ip | Afi::Ip6), Safi::Unicast) => afi,
             _ => return,
         };
+        // At N>1 the pool owns IPv4-unicast selection and main's table is
+        // only its read replica: hand the policy to every shard, which
+        // re-runs selection and returns the sets for the reduce to install.
+        if afi == Afi::Ip
+            && let Some(pool) = self.shards.as_ref()
+        {
+            let cfg = self.shard.v4.2;
+            pool.broadcast(|| super::shard::ShardMsg::MultipathResyncV4 { cfg });
+            return;
+        }
         let mut selected_v4: Vec<(ipnet::Ipv4Net, Vec<super::route::BgpRib>)> = Vec::new();
         let mut selected_v6: Vec<(ipnet::Ipv6Net, Vec<super::route::BgpRib>)> = Vec::new();
         if afi == Afi::Ip {
@@ -9599,6 +9609,10 @@ mod local_withdraw_noop_tests;
 #[cfg(test)]
 #[path = "redist_pool_tests.rs"]
 mod redist_pool_tests;
+
+#[cfg(test)]
+#[path = "multipath_pool_tests.rs"]
+mod multipath_pool_tests;
 
 #[cfg(test)]
 #[path = "enhe_pool_tests.rs"]

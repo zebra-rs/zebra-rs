@@ -2375,7 +2375,8 @@ pub fn bestpath_recompute_untracked(bgp: &mut BgpTop, peers: &mut PeerMap) {
 /// Lives on the table rather than on `Bgp` because `select_best_path`
 /// is reached from a dozen call sites that have no config in hand —
 /// the shard dispatcher, the NHT re-eval, the peer-down sweep. Config
-/// writes it once through `set_multipath`; selection only reads it.
+/// writes main's copy; at N>1 `multipath_resync` hands it to every pool
+/// shard. Selection only reads it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MultipathCfg {
     /// Equal-cost paths to install, bestpath included. 1 disables
@@ -5226,6 +5227,23 @@ pub(super) fn route_apply_bestpath_v4_batch(
     // it in step by mirroring each delta before consuming it for the
     // advertise. This reduce only runs at N>1 (it is dispatched solely
     // from `process_shard_result`), so the N=1 path is untouched.
+    //
+    // A multipath re-run changes the installed set, not the winner:
+    // install it and advertise nothing, as `multipath_resync` does at N=1.
+    // The replica's best is refreshed; its per-candidate multipath flags
+    // are not. A shard replies to a resync with `MultipathV4` alone, so
+    // no `BestPathV4` for the same prefix shares its result.
+    let outs: Vec<ShardOut> = outs
+        .into_iter()
+        .filter_map(|out| match out {
+            ShardOut::MultipathV4 { prefix, selected } => {
+                bgp.shard.mirror_v4(prefix, None, &[], selected.first());
+                fib_install_v4(bgp, prefix, &selected);
+                None
+            }
+            other => Some(other),
+        })
+        .collect();
     for out in &outs {
         mirror_v4_delta(bgp, out);
     }

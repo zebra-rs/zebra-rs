@@ -170,6 +170,16 @@ pub enum ShardMsg {
         policy: Option<std::sync::Arc<super::InPolicy>>,
     },
 
+    /// Adopt the IPv4-unicast multipath policy (`maximum-paths`,
+    /// `maximum-paths-ibgp`, `multipath-relax`) and re-run best-path over
+    /// every prefix the shard owns, replying with one
+    /// [`ShardOut::MultipathV4`] per prefix. Broadcast by
+    /// [`crate::bgp::inst::Bgp::multipath_resync`] at N>1: the pool owns
+    /// selection there, so the policy main holds never reaches it otherwise.
+    MultipathResyncV4 {
+        cfg: super::super::route::MultipathCfg,
+    },
+
     /// Re-evaluate a batch of IPv4-unicast prefixes that share a next-hop,
     /// after that next-hop's reachability flipped (`RibRx::NexthopUpdate`).
     /// All of the next-hop's dependent prefixes hashing to this shard ride
@@ -418,6 +428,15 @@ pub enum ShardOut {
         /// v6-unicast and for withdraw / peer-down deltas.
         added: Option<BgpRib>,
         survivor_nexthops: BTreeSet<IpAddr>,
+    },
+
+    /// The selection for an IPv4-unicast prefix re-run after a
+    /// [`ShardMsg::MultipathResyncV4`]. The multipath policy changes the
+    /// installed set, never the winner, so main installs `selected` and
+    /// advertises nothing — as `multipath_resync` does at N=1.
+    MultipathV4 {
+        prefix: ipnet::Ipv4Net,
+        selected: Vec<BgpRib>,
     },
 
     /// Labeled-Unicast (v4 or v6, per `prefix`) best-path delta.
