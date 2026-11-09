@@ -854,6 +854,14 @@ pub fn parse(
     if path.name == "show" {
         s.show = true;
     }
+    // `start|stop|restart process <name>` (exec mode, insomnia-gated)
+    // are operator actions answered by a show provider: route them the
+    // way show orders are routed. Only as the first word, so config
+    // leaves of the same name (a DHCP range's `start` / `stop`) are not
+    // affected.
+    if s.paths.is_empty() && matches!(path.name.as_str(), "start" | "stop" | "restart") {
+        s.show = true;
+    }
     if path.name == "clear" {
         s.clear = true;
     }
