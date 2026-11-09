@@ -1,0 +1,14 @@
+# Phase 1 of the two-step bring-up (see bgp_unnumbered_multipath): a bare
+# `router bgp` block, which spawns ND so it learns i1/i2 before the next
+# commit enables RA on them. BGP reads its shard count once, when this
+# first commit spawns it, so `rib-sharding` must be here already; the
+# `sharding` trace category makes the daemon log the count it resolved.
+router:
+  bgp:
+    tracing:
+      sharding: null
+    global:
+      as: 65031
+      router-id: 10.0.0.31
+    sharding:
+      rib-sharding: 2

@@ -1,0 +1,9 @@
+# Phase 1 warm-up (see z1-base.yaml). Also the teardown target for the
+# failover scenario: re-applying this file whole-config-replaces the
+# full config away, removing the interface-neighbor and dropping the
+# session to z1.
+router:
+  bgp:
+    global:
+      as: 65000
+      router-id: 10.0.0.101

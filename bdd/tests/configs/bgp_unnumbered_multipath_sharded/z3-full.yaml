@@ -1,0 +1,22 @@
+# Phase 2: same as z2-full.yaml with z3's identity — the second
+# equal-cost ENHE path for 10.99.0.0/24.
+interface:
+- if-name: i1
+  ipv6:
+    router-advertisements:
+      send-advertisements: true
+router:
+  bgp:
+    global:
+      as: 65000
+      router-id: 10.0.0.102
+    timer:
+      adv-interval:
+        ebgp: 0
+    interface-neighbor:
+    - interface: i1
+      remote-as: 65031
+    afi-safi:
+    - name: ipv4
+      network:
+      - prefix: 10.99.0.0/24

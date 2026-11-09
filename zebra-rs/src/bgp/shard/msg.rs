@@ -173,7 +173,7 @@ pub enum ShardMsg {
     /// Adopt the IPv4-unicast multipath policy (`maximum-paths`,
     /// `maximum-paths-ibgp`, `multipath-relax`) and re-run best-path over
     /// every prefix the shard owns, replying with one
-    /// [`ShardOut::MultipathV4`] per prefix. Broadcast by
+    /// [`ShardOut::MultipathV4`] per prefix whose set changed. Broadcast by
     /// [`crate::bgp::inst::Bgp::multipath_resync`] at N>1: the pool owns
     /// selection there, so the policy main holds never reaches it otherwise.
     MultipathResyncV4 {
