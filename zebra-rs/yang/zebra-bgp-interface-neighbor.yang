@@ -46,22 +46,22 @@ module zebra-bgp-interface-neighbor {
        }
        router bgp {
          interface-neighbor eth0 {
-           remote-as external;
+           remote-as 65002;
          }
        }
 
      Operation:
-       1. The ND subsystem ingests inbound RAs (already running from
-          daemon startup) and emits NeighborDiscovered { ifindex,
-          src=link-local } events.
-       2. BGP listens for these and, when `interface-neighbor` matches
-          the ifindex, materializes a Peer keyed by
-          PeerKey::Interface(ifindex) with origin Interface and the
-          discovered link-local as `address`.
-       3. The session establishes over fe80::%ifindex; ENHE (RFC 8950)
-          carries IPv4 routes with an IPv6 link-local next-hop — that
-          codec is already in tree (#618); wiring it on for
-          interface peers is a follow-up.";
+       1. The ND subsystem (started by the first `router bgp` or
+          `ipv6 router-advertisements` line) ingests inbound RAs and
+          emits NeighborDiscovered { ifindex, src=link-local } events.
+       2. Once the interface exists, BGP materializes a dormant Peer
+          keyed by PeerKey::Interface(ifindex), listed as Idle in
+          `show bgp summary`. The first RA from the neighbor fills in
+          its link-local as `address` and starts the session.
+       3. The session establishes over fe80::%ifindex. RFC 8950
+          Extended Next Hop Encoding is advertised automatically, so
+          IPv4 routes travel with an IPv6 link-local next-hop and are
+          installed via that link-local on the interface.";
 
   typedef remote-as-type {
     type union {
@@ -70,9 +70,10 @@ module zebra-bgp-interface-neighbor {
         enum external {
           description
             "FRR-style shorthand — the remote AS is anything other
-             than the local one. Resolved at session-establishment
-             time; the session is eBGP if the OPEN's AS matches the
-             local ASN this is treated as a config error.";
+             than the local one. Accepted, but learning the AS from
+             the neighbor's OPEN is not implemented yet: a peer
+             configured this way stays dormant. Use a numeric AS or
+             `internal`.";
         }
         enum internal {
           description
