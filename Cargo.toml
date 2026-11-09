@@ -16,6 +16,7 @@ members = [
   "crates/pim-packet",
   "crates/bfd-packet",
   "crates/nd-packet",
+  "crates/dhcp-packet",
   "crates/stamp-packet",
   "crates/fixedbuf",
   "bdd",
