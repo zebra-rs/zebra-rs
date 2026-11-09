@@ -128,8 +128,10 @@ module exec {
     }
   }
 
-  // `show dhcp[v6] server <view> [vrf <name>] [pool <name>]`: one
-  // grouping for both families. The pool filter is the shared network.
+  // `show dhcp[v6] server [vrf <name>] <view> [pool <name>]`: one
+  // grouping for both families, VyOS's spelling (`show dhcp server vrf
+  // <name> leases`) and zebra-rs's `show <feature> vrf <name> <view>`
+  // order. The pool filter is the shared network.
   grouping dhcp-server-pool-filter {
     list pool {
       ext:help "Only this shared network";
@@ -142,36 +144,57 @@ module exec {
     }
   }
 
-  grouping dhcp-server-show-view {
-    uses dhcp-server-pool-filter;
+  grouping dhcp-server-show-views {
+    container leases {
+      ext:help "Leases granted by the server";
+      presence "Leases granted by the server";
+      uses dhcp-server-pool-filter;
+    }
+    container statistics {
+      ext:help "Pool usage statistics";
+      presence "Pool usage statistics";
+      uses dhcp-server-pool-filter;
+    }
+    container static-mappings {
+      ext:help "Configured static mappings";
+      presence "Configured static mappings";
+      uses dhcp-server-pool-filter;
+    }
+  }
+
+  grouping dhcp-server-show {
+    uses dhcp-server-show-views;
     list vrf {
       ext:help "The server in a VRF";
-      ext:presence "The server in a VRF";
       key "name";
       leaf name {
         ext:help "VRF name";
         ext:dynamic "rib:vrf";
         type string;
       }
-      uses dhcp-server-pool-filter;
+      uses dhcp-server-show-views;
     }
   }
 
-  grouping dhcp-server-show-views {
-    container leases {
-      ext:help "Leases granted by the server";
-      presence "Leases granted by the server";
-      uses dhcp-server-show-view;
-    }
+  // `show dhcp[v6] relay [vrf <name>] statistics`: one agent relays for
+  // every VRF; the filter keeps one VRF's rows.
+  grouping dhcp-relay-show {
     container statistics {
-      ext:help "Pool usage statistics";
-      presence "Pool usage statistics";
-      uses dhcp-server-show-view;
+      ext:help "Relay agent statistics";
+      presence "Relay agent statistics, every VRF";
     }
-    container static-mappings {
-      ext:help "Configured static mappings";
-      presence "Configured static mappings";
-      uses dhcp-server-show-view;
+    list vrf {
+      ext:help "The relay agent in a VRF";
+      key "name";
+      leaf name {
+        ext:help "VRF name";
+        ext:dynamic "rib:vrf";
+        type string;
+      }
+      container statistics {
+        ext:help "Relay agent statistics";
+        presence "Relay agent statistics, this VRF";
+      }
     }
   }
 
@@ -486,23 +509,20 @@ module exec {
     }
     // `show dhcp …` / `show dhcpv6 …` — served by the external insomnia
     // provider (zebra.show.v1 name "dhcp"); insomnia-gated like the
-    // config tree. The server views are VyOS's (`show dhcp server
-    // leases|statistics|static-mappings [pool <name>]`), each also per
-    // VRF; the relay counters (an extension: VyOS has no relay view)
-    // cover every VRF.
+    // config tree. The server views are VyOS's (`show dhcp server [vrf
+    // <name>] leases|statistics|static-mappings [pool <name>]`); the
+    // relay counters (an extension: VyOS has no relay view) cover every
+    // VRF, or one with `vrf <name>`.
     container dhcp {
       if-feature feat:insomnia;
       ext:help "DHCP information";
       container server {
         ext:help "DHCP server information";
-        uses dhcp-server-show-views;
+        uses dhcp-server-show;
       }
       container relay {
         ext:help "DHCP relay agent information";
-        container statistics {
-          ext:help "DHCP relay agent statistics";
-          presence "DHCP relay agent statistics";
-        }
+        uses dhcp-relay-show;
       }
     }
     container dhcpv6 {
@@ -510,14 +530,11 @@ module exec {
       ext:help "DHCPv6 information";
       container server {
         ext:help "DHCPv6 server information";
-        uses dhcp-server-show-views;
+        uses dhcp-server-show;
       }
       container relay {
         ext:help "DHCPv6 relay agent information";
-        container statistics {
-          ext:help "DHCPv6 relay agent statistics";
-          presence "DHCPv6 relay agent statistics";
-        }
+        uses dhcp-relay-show;
       }
     }
     // `show process [<name>]` — the daemons insomnia manages (keepalived
