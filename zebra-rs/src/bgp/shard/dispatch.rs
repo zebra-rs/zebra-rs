@@ -656,18 +656,16 @@ impl BgpShard {
     /// every prefix this shard owns — the pool half of `multipath_resync`.
     /// Both directions need the re-run: raising `maximum-paths` discovers
     /// legs never selected, lowering it drops legs that no longer fit.
+    /// Replies only for the prefixes whose set changed.
     fn handle_multipath_resync_v4(
         &mut self,
         cfg: super::super::route::MultipathCfg,
     ) -> Vec<ShardOut> {
         self.v4.2 = cfg;
-        let prefixes: Vec<Ipv4Net> = self.v4.0.iter().map(|(p, _)| p).collect();
-        prefixes
+        self.v4
+            .reselect_changed()
             .into_iter()
-            .map(|prefix| ShardOut::MultipathV4 {
-                prefix,
-                selected: self.v4.select_best_path(prefix),
-            })
+            .map(|(prefix, selected)| ShardOut::MultipathV4 { prefix, selected })
             .collect()
     }
 

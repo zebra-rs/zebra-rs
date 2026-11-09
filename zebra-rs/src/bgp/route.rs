@@ -2662,6 +2662,37 @@ impl<P: Prefix + Copy> LocalRibTable<P> {
         self.0.get(&prefix).map(|c| c.as_slice()).unwrap_or(&[])
     }
 
+    /// Re-run best-path over every prefix after the multipath policy
+    /// (`self.2`) changed, and return the prefixes whose selection
+    /// changed, each with its new set. A selection is the winner plus its
+    /// multipath members, read before the re-run from the candidates'
+    /// flags (the last `select_best_path` set them). A prefix whose set the
+    /// policy leaves alone needs no FIB install, so a knob that ties no
+    /// paths costs one pass and no RIB messages; FRR installs only the
+    /// paths whose multipath state changed too.
+    pub fn reselect_changed(&mut self) -> Vec<(P, Vec<BgpRib>)> {
+        type Selection = (Option<(usize, u32)>, Vec<(usize, u32)>);
+        fn ids<'a>(winner: Option<&BgpRib>, legs: impl Iterator<Item = &'a BgpRib>) -> Selection {
+            let mut legs: Vec<(usize, u32)> = legs.map(|r| (r.ident, r.remote_id)).collect();
+            legs.sort_unstable();
+            (winner.map(|r| (r.ident, r.remote_id)), legs)
+        }
+        let prefixes: Vec<P> = self.0.iter().map(|(p, _)| p).collect();
+        let mut changed = Vec::new();
+        for prefix in prefixes {
+            let cands = self.candidates(prefix);
+            let before = ids(
+                cands.iter().find(|r| r.best_path),
+                cands.iter().filter(|r| r.multipath),
+            );
+            let set = self.select_best_path(prefix);
+            if ids(set.first(), set.iter().skip(1)) != before {
+                changed.push((prefix, set));
+            }
+        }
+        changed
+    }
+
     /// The best candidate, independent of candidate order — deterministic
     /// MED (review finding #10). MED is compared only between paths from
     /// the same neighboring AS, so `is_better` is not transitive and a
@@ -5227,24 +5258,6 @@ pub(super) fn route_apply_bestpath_v4_batch(
     // it in step by mirroring each delta before consuming it for the
     // advertise. This reduce only runs at N>1 (it is dispatched solely
     // from `process_shard_result`), so the N=1 path is untouched.
-    //
-    // A multipath re-run changes the installed set, not the winner:
-    // install it and advertise nothing, as `multipath_resync` does at N=1.
-    // The replica's best and its candidates' best / multipath flags follow
-    // the re-run. A shard replies to a resync with `MultipathV4` alone, so
-    // no `BestPathV4` for the same prefix shares its result.
-    let outs: Vec<ShardOut> = outs
-        .into_iter()
-        .filter_map(|out| match out {
-            ShardOut::MultipathV4 { prefix, selected } => {
-                bgp.shard.mirror_v4(prefix, None, &[], selected.first());
-                bgp.shard.mirror_v4_selection(prefix, &selected);
-                fib_install_v4(bgp, prefix, &selected);
-                None
-            }
-            other => Some(other),
-        })
-        .collect();
     for out in &outs {
         mirror_v4_delta(bgp, out);
     }
@@ -5291,6 +5304,17 @@ pub(super) fn route_apply_bestpath_v4_batch(
     for ((job, memo), ident) in jobs.into_iter().zip(memos).zip(idents) {
         apply_ipv4_advertise_job(job, ident, memo, bgp, peers);
     }
+}
+
+/// Main's half of a pool shard's multipath re-run (`ShardOut::MultipathV4`,
+/// N>1): the policy changes the installed set, never the winner, so
+/// install the set and advertise nothing, as `multipath_resync` does at
+/// N=1, and bring the read replica's best and its candidates' best /
+/// multipath flags in line with the re-run.
+pub(super) fn apply_multipath_v4(bgp: &mut BgpTop, prefix: Ipv4Net, selected: &[BgpRib]) {
+    bgp.shard.mirror_v4(prefix, None, &[], selected.first());
+    bgp.shard.mirror_v4_selection(prefix, selected);
+    fib_install_v4(bgp, prefix, selected);
 }
 
 /// Mirror one pool `BestPathV4` delta into the main shard's v4-unicast

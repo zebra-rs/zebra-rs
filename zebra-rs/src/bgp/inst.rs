@@ -7822,21 +7822,12 @@ impl Bgp {
             pool.broadcast(|| super::shard::ShardMsg::MultipathResyncV4 { cfg });
             return;
         }
-        let mut selected_v4: Vec<(ipnet::Ipv4Net, Vec<super::route::BgpRib>)> = Vec::new();
-        let mut selected_v6: Vec<(ipnet::Ipv6Net, Vec<super::route::BgpRib>)> = Vec::new();
-        if afi == Afi::Ip {
-            let prefixes: Vec<ipnet::Ipv4Net> = self.shard.v4.0.iter().map(|(p, _)| p).collect();
-            for prefix in prefixes {
-                let set = self.shard.v4.select_best_path(prefix);
-                selected_v4.push((prefix, set));
-            }
+        // Only the prefixes whose set changed need a FIB install.
+        let (selected_v4, selected_v6) = if afi == Afi::Ip {
+            (self.shard.v4.reselect_changed(), Vec::new())
         } else {
-            let prefixes: Vec<ipnet::Ipv6Net> = self.shard.v6.0.iter().map(|(p, _)| p).collect();
-            for prefix in prefixes {
-                let set = self.shard.v6.select_best_path(prefix);
-                selected_v6.push((prefix, set));
-            }
-        }
+            (Vec::new(), self.shard.v6.reselect_changed())
+        };
         let top = super::peer::BgpTop {
             router_id: &self.router_id,
             srv6_ipv6_export: self.srv6_ipv6_export.as_ref(),
@@ -7999,6 +7990,7 @@ impl Bgp {
         // then (each shard enqueues its slice before acking). Everything
         // else is a best-path delta for the reduce below.
         let mut deltas = Vec::with_capacity(result.out.len());
+        let mut multipath = Vec::new();
         for out in result.out {
             match out {
                 super::shard::ShardOut::DumpDoneV4 {
@@ -8078,10 +8070,16 @@ impl Bgp {
                         );
                     }
                 }
+                // A multipath re-run's sets: one result answers one
+                // message, and a shard answers a resync with these alone,
+                // so none shares a result with a `BestPathV4` delta.
+                super::shard::ShardOut::MultipathV4 { prefix, selected } => {
+                    multipath.push((prefix, selected));
+                }
                 other => deltas.push(other),
             }
         }
-        if deltas.is_empty() {
+        if deltas.is_empty() && multipath.is_empty() {
             return;
         }
         let import_dispatcher = super::vrf::VrfImportDispatcher {
@@ -8108,7 +8106,12 @@ impl Bgp {
             vrf_transport_v6: None,
             as_sets_withdraw: self.as_sets_withdraw,
         };
-        super::route::route_apply_bestpath_v4_batch(&mut bgp_ref, &mut self.peers, deltas);
+        for (prefix, selected) in multipath {
+            super::route::apply_multipath_v4(&mut bgp_ref, prefix, &selected);
+        }
+        if !deltas.is_empty() {
+            super::route::route_apply_bestpath_v4_batch(&mut bgp_ref, &mut self.peers, deltas);
+        }
     }
 
     /// A2 — fan a `DumpV4` to every pool shard for `ident`'s session-up
@@ -9621,3 +9624,7 @@ mod enhe_pool_tests;
 #[cfg(test)]
 #[path = "replica_flags_tests.rs"]
 mod replica_flags_tests;
+
+#[cfg(test)]
+#[path = "multipath_resync_tests.rs"]
+mod multipath_resync_tests;

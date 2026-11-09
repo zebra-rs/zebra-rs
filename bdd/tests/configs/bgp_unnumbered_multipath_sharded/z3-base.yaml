@@ -1,0 +1,6 @@
+# Phase 1 warm-up (see z1-base.yaml).
+router:
+  bgp:
+    global:
+      as: 65000
+      router-id: 10.0.0.102
