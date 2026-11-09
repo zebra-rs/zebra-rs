@@ -8,46 +8,646 @@ module dhcp {
     prefix inet;
   }
 
+  import ietf-yang-types {
+    prefix yang;
+  }
+
   import extension {
     prefix ext;
   }
 
   description
-    "VyOS-derived DHCP relay configuration, ported from the VyOS rolling
-     interface definitions (vyos-1x interface-definitions/
-     service_dhcp-relay.xml.in and service_dhcpv6-relay.xml.in).
-     Enforced by the out-of-process insomnia daemon, which renders these
-     trees into the config of its own relay agent (insomnia-dhcp-relay);
-     zebra-rs owns only the schema and the config store.
+    "VyOS-derived DHCP server and relay configuration, ported from the
+     VyOS rolling interface definitions (vyos-1x interface-definitions/
+     service_dhcp-server.xml.in, service_dhcpv6-server.xml.in,
+     service_dhcp-relay.xml.in, service_dhcpv6-relay.xml.in and
+     include/dhcp/). Enforced by the out-of-process insomnia daemon,
+     which renders the server trees into Kea configurations and the
+     relay trees into the config of its own relay agent
+     (insomnia-dhcp-relay); zebra-rs owns only the schema and the config
+     store.
 
      This module is a grouping library in the vrrp.yang / ipsec.yang
      style: config.yang instantiates the groupings under an
      insomnia-gated top-level `container service`, VyOS's own home for
-     DHCP, so a VyOS `set service dhcp-relay …` line ports verbatim.
+     DHCP, so a VyOS `set service dhcp-server …` line ports verbatim.
      The same groupings are instantiated again under a per-VRF `vrf`
-     list, zebra-rs's `<feature> vrf <name>` convention; VyOS has no
-     per-VRF relay.
+     list, zebra-rs's `<feature> vrf <name>` convention (VyOS spells the
+     server's `vrf name <n> service dhcp-server`, and has no per-VRF
+     relay).
 
-     Scope: `service dhcp-relay` and `service dhcpv6-relay`. The DHCP
-     server trees (`service dhcp-server`, `service dhcpv6-server`) land
-     with insomnia's Kea backend. Deliberately not carried over: the v4
-     relay's `interface` leaf, which VyOS deprecates in favour of
-     `listen-interface` plus `upstream-interface`.
+     Deliberately not carried over, because insomnia cannot apply them
+     (a leaf that is not enforced stays out of the schema, so `set`
+     fails instead of storing something silently ignored):
+     - `dynamic-dns-update` and `hostfile-update`: need a DNS server;
+       they come back with `service dns forwarding`;
+     - `ping-check`: Ubuntu's Kea 2.4.1 has no ping_check hook;
+     - `high-availability`: must be mutually authenticated, which needs
+       `pki`;
+     - the client-class `substring` matches: Kea 2.4.1 has neither
+       match() nor lcase(), so a case-insensitive contains test cannot
+       be expressed;
+     - the v4 relay's `interface` leaf, which VyOS deprecates in favour
+       of `listen-interface` plus `upstream-interface`.
 
      Value-shape conventions follow vrrp.yang: no `pattern` statements
-     on value leaves; interface references are plain `type string`, so
-     an interface may be configured after the relay that names it.
-     Defaults are not declared here: insomnia applies VyOS's defaults
-     when rendering, so the JSON batch carries only what the operator
-     set. The rules VyOS checks in verify() (a server is required,
-     listen and upstream interfaces come together, each DHCPv6 upstream
-     interface needs an address) are applied by insomnia, which skips
-     what fails them with a warning.";
+     on value leaves; interface and client-class references are plain
+     `type string`, so a referent may be configured after the element
+     that names it. Defaults are not declared here: insomnia applies
+     VyOS's defaults when rendering, so the JSON batch carries only what
+     the operator set. The structural rules VyOS checks in verify() that
+     fit YANG are `mandatory` here (subnet-id, range start and stop, a
+     static route's next-hop, a delegated prefix's lengths); the rest
+     (ranges inside their subnet, duplicate subnet-ids, missing client
+     classes, …) are applied by insomnia, which skips what fails them
+     with a warning.";
+
+  revision "2026-11-09" {
+    description
+      "Added the DHCP server trees (`service dhcp-server`,
+       `service dhcpv6-server`) and their option groupings.";
+  }
 
   revision "2026-11-08" {
     description
       "Replaced the unused IETF dhc draft model (2016-08-25, mounted at
        `system dhcp`) with the VyOS-derived relay trees.";
+  }
+
+  // ---------------------------------------------------------------
+  // Common leaves — vyos-1x include/dhcp/*.xml.i
+  // ---------------------------------------------------------------
+
+  grouping log-level {
+    leaf log-level {
+      ext:help "Logging level (VyOS default: info)";
+      type enumeration {
+        enum fatal {
+          description "Fatal errors only";
+        }
+        enum error {
+          description "Errors";
+        }
+        enum warn {
+          description "Warnings";
+        }
+        enum info {
+          description "Informational messages";
+        }
+        enum debug {
+          description "Debug messages";
+        }
+      }
+    }
+  }
+
+  grouping subnet-id {
+    leaf subnet-id {
+      ext:help "Unique ID mapped to leases in the lease file";
+      mandatory true;
+      type uint32 {
+        range "1..4294967294";
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------
+  // DHCPv4 options — vyos-1x include/dhcp/option-v4.xml.i
+  // ---------------------------------------------------------------
+
+  grouping option-v4 {
+    container option {
+      ext:help "DHCP option";
+      leaf captive-portal {
+        ext:help "Captive portal API endpoint";
+        type string;
+      }
+      leaf domain-name {
+        ext:help "Client Domain Name";
+        type string;
+      }
+      leaf-list domain-search {
+        ext:help "Client Domain Name search list";
+        type string;
+      }
+      leaf-list ntp-server {
+        ext:help "IP address of NTP server";
+        type inet:ipv4-address;
+      }
+      leaf-list name-server {
+        ext:help "Domain Name Servers (DNS) addresses";
+        type inet:ipv4-address;
+      }
+      leaf bootfile-name {
+        ext:help "Bootstrap file name";
+        type string;
+      }
+      leaf bootfile-server {
+        ext:help "Server from which the initial boot file is to be loaded";
+        type string;
+      }
+      leaf bootfile-size {
+        ext:help "Bootstrap file size";
+        type uint16 {
+          range "1..16";
+        }
+      }
+      leaf client-prefix-length {
+        ext:help "Client subnet mask length (RFC 950); the subnet's own when unset";
+        type uint8 {
+          range "0..32";
+        }
+      }
+      leaf capwap-controller {
+        ext:help "IP address of CAPWAP access controller (Option 138)";
+        type inet:ipv4-address;
+      }
+      leaf default-router {
+        ext:help "IP address of default router";
+        type inet:ipv4-address;
+      }
+      leaf interface-mtu {
+        ext:help "Interface MTU";
+        type uint16 {
+          range "576..16000";
+        }
+      }
+      leaf ip-forwarding {
+        ext:help "Enable IP forwarding on client";
+        type empty;
+      }
+      leaf ipv6-only-preferred {
+        ext:help "Disable IPv4 on IPv6 only hosts (RFC 8925)";
+        type uint32;
+      }
+      leaf-list pop-server {
+        ext:help "IP address of POP3 server";
+        type inet:ipv4-address;
+      }
+      leaf server-identifier {
+        ext:help "Address for DHCP server identifier";
+        type inet:ipv4-address;
+      }
+      leaf-list smtp-server {
+        ext:help "IP address of SMTP server";
+        type inet:ipv4-address;
+      }
+      list static-route {
+        ext:help "Classless static route destination subnet";
+        key "prefix";
+        leaf prefix {
+          ext:help "Destination subnet";
+          type inet:ipv4-prefix;
+        }
+        leaf next-hop {
+          ext:help "IP address of router to be used to reach the destination subnet";
+          mandatory true;
+          type inet:ipv4-address;
+        }
+      }
+      leaf tftp-server-name {
+        ext:help "TFTP server name";
+        type string;
+      }
+      leaf time-offset {
+        ext:help "Client subnet offset in seconds from Coordinated Universal Time (UTC)";
+        type int32;
+      }
+      leaf-list time-server {
+        ext:help "IP address of time server";
+        type inet:ipv4-address;
+      }
+      leaf time-zone {
+        ext:help "Time zone to send to clients. Uses RFC4833 options 100 and 101";
+        type string;
+      }
+      container vendor-option {
+        ext:help "Vendor Specific Options";
+        container ubiquiti {
+          ext:help "Ubiquiti specific parameters";
+          leaf unifi-controller {
+            ext:help "Address of UniFi controller";
+            type inet:ipv4-address;
+          }
+        }
+      }
+      leaf-list wins-server {
+        ext:help "IP address for Windows Internet Name Service (WINS) server";
+        type inet:ipv4-address;
+      }
+      leaf wpad-url {
+        ext:help "Web Proxy Autodiscovery (WPAD) URL";
+        type string;
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------
+  // DHCPv6 options — vyos-1x include/dhcp/option-v6.xml.i
+  // ---------------------------------------------------------------
+
+  grouping option-v6 {
+    container option {
+      ext:help "DHCPv6 option";
+      leaf captive-portal {
+        ext:help "Captive portal API endpoint";
+        type string;
+      }
+      leaf-list domain-search {
+        ext:help "Client Domain Name search list";
+        type string;
+      }
+      leaf-list name-server {
+        ext:help "Domain Name Servers (DNS) addresses";
+        type inet:ipv6-address;
+      }
+      leaf capwap-controller {
+        ext:help "IP address of CAPWAP access controller (Option 52)";
+        type inet:ipv6-address;
+      }
+      leaf nis-domain {
+        ext:help "NIS domain name for client to use";
+        type string;
+      }
+      leaf-list nis-server {
+        ext:help "IPv6 address of a NIS Server";
+        type inet:ipv6-address;
+      }
+      leaf nisplus-domain {
+        ext:help "NIS+ domain name for client to use";
+        type string;
+      }
+      leaf-list nisplus-server {
+        ext:help "IPv6 address of a NIS+ Server";
+        type inet:ipv6-address;
+      }
+      leaf-list sip-server {
+        ext:help "IPv6 address or host name of SIP server";
+        type string;
+      }
+      leaf-list sntp-server {
+        ext:help "IPv6 address of an SNTP server for client to use";
+        type inet:ipv6-address;
+      }
+      leaf info-refresh-time {
+        ext:help "Time (in seconds) that stateless clients should wait between refreshing the information they were given";
+        type uint32 {
+          range "1..4294967295";
+        }
+      }
+      leaf time-zone {
+        ext:help "Time zone to send to clients. Uses RFC4833 options 41 and 42";
+        type string;
+      }
+      container vendor-option {
+        ext:help "Vendor Specific Options";
+        container cisco {
+          ext:help "Cisco specific parameters";
+          leaf-list tftp-server {
+            ext:help "TFTP server address";
+            type inet:ipv6-address;
+          }
+        }
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------
+  // service dhcp-server — vyos-1x service_dhcp-server.xml.in
+  // ---------------------------------------------------------------
+
+  grouping client-class-match {
+    leaf value {
+      ext:help "Exact contents of the option (text, or hex as 0x…)";
+      type string;
+    }
+  }
+
+  grouping dhcp-server {
+    leaf disable {
+      ext:help "Disable instance";
+      type empty;
+    }
+    leaf-list listen-address {
+      ext:help "Local IPv4 addresses to listen on (relayed traffic only)";
+      type inet:ipv4-address;
+    }
+    leaf-list listen-interface {
+      ext:help "Interface to listen on";
+      type string;
+    }
+    uses log-level;
+    list client-class {
+      ext:help "Client class name";
+      key "name";
+      leaf name {
+        ext:help "Client class name";
+        type string;
+      }
+      leaf disable {
+        ext:help "Disable instance";
+        type empty;
+      }
+      container relay-agent-information {
+        ext:help "Match DHCP Option 82 (relay agent information)";
+        leaf circuit-id {
+          ext:help "Filters on the contents of the circuit-id sub option";
+          type string;
+        }
+        leaf remote-id {
+          ext:help "Filters on the contents of the remote-id sub option";
+          type string;
+        }
+      }
+      container hostname {
+        ext:help "Match DHCP Option 12 (hostname)";
+        uses client-class-match;
+      }
+      container vendor-class-id {
+        ext:help "Match DHCP Option 60 (vendor class identifier)";
+        uses client-class-match;
+      }
+      uses option-v4;
+    }
+    list shared-network-name {
+      ext:help "Name of DHCP shared network";
+      key "name";
+      leaf name {
+        ext:help "Shared network name";
+        type string;
+      }
+      leaf authoritative {
+        ext:help "Option to make DHCP server authoritative for this physical network";
+        type empty;
+      }
+      leaf description {
+        ext:help "Description";
+        type string;
+      }
+      leaf disable {
+        ext:help "Disable instance";
+        type empty;
+      }
+      uses option-v4;
+      list subnet {
+        ext:help "DHCP subnet for shared network";
+        key "prefix";
+        leaf prefix {
+          ext:help "IPv4 subnet";
+          type inet:ipv4-prefix;
+        }
+        uses subnet-id;
+        uses option-v4;
+        leaf client-class {
+          ext:help "DHCP client class";
+          type string;
+        }
+        leaf description {
+          ext:help "Description";
+          type string;
+        }
+        leaf disable {
+          ext:help "Disable instance";
+          type empty;
+        }
+        leaf-list exclude {
+          ext:help "IP address to exclude from DHCP lease range";
+          type inet:ipv4-address;
+        }
+        leaf ignore-client-id {
+          ext:help "Ignore client identifier for lease lookups";
+          type empty;
+        }
+        leaf lease {
+          ext:help "Lease timeout in seconds (VyOS default: 86400)";
+          type uint32;
+        }
+        list range {
+          ext:help "DHCP lease range";
+          key "name";
+          leaf name {
+            ext:help "Range name";
+            type string;
+          }
+          leaf start {
+            ext:help "First IP address for DHCP lease range";
+            mandatory true;
+            type inet:ipv4-address;
+          }
+          leaf stop {
+            ext:help "Last IP address for DHCP lease range";
+            mandatory true;
+            type inet:ipv4-address;
+          }
+          leaf client-class {
+            ext:help "DHCP client class";
+            type string;
+          }
+          uses option-v4;
+        }
+        list static-mapping {
+          ext:help "Hostname for static mapping reservation";
+          key "name";
+          leaf name {
+            ext:help "Host name";
+            type string;
+          }
+          leaf ip-address {
+            ext:help "Fixed IP address of static mapping";
+            type inet:ipv4-address;
+          }
+          leaf mac {
+            ext:help "Media Access Control (MAC) address";
+            type yang:mac-address;
+          }
+          leaf duid {
+            ext:help "DHCP unique identifier (DUID) to be sent by client";
+            type string;
+          }
+          leaf description {
+            ext:help "Description";
+            type string;
+          }
+          leaf disable {
+            ext:help "Disable instance";
+            type empty;
+          }
+          uses option-v4;
+        }
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------
+  // service dhcpv6-server — vyos-1x service_dhcpv6-server.xml.in
+  // ---------------------------------------------------------------
+
+  grouping dhcpv6-server {
+    leaf disable {
+      ext:help "Disable instance";
+      type empty;
+    }
+    leaf disable-route-autoinstall {
+      ext:help "Do not install routes for delegated prefixes";
+      type empty;
+    }
+    leaf-list listen-interface {
+      ext:help "Interface to listen on";
+      type string;
+    }
+    uses log-level;
+    leaf preference {
+      ext:help "Preference of this DHCPv6 server compared with others";
+      type uint8;
+    }
+    container global-parameters {
+      ext:help "Additional global parameters for DHCPv6 server";
+      leaf-list name-server {
+        ext:help "Domain Name Servers (DNS) addresses";
+        type inet:ipv6-address;
+      }
+    }
+    list shared-network-name {
+      ext:help "DHCPv6 shared network name";
+      key "name";
+      leaf name {
+        ext:help "Shared network name";
+        type string;
+      }
+      leaf description {
+        ext:help "Description";
+        type string;
+      }
+      leaf disable {
+        ext:help "Disable instance";
+        type empty;
+      }
+      leaf interface {
+        ext:help "Interface";
+        type string;
+      }
+      uses option-v6;
+      list subnet {
+        ext:help "IPv6 DHCP subnet for this shared network";
+        key "prefix";
+        leaf prefix {
+          ext:help "IPv6 subnet";
+          type inet:ipv6-prefix;
+        }
+        uses subnet-id;
+        uses option-v6;
+        leaf interface {
+          ext:help "Interface";
+          type string;
+        }
+        container lease-time {
+          ext:help "Parameters relating to the lease time";
+          leaf default {
+            ext:help "Default time (in seconds) that will be assigned to a lease";
+            type uint32 {
+              range "1..4294967295";
+            }
+          }
+          leaf maximum {
+            ext:help "Maximum time (in seconds) that will be assigned to a lease";
+            type uint32 {
+              range "1..4294967295";
+            }
+          }
+          leaf minimum {
+            ext:help "Minimum time (in seconds) that will be assigned to a lease";
+            type uint32 {
+              range "1..4294967295";
+            }
+          }
+        }
+        list range {
+          ext:help "Parameters setting ranges for assigning IPv6 addresses";
+          key "name";
+          leaf name {
+            ext:help "Range name";
+            type string;
+          }
+          leaf prefix {
+            ext:help "IPv6 prefix defining range of addresses to assign";
+            type inet:ipv6-prefix;
+          }
+          leaf start {
+            ext:help "First in range of consecutive IPv6 addresses to assign";
+            type inet:ipv6-address;
+          }
+          leaf stop {
+            ext:help "Last in range of consecutive IPv6 addresses";
+            type inet:ipv6-address;
+          }
+          uses option-v6;
+        }
+        container prefix-delegation {
+          ext:help "Parameters relating to IPv6 prefix delegation";
+          list prefix {
+            ext:help "IPv6 prefix to be used in prefix delegation";
+            key "prefix";
+            leaf prefix {
+              ext:help "IPv6 prefix address";
+              type inet:ipv6-address;
+            }
+            leaf prefix-length {
+              ext:help "Length in bits of prefix";
+              mandatory true;
+              type uint8 {
+                range "32..64";
+              }
+            }
+            leaf delegated-length {
+              ext:help "Length in bits of prefixes to be delegated";
+              mandatory true;
+              type uint8 {
+                range "32..96";
+              }
+            }
+            leaf excluded-prefix {
+              ext:help "IPv6 prefix to be excluded from prefix delegation";
+              type inet:ipv6-address;
+            }
+            leaf excluded-prefix-length {
+              ext:help "Length in bits of excluded prefix";
+              type uint8 {
+                range "33..128";
+              }
+            }
+          }
+        }
+        list static-mapping {
+          ext:help "Hostname for static mapping reservation";
+          key "name";
+          leaf name {
+            ext:help "Host name";
+            type string;
+          }
+          leaf disable {
+            ext:help "Disable instance";
+            type empty;
+          }
+          leaf mac {
+            ext:help "Media Access Control (MAC) address";
+            type yang:mac-address;
+          }
+          leaf duid {
+            ext:help "DHCP unique identifier (DUID) to be sent by client";
+            type string;
+          }
+          leaf-list ipv6-address {
+            ext:help "Client IPv6 address for this static mapping";
+            type inet:ipv6-address;
+          }
+          leaf-list ipv6-prefix {
+            ext:help "Client IPv6 prefix for this static mapping";
+            type inet:ipv6-prefix;
+          }
+          uses option-v6;
+        }
+      }
+    }
   }
 
   // ---------------------------------------------------------------

@@ -8213,6 +8213,192 @@ module test-insomnia-gated {
                 "dhcpv6-relay {name} branch missing"
             );
         }
+        let s4 = child(&service, "dhcp-server").expect("service dhcp-server");
+        for name in [
+            "disable",
+            "listen-address",
+            "listen-interface",
+            "log-level",
+            "client-class",
+            "shared-network-name",
+            "vrf",
+        ] {
+            assert!(
+                child(&s4, name).is_some(),
+                "dhcp-server {name} branch missing"
+            );
+        }
+        // Not carried over (dhcp.yang module description).
+        for name in [
+            "dynamic-dns-update",
+            "hostfile-update",
+            "high-availability",
+            "ping-check",
+        ] {
+            assert!(
+                child(&s4, name).is_none(),
+                "dhcp-server {name} must be absent"
+            );
+        }
+        let s6 = child(&service, "dhcpv6-server").expect("service dhcpv6-server");
+        for name in [
+            "disable",
+            "disable-route-autoinstall",
+            "listen-interface",
+            "log-level",
+            "preference",
+            "global-parameters",
+            "shared-network-name",
+            "vrf",
+        ] {
+            assert!(
+                child(&s6, name).is_some(),
+                "dhcpv6-server {name} branch missing"
+            );
+        }
+    }
+
+    /// End-to-end CLI grammar for the DHCP server trees: representative
+    /// VyOS `set service dhcp-server …` / `dhcpv6-server …` lines parse
+    /// with insomnia, in the default VRF and per VRF, and are rejected
+    /// on a stock start. The negatives pin VyOS's ranges, the
+    /// address-typed leaves, and the leaves not carried over.
+    #[test]
+    fn dhcp_server_commands_parse_only_with_insomnia() {
+        use crate::config::parse::{State, parse};
+
+        let n = "set service dhcp-server shared-network-name LAN";
+        let sn = "set service dhcp-server shared-network-name LAN subnet 10.1.0.0/24";
+        let ok = [
+            "set service dhcp-server disable".to_string(),
+            "set service dhcp-server listen-address 192.0.2.2".to_string(),
+            "set service dhcp-server listen-interface eth1".to_string(),
+            "set service dhcp-server log-level debug".to_string(),
+            "set service dhcp-server client-class VOIP vendor-class-id value voip".to_string(),
+            "set service dhcp-server client-class VOIP hostname value 0x6869".to_string(),
+            "set service dhcp-server client-class R relay-agent-information circuit-id lan1"
+                .to_string(),
+            "set service dhcp-server client-class R relay-agent-information remote-id 0x01"
+                .to_string(),
+            "set service dhcp-server client-class R option tftp-server-name tftp.example"
+                .to_string(),
+            format!("{n} authoritative"),
+            format!("{n} description office"),
+            format!("{n} option domain-name example.com"),
+            format!("{n} option name-server 192.0.2.53"),
+            format!("{sn} subnet-id 1"),
+            format!("{sn} option default-router 10.1.0.1"),
+            format!("{sn} option static-route 198.51.100.0/24 next-hop 10.1.0.1"),
+            format!("{sn} option domain-search example.com"),
+            format!("{sn} option ntp-server 192.0.2.123"),
+            format!("{sn} option client-prefix-length 24"),
+            format!("{sn} option interface-mtu 1500"),
+            format!("{sn} option ip-forwarding"),
+            format!("{sn} option ipv6-only-preferred 1800"),
+            format!("{sn} option time-offset -3600"),
+            format!("{sn} option time-zone Asia/Tokyo"),
+            format!("{sn} option vendor-option ubiquiti unifi-controller 10.1.0.5"),
+            format!("{sn} option wpad-url http://wpad.example/wpad.dat"),
+            format!("{sn} option bootfile-name pxelinux.0"),
+            format!("{sn} option bootfile-server 10.1.0.9"),
+            format!("{sn} exclude 10.1.0.100"),
+            format!("{sn} ignore-client-id"),
+            format!("{sn} lease 3600"),
+            format!("{sn} client-class VOIP"),
+            format!("{sn} range 0 start 10.1.0.100"),
+            format!("{sn} range 0 stop 10.1.0.199"),
+            format!("{sn} range 0 client-class VOIP"),
+            format!("{sn} range 0 option default-router 10.1.0.2"),
+            format!("{sn} static-mapping printer ip-address 10.1.0.10"),
+            format!("{sn} static-mapping printer mac 02:00:00:00:00:01"),
+            format!("{sn} static-mapping phone duid 00:03:00:01:02:00:00:00:00:02"),
+            format!("{sn} static-mapping printer description lobby"),
+            format!("{sn} static-mapping printer disable"),
+            "set service dhcp-server vrf red shared-network-name LAN subnet 10.1.0.0/24 subnet-id 1"
+                .to_string(),
+            "set service dhcp-server vrf red listen-interface lanred".to_string(),
+            "set service dhcpv6-server disable".to_string(),
+            "set service dhcpv6-server disable-route-autoinstall".to_string(),
+            "set service dhcpv6-server listen-interface eth1".to_string(),
+            "set service dhcpv6-server preference 255".to_string(),
+            "set service dhcpv6-server global-parameters name-server 2001:db8::53".to_string(),
+            "set service dhcpv6-server shared-network-name LAN interface eth1".to_string(),
+            "set service dhcpv6-server shared-network-name LAN option sip-server sip.example"
+                .to_string(),
+            "set service dhcpv6-server shared-network-name LAN subnet 2001:db8:1::/64 subnet-id 1"
+                .to_string(),
+            "set service dhcpv6-server shared-network-name LAN subnet 2001:db8:1::/64 range 0 start 2001:db8:1::100"
+                .to_string(),
+            "set service dhcpv6-server shared-network-name LAN subnet 2001:db8:1::/64 range 0 stop 2001:db8:1::1ff"
+                .to_string(),
+            "set service dhcpv6-server shared-network-name LAN subnet 2001:db8:1::/64 range 1 prefix 2001:db8:1:0:8000::/65"
+                .to_string(),
+            "set service dhcpv6-server shared-network-name LAN subnet 2001:db8:1::/64 lease-time default 3600"
+                .to_string(),
+            "set service dhcpv6-server shared-network-name LAN subnet 2001:db8:1::/64 prefix-delegation prefix 2001:db8:8000:: prefix-length 48"
+                .to_string(),
+            "set service dhcpv6-server shared-network-name LAN subnet 2001:db8:1::/64 prefix-delegation prefix 2001:db8:8000:: delegated-length 56"
+                .to_string(),
+            "set service dhcpv6-server shared-network-name LAN subnet 2001:db8:1::/64 static-mapping c1 duid 00:03:00:01:02:00:00:00:00:01"
+                .to_string(),
+            "set service dhcpv6-server shared-network-name LAN subnet 2001:db8:1::/64 static-mapping c1 ipv6-address 2001:db8:1::10"
+                .to_string(),
+            "set service dhcpv6-server shared-network-name LAN subnet 2001:db8:1::/64 static-mapping c1 ipv6-prefix 2001:db8:9000::/56"
+                .to_string(),
+            "set service dhcpv6-server shared-network-name LAN subnet 2001:db8:1::/64 option vendor-option cisco tftp-server 2001:db8::69"
+                .to_string(),
+            "set service dhcpv6-server vrf red shared-network-name LAN subnet 2001:db8:1::/64 subnet-id 1"
+                .to_string(),
+        ];
+
+        let bad_with_insomnia = [
+            format!("{sn} subnet-id 0"),
+            format!("{sn} subnet-id 4294967295"),
+            format!("{sn} option client-prefix-length 33"),
+            format!("{sn} option interface-mtu 575"),
+            format!("{sn} option bootfile-size 17"),
+            format!("{sn} option default-router 2001:db8::1"),
+            format!("{sn} range 0 start 2001:db8::1"),
+            format!("{sn} static-mapping printer mac not-a-mac"),
+            "set service dhcp-server listen-address 2001:db8::1".to_string(),
+            "set service dhcp-server log-level trace".to_string(),
+            "set service dhcp-server shared-network-name LAN subnet 2001:db8::/64".to_string(),
+            "set service dhcpv6-server preference 256".to_string(),
+            "set service dhcpv6-server shared-network-name LAN subnet 2001:db8:1::/64 prefix-delegation prefix 2001:db8:8000:: prefix-length 31"
+                .to_string(),
+            "set service dhcpv6-server shared-network-name LAN subnet 2001:db8:1::/64 prefix-delegation prefix 2001:db8:8000:: delegated-length 97"
+                .to_string(),
+            // Not carried over (dhcp.yang module description).
+            "set service dhcp-server hostfile-update".to_string(),
+            format!("{n} ping-check"),
+            format!("{sn} dynamic-dns-update send-updates enable"),
+            "set service dhcp-server high-availability mode active-active".to_string(),
+            "set service dhcp-server client-class VOIP vendor-class-id substring value voip"
+                .to_string(),
+        ];
+
+        let entry = shipped_tree(&["insomnia"]);
+        for cmd in &ok {
+            let (code, _, _) = parse(cmd, entry.clone(), None, State::new());
+            assert_eq!(code, ExecCode::Success, "`{cmd}` must parse with insomnia");
+        }
+        for cmd in &bad_with_insomnia {
+            let (code, _, _) = parse(cmd, entry.clone(), None, State::new());
+            assert_ne!(code, ExecCode::Success, "`{cmd}` must not parse");
+        }
+
+        let entry = shipped_tree(&[]);
+        for cmd in [
+            format!("{sn} subnet-id 1"),
+            "set service dhcpv6-server listen-interface eth1".to_string(),
+        ] {
+            let (code, _, _) = parse(&cmd, entry.clone(), None, State::new());
+            assert_ne!(
+                code,
+                ExecCode::Success,
+                "`{cmd}` must be rejected on a stock start"
+            );
+        }
     }
 
     /// End-to-end CLI grammar for the DHCP relay trees: representative
@@ -8292,26 +8478,56 @@ module test-insomnia-gated {
     }
 
     /// `show dhcp …` / `show dhcpv6 …` grammar (exec.yang, insomnia-gated):
-    /// the relay statistics views map to the dispatch paths the insomnia
-    /// provider matches on and route to the `"dhcp"` show subscriber.
+    /// the server views with their `vrf` and `pool` filters and the relay
+    /// statistics map to the dispatch paths the insomnia provider matches
+    /// on and route to the `"dhcp"` show subscriber.
     #[test]
     fn show_dhcp_grammar_gated_on_insomnia() {
         use crate::config::parse::{State, parse};
         use crate::config::path_from_command;
 
         let entry = shipped_tree_mode("exec", &["insomnia"]);
-        for (cmd, want_path) in [
-            ("show dhcp relay statistics", "/show/dhcp/relay/statistics"),
+        let mut cases: Vec<(String, String, Vec<&str>)> = vec![
             (
-                "show dhcpv6 relay statistics",
-                "/show/dhcpv6/relay/statistics",
+                "show dhcp relay statistics".into(),
+                "/show/dhcp/relay/statistics".into(),
+                vec![],
             ),
-        ] {
+            (
+                "show dhcpv6 relay statistics".into(),
+                "/show/dhcpv6/relay/statistics".into(),
+                vec![],
+            ),
+        ];
+        for family in ["dhcp", "dhcpv6"] {
+            for view in ["leases", "statistics", "static-mappings"] {
+                let base = format!("show {family} server {view}");
+                let path = format!("/show/{family}/server/{view}");
+                cases.push((base.clone(), path.clone(), vec![]));
+                cases.push((
+                    format!("{base} pool LAN"),
+                    format!("{path}/pool"),
+                    vec!["LAN"],
+                ));
+                cases.push((
+                    format!("{base} vrf red"),
+                    format!("{path}/vrf"),
+                    vec!["red"],
+                ));
+                cases.push((
+                    format!("{base} vrf red pool LAN"),
+                    format!("{path}/vrf/pool"),
+                    vec!["red", "LAN"],
+                ));
+            }
+        }
+        for (cmd, want_path, want_args) in &cases {
             let (code, _, state) = parse(cmd, entry.clone(), None, State::new());
             assert_eq!(code, ExecCode::Success, "parse `{cmd}`");
             let (path, args) = path_from_command(&state.paths);
-            assert_eq!(path, want_path, "path for `{cmd}`");
-            assert!(args.0.is_empty(), "no args for `{cmd}`");
+            assert_eq!(&path, want_path, "path for `{cmd}`");
+            let args: Vec<&str> = args.0.iter().map(String::as_str).collect();
+            assert_eq!(&args, want_args, "args for `{cmd}`");
             assert_eq!(show_proto(&state.paths), "dhcp", "routing for `{cmd}`");
             assert_eq!(show_proto_name(&state.paths), "DHCP");
         }
@@ -8323,6 +8539,80 @@ module test-insomnia-gated {
             code,
             ExecCode::Success,
             "gated off without --feature insomnia"
+        );
+    }
+
+    /// The `/service/dhcp-server` and `/service/dhcpv6-server` halves of
+    /// the marshal contract, as for [`dhcp_relay_json_marshal_contract`]:
+    /// insomnia's Kea backend subscribes to each subtree, this golden
+    /// pins what the JSON subscription delivers, and insomnia's backend
+    /// tests pin the parse half. Covers nested keyed lists (shared
+    /// network → subnet → range / static-mapping), the option container
+    /// with a leaf-list, a keyed static-route list and a presence leaf,
+    /// numeric leaves (subnet-id, lease, lengths), and the per-VRF list.
+    #[test]
+    fn dhcp_server_json_marshal_contract() {
+        use crate::config::parse::{State, parse};
+
+        let entry = shipped_tree(&["insomnia"]);
+
+        let store = ConfigStore::new();
+        let sn = "set service dhcp-server shared-network-name LAN subnet 10.1.0.0/24";
+        let sn6 = "set service dhcpv6-server shared-network-name LAN subnet 2001:db8:1::/64";
+        for cmd in [
+            "set service dhcp-server listen-interface eth1".to_string(),
+            "set service dhcp-server client-class VOIP vendor-class-id value voip".to_string(),
+            "set service dhcp-server shared-network-name LAN authoritative".to_string(),
+            "set service dhcp-server shared-network-name LAN option name-server 192.0.2.53"
+                .to_string(),
+            "set service dhcp-server shared-network-name LAN option name-server 192.0.2.54"
+                .to_string(),
+            format!("{sn} subnet-id 1"),
+            format!("{sn} lease 3600"),
+            format!("{sn} exclude 10.1.0.100"),
+            format!("{sn} option default-router 10.1.0.1"),
+            format!("{sn} option ip-forwarding"),
+            format!("{sn} option static-route 198.51.100.0/24 next-hop 10.1.0.1"),
+            format!("{sn} range 0 start 10.1.0.100"),
+            format!("{sn} range 0 stop 10.1.0.199"),
+            format!("{sn} static-mapping printer ip-address 10.1.0.10"),
+            format!("{sn} static-mapping printer mac 02:00:00:00:00:01"),
+            "set service dhcp-server vrf red shared-network-name T subnet 10.1.0.0/24 subnet-id 7"
+                .to_string(),
+            "set service dhcpv6-server preference 10".to_string(),
+            "set service dhcpv6-server global-parameters name-server 2001:db8::53".to_string(),
+            format!("{sn6} subnet-id 1"),
+            format!("{sn6} range 0 start 2001:db8:1::100"),
+            format!("{sn6} range 0 stop 2001:db8:1::1ff"),
+            format!("{sn6} prefix-delegation prefix 2001:db8:8000:: prefix-length 48"),
+            format!("{sn6} prefix-delegation prefix 2001:db8:8000:: delegated-length 56"),
+            format!("{sn6} static-mapping c1 duid 00:03:00:01:02:00:00:00:00:01"),
+            format!("{sn6} static-mapping c1 ipv6-address 2001:db8:1::10"),
+        ] {
+            let candidate = store.candidate.borrow().clone();
+            let (code, _, state) = parse(&cmd, entry.clone(), None, State::new());
+            assert_eq!(code, ExecCode::Success, "parse `{cmd}`");
+            set(path_try_trim("set", state.paths), candidate);
+        }
+
+        let subtree = |name: &str| {
+            let mut node = store.candidate.borrow().clone();
+            for seg in ["service", name] {
+                node = node.lookup(&seg.to_string()).expect("subtree exists");
+            }
+            let mut json = String::new();
+            node.json(&mut json);
+            eprintln!("{name} json: {json}");
+            json
+        };
+
+        assert_eq!(
+            subtree("dhcp-server"),
+            r#"{"client-class": [{"name":"VOIP","vendor-class-id":{"value":"voip"}}],"listen-interface": ["eth1"],"shared-network-name": [{"name":"LAN","authoritative":null,"option":{"name-server": ["192.0.2.53","192.0.2.54"]},"subnet": [{"prefix":"10.1.0.0/24","exclude": ["10.1.0.100"],"lease":3600,"option":{"default-router":"10.1.0.1","ip-forwarding":null,"static-route": [{"prefix":"198.51.100.0/24","next-hop":"10.1.0.1"}]},"range": [{"name":0,"start":"10.1.0.100","stop":"10.1.0.199"}],"static-mapping": [{"name":"printer","ip-address":"10.1.0.10","mac":"02:00:00:00:00:01"}],"subnet-id":1}]}],"vrf": [{"name":"red","shared-network-name": [{"name":"T","subnet": [{"prefix":"10.1.0.0/24","subnet-id":7}]}]}]}"#
+        );
+        assert_eq!(
+            subtree("dhcpv6-server"),
+            r#"{"global-parameters":{"name-server": ["2001:db8::53"]},"preference":10,"shared-network-name": [{"name":"LAN","subnet": [{"prefix":"2001:db8:1::/64","prefix-delegation":{"prefix": [{"prefix":"2001:db8:8000::","delegated-length":56,"prefix-length":48}]},"range": [{"name":0,"start":"2001:db8:1::100","stop":"2001:db8:1::1ff"}],"static-mapping": [{"name":"c1","duid":"00:03:00:01:02:00:00:00:00:01","ipv6-address": ["2001:db8:1::10"]}],"subnet-id":1}]}]}"#
         );
     }
 
