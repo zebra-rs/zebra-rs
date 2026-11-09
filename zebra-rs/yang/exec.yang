@@ -520,6 +520,20 @@ module exec {
         }
       }
     }
+    // `show process [<name>]` — the daemons insomnia manages (keepalived
+    // and Kea instances per VRF, the DHCP relay agent), answered by the
+    // external insomnia provider (zebra.show.v1 name "process");
+    // insomnia-gated (design/process.md §6).
+    list process {
+      if-feature feat:insomnia;
+      ext:help "Daemon processes managed by insomnia";
+      ext:presence "Every daemon process managed by insomnia";
+      key "name";
+      leaf name {
+        ext:help "Process name (keepalived@<vrf>, kea-dhcp4@<vrf>, dhcp-relay, ...)";
+        type string;
+      }
+    }
     container evpn {
       ext:help "EVPN information";
       container vni {
@@ -1645,6 +1659,48 @@ module exec {
           ext:help "Prefix-set name";
           type string;
         }
+      }
+    }
+  }
+  // `start|stop|restart process <name>` — operator control of the
+  // daemons insomnia manages (design/process.md §6). Exec mode, not
+  // configure mode: they change no configuration. Routed like show
+  // orders to the insomnia provider "process"; insomnia-gated. `stop`
+  // is an operator hold that lasts until `start` or a reboot; the
+  // configuration's `disable` leaves are the persistent switch.
+  container start {
+    if-feature feat:insomnia;
+    ext:help "Start a daemon process";
+    list process {
+      ext:help "Daemon process managed by insomnia (clears a stop process hold)";
+      key "name";
+      leaf name {
+        ext:help "Process name (see show process)";
+        type string;
+      }
+    }
+  }
+  container stop {
+    if-feature feat:insomnia;
+    ext:help "Stop a daemon process";
+    list process {
+      ext:help "Daemon process managed by insomnia (held down until start process)";
+      key "name";
+      leaf name {
+        ext:help "Process name (see show process)";
+        type string;
+      }
+    }
+  }
+  container restart {
+    if-feature feat:insomnia;
+    ext:help "Restart a daemon process";
+    list process {
+      ext:help "Daemon process managed by insomnia";
+      key "name";
+      leaf name {
+        ext:help "Process name (see show process)";
+        type string;
       }
     }
   }

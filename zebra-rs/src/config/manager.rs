@@ -2043,6 +2043,18 @@ fn is_dhcp(paths: &[CommandPath]) -> bool {
     paths.iter().any(|x| x.name == "dhcp" || x.name == "dhcpv6")
 }
 
+/// `show process [<name>]` and `start|stop|restart process <name>` —
+/// the daemons the external insomnia daemon manages, served by its
+/// `"process"` show provider (zebra.show.v1); insomnia-gated exec
+/// grammar. With no provider connected the not-running fallback
+/// answers.
+fn is_process(paths: &[CommandPath]) -> bool {
+    matches!(
+        paths.first().map(|p| p.name.as_str()),
+        Some("show" | "start" | "stop" | "restart")
+    ) && paths.get(1).is_some_and(|p| p.name == "process")
+}
+
 /// `show pim ...`, `show igmp ...` and `show mroute` — all served by
 /// the PIM task (IGMP membership tracking and the multicast routing
 /// table live inside the PIM module).
@@ -2084,6 +2096,9 @@ fn is_policy(paths: &[CommandPath]) -> bool {
 /// running".
 type ShowProto = (fn(&[CommandPath]) -> bool, &'static str, &'static str);
 const SHOW_PROTOS: &[ShowProto] = &[
+    // First: a process name is a free-form key (`show process
+    // kea-dhcp4@red`) and must not be taken for another protocol's node.
+    (is_process, "process", "Process"),
     (is_bgp, "bgp", "BGP"),
     (is_ospfv3, "ospfv3", "OSPFv3"),
     (is_ospf, "ospf", "OSPF"),
@@ -8473,6 +8488,84 @@ module test-insomnia-gated {
                 code,
                 ExecCode::Success,
                 "`{cmd}` must be rejected on a stock start"
+            );
+        }
+    }
+
+    /// `show process [<name>]` and `start|stop|restart process <name>`
+    /// (exec.yang, insomnia-gated): each maps to the dispatch path the
+    /// insomnia provider matches on, with the name as its argument, is
+    /// redirected like a show order, and routes to the `"process"`
+    /// provider — ahead of any protocol whose node name the free-form
+    /// process name might spell.
+    #[test]
+    fn process_grammar_gated_on_insomnia() {
+        use crate::config::parse::{State, parse};
+        use crate::config::path_from_command;
+
+        let entry = shipped_tree_mode("exec", &["insomnia"]);
+        let cases: Vec<(&str, &str, Vec<&str>)> = vec![
+            ("show process", "/show/process", vec![]),
+            (
+                "show process kea-dhcp4@red",
+                "/show/process",
+                vec!["kea-dhcp4@red"],
+            ),
+            ("show process dhcp", "/show/process", vec!["dhcp"]),
+            (
+                "start process keepalived@default",
+                "/start/process",
+                vec!["keepalived@default"],
+            ),
+            (
+                "stop process dhcp-relay",
+                "/stop/process",
+                vec!["dhcp-relay"],
+            ),
+            (
+                "restart process kea-dhcp6@blue",
+                "/restart/process",
+                vec!["kea-dhcp6@blue"],
+            ),
+        ];
+        for (cmd, want_path, want_args) in &cases {
+            let (code, _, state) = parse(cmd, entry.clone(), None, State::new());
+            assert_eq!(code, ExecCode::Success, "parse `{cmd}`");
+            assert!(state.show, "`{cmd}` is redirected like a show order");
+            let (path, args) = path_from_command(&state.paths);
+            assert_eq!(path, *want_path, "path for `{cmd}`");
+            let args: Vec<&str> = args.0.iter().map(String::as_str).collect();
+            assert_eq!(args, *want_args, "args for `{cmd}`");
+            assert_eq!(show_proto(&state.paths), "process", "routing for `{cmd}`");
+            assert_eq!(show_proto_name(&state.paths), "Process");
+        }
+
+        // The actions need a name.
+        for cmd in ["start process", "stop process", "restart process"] {
+            let (code, _, _) = parse(cmd, entry.clone(), None, State::new());
+            assert_ne!(code, ExecCode::Success, "`{cmd}` needs a name");
+        }
+
+        // Only a leading start/stop/restart is an action: config leaves of
+        // the same name stay plain set lines.
+        let config = shipped_tree(&["insomnia"]);
+        let (code, _, state) = parse(
+            "set service dhcp-server shared-network-name LAN subnet 10.1.0.0/24 range 0 start 10.1.0.100",
+            config,
+            None,
+            State::new(),
+        );
+        assert_eq!(code, ExecCode::Success);
+        assert!(!state.show, "a range's `start` leaf is not an action");
+
+        // Stock start: the whole tree is absent.
+        let entry = shipped_tree_mode("exec", &[]);
+        for cmd in ["show process", "stop process dhcp-relay"] {
+            let (code, _, _) = parse(cmd, entry.clone(), None, State::new());
+            assert_ne!(
+                code,
+                ExecCode::Success,
+                "`{cmd}` gated off without --feature insomnia"
             );
         }
     }
