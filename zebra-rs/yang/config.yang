@@ -5863,26 +5863,49 @@ module config {
       }
       container ipv4 {
         ext:help "IPv4 configuration";
-        leaf-list address {
+        list address {
           ext:help "IPv4 interface address, or dhcp to acquire one";
-          type union {
-            type inet:ipv4-prefix;
-            type enumeration {
-              enum dhcp;
-            }
+          key "address";
+          ordered-by user;
+          must "not(../address[address = 'dhcp']) or count(../address) = 1" {
+            error-message
+              "address dhcp cannot be combined with a static address";
+            description
+              "An interface is addressed by DHCP or statically, not
+               both. The schema library parses `must` and does not
+               evaluate it: the commit check
+               `config::check::address_dhcp_exclusive` enforces this.";
           }
           description
-            "Interface IPv4 addresses. Multiple addresses may be
-             configured; the kernel marks an address secondary when it
-             shares its mask and subnet with an existing primary on the
-             interface (shown by `show interface`). Within a subnet the
-             first address installed becomes the primary, so on a full
-             config replay the leaf-list order decides.
+            "Interface IPv4 addresses, one entry per address. A keyed
+             list and not a leaf-list so that a command names exactly
+             one address (`address 10.0.0.1/24`, `address dhcp`): the
+             CLI repeats a leaf-list's value position, which accepted
+             `address dhcp dhcp`.
 
-             `dhcp` leases an address from a DHCP server (the dhcpc
-             task, docs/design/dhcp-client.md), beside any configured
-             here. The lease's address, default route and classless
-             routes go through the RIB; `dhcp-options` tunes the client.";
+             Multiple static addresses may be configured; the kernel
+             marks an address secondary when it shares its mask and
+             subnet with an existing primary on the interface (shown
+             by `show interface`). Within a subnet the first address
+             installed becomes the primary, so on a full config replay
+             the list order decides: `ordered-by user` keeps the
+             entries in the order they were set, not sorted by address.
+
+             `dhcp` leases the interface's address from a DHCP server
+             instead (the dhcpc task, docs/design/dhcp-client.md), and
+             is then the only entry: a commit holding it beside a
+             static address is refused. The lease's address, default
+             route and classless routes go through the RIB;
+             `dhcp-options` tunes the client.";
+          leaf address {
+            ext:help "IPv4 interface address, or dhcp to acquire one";
+            type union {
+              type inet:ipv4-prefix;
+              type enumeration {
+                enum dhcp;
+              }
+            }
+          }
         }
         container dhcp-options {
           ext:help "DHCP client options";
@@ -5945,15 +5968,22 @@ module config {
       }
       container ipv6 {
         ext:help "IPv6 configuration";
-        leaf-list address {
+        list address {
           ext:help "IPv6 interface address";
-          type inet:ipv6-prefix;
+          key "address";
+          ordered-by user;
           description
-            "IPv6 addresses assigned to the interface. Unlike IPv4,
-             IPv6 interfaces routinely hold several addresses (a
+            "IPv6 addresses assigned to the interface, one entry per
+             address (a keyed list for the reason given on the IPv4
+             `address` list), kept in the order they were set. Unlike
+             IPv4, IPv6 interfaces routinely hold several addresses (a
              link-local plus one or more globals); each entry is
              installed to the kernel independently and removing one
              leaves the others in place.";
+          leaf address {
+            ext:help "IPv6 interface address";
+            type inet:ipv6-prefix;
+          }
         }
       }
     }

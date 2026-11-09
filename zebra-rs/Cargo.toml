@@ -143,8 +143,10 @@ tower = { version = "0.5", default-features = false, features = ["util"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 console-subscriber = "0.5"
 # 2.2 evaluates if-feature on enum arms (feature-gated union values).
-libyang = "2.2"
-#libyang = { git = "https://github.com/zebra-rs/libyang", rev = "1dada0e" }
+# Pinned to zebra-rs/libyang#37 until 2.3 is published: it carries
+# `ordered-by user` to the entry tree (the interface address lists).
+#libyang = "2.2"
+libyang = { git = "https://github.com/zebra-rs/libyang", rev = "d2acdc65c255230e61a6d93edf44ee88e5b1be32" }
 #libyang = { path = "../../libyang" }
 regex = "1.10"
 similar = "3"

@@ -69,15 +69,31 @@ Feature: DHCPv4 client on a WAN interface (interface ipv4 address dhcp)
     And show command "show dhcp client leases" in namespace "r1" should eventually contain "State:        bound"
     And ping from "r1" to "198.51.100.1" should eventually succeed
 
-  Scenario: With a static address beside it, the client still talks from the leased address
+  Scenario: A static address beside the lease is refused
     Given the test topology exists
-    # The static address goes in first, so it is the interface's primary
-    # address and the lease is a secondary: what the kernel would pick as
-    # the source if the client did not name the leased one. The server
-    # drops DHCP from any other source.
+    # An interface is addressed by DHCP or statically, not both (the
+    # `must` on the address list). The commit is refused and discarded:
+    # nothing of it reaches the running config or the interface, and the
+    # lease it would have sat beside is as it was.
+    Then applying command "set interface wan0 ipv4 address 192.0.2.5/24" in namespace "r1" should be rejected with "interface wan0 ipv4 address: dhcp cannot be combined with a static address (192.0.2.5/24); delete one or the other"
+    And show command "show running-config formal" in namespace "r1" should contain "set interface wan0 ipv4 address dhcp"
+    And show command "show running-config formal" in namespace "r1" should not contain "192.0.2.5/24"
+    And show command "show interface wan0" in namespace "r1" should not contain "192.0.2.5/24"
+    And show command "show dhcp client leases" in namespace "r1" should contain "State:        bound"
+    And ping from "r1" to "198.51.100.1" should eventually succeed
+
+  Scenario: With another address ahead of it, the client still talks from the leased address
+    Given the test topology exists
+    # An address zebra-rs did not configure (one of its own beside
+    # `address dhcp` is refused, above) goes in first, so it is the
+    # interface's primary address and the lease is a secondary: what the
+    # kernel would pick as the source if the client did not name the
+    # leased one. The server drops DHCP from any other source.
     Then show command "release dhcp interface wan0" in namespace "r1" should contain "Released"
-    When I apply command "set interface wan0 ipv4 address 192.0.2.5/24" in namespace "r1"
-    And I execute "tests/scripts/dhcp_server.sh dhcp_client require-source 192.0.2.100" in namespace "s1"
+    And show command "show interface wan0" in namespace "r1" should eventually not contain "192.0.2.100"
+    When I execute "ip addr add 192.0.2.5/24 dev wan0" in namespace "r1"
+    Then show command "show interface wan0" in namespace "r1" should eventually contain "inet 192.0.2.5/24"
+    When I execute "tests/scripts/dhcp_server.sh dhcp_client require-source 192.0.2.100" in namespace "s1"
     Then show command "renew dhcp interface wan0" in namespace "r1" should contain "Renewing"
     And show command "show dhcp client leases" in namespace "r1" should eventually contain "State:        bound"
     And show command "show interface wan0" in namespace "r1" should eventually contain "inet 192.0.2.100/24 secondary dhcp"
@@ -87,32 +103,9 @@ Feature: DHCPv4 client on a WAN interface (interface ipv4 address dhcp)
     # Deleting the primary makes the kernel purge its secondaries, the
     # lease's address among them: the client notices and leases again.
     When I execute "tests/scripts/dhcp_server.sh dhcp_client any-source" in namespace "s1"
-    And I apply command "delete interface wan0 ipv4 address 192.0.2.5/24" in namespace "r1"
+    And I execute "ip addr del 192.0.2.5/24 dev wan0" in namespace "r1"
     Then show command "show interface wan0" in namespace "r1" should eventually contain "inet 192.0.2.100/24 dhcp valid-lft"
-    And show command "show dhcp client leases" in namespace "r1" should eventually contain "State:        bound"
-
-  Scenario: An address both leased and configured belongs to the configuration
-    Given the test topology exists
-    # Configured after the lease: it becomes permanent, and renewals no
-    # longer put a lifetime on it.
-    When I apply command "set interface wan0 ipv4 address 192.0.2.100/24" in namespace "r1"
-    Then show command "show interface wan0" in namespace "r1" should eventually contain "inet 192.0.2.100/24 dhcp"
-    And show command "show interface wan0" in namespace "r1" should not contain "192.0.2.100/24 dhcp valid-lft"
-    And show command "renew dhcp interface wan0" in namespace "r1" should contain "Renewing"
-    And show command "show dhcp client leases" in namespace "r1" should eventually contain "State:        bound"
-    And show command "show interface wan0" in namespace "r1" should not contain "192.0.2.100/24 dhcp valid-lft"
-    # The configuration lets go: the lease's lifetime is back on it.
-    When I apply command "delete interface wan0 ipv4 address 192.0.2.100/24" in namespace "r1"
-    Then show command "show interface wan0" in namespace "r1" should eventually contain "inet 192.0.2.100/24 dhcp valid-lft"
-    # Configured again, and the lease ends: the address stays, its route goes.
-    When I apply command "set interface wan0 ipv4 address 192.0.2.100/24" in namespace "r1"
-    Then show command "release dhcp interface wan0" in namespace "r1" should contain "Released"
-    And show command "show ip route" in namespace "r1" should eventually not contain "0.0.0.0/0"
-    And show command "show interface wan0" in namespace "r1" should contain "inet 192.0.2.100/24"
-    And show command "show interface wan0" in namespace "r1" should not contain "192.0.2.100/24 dhcp"
-    When I apply command "delete interface wan0 ipv4 address 192.0.2.100/24" in namespace "r1"
-    Then show command "show interface wan0" in namespace "r1" should eventually not contain "192.0.2.100"
-    And show command "renew dhcp interface wan0" in namespace "r1" should contain "Renewing"
+    And show command "show interface wan0" in namespace "r1" should not contain "192.0.2.5/24"
     And show command "show dhcp client leases" in namespace "r1" should eventually contain "State:        bound"
     And ping from "r1" to "198.51.100.1" should eventually succeed
 

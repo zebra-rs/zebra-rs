@@ -1,8 +1,9 @@
 # Multiple IPv4 Addresses and the Secondary Flag
 
 An interface may carry any number of IPv4 addresses. The
-`ipv4 address` leaf of the [`interface`](ch-00-02-interface-configuration.md)
-block is a leaf-list — repeat it once per address:
+`ipv4 address` node of the [`interface`](ch-00-02-interface-configuration.md)
+block is a list keyed by the address — repeat it once per address (a
+command takes exactly one):
 
 ```
 interface enp0s6 {

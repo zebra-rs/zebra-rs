@@ -1873,17 +1873,16 @@ pub async fn link_config_exec(
 
     // let func = self.builder.map.get()
     if path == "/interface/ipv4/address" {
-        // `address` is a leaf-list: each commit line carries one value,
-        // but drain the deque so a bundled delivery would not silently
-        // drop trailing values.
+        // `address` is a keyed list: each commit line carries one entry's
+        // key, but drain the deque so a bundled delivery would not
+        // silently drop trailing values.
         //
-        // `dhcp` is the feature-gated enum arm of the address union
-        // (present only under `--feature insomnia`). The daemon-side DHCP
-        // client is not implemented yet, so the value is accepted
-        // without kernel action — and it must be consumed here: an
-        // unparsed value left in the deque would read as the
-        // value-less delete form below, which removes every
-        // configured address on the interface.
+        // `dhcp` is the enum arm of the key's union. The DHCP client
+        // task (`dhcpc`) acts on it; the RIB takes no kernel action for
+        // it here. It must be consumed all the same: an unparsed value
+        // left in the deque would read as the value-less delete form
+        // below, which removes every configured address on the
+        // interface.
         let mut dhcp = false;
         let mut values: Vec<Ipv4Net> = Vec::new();
         while let Some(value) = args.string() {
@@ -2004,10 +2003,10 @@ pub async fn link_config_exec(
         // so recompute the auto router-id here.
         rib.router_id_update();
     } else if path == "/interface/ipv6/address" {
-        // `address` is a leaf-list: one callback can carry several
-        // addresses (config-file load, multi-value commit), so drain the
-        // args deque and apply each value independently — reading a
-        // single value would silently drop the rest.
+        // `address` is a keyed list: each commit line carries one
+        // entry's key. Drain the args deque all the same and apply each
+        // value independently, so a bundled delivery would not silently
+        // drop trailing values.
         let first = args.v6net().context(IPV6_ADDR_ERR)?;
         let mut v6addrs = vec![first];
         while let Some(more) = args.v6net() {

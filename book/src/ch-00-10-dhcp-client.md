@@ -17,10 +17,13 @@ source:
 
 - **The address** is installed with the lease's lifetime, so the kernel
   removes it on time even if zebra-rs is not running. `show interface`
-  tags it `dhcp`. It can sit beside configured addresses on the same
-  interface; the client always talks to the server from the leased
-  address. An address that is both leased and configured belongs to the
-  configuration: it has no lifetime and stays when the lease ends.
+  tags it `dhcp`. `address dhcp` is the interface's only IPv4 address
+  entry: an interface is addressed by DHCP or statically, not both, and
+  a commit holding `dhcp` beside a static address is refused (`dhcp
+  cannot be combined with a static address`) — delete the one before
+  setting the other. The client always talks to the server from the
+  leased address, also when an address added outside zebra-rs is the
+  interface's primary.
 - **The default route** is a `D` route through the lease's router, at
   administrative distance 210. That is above every routing protocol, so a
   default learned from BGP or OSPF, or a static one, wins over it.

@@ -773,6 +773,15 @@ pub fn parse(
         .get("ext:non-empty")
         .cloned()
         .unwrap_or_default();
+    // `ordered-by user` on a list node (RFC 7950 §7.7.7): its entries
+    // keep the order they were entered in. Carried on the CommandPath
+    // that names the list so `config_set_dir` can stamp it onto the
+    // list's Config node, where `config_set_key` skips the key sort.
+    let ordered_by_user = mx
+        .matched_entry
+        .list_attr
+        .as_ref()
+        .is_some_and(|attr| attr.ordered_by_user);
     // Choice exclusivity (RFC 7950 §7.9.3): when the matched node was
     // contributed by a `case`, carry the names of the siblings from the
     // choice's other cases so `config_set_dir` deletes them when this
@@ -824,6 +833,7 @@ pub fn parse(
             sort_priority,
             non_empty,
             choice_exclude,
+            ordered_by_user,
         }
     } else {
         CommandPath {
@@ -834,6 +844,7 @@ pub fn parse(
             sort_priority,
             non_empty,
             choice_exclude,
+            ordered_by_user,
         }
     };
 
