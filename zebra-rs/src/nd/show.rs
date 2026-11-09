@@ -11,6 +11,10 @@
 //!
 //! Every command also accepts a trailing `json` keyword (surfaced as
 //! the `json` flag) for machine-readable output.
+//!
+//! An interface running the RA host (`ipv6 address autoconf`) gets an
+//! `RA host` section: its routers, prefixes, SLAAC addresses and DNS
+//! information, and JSON `ra_host`.
 
 use std::collections::BTreeSet;
 use std::fmt::Write;
@@ -21,6 +25,7 @@ use serde::Serialize;
 use crate::config::{Args, Builder};
 
 use super::engine::{LinkLocalHold, NdIfCounters, NdNeighbor};
+use super::host::{Host, RaRoute};
 use super::inst::{Nd, ShowCallback};
 
 impl Nd {
@@ -155,6 +160,8 @@ struct JsonNeighbor {
 struct JsonCounters {
     tx_ra_unsolicited: u64,
     tx_ra_solicited: u64,
+    /// Router Solicitations the RA host sent.
+    tx_rs: u64,
     rx_ra: u64,
     rx_rs: u64,
     rx_ns: u64,
@@ -191,11 +198,65 @@ struct JsonRaScheduler {
 }
 
 #[derive(Serialize)]
+struct JsonRouter {
+    address: String,
+    preference: String,
+    lifetime: u16,
+    expires_in_secs: u64,
+    /// A leg of the default route the RA host installed.
+    installed: bool,
+}
+
+#[derive(Serialize)]
+struct JsonPrefix {
+    prefix: String,
+    /// `null`: forever.
+    valid_secs: Option<u64>,
+}
+
+#[derive(Serialize)]
+struct JsonSlaac {
+    address: String,
+    prefix: String,
+    /// `null`: forever.
+    valid_secs: Option<u64>,
+    preferred_secs: Option<u64>,
+}
+
+#[derive(Serialize)]
+struct JsonTimed {
+    value: String,
+    /// `null`: forever.
+    expires_in_secs: Option<u64>,
+}
+
+/// The RA host on an interface (`ipv6 address autoconf`).
+#[derive(Serialize)]
+struct JsonRaHost {
+    autoconf: bool,
+    vrf: Option<String>,
+    default_route_distance: u8,
+    no_default_route: bool,
+    solicitations_sent: u64,
+    /// When the next Router Solicitation is due; `null` once the burst
+    /// is over or a router has answered.
+    next_solicitation_in_secs: Option<u64>,
+    routers: Vec<JsonRouter>,
+    on_link_prefixes: Vec<JsonPrefix>,
+    slaac_addresses: Vec<JsonSlaac>,
+    dns_servers: Vec<JsonTimed>,
+    dns_search: Vec<JsonTimed>,
+    mtu: Option<u32>,
+}
+
+#[derive(Serialize)]
 struct JsonInterface {
     name: String,
     ifindex: u32,
     ra_enabled: bool,
     ra_scheduler: Option<JsonRaScheduler>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ra_host: Option<JsonRaHost>,
     counters: JsonCounters,
     kernel_counters: Option<KernelNdCounters>,
     neighbors: Vec<JsonNeighbor>,
@@ -226,7 +287,182 @@ fn all_ifindexes(nd: &super::engine::NdEngine) -> BTreeSet<u32> {
     for &k in nd.neighbors().keys() {
         set.insert(k);
     }
+    for &k in nd.hosts().hosts().keys() {
+        set.insert(k);
+    }
     set
+}
+
+/// Seconds until `at`; `None` (forever) stays `None`.
+fn secs_until(now: Instant, at: Option<Instant>) -> Option<u64> {
+    at.map(|at| at.saturating_duration_since(now).as_secs())
+}
+
+/// `at` as a countdown, or `forever`.
+fn until_or_forever(now: Instant, at: Option<Instant>) -> String {
+    at.map_or_else(|| "forever".to_string(), |at| until(now, at))
+}
+
+/// Whether router `gateway` on `ifindex` is a leg of the default route
+/// the RA host installed in `host`'s VRF.
+fn router_installed(
+    nd: &super::engine::NdEngine,
+    host: &Host,
+    ifindex: u32,
+    gateway: std::net::Ipv6Addr,
+) -> bool {
+    matches!(
+        nd.hosts().installed().get(&(host.vrf.clone(), ipnet::Ipv6Net::default())),
+        Some(RaRoute::Routers { legs, .. }) if legs.contains(&(gateway, ifindex))
+    )
+}
+
+/// Render the RA host section of an interface's block (text).
+fn render_host_text(
+    out: &mut String,
+    nd: &super::engine::NdEngine,
+    ifindex: u32,
+    ifname: &str,
+    now: Instant,
+) -> std::fmt::Result {
+    let Some(host) = nd.hosts().host(ifindex) else {
+        return Ok(());
+    };
+    let cfg = nd.hosts().config(ifname);
+    writeln!(out, "  RA host: enabled (autoconf)")?;
+    writeln!(
+        out,
+        "    default route distance {}{}{}",
+        cfg.distance,
+        if cfg.no_default_route {
+            ", no-default-route"
+        } else {
+            ""
+        },
+        host.vrf
+            .as_ref()
+            .map_or(String::new(), |vrf| format!(", vrf {vrf}"))
+    )?;
+    let next = match (host.rs_next, nd.link_local_hold(ifindex)) {
+        (Some(_), Some(hold)) => format!("held ({hold})"),
+        (Some(at), None) => format!("next in {}", until(now, at)),
+        (None, _) => "done".to_string(),
+    };
+    writeln!(
+        out,
+        "    router solicitations sent {}, {}",
+        host.rs_total, next
+    )?;
+    writeln!(out, "    Default routers ({}):", host.routers.len())?;
+    for (gateway, router) in &host.routers {
+        writeln!(
+            out,
+            "      {} preference {}, lifetime {}s, expires in {}{}",
+            gateway,
+            router.preference,
+            router.lifetime,
+            until(now, router.expires),
+            if router_installed(nd, host, ifindex, *gateway) {
+                ", installed"
+            } else {
+                ""
+            }
+        )?;
+    }
+    writeln!(out, "    On-link prefixes ({}):", host.on_link.len())?;
+    for (prefix, valid) in &host.on_link {
+        writeln!(
+            out,
+            "      {} valid {}",
+            prefix,
+            until_or_forever(now, *valid)
+        )?;
+    }
+    writeln!(out, "    SLAAC addresses ({}):", host.slaac.len())?;
+    for slaac in host.slaac.values() {
+        writeln!(
+            out,
+            "      {} valid {}, preferred {}",
+            slaac.addr,
+            until_or_forever(now, slaac.valid),
+            until_or_forever(now, slaac.preferred)
+        )?;
+    }
+    if !host.dns.is_empty() {
+        let servers: Vec<String> = host.dns.keys().map(|a| a.to_string()).collect();
+        writeln!(out, "    DNS servers: {}", servers.join(" "))?;
+    }
+    if !host.search.is_empty() {
+        let domains: Vec<&str> = host.search.keys().map(String::as_str).collect();
+        writeln!(out, "    DNS search: {}", domains.join(" "))?;
+    }
+    if let Some(mtu) = host.mtu {
+        writeln!(out, "    MTU (advertised, not applied): {mtu}")?;
+    }
+    Ok(())
+}
+
+fn build_host_json(
+    nd: &super::engine::NdEngine,
+    ifindex: u32,
+    ifname: &str,
+    now: Instant,
+) -> Option<JsonRaHost> {
+    let host = nd.hosts().host(ifindex)?;
+    let cfg = nd.hosts().config(ifname);
+    let timed = |map: Vec<(String, Option<Instant>)>| {
+        map.into_iter()
+            .map(|(value, at)| JsonTimed {
+                value,
+                expires_in_secs: secs_until(now, at),
+            })
+            .collect()
+    };
+    Some(JsonRaHost {
+        autoconf: cfg.autoconf,
+        vrf: host.vrf.clone(),
+        default_route_distance: cfg.distance,
+        no_default_route: cfg.no_default_route,
+        solicitations_sent: host.rs_total,
+        next_solicitation_in_secs: secs_until(now, host.rs_next),
+        routers: host
+            .routers
+            .iter()
+            .map(|(gateway, router)| JsonRouter {
+                address: gateway.to_string(),
+                preference: router.preference.to_string(),
+                lifetime: router.lifetime,
+                expires_in_secs: router.expires.saturating_duration_since(now).as_secs(),
+                installed: router_installed(nd, host, ifindex, *gateway),
+            })
+            .collect(),
+        on_link_prefixes: host
+            .on_link
+            .iter()
+            .map(|(prefix, valid)| JsonPrefix {
+                prefix: prefix.to_string(),
+                valid_secs: secs_until(now, *valid),
+            })
+            .collect(),
+        slaac_addresses: host
+            .slaac
+            .iter()
+            .map(|(prefix, slaac)| JsonSlaac {
+                address: slaac.addr.to_string(),
+                prefix: prefix.to_string(),
+                valid_secs: secs_until(now, slaac.valid),
+                preferred_secs: secs_until(now, slaac.preferred),
+            })
+            .collect(),
+        dns_servers: timed(
+            host.dns
+                .iter()
+                .map(|(a, at)| (a.to_string(), *at))
+                .collect(),
+        ),
+        dns_search: timed(host.search.iter().map(|(d, at)| (d.clone(), *at)).collect()),
+        mtu: host.mtu,
+    })
 }
 
 /// Render one interface's detail block (text).
@@ -305,16 +541,25 @@ fn render_interface_text(
         writeln!(out, "  Router advertisement: disabled")?;
     }
 
+    // ── RA host ─────────────────────────────────────────────────────────
+    render_host_text(out, nd, ifindex, &ifname, now)?;
+
     // ── Daemon-observed counters ─────────────────────────────────────────
     let empty_counters = NdIfCounters::default();
     let c = nd.counters().get(&ifindex).unwrap_or(&empty_counters);
     let tx_ra = c.tx_ra_unsolicited + c.tx_ra_solicited;
+    // Only the RA host sends solicitations: `-` where it never ran.
+    let tx_rs = if c.tx_rs > 0 || nd.hosts().host(ifindex).is_some() {
+        c.tx_rs.to_string()
+    } else {
+        "-".to_string()
+    };
 
     writeln!(out, "  Counters (daemon-observed)        Sent  Received")?;
     writeln!(
         out,
         "    Router solicitations         {:>7}  {:>8}",
-        "-", c.rx_rs
+        tx_rs, c.rx_rs
     )?;
     writeln!(
         out,
@@ -463,6 +708,7 @@ fn build_interface_json(nd: &super::engine::NdEngine, ifindex: u32, now: Instant
     let counters = JsonCounters {
         tx_ra_unsolicited: c.tx_ra_unsolicited,
         tx_ra_solicited: c.tx_ra_solicited,
+        tx_rs: c.tx_rs,
         rx_ra: c.rx_ra,
         rx_rs: c.rx_rs,
         rx_ns: c.rx_ns,
@@ -505,11 +751,14 @@ fn build_interface_json(nd: &super::engine::NdEngine, ifindex: u32, now: Instant
         })
         .collect();
 
+    let ra_host = build_host_json(nd, ifindex, &ifname, now);
+
     JsonInterface {
         name: ifname,
         ifindex,
         ra_enabled,
         ra_scheduler,
+        ra_host,
         counters,
         kernel_counters,
         neighbors,
@@ -997,5 +1246,91 @@ Icmp6InUnrelated                    \t99
             json["ra_scheduler"]["link_local_hold"],
             serde_json::json!("dad_failed")
         );
+    }
+
+    /// An interface running the RA host shows its routers, prefixes,
+    /// SLAAC address and DNS information; one without shows no section
+    /// and keeps `-` for the solicitations it never sends.
+    #[test]
+    fn the_ra_host_section() {
+        use nd_packet::{NdOption, PrefixInfo, PrefixInfoFlags, Rdnss, RouterAdvert};
+        let start = t0();
+        let mut eng = NdEngine::new();
+        let mut l = link("wan0", 2);
+        l.mac = Some([0x52, 0x54, 0x00, 0x12, 0x34, 0x56].into());
+        eng.process_link_add(&l, start);
+        eng.process_link_add(&link("eth1", 3), start);
+
+        let mut plain = String::new();
+        render_interface_text(&mut plain, &eng, 2, start).unwrap();
+        assert!(!plain.contains("RA host"), "{plain}");
+
+        eng.hosts_mut()
+            .update_config("wan0", start, |cfg| cfg.autoconf = true);
+        let ra = RouterAdvert {
+            cur_hop_limit: 64,
+            flags: Default::default(),
+            router_lifetime: 1800,
+            reachable_time: 0,
+            retrans_timer: 0,
+            options: vec![
+                NdOption::PrefixInformation(PrefixInfo {
+                    prefix_length: 64,
+                    flags: PrefixInfoFlags::L | PrefixInfoFlags::A,
+                    valid_lifetime: 3600,
+                    preferred_lifetime: 1800,
+                    prefix: "2001:db8:1::".parse().unwrap(),
+                }),
+                NdOption::Rdnss(Rdnss {
+                    lifetime: 600,
+                    servers: vec!["2001:db8::53".parse().unwrap()],
+                }),
+            ],
+        };
+        eng.on_recv(
+            crate::nd::NdRecv::RouterAdvert {
+                ifindex: 2,
+                src: "fe80::1".parse().unwrap(),
+                ra,
+            },
+            start,
+        );
+
+        let mut out = String::new();
+        render_interface_text(&mut out, &eng, 2, start).unwrap();
+        for line in [
+            "  RA host: enabled (autoconf)",
+            "    default route distance 210",
+            "    router solicitations sent 0, done",
+            "      fe80::1 preference medium, lifetime 1800s, expires in 30m, installed",
+            "      2001:db8:1::/64 valid 1h",
+            "      2001:db8:1:0:5054:ff:fe12:3456 valid 1h, preferred 30m",
+            "    DNS servers: 2001:db8::53",
+            "    Router solicitations               0",
+        ] {
+            assert!(out.contains(line), "missing `{line}` in:\n{out}");
+        }
+
+        let json = build_interface_json(&eng, 2, start);
+        let json: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&json).unwrap()).unwrap();
+        let host = &json["ra_host"];
+        assert_eq!(host["autoconf"], serde_json::json!(true));
+        assert_eq!(host["routers"][0]["address"], serde_json::json!("fe80::1"));
+        assert_eq!(host["routers"][0]["installed"], serde_json::json!(true));
+        assert_eq!(
+            host["slaac_addresses"][0]["address"],
+            serde_json::json!("2001:db8:1:0:5054:ff:fe12:3456")
+        );
+        assert_eq!(
+            host["dns_servers"][0]["value"],
+            serde_json::json!("2001:db8::53")
+        );
+
+        // An interface without the host has no `ra_host` key at all.
+        let other = build_interface_json(&eng, 3, start);
+        let other: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&other).unwrap()).unwrap();
+        assert!(other.get("ra_host").is_none());
     }
 }

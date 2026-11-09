@@ -1117,6 +1117,18 @@ impl ConfigManager {
                 nd = true;
                 spawn_nd(self);
             }
+            // The RA host lives in ND too (`interface X ipv6 address
+            // autoconf`, `interface X ipv6 ra-options …`). The options
+            // count, as for the DHCP client below: committed ahead of
+            // `autoconf`, they would never reach a task spawned later.
+            if !nd
+                && op == ConfigOp::Set
+                && line.starts_with("interface ")
+                && (line.contains(" ipv6 address autoconf") || line.contains(" ipv6 ra-options "))
+            {
+                nd = true;
+                spawn_nd(self);
+            }
             // The DHCP client is configured per interface too (`interface
             // X ipv4 address dhcp`, `interface X ipv4 dhcp-options …`):
             // spawn on the first line of either, so options committed
@@ -7297,6 +7309,42 @@ module test-insomnia-gated {
         for line in [
             "set interface eth0 ipv4 dhcp-options default-route-distance 0",
             "set interface eth0 ipv4 dhcp-options reject not-an-address",
+        ] {
+            let (code, _, _) = parse(line, entry.clone(), None, State::new());
+            assert_ne!(code, ExecCode::Success, "`{line}` must be refused");
+        }
+    }
+
+    /// End-to-end CLI grammar of the RA host's configuration: `address
+    /// autoconf` and the `ra-options` leaves parse on a stock start,
+    /// beside the plain prefix form.
+    #[test]
+    fn address_autoconf_and_ra_options_parse_on_a_stock_start() {
+        use crate::config::ExecCode;
+        use crate::config::parse::{State, parse};
+
+        let mut yang = YangStore::new();
+        yang.add_path(concat!(env!("CARGO_MANIFEST_DIR"), "/yang"));
+        enable_features(&mut yang, &[]);
+        yang.read_with_resolve("configure")
+            .expect("configure loads");
+        yang.identity_resolve();
+        let module = yang.find_module("configure").expect("configure module");
+        let entry = to_entry(&yang, module);
+
+        for line in [
+            "set interface eth0 ipv6 address autoconf",
+            "set interface eth0 ipv6 address 2001:db8::1/64",
+            "set interface eth0 ipv6 ra-options default-route-distance 220",
+            "set interface eth0 ipv6 ra-options no-default-route",
+        ] {
+            let (code, _, _) = parse(line, entry.clone(), None, State::new());
+            assert_eq!(code, ExecCode::Success, "`{line}` must parse");
+        }
+        for line in [
+            "set interface eth0 ipv6 address dhcp",
+            "set interface eth0 ipv6 ra-options default-route-distance 0",
+            "set interface eth0 ipv6 ra-options default-route-distance 256",
         ] {
             let (code, _, _) = parse(line, entry.clone(), None, State::new());
             assert_ne!(code, ExecCode::Success, "`{line}` must be refused");

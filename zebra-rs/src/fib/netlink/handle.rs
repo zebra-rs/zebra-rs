@@ -370,8 +370,17 @@ pub(crate) fn route_protocol(rtype: RibType) -> RouteProtocol {
         RibType::Isis => RouteProtocol::Isis,
         // What `ip route` shows for any DHCP client's routes.
         RibType::DhcpClient => RouteProtocol::Dhcp,
+        // What the kernel's own RA processing installs under.
+        RibType::Ra => RouteProtocol::Ra,
         _ => RouteProtocol::Zebra,
     }
+}
+
+/// An IPv6 route whose nexthop names no gateway, installed as `dev <oif>`
+/// with no kernel nexthop object: an oif-only seg6 H.Encaps, or an on-link
+/// route pinned to its interface (an RA's on-link prefix).
+fn oif_only(uni: &NexthopUni) -> bool {
+    uni.addr.is_unspecified() && (!uni.segs.is_empty() || uni.ifindex().is_some())
 }
 
 fn sid_route_protocol(sid: &crate::rib::Sid) -> RouteProtocol {
@@ -2125,28 +2134,31 @@ impl FibHandle {
         }
 
         if let Nexthop::Uni(uni) = &nexthop
-            && !uni.segs.is_empty()
-            && uni.addr.is_unspecified()
+            && oif_only(uni)
         {
-            // Oif-only recursive seg6 H.Encaps — see the same branch in
-            // `route_ipv4_add_uni` for the rationale. No gateway; embed the
-            // seg6 encap and let the kernel re-route by the outer SID DA.
-            // Must precede the `use_nhid` arm: an unspecified-addr nexthop
-            // has gid 0, which the sanity check below would reject.
+            // Oif-only: no gateway, so no kernel nexthop object (see
+            // `nexthop_add`), only `dev <oif>`. Either a recursive seg6
+            // H.Encaps — see the same branch in `route_ipv4_add_uni` for
+            // the rationale; embed the seg6 encap and let the kernel
+            // re-route by the outer SID DA — or a plain on-link route (an
+            // RA's on-link prefix). Must precede the `use_nhid` arm: the
+            // route can name no nh_id.
             if let Some(ifindex) = uni.ifindex() {
                 msg.attributes.push(RouteAttribute::Oif(ifindex));
             }
-            let encap_type = uni
-                .encap_type
-                .unwrap_or(isis_packet::srv6::EncapType::HEncap);
-            match super::srv6::build_seg6_attrs(&uni.segs, encap_type) {
-                Ok((encap, encap_type_attr)) => {
-                    msg.attributes.push(encap);
-                    msg.attributes.push(encap_type_attr);
-                }
-                Err(e) => {
-                    tracing::warn!("SRv6 oif-only encap build failed for {prefix}: {e:#}");
-                    return false;
+            if !uni.segs.is_empty() {
+                let encap_type = uni
+                    .encap_type
+                    .unwrap_or(isis_packet::srv6::EncapType::HEncap);
+                match super::srv6::build_seg6_attrs(&uni.segs, encap_type) {
+                    Ok((encap, encap_type_attr)) => {
+                        msg.attributes.push(encap);
+                        msg.attributes.push(encap_type_attr);
+                    }
+                    Err(e) => {
+                        tracing::warn!("SRv6 oif-only encap build failed for {prefix}: {e:#}");
+                        return false;
+                    }
                 }
             }
             msg.attributes.push(RouteAttribute::Priority(uni.metric));
@@ -2485,11 +2497,11 @@ impl FibHandle {
         }
 
         if let Nexthop::Uni(uni) = &nexthop
-            && !uni.segs.is_empty()
-            && uni.addr.is_unspecified()
+            && oif_only(uni)
         {
-            // Oif-only recursive seg6 encap: delete by {dest, table, oif}
-            // (no gateway / nh_id — see route_ipv4_del_uni).
+            // Oif-only (recursive seg6 encap, or an on-link route): delete
+            // by {dest, table, oif} (no gateway / nh_id — see
+            // route_ipv4_del_uni).
             if let Some(ifindex) = uni.ifindex() {
                 msg.attributes.push(RouteAttribute::Oif(ifindex));
             }
@@ -6493,6 +6505,9 @@ pub fn route_from_msg_with(
             // Our own DHCP client's, when it has this route installed;
             // any other `RTPROT_DHCP` route stays a learned `Dhcp` one.
             RouteProtocol::Dhcp => Some(RibType::DhcpClient),
+            // The RA host's, when it has this route installed; any other
+            // `RTPROT_RA` route stays a learned `Kernel` one.
+            RouteProtocol::Ra => Some(RibType::Ra),
             _ => None,
         },
         // Before zebra-rs used `RTPROT_ZEBRA` for statics, it installed

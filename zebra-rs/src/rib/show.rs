@@ -452,7 +452,7 @@ fn rib_entry_to_json_v6(rib: &Rib, prefix: &Ipv6Net, e: &RibEntry) -> RouteEntry
     }
 }
 
-static SHOW_HEADER: &str = r#"Codes: K - kernel, D - DHCP route, C - connected, S - static
+static SHOW_HEADER: &str = r#"Codes: K - kernel, D - DHCP route, A - RA route, C - connected, S - static
        O - OSPF, IA - OSPF inter area, N1/N2 - OSPF NSSA external type 1/2
        E1/E2 - OSPF external type 1/2
        L1/L2 - IS-IS level-1/2, B - BGP
@@ -875,6 +875,7 @@ fn protocol_long_name(t: super::types::RibType) -> &'static str {
         RibType::Bgp => "bgp",
         RibType::Dhcp => "dhcp",
         RibType::DhcpClient => "dhcp client",
+        RibType::Ra => "ra",
         RibType::Other(_) => "unknown",
     }
 }

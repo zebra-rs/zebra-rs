@@ -1,0 +1,10 @@
+# r1: the RA host on both WAN interfaces.
+interface:
+- if-name: wan0
+  ipv6:
+    address:
+    - autoconf
+- if-name: wan1
+  ipv6:
+    address:
+    - autoconf

@@ -153,7 +153,7 @@ async fn dhcp_client_routes_own_their_echo_and_adopt_a_leftover() {
     owner.distance = 210;
     owner.nexthop = Nexthop::Uni(crate::rib::NexthopUni::default());
     assert!(owner.is_protocol());
-    rib.adopt_learned_dhcp(RT_TABLE_MAIN, prefix, &owner);
+    rib.adopt_learned(RT_TABLE_MAIN, prefix, &owner);
     let rows = entries(&rib, prefix, RT_TABLE_MAIN);
     assert_eq!(rows.len(), 1);
     assert_eq!((rows[0].rtype, rows[0].metric), (RibType::Dhcp, 100));
@@ -172,6 +172,68 @@ async fn dhcp_client_routes_own_their_echo_and_adopt_a_leftover() {
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].rtype, RibType::DhcpClient);
     assert!(rows[0].selected && rows[0].fib);
+}
+
+/// `RTPROT_RA` routes nobody in the RIB owns are learned `Kernel` routes,
+/// recorded in `learned_ra`. The RA host takes over the one at the
+/// priority its route goes in at (an earlier run's leftover), not another
+/// program's route that happens to share a prefix and priority under a
+/// different protocol number.
+#[tokio::test]
+async fn ra_routes_own_their_echo_and_adopt_only_a_learned_ra_route() {
+    let mut rib = Rib::new(false).unwrap();
+    let default: IpNet = "::/0".parse().unwrap();
+    let event =
+        |prefix, protocol, metric| kernel_route(prefix, protocol, false, metric, RT_TABLE_MAIN);
+    let ra = |metric| event(default, RouteProtocol::Ra, metric);
+    assert_eq!(ra(1024).entry.rtype, RibType::Kernel);
+    assert_eq!(ra(1024).kernel_protocol, Some(RibType::Ra));
+
+    rib.process_fib_msg(FibMessage::NewRoute(ra(1024))).await;
+    rib.process_fib_msg(FibMessage::NewRoute(ra(2048))).await;
+    assert_eq!(entries(&rib, default, RT_TABLE_MAIN).len(), 2);
+    assert_eq!(rib.learned_ra.len(), 2);
+
+    // The RA host's route goes in at priority 1024 (metric 0) and takes
+    // that one over; the route at 2048 stays learned.
+    let mut owner = RibEntry::new(RibType::Ra);
+    owner.distance = 210;
+    owner.nexthop = Nexthop::Uni(crate::rib::NexthopUni::default());
+    assert!(owner.is_protocol());
+    rib.adopt_learned(RT_TABLE_MAIN, default, &owner);
+    let rows = entries(&rib, default, RT_TABLE_MAIN);
+    assert_eq!(rows.len(), 1);
+    assert_eq!((rows[0].rtype, rows[0].metric), (RibType::Kernel, 2048));
+    assert_eq!(
+        rib.learned_ra.iter().collect::<Vec<_>>(),
+        vec![&(RT_TABLE_MAIN, default, 2048)]
+    );
+
+    // Installed, its echo is not learned a second time.
+    owner.valid = true;
+    owner.selected = true;
+    owner.fib = true;
+    insert(&mut rib, default, RT_TABLE_MAIN, owner.clone());
+    assert!(rib.is_kernel_route_echo(&ra(1024)));
+    assert!(!rib.is_kernel_route_echo(&ra(2048)));
+
+    // A learned route withdrawn by the kernel is forgotten.
+    rib.process_fib_msg(FibMessage::DelRoute(ra(2048))).await;
+    assert!(rib.learned_ra.is_empty());
+
+    // Another program's route at the same prefix and priority, under its
+    // own protocol number, is not the RA host's to take.
+    let other: IpNet = "2001:db8:ffff::/48".parse().unwrap();
+    rib.process_fib_msg(FibMessage::NewRoute(event(
+        other,
+        RouteProtocol::Boot,
+        1024,
+    )))
+    .await;
+    rib.adopt_learned(RT_TABLE_MAIN, other, &owner);
+    let rows = entries(&rib, other, RT_TABLE_MAIN);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].rtype, RibType::Kernel);
 }
 
 #[tokio::test]

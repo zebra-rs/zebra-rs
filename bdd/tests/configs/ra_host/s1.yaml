@@ -1,0 +1,7 @@
+# s1: an upstream router advertising itself on srv0 with zebra-rs's own
+# RA sender (router lifetime 1800 s, no prefix information).
+interface:
+- if-name: srv0
+  ipv6:
+    router-advertisements:
+      send-advertisements: true
