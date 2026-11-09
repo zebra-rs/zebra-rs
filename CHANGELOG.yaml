@@ -11,6 +11,105 @@
 # Fields "distribution" and "urgency" are optional per-entry; if you omit them,
 # changelog-gen.sh defaults to distribution "unstable" and urgency "medium".
 
+- semver: 26.11.2
+  date: 2026-11-09T18:00:00+09:00
+  distribution: unstable
+  urgency: medium
+  packager: Kunihiro Ishiguro <kunihiro@zebra.rs>
+  changes:
+    - note: |
+        ### Upgrade notes
+        * `system dhcp`, an unpublished IETF draft tree nothing read,
+          is gone: a saved configuration containing it no longer
+          loads. DHCP now lives under `service` (below)
+        * The VRF name `default` is reserved for the global table.
+          `vrf default`, and `default` in the new per-VRF `service`
+          and `vrrp vrf` lists, are refused at commit; a startup
+          configuration is only warned about
+        * `show l2 neighbor` no longer lists a NIC's address lists,
+          which the kernel reports as FDB rows but never removes
+    - note: |
+        ### BGP: RIB sharding (`rib-sharding` above 1)
+        * `maximum-paths`, `maximum-paths-ibgp` and `multipath-relax`
+          reach the shard pool (kurokiyokiyo). Each shard kept the
+          single-path default, so its next selection of a prefix
+          installed one leg
+        * IPv4 routes with an IPv6 next hop (RFC 8950, as unnumbered
+          neighbors send them) go through the shard pool. A withdraw,
+          a session loss, removing the `interface-neighbor` or an
+          inbound policy deny left them in the Loc-RIB and the FIB
+        * `show bgp ipv4` marks the best path `>` and multipath
+          members `=`; no route was shown as either. Forwarding was
+          not affected
+        * A change to a multipath knob re-installs only the prefixes
+          whose set changed, with any shard count. Every prefix was
+          re-installed, about a million RIB messages per knob with a
+          full table
+    - note: |
+        ### BGP: interface neighbors
+        * `interface-neighbor <if> remote-as external` brings a
+          session up: the peer dials with the AS still unknown and
+          accepts an OPEN from any AS but ours, as in FRR. It used to
+          stay down with Bad Peer AS
+        * A `remote-as` change on an existing interface neighbor
+          reaches its peer, as `neighbor <addr> remote-as` does; the
+          peer kept the AS it was created with
+    - note: |
+        ### RIB: kernel next-hop objects
+        * zebra-rs no longer runs out of memory at startup when
+          another program holds next-hop objects with large ids, such
+          as the hashed ids systemd-networkd gives RA routes (1outres)
+        * A next-hop object another program creates while zebra-rs
+          runs keeps its id. A group given the same id took the
+          object over, re-pointing that program's routes, or was
+          never installed and forwarded through the other object
+        * The startup dump of next-hop objects is repeated, up to
+          three times, when the kernel flags it interrupted, so no
+          object it missed is taken over
+        * A next-hop group the kernel refuses is tried again at the
+          next sync; it stayed marked installed and its routes failed
+    - note: |
+        ### RIB: bridge and VXLAN FDB
+        * The FDB cache keys a bridge's rows and a device's own rows
+          apart, as the kernel keeps them (kurokiyokiyo). On a
+          fixed-VNI VXLAN port without a VLAN, the bridge's row for a
+          remote MAC and the VXLAN device's own row overwrote each
+          other
+        * Each remote VTEP of an all-zero or multicast VXLAN entry
+          (ingress replication) is a row of its own; `show l2
+          neighbor` listed one VTEP, or none once one was deleted
+        * Only the bridge's row makes an installed MAC sticky; the
+          VXLAN device's own entry is no longer marked sticky
+        * `show l2 neighbor json` gains `table`, `bridge`, `src_vni`,
+          `port` and `via`
+    - note: |
+        ### insomnia services (`--feature insomnia`)
+        * `service dhcp-relay` and `service dhcpv6-relay`, ported
+          from VyOS so its `set service …` lines carry over, globally
+          and per VRF (`service dhcp-relay vrf <name>`); `show
+          dhcp[v6] relay [vrf <name>] statistics`
+        * `service dhcp-server` and `service dhcpv6-server` from
+          VyOS, rendered into Kea by insomnia, also per VRF; `show
+          dhcp[v6] server [vrf <name>] leases|statistics|static-mappings
+          [pool <name>]`. Not carried over: dynamic DNS and hostfile
+          updates, ping-check, high availability and client-class
+          `substring` matches
+        * `vrrp vrf <name>` runs a VRF's VRRP groups in a keepalived
+          bound to that VRF; `show vrrp vrf <name> [statistics |
+          detail] [group <name>]`
+        * `show process [<name>]` and `start|stop|restart process
+          <name>` for the daemons insomnia manages, such as
+          `kea-dhcp4@red`, `keepalived@default` and `dhcp-relay`
+    - note: |
+        ### Packaging and CI
+        * The package depends on `libcap2-bin` (1outres): its
+          postinst runs `setcap`, and on a host without it, such as
+          the `ubuntu:24.04` image, the install stopped
+          half-configured with "setcap: not found"
+        * Every CI job has a timeout, so a hung runner no longer holds
+          a pull request for six hours
+        * New BDD features cover foreign next-hop objects and
+          unnumbered multipath with two RIB shards
 - semver: 26.11.1
   date: 2026-11-02T18:00:00+09:00
   distribution: unstable
