@@ -4643,10 +4643,18 @@ fn inbound_attr_checks(
 /// policy walk — the serial bottleneck under heavy policy — fans out
 /// across cores with rayon. The Loc-RIB writes + advertise then run
 /// serially in NLRI order off the decisions.
+///
+/// `enhe_egress` is the (link-local, ifindex) egress of an RFC 8950 UPDATE
+/// (IPv4 NLRI with an IPv6 next-hop), `None` for an IPv4 next-hop. Those
+/// routes take this path too, so at N>1 they live on the pool with every
+/// other IPv4-unicast route, where the pool's withdraw, peer-down and
+/// soft-in paths reach them.
+#[allow(clippy::too_many_arguments)]
 pub fn route_ipv4_update_batch(
     ident: usize,
     prefixes: &[Ipv4Nlri],
     attr: &BgpAttr,
+    enhe_egress: Option<(Ipv6Addr, u32)>,
     bgp: &mut BgpTop,
     peers: &mut PeerMap,
     shards: Option<&super::shard::pool::ShardPool>,
@@ -4668,6 +4676,12 @@ pub fn route_ipv4_update_batch(
     // split — every prefix (and the N>1 batch clone) sees the same attr.
     let attr = otc_stamped.as_ref().unwrap_or(attr);
     let stale = stale || attr_has_llgr_stale(attr);
+    // RFC 8950 §4: the receiver ignores an ENHE route's v4 NEXT_HOP, so
+    // NHT never tracks it (on an unnumbered link it is the sender's
+    // router-id, unreachable) — the same rule as `route_ipv4_update_decided`.
+    let nexthop_reachable = |bgp: &mut BgpTop, prefix: Ipv4Net| {
+        enhe_egress.is_some() || nht_track_received_attr(bgp, attr, super::nht::NhtDep::V4(prefix))
+    };
 
     // N>1 (RIB sharding Phase C + RouteBatch): inbound policy runs in the
     // shard (no main-side `par_iter`), and this UPDATE's prefixes are
@@ -4678,10 +4692,9 @@ pub fn route_ipv4_update_batch(
     // (a no-op when NHT is off); reachability is shared (same attr).
     if let Some(pool) = shards {
         let mut per_shard: Vec<Vec<Ipv4Nlri>> = vec![Vec::new(); pool.n()];
-        let mut nexthop_reachable = true;
+        let mut reachable = true;
         for nlri in prefixes {
-            nexthop_reachable =
-                nht_track_received_attr(bgp, attr, super::nht::NhtDep::V4(nlri.prefix));
+            reachable = nexthop_reachable(bgp, nlri.prefix);
             let idx = pool.shard_of(std::net::IpAddr::V4(nlri.prefix.addr()));
             per_shard[idx].push(nlri.clone());
         }
@@ -4698,9 +4711,9 @@ pub fn route_ipv4_update_batch(
                     from_client,
                     attr: attr.clone(),
                     nlris,
-                    enhe_egress: None,
+                    enhe_egress,
                     stale,
-                    nexthop_reachable,
+                    nexthop_reachable: reachable,
                     compute_policy: true,
                 }),
             );
@@ -4718,8 +4731,7 @@ pub fn route_ipv4_update_batch(
     // N>1 reduce uses; the out-policy advertise is deferred to Phase B/C.
     let mut jobs: Vec<Ipv4AdvertiseJob> = Vec::new();
     for nlri in prefixes {
-        let nexthop_reachable =
-            nht_track_received_attr(bgp, attr, super::nht::NhtDep::V4(nlri.prefix));
+        let reachable = nexthop_reachable(bgp, nlri.prefix);
         let msg = ShardMsg::UpdateV4(ShardUpdateV4 {
             ident: peer_ident,
             rd: None,
@@ -4730,9 +4742,9 @@ pub fn route_ipv4_update_batch(
             attr: attr.clone(),
             label: None,
             nexthop: None,
-            enhe_egress: None,
+            enhe_egress,
             stale,
-            nexthop_reachable,
+            nexthop_reachable: reachable,
             vrf_transit_only: false,
             decision: None,
             compute_policy: true,
@@ -14127,6 +14139,7 @@ pub fn route_from_peer(
             peer_id,
             &packet.ipv4_update,
             bgp_attr,
+            None,
             bgp,
             peers,
             shards,
@@ -14218,7 +14231,7 @@ pub fn route_from_peer(
                         let mut attr_v4 = bgp_attr.clone();
                         attr_v4.nexthop = Some(BgpNexthop::Ipv4(nh4));
                         route_ipv4_update_batch(
-                            peer_id, &updates, &attr_v4, bgp, peers, shards, false,
+                            peer_id, &updates, &attr_v4, None, bgp, peers, shards, false,
                         );
                     }
                     // RFC 8950 IPv4-over-IPv6: install the prefix into
@@ -14230,23 +14243,24 @@ pub fn route_from_peer(
                     // unexpected — ENHE is currently only negotiated by
                     // unnumbered peers; log and drop in that case rather
                     // than fall back to a bogus install.
+                    //
+                    // Same batch path as an IPv4 next-hop: at N>1 the pool
+                    // owns these routes like any other IPv4-unicast route.
+                    // Ingested on main they were out of reach of the pool's
+                    // withdraw, peer-down and soft-in.
                     IpAddr::V6(nh6) => {
                         let egress_ifindex = peers.get_by_idx(peer_id).and_then(|p| p.scope_id);
                         if let Some(ifindex) = egress_ifindex {
-                            for update in updates.iter() {
-                                route_ipv4_update(
-                                    peer_id,
-                                    update,
-                                    None,
-                                    None,
-                                    bgp_attr,
-                                    None,
-                                    Some((nh6, ifindex)),
-                                    bgp,
-                                    peers,
-                                    false,
-                                );
-                            }
+                            route_ipv4_update_batch(
+                                peer_id,
+                                &updates,
+                                bgp_attr,
+                                Some((nh6, ifindex)),
+                                bgp,
+                                peers,
+                                shards,
+                                false,
+                            );
                         } else {
                             tracing::warn!(
                                 "RFC 8950: dropping IPv4 routes from peer {} via next-hop {} — need an egress ifindex",

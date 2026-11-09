@@ -1,0 +1,25 @@
+# Phase 2: RA on i1 and the interface-keyed (IPv6 unnumbered) neighbor,
+# with the shard pool from phase 1. IPv4 travels over the link-local
+# session via RFC 8950 extended next-hop, which interface-keyed peers
+# negotiate automatically.
+interface:
+- if-name: i1
+  ipv6:
+    router-advertisements:
+      send-advertisements: true
+router:
+  bgp:
+    tracing:
+      sharding: null
+    global:
+      as: 65001
+      router-id: 1.1.1.1
+    sharding:
+      rib-sharding: 2
+    interface-neighbor:
+    - interface: i1
+      remote-as: 65002
+    afi-safi:
+    - name: ipv4
+      network:
+      - prefix: 10.10.1.0/24

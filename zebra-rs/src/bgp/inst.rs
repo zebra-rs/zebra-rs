@@ -9599,3 +9599,7 @@ mod local_withdraw_noop_tests;
 #[cfg(test)]
 #[path = "redist_pool_tests.rs"]
 mod redist_pool_tests;
+
+#[cfg(test)]
+#[path = "enhe_pool_tests.rs"]
+mod enhe_pool_tests;
