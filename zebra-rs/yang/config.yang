@@ -5706,12 +5706,41 @@ module config {
 
     // VyOS-derived system services (see dhcp.yang), under VyOS's own
     // `service` node so `set service …` lines port verbatim.
-    // insomnia-only. Each relay tree is instantiated twice: for the
+    // insomnia-only. Each DHCP tree is instantiated twice: for the
     // default VRF, and per VRF under `vrf <name>`, zebra-rs's
-    // `<feature> vrf <name>` convention (VyOS has no per-VRF relay).
+    // `<feature> vrf <name>` convention (VyOS spells the server's
+    // `vrf name <n> service dhcp-server`, and has no per-VRF relay).
     container service {
       if-feature feat:insomnia;
       ext:help "System services";
+      container dhcp-server {
+        ext:help "Dynamic Host Configuration Protocol (DHCP) for DHCP server";
+        uses "dhcp:dhcp-server";
+        list vrf {
+          ext:help "DHCP server in a VRF";
+          key "name";
+          leaf name {
+            ext:help "VRF name";
+            ext:dynamic "rib:vrf";
+            type string;
+          }
+          uses "dhcp:dhcp-server";
+        }
+      }
+      container dhcpv6-server {
+        ext:help "DHCP for IPv6 (DHCPv6) server";
+        uses "dhcp:dhcpv6-server";
+        list vrf {
+          ext:help "DHCPv6 server in a VRF";
+          key "name";
+          leaf name {
+            ext:help "VRF name";
+            ext:dynamic "rib:vrf";
+            type string;
+          }
+          uses "dhcp:dhcpv6-server";
+        }
+      }
       container dhcp-relay {
         ext:help "Host Configuration Protocol (DHCP) relay agent";
         uses "dhcp:dhcp-relay";

@@ -128,6 +128,53 @@ module exec {
     }
   }
 
+  // `show dhcp[v6] server <view> [vrf <name>] [pool <name>]`: one
+  // grouping for both families. The pool filter is the shared network.
+  grouping dhcp-server-pool-filter {
+    list pool {
+      ext:help "Only this shared network";
+      ext:presence "Only this shared network";
+      key "name";
+      leaf name {
+        ext:help "Shared network name";
+        type string;
+      }
+    }
+  }
+
+  grouping dhcp-server-show-view {
+    uses dhcp-server-pool-filter;
+    list vrf {
+      ext:help "The server in a VRF";
+      ext:presence "The server in a VRF";
+      key "name";
+      leaf name {
+        ext:help "VRF name";
+        ext:dynamic "rib:vrf";
+        type string;
+      }
+      uses dhcp-server-pool-filter;
+    }
+  }
+
+  grouping dhcp-server-show-views {
+    container leases {
+      ext:help "Leases granted by the server";
+      presence "Leases granted by the server";
+      uses dhcp-server-show-view;
+    }
+    container statistics {
+      ext:help "Pool usage statistics";
+      presence "Pool usage statistics";
+      uses dhcp-server-show-view;
+    }
+    container static-mappings {
+      ext:help "Configured static mappings";
+      presence "Configured static mappings";
+      uses dhcp-server-show-view;
+    }
+  }
+
   container show {
     ext:help "Show command";
     presence "Show command";
@@ -439,12 +486,17 @@ module exec {
     }
     // `show dhcp …` / `show dhcpv6 …` — served by the external insomnia
     // provider (zebra.show.v1 name "dhcp"); insomnia-gated like the
-    // config tree. The relay counters (an extension: VyOS has no relay
-    // view) cover every VRF; the server views land with insomnia's Kea
-    // backend.
+    // config tree. The server views are VyOS's (`show dhcp server
+    // leases|statistics|static-mappings [pool <name>]`), each also per
+    // VRF; the relay counters (an extension: VyOS has no relay view)
+    // cover every VRF.
     container dhcp {
       if-feature feat:insomnia;
       ext:help "DHCP information";
+      container server {
+        ext:help "DHCP server information";
+        uses dhcp-server-show-views;
+      }
       container relay {
         ext:help "DHCP relay agent information";
         container statistics {
@@ -456,6 +508,10 @@ module exec {
     container dhcpv6 {
       if-feature feat:insomnia;
       ext:help "DHCPv6 information";
+      container server {
+        ext:help "DHCPv6 server information";
+        uses dhcp-server-show-views;
+      }
       container relay {
         ext:help "DHCPv6 relay agent information";
         container statistics {
