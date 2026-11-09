@@ -108,7 +108,8 @@ zebra-rs's per-family containers. §16 lists the deviations.
 **Elsewhere**
 
 - insomnia's `dhcp-packet` crate is a no-I/O DHCPv4/DHCPv6 framing codec
-  (header plus raw options, total parse, fuzzed) used by its relay agent.
+  (header plus raw options, total parse, property-tested) used by its relay
+  agent.
   insomnia's design (`design/dhcp.md` §13) already expects it to move here
   for a client.
 - The relay's `sys.rs` / `v4.rs` have the `AF_PACKET` send path and the
@@ -139,9 +140,11 @@ zebra-rs's per-family containers. §16 lists the deviations.
 ### D2. The codec moves to zebra-rs
 
 - `dhcp-packet` moves to `crates/dhcp-packet`, next to `nd-packet`.
-- It gains a typed option layer (`v4::opt`, `v6::opt`, §12) on top of the
-  existing framing, keeping its properties: no I/O, total parse, fuzz
-  targets.
+- It gains a typed option layer (`v4::params`, `v6::params`, `name`, §12)
+  on top of the existing framing, keeping its properties: no I/O, total
+  parse, no dependencies, and the deterministic `parse_is_total` property
+  tests. (`v4::opt` / `v6::opt` already held the option-code constants.
+  insomnia's design mentions cargo-fuzz targets; none were ever written.)
 - insomnia keeps a vendored copy, synced like its `proto/`. The relay only
   needs the framing, so its goldens do not change.
 
@@ -685,18 +688,21 @@ RDNSS/DNSSL.
 ## 12. Module layout
 
 ```
-crates/dhcp-packet/            moved from insomnia (D2)
-  src/v4.rs, v6.rs             framing, unchanged
-  src/v4/opt.rs                typed options: mask, routers, dns, domain,
-                               search (RFC 1035 names with compression,
-                               pointer-loop safe), ntp, mtu, broadcast,
-                               lease/T1/T2, server id, classless routes;
-                               encoders for what the client sends
-  src/v6/opt.rs                IA_NA, IA_PD, IAADDR, IAPREFIX, status code,
-                               ORO, elapsed time, preference, rapid commit,
-                               DNS, domain list, NTP, SOL/INF_MAX_RT,
-                               information refresh time
-  fuzz/                        targets extended to the typed layer
+crates/dhcp-packet/            moved from insomnia (D2; done in P0)
+  src/v4.rs, v6.rs             framing; + all option and message codes,
+                               v4 merged_options (RFC 3396 + overload),
+                               v6 ClientMessage::new/option/emit
+  src/name.rs                  RFC 1035 names, compressed (119) or not (24,
+                               NTP FQDN); pointers only move backwards
+  src/v4/params.rs             Params::from_packet: mask, routers, dns,
+                               domain, search, ntp, mtu, broadcast,
+                               lease/T1/T2, server id, classless routes,
+                               message, client id; DhcpOption and
+                               Packet::request constructors
+  src/v6/params.rs             IaNa, IaPd, IaAddress, IaPrefix, StatusCode,
+                               NtpServer, DUIDs; Params::from_options;
+                               Dhcp6Option constructors (ORO, elapsed time,
+                               rapid commit)
 crates/nd-packet/              + typed RDNSS, DNSSL, router preference
 zebra-rs/src/config/dhcpc.rs   spawn_dhcpc (lazy, like spawn_nd)
 zebra-rs/src/dhcpc/
@@ -749,7 +755,7 @@ belongs to systemd-resolved.
 
 | Phase | Content | Depends on |
 |---|---|---|
-| P0 | Codec move + typed options + fuzz; insomnia switches to the vendored copy (relay goldens unchanged) | – |
+| P0 | Codec move + typed options + property tests; insomnia switches to the vendored copy (relay goldens unchanged) | – |
 | P1 | RIB plumbing (D5, D6); `dhcpc` task; DHCPv4 state machine, sockets, ACD, persistence; `show dhcp client leases`, `renew/release dhcp`; ungate `address dhcp` | P0 |
 | P2 | RA host in `nd`: RS, default route, on-link prefixes, `ipv6 address autoconf`, `ra-options`, `accept_ra=0`; show section | P1's RIB plumbing |
 | P3 | DHCPv6 IA_NA and `parameters-only`; DUID; `show dhcpv6 client leases`, `renew/release dhcpv6` | P0, P2 |
@@ -776,9 +782,9 @@ Each phase is one PR, or a short series, with its own BDD feature.
     after a restart, and a prefix change.
 - **Arithmetic:** sub-prefixes and `sla-id` overflow; IAID stability;
   DUID created once.
-- **Codec:** typed-option round trips, plus the existing property and fuzz
-  targets extended to them. One case covers option 119's compression
-  pointers, including a loop.
+- **Codec:** typed-option round trips, plus the existing `parse_is_total`
+  property tests extended to them. Cases cover option 119's compression
+  pointers, including loops and pointer chains.
 - **RIB:**
   - a dynamic address is not resurrected after it expires;
   - an operator-configured duplicate survives a Release;

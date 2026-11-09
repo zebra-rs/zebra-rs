@@ -1,0 +1,20 @@
+[package]
+name = "dhcp-packet"
+version = "0.1.0"
+edition = "2024"
+authors = ["Kunihiro Ishiguro <kunihiro@zebra.rs>"]
+license = "AGPL-3.0-or-later"
+description = "DHCPv4 / DHCPv6 packet codec (no I/O) for the zebra-rs DHCP client and the insomnia DHCP relay"
+publish = false
+
+# zebra-rs owns this crate; insomnia vendors an identical copy for its
+# relay. That is why the fields above are spelled out instead of inherited
+# from either workspace: the file must read the same in both.
+
+# No dependencies on purpose: the codec parses packets from every server a
+# client hears and from every client on every relay listen interface, so it
+# stays small, safe and fuzzable.
+[dependencies]
+
+[lints]
+workspace = true
