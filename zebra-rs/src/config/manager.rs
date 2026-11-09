@@ -2035,6 +2035,14 @@ fn is_vrrp(paths: &[CommandPath]) -> bool {
     paths.iter().any(|x| x.name == "vrrp")
 }
 
+/// `show dhcp …` and `show dhcpv6 …` — served by the external insomnia
+/// daemon, which registers the `"dhcp"` show provider (zebra.show.v1);
+/// insomnia-gated exec grammar. With no provider connected the
+/// not-running fallback answers.
+fn is_dhcp(paths: &[CommandPath]) -> bool {
+    paths.iter().any(|x| x.name == "dhcp" || x.name == "dhcpv6")
+}
+
 /// `show pim ...`, `show igmp ...` and `show mroute` — all served by
 /// the PIM task (IGMP membership tracking and the multicast routing
 /// table live inside the PIM module).
@@ -2088,6 +2096,7 @@ const SHOW_PROTOS: &[ShowProto] = &[
     (is_firewall, "firewall", "Firewall"),
     (is_vpn, "ipsec", "IPsec"),
     (is_vrrp, "vrrp", "VRRP"),
+    (is_dhcp, "dhcp", "DHCP"),
     (is_policy, "policy", "Policy"),
 ];
 
@@ -8150,6 +8159,234 @@ module test-insomnia-gated {
         assert_eq!(
             json,
             r#"{"global-parameters":{"version":3},"group": [{"name":"WAN","address": [{"address":"192.0.2.253/24","interface":"eth1"},{"address":"192.0.2.254/24"}],"advertise-interval":0.5,"interface":"eth0","no-preempt":null,"peer-address": ["192.0.2.1","192.0.2.2"],"priority":200,"vrid":10}],"sync-group": [{"name":"SG","member": ["WAN"]}]}"#
+        );
+    }
+
+    /// The VyOS-derived `service` subtree (dhcp.yang, instantiated as an
+    /// insomnia-gated top-level container in config.yang) is part of the
+    /// insomnia-only config surface: absent on a stock start, present
+    /// with `--feature insomnia`. The IETF-draft `system dhcp` it
+    /// replaced is gone either way.
+    #[test]
+    fn shipped_service_gated_on_insomnia() {
+        let child = |e: &Rc<Entry>, name: &str| -> Option<Rc<Entry>> {
+            e.dir.borrow().iter().find(|c| c.name == name).cloned()
+        };
+
+        let set = child(&shipped_tree(&[]), "set").expect("set subtree");
+        assert!(
+            child(&set, "service").is_none(),
+            "service subtree must be absent on a stock start"
+        );
+        let system = child(&set, "system").expect("system subtree");
+        assert!(child(&system, "dhcp").is_none(), "system dhcp is removed");
+
+        let set = child(&shipped_tree(&["insomnia"]), "set").expect("set subtree");
+        let system = child(&set, "system").expect("system subtree");
+        assert!(child(&system, "dhcp").is_none(), "system dhcp is removed");
+        let service = child(&set, "service").expect("service subtree with --feature insomnia");
+        let v4 = child(&service, "dhcp-relay").expect("service dhcp-relay");
+        for name in [
+            "disable",
+            "listen-interface",
+            "upstream-interface",
+            "server",
+            "relay-options",
+            "vrf",
+        ] {
+            assert!(
+                child(&v4, name).is_some(),
+                "dhcp-relay {name} branch missing"
+            );
+        }
+        let v6 = child(&service, "dhcpv6-relay").expect("service dhcpv6-relay");
+        for name in [
+            "disable",
+            "listen-interface",
+            "upstream-interface",
+            "max-hop-count",
+            "use-interface-id-option",
+            "vrf",
+        ] {
+            assert!(
+                child(&v6, name).is_some(),
+                "dhcpv6-relay {name} branch missing"
+            );
+        }
+    }
+
+    /// End-to-end CLI grammar for the DHCP relay trees: representative
+    /// `set service dhcp-relay …` / `dhcpv6-relay …` commands parse with
+    /// insomnia, in the default VRF and per VRF, and are rejected on a
+    /// stock start. The negatives pin VyOS's ranges and enum, the
+    /// address-typed leaves, and the leaves not carried over.
+    #[test]
+    fn dhcp_relay_commands_parse_only_with_insomnia() {
+        use crate::config::parse::{State, parse};
+
+        let ok = [
+            "set service dhcp-relay disable",
+            "set service dhcp-relay listen-interface eth1",
+            "set service dhcp-relay listen-interface eth2",
+            "set service dhcp-relay upstream-interface eth0",
+            "set service dhcp-relay server 192.0.2.10",
+            "set service dhcp-relay relay-options hop-count 4",
+            "set service dhcp-relay relay-options max-size 1400",
+            "set service dhcp-relay relay-options relay-agents-packets append",
+            "set service dhcp-relay relay-options relay-agents-packets discard",
+            "set service dhcp-relay vrf red listen-interface eth3",
+            "set service dhcp-relay vrf red server 198.51.100.10",
+            "set service dhcp-relay vrf red relay-options hop-count 10",
+            "set service dhcpv6-relay disable",
+            "set service dhcpv6-relay listen-interface eth1",
+            "set service dhcpv6-relay listen-interface eth1 address 2001:db8:1::1",
+            "set service dhcpv6-relay upstream-interface eth0 address 2001:db8::10",
+            "set service dhcpv6-relay upstream-interface eth0 address ff05::1:3",
+            "set service dhcpv6-relay max-hop-count 8",
+            "set service dhcpv6-relay use-interface-id-option",
+            "set service dhcpv6-relay vrf red listen-interface eth3",
+            "set service dhcpv6-relay vrf red upstream-interface eth4 address 2001:db8:4::10",
+        ];
+
+        let bad_with_insomnia = [
+            "set service dhcp-relay relay-options hop-count 0",
+            "set service dhcp-relay relay-options hop-count 256",
+            "set service dhcp-relay relay-options max-size 63",
+            "set service dhcp-relay relay-options max-size 1401",
+            "set service dhcp-relay relay-options relay-agents-packets drop",
+            "set service dhcp-relay server not-an-address",
+            "set service dhcp-relay server 2001:db8::10",
+            "set service dhcpv6-relay listen-interface eth1 address 192.0.2.1",
+            "set service dhcpv6-relay upstream-interface eth0 address 192.0.2.10",
+            "set service dhcpv6-relay max-hop-count 0",
+            // VyOS's deprecated both-directions leaf is not carried over.
+            "set service dhcp-relay interface eth1",
+            // The IETF-draft tree this replaced.
+            "set system dhcp relay server-group CORE server-address 192.0.2.10",
+            "set system dhcp server default-lease-time 600",
+        ];
+
+        let entry = shipped_tree(&["insomnia"]);
+        for cmd in ok {
+            let (code, _, _) = parse(cmd, entry.clone(), None, State::new());
+            assert_eq!(code, ExecCode::Success, "`{cmd}` must parse with insomnia");
+        }
+        for cmd in bad_with_insomnia {
+            let (code, _, _) = parse(cmd, entry.clone(), None, State::new());
+            assert_ne!(code, ExecCode::Success, "`{cmd}` must not parse");
+        }
+
+        let entry = shipped_tree(&[]);
+        for cmd in [
+            "set service dhcp-relay server 192.0.2.10",
+            "set service dhcpv6-relay listen-interface eth1",
+            "set system dhcp server default-lease-time 600",
+        ] {
+            let (code, _, _) = parse(cmd, entry.clone(), None, State::new());
+            assert_ne!(
+                code,
+                ExecCode::Success,
+                "`{cmd}` must be rejected on a stock start"
+            );
+        }
+    }
+
+    /// `show dhcp …` / `show dhcpv6 …` grammar (exec.yang, insomnia-gated):
+    /// the relay statistics views map to the dispatch paths the insomnia
+    /// provider matches on and route to the `"dhcp"` show subscriber.
+    #[test]
+    fn show_dhcp_grammar_gated_on_insomnia() {
+        use crate::config::parse::{State, parse};
+        use crate::config::path_from_command;
+
+        let entry = shipped_tree_mode("exec", &["insomnia"]);
+        for (cmd, want_path) in [
+            ("show dhcp relay statistics", "/show/dhcp/relay/statistics"),
+            (
+                "show dhcpv6 relay statistics",
+                "/show/dhcpv6/relay/statistics",
+            ),
+        ] {
+            let (code, _, state) = parse(cmd, entry.clone(), None, State::new());
+            assert_eq!(code, ExecCode::Success, "parse `{cmd}`");
+            let (path, args) = path_from_command(&state.paths);
+            assert_eq!(path, want_path, "path for `{cmd}`");
+            assert!(args.0.is_empty(), "no args for `{cmd}`");
+            assert_eq!(show_proto(&state.paths), "dhcp", "routing for `{cmd}`");
+            assert_eq!(show_proto_name(&state.paths), "DHCP");
+        }
+
+        // Stock start: the whole tree is absent.
+        let entry = shipped_tree_mode("exec", &[]);
+        let (code, _, _) = parse("show dhcp relay statistics", entry, None, State::new());
+        assert_ne!(
+            code,
+            ExecCode::Success,
+            "gated off without --feature insomnia"
+        );
+    }
+
+    /// The `/service/dhcp-relay` and `/service/dhcpv6-relay` halves of
+    /// the marshal contract, as for [`vrrp_json_marshal_contract`]: the
+    /// relay backend lives in the insomnia daemon, which subscribes to
+    /// each subtree; this golden pins what the JSON subscription
+    /// delivers and insomnia's backend tests pin the parse half. Covers
+    /// leaf-lists, a numeric leaf, an enum, presence leaves, a keyed
+    /// list with an optional sub-leaf and a sub-leaf-list, and the
+    /// per-VRF list.
+    #[test]
+    fn dhcp_relay_json_marshal_contract() {
+        use crate::config::parse::{State, parse};
+
+        let entry = shipped_tree(&["insomnia"]);
+
+        let store = ConfigStore::new();
+        for cmd in [
+            "set service dhcp-relay listen-interface eth1",
+            "set service dhcp-relay listen-interface eth2",
+            "set service dhcp-relay upstream-interface eth0",
+            "set service dhcp-relay server 192.0.2.10",
+            "set service dhcp-relay server 192.0.2.11",
+            "set service dhcp-relay relay-options hop-count 4",
+            "set service dhcp-relay relay-options relay-agents-packets replace",
+            "set service dhcp-relay vrf red listen-interface eth3",
+            "set service dhcp-relay vrf red upstream-interface eth4",
+            "set service dhcp-relay vrf red server 198.51.100.10",
+            "set service dhcp-relay vrf red disable",
+            "set service dhcpv6-relay listen-interface eth1 address 2001:db8:1::1",
+            "set service dhcpv6-relay listen-interface eth2",
+            "set service dhcpv6-relay upstream-interface eth0 address 2001:db8::10",
+            "set service dhcpv6-relay upstream-interface eth0 address ff05::1:3",
+            "set service dhcpv6-relay max-hop-count 8",
+            "set service dhcpv6-relay use-interface-id-option",
+            "set service dhcpv6-relay vrf red listen-interface eth3",
+            "set service dhcpv6-relay vrf red upstream-interface eth4 address 2001:db8:4::10",
+        ] {
+            let candidate = store.candidate.borrow().clone();
+            let (code, _, state) = parse(cmd, entry.clone(), None, State::new());
+            assert_eq!(code, ExecCode::Success, "parse `{cmd}`");
+            set(path_try_trim("set", state.paths), candidate);
+        }
+
+        // Marshal each subtree the way `subtree_json` does.
+        let subtree = |name: &str| {
+            let mut node = store.candidate.borrow().clone();
+            for seg in ["service", name] {
+                node = node.lookup(&seg.to_string()).expect("subtree exists");
+            }
+            let mut json = String::new();
+            node.json(&mut json);
+            eprintln!("{name} json: {json}");
+            json
+        };
+
+        assert_eq!(
+            subtree("dhcp-relay"),
+            r#"{"listen-interface": ["eth1","eth2"],"relay-options":{"hop-count":4,"relay-agents-packets":"replace"},"server": ["192.0.2.10","192.0.2.11"],"upstream-interface": ["eth0"],"vrf": [{"name":"red","disable":null,"listen-interface": ["eth3"],"server": ["198.51.100.10"],"upstream-interface": ["eth4"]}]}"#
+        );
+        assert_eq!(
+            subtree("dhcpv6-relay"),
+            r#"{"listen-interface": [{"name":"eth1","address":"2001:db8:1::1"},{"name":"eth2"}],"max-hop-count":8,"upstream-interface": [{"name":"eth0","address": ["2001:db8::10","ff05::1:3"]}],"use-interface-id-option":null,"vrf": [{"name":"red","listen-interface": [{"name":"eth3"}],"upstream-interface": [{"name":"eth4","address": ["2001:db8:4::10"]}]}]}"#
         );
     }
 }

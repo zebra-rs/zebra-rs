@@ -746,10 +746,6 @@ module config {
              production. When unset the full XDP+TC pipeline runs as normal.";
         }
       }
-      container dhcp {
-        ext:help "DHCP configuration";
-        uses "dhcp:dhcp";
-      }
       container etcd {
         ext:help "etcd datastore configuration";
         list endpoints {
@@ -5706,6 +5702,44 @@ module config {
       if-feature feat:insomnia;
       ext:help "Virtual Router Redundancy Protocol (VRRP)";
       uses "vrrp:vrrp";
+    }
+
+    // VyOS-derived system services (see dhcp.yang), under VyOS's own
+    // `service` node so `set service …` lines port verbatim.
+    // insomnia-only. Each relay tree is instantiated twice: for the
+    // default VRF, and per VRF under `vrf <name>`, zebra-rs's
+    // `<feature> vrf <name>` convention (VyOS has no per-VRF relay).
+    container service {
+      if-feature feat:insomnia;
+      ext:help "System services";
+      container dhcp-relay {
+        ext:help "Host Configuration Protocol (DHCP) relay agent";
+        uses "dhcp:dhcp-relay";
+        list vrf {
+          ext:help "DHCP relay agent in a VRF";
+          key "name";
+          leaf name {
+            ext:help "VRF name";
+            ext:dynamic "rib:vrf";
+            type string;
+          }
+          uses "dhcp:dhcp-relay";
+        }
+      }
+      container dhcpv6-relay {
+        ext:help "DHCPv6 Relay Agent parameters";
+        uses "dhcp:dhcpv6-relay";
+        list vrf {
+          ext:help "DHCPv6 relay agent in a VRF";
+          key "name";
+          leaf name {
+            ext:help "VRF name";
+            ext:dynamic "rib:vrf";
+            type string;
+          }
+          uses "dhcp:dhcpv6-relay";
+        }
+      }
     }
 
     list interface {
