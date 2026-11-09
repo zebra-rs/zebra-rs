@@ -14,11 +14,12 @@ use super::peer_key::{PeerKey, PeerOrigin};
 use crate::config::{Args, ConfigOp};
 
 /// `remote-as` may be a numeric AS or one of the FRR-style
-/// shortcuts `external` / `internal`. The shortcuts are resolved at
-/// materialization time against the local ASN (for `internal`); the
-/// `external` case is materialized with `remote_as = 0` and the
-/// actual peer AS is learned from the OPEN — strict
-/// same-AS-rejection validation lands in a follow-up.
+/// shortcuts `external` / `internal`. `internal` resolves to the local
+/// ASN at materialization time. `external` materializes with the
+/// placeholder `remote_as = 0` and sets
+/// [`super::peer::PeerConfig::remote_as_external`]: the peer still dials,
+/// and each OPEN is accepted from any AS but ours, which then becomes
+/// `remote_as` (`process_open`).
 #[derive(Debug, Default, Clone, PartialEq, Eq, Copy)]
 pub enum RemoteAsSpec {
     #[default]
@@ -211,12 +212,9 @@ fn materialize(
     // resolved remote-as like the addressed-neighbor and group-sweep
     // paths do — it drives admin distance (20 vs 200), the eBGP
     // AS_PATH egress rules, and the TTL convention. An `external`
-    // placeholder (asn 0 until OPEN backfill) is eBGP by definition.
-    peer.peer_type = if resolved.asn == bgp.asn {
-        PeerType::IBGP
-    } else {
-        PeerType::EBGP
-    };
+    // placeholder (asn 0 until the OPEN supplies it) is eBGP by
+    // definition.
+    peer.peer_type = session_type(cfg.remote_as, resolved.asn, bgp.asn);
     peer.origin = PeerOrigin::Interface { ifindex };
     // The operator-facing identity for show/clear output and lookups
     // (`show bgp summary`, `show bgp neighbor i1`, …) — the
@@ -247,6 +245,7 @@ fn materialize(
     if resolved.inherited_from_group {
         peer.config.remote_as_inherited = true;
     }
+    peer.config.remote_as_external = cfg.remote_as == RemoteAsSpec::External;
     bgp.peers.insert_with_key(PeerKey::Interface(ifindex), peer);
 
     // Resolve everything the group supplies (the MP family set for
@@ -261,13 +260,11 @@ fn materialize(
     // Kick the FSM. `peer.start()` arms the idle-hold timer which
     // fires Event::Start → fsm_start → peer_start_connection. The
     // timer captures `peer.ident`, so it must run AFTER insert (which
-    // assigns the real ident). The gates inside start() also require
-    // `remote_as != 0` and a specified address, so two kinds of peer
-    // remain dormant in Idle here: ones materialized from a
-    // `RemoteAsSpec::External` (which yields 0 as a placeholder until
-    // OPEN backfill — that case lands in a follow-up alongside the
-    // OPEN-side validation) and ones materialized without a link-local
-    // (no RA yet — the RA path upgrades them in place).
+    // assigns the real ident). The gates inside start()
+    // (`Peer::is_dialable`) also require a specified address, so a peer
+    // materialized without a link-local (no RA yet) stays dormant in
+    // Idle here; the RA path upgrades it in place. A `remote-as
+    // external` peer dials with the AS still unknown.
     peer.start();
     let ident = peer.ident;
     // Reconcile BFD for the freshly materialized peer (the `peer` borrow
@@ -464,11 +461,16 @@ pub fn config_interface_neighbor_remote_as(
     match op {
         ConfigOp::Set => {
             let raw = args.string()?;
-            entry.remote_as = match raw.as_str() {
+            let spec = match raw.as_str() {
                 "external" => RemoteAsSpec::External,
                 "internal" => RemoteAsSpec::Internal,
                 numeric => RemoteAsSpec::Asn(numeric.parse().ok()?),
             };
+            let changed = entry.remote_as != spec;
+            entry.remote_as = spec;
+            if changed {
+                apply_remote_as(bgp, &name, spec);
+            }
             // remote-as usually completes the config (it arrives after
             // the list-key callback in a commit) — surface the dormant
             // peer so the neighbor shows up before any RA.
@@ -478,6 +480,50 @@ pub fn config_interface_neighbor_remote_as(
         _ => {}
     }
     Some(())
+}
+
+/// The session type for a resolved remote-as. `external` is eBGP by
+/// definition, whatever the placeholder AS compares equal to.
+fn session_type(spec: RemoteAsSpec, asn: u32, local_as: u32) -> PeerType {
+    if spec != RemoteAsSpec::External && asn == local_as {
+        PeerType::IBGP
+    } else {
+        PeerType::EBGP
+    }
+}
+
+/// A changed `remote-as` on an interface-neighbor that already has a
+/// peer, applied as the addressed `neighbor <addr> remote-as` callback
+/// applies it: the new AS (or `external`'s placeholder) and session type,
+/// and a dial if the peer can now be dialed. A running session keeps
+/// going; its next OPEN is judged by the new spec. Without this the
+/// peer kept the spec it was created with.
+fn apply_remote_as(bgp: &mut Bgp, name: &str, spec: RemoteAsSpec) {
+    let local_as = bgp.asn;
+    let Some(asn) = spec.materialize(local_as) else {
+        return;
+    };
+    let Some(peer) = interface_peer_mut(bgp, name) else {
+        return;
+    };
+    // A session past its OPEN keeps the AS that OPEN carried when the
+    // spec turns `external`: it is the neighbor's real AS, and the
+    // placeholder would leave the live session showing (and comparing
+    // against) AS 0. A peer without one takes the placeholder.
+    let validated = matches!(
+        peer.state,
+        super::peer::State::OpenConfirm | super::peer::State::Established
+    );
+    if !(spec == RemoteAsSpec::External && validated) {
+        peer.remote_as = asn;
+    }
+    peer.config.remote_as_external = spec == RemoteAsSpec::External;
+    peer.config.remote_as_inherited = false;
+    peer.peer_type = session_type(spec, asn, local_as);
+    peer.start();
+    let ident = peer.ident;
+    // BFD infers its hop mode from the session type.
+    let _ = super::config::bfd_apply_ident(bgp, ident);
 }
 
 /// The peer an `interface-neighbor <name>` materialized into, if it

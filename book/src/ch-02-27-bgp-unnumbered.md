@@ -46,10 +46,11 @@ the interface name is the peer's CLI identity throughout:
 FRR-style shorthands:
 
 - **`internal`** — the peer is in the local AS (iBGP).
-- **`external`** — any AS other than the local one. Accepted by the
-  schema today, but the OPEN-side AS learning is not wired up yet, so
-  a peer configured this way stays dormant — use a numeric AS or
-  `internal` for now.
+- **`external`** — any AS other than the local one. The neighbor's AS
+  is learned from its OPEN on each session, so every link of a fabric
+  can carry the same config, and a neighbor re-cabled to another AS
+  still comes up. An OPEN from the local AS is refused with Bad Peer
+  AS. Until the first OPEN, `show bgp neighbor` shows `remote AS 0`.
 
 Alternatively the AS can come from a referenced
 [neighbor-group](ch-02-26-bgp-neighbor-group.md); a `remote-as` on the
@@ -180,9 +181,10 @@ BGP neighbor-group: dynamic
   neighbor's RA, so check `send-advertisements true` on *both* ends,
   and that the `interface-neighbor` name matches the actual interface.
   First discovery can take ~16 seconds (RA timing).
-- **Peer exists but stays down with `remote-as external`.** Expected
-  for now — see [remote-as forms](#remote-as-forms); configure a
-  numeric AS or `internal`.
+- **Peer with `remote-as external` stays down.** Check that the
+  neighbor is in a different AS: an OPEN carrying the local AS is
+  refused with Bad Peer AS. For a neighbor in the local AS, configure
+  `internal`.
 - **IPv6 routes don't flow.** The session is IPv4-unicast-only by
   default; IPv6 must be enabled through the referenced group's
   `afi-safi ipv6 enabled true` (there is no per-interface-neighbor
