@@ -1,0 +1,22 @@
+# z2-full.yaml without 10.10.2.0/24: z2 withdraws that one route and
+# keeps the session and 10.0.0.2/32.
+interface:
+- if-name: i1
+  ipv6:
+    router-advertisements:
+      send-advertisements: true
+router:
+  bgp:
+    global:
+      as: 65002
+      router-id: 2.2.2.2
+    timer:
+      adv-interval:
+        ebgp: 0
+    interface-neighbor:
+    - interface: i1
+      remote-as: 65001
+    afi-safi:
+    - name: ipv4
+      network:
+      - prefix: 10.0.0.2/32

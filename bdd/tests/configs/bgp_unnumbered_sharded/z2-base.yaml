@@ -1,0 +1,7 @@
+# Phase 1 of the two-step bring-up: a bare `router bgp` block (no
+# sharding — z2 is the plain neighbor).
+router:
+  bgp:
+    global:
+      as: 65002
+      router-id: 2.2.2.2
