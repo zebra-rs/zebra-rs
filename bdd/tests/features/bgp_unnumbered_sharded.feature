@@ -59,6 +59,10 @@ Feature: BGP unnumbered neighbor on a router with RIB sharding
     And kernel route "10.10.2.0/24" in namespace "z1" should eventually contain "via inet6 fe80::"
     And kernel route "10.0.0.2/32" in namespace "z1" should eventually contain "via inet6 fe80::"
     And show command "show bgp ipv4" in namespace "z1" should contain "10.10.2.0/24"
+    # The best path is marked `>`. At N>1 the table renders main's read
+    # replica of the pool, whose candidates used to keep their
+    # pre-selection flags: the line read `*   10.10.2.0/24`.
+    And show command "show bgp ipv4" in namespace "z1" should contain "*>  10.10.2.0/24"
     And ping from "z1" to "10.10.2.1" should succeed
 
   Scenario: A withdrawn route leaves the sharded router's FIB

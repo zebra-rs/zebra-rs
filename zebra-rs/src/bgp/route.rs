@@ -5230,14 +5230,15 @@ pub(super) fn route_apply_bestpath_v4_batch(
     //
     // A multipath re-run changes the installed set, not the winner:
     // install it and advertise nothing, as `multipath_resync` does at N=1.
-    // The replica's best is refreshed; its per-candidate multipath flags
-    // are not. A shard replies to a resync with `MultipathV4` alone, so
+    // The replica's best and its candidates' best / multipath flags follow
+    // the re-run. A shard replies to a resync with `MultipathV4` alone, so
     // no `BestPathV4` for the same prefix shares its result.
     let outs: Vec<ShardOut> = outs
         .into_iter()
         .filter_map(|out| match out {
             ShardOut::MultipathV4 { prefix, selected } => {
                 bgp.shard.mirror_v4(prefix, None, &[], selected.first());
+                bgp.shard.mirror_v4_selection(prefix, &selected);
                 fib_install_v4(bgp, prefix, &selected);
                 None
             }
@@ -5312,6 +5313,8 @@ fn mirror_v4_delta(bgp: &mut BgpTop, out: &ShardOut) {
         // A next-hop flip changes candidates in place; the AddPath dump
         // reads their reachability from the mirror.
         bgp.shard.mirror_v4_refresh(prefix.prefix, nexthop_flipped);
+        // Last: `show bgp ipv4` renders `>` / `=` from these flags.
+        bgp.shard.mirror_v4_selection(prefix.prefix, selected);
     }
 }
 
