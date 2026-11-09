@@ -16,6 +16,10 @@ pub enum OptionType {
     TargetLinkLayerAddress = 2,
     PrefixInformation = 3,
     Mtu = 5,
+    /// Recursive DNS Server (RFC 8106 §5.1).
+    Rdnss = 25,
+    /// DNS Search List (RFC 8106 §5.2).
+    Dnssl = 31,
 }
 
 impl OptionType {
@@ -25,6 +29,8 @@ impl OptionType {
             2 => Some(Self::TargetLinkLayerAddress),
             3 => Some(Self::PrefixInformation),
             5 => Some(Self::Mtu),
+            25 => Some(Self::Rdnss),
+            31 => Some(Self::Dnssl),
             _ => None,
         }
     }
@@ -74,6 +80,24 @@ pub struct PrefixInfo {
     pub prefix: Ipv6Addr,
 }
 
+/// Recursive DNS Server option (RFC 8106 §5.1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Rdnss {
+    /// Seconds the servers may be used; `u32::MAX` is forever, 0 asks
+    /// the host to stop using them.
+    pub lifetime: u32,
+    pub servers: Vec<Ipv6Addr>,
+}
+
+/// DNS Search List option (RFC 8106 §5.2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Dnssl {
+    /// Seconds the domains may be used; as [`Rdnss::lifetime`].
+    pub lifetime: u32,
+    /// Domain names without the trailing dot.
+    pub domains: Vec<String>,
+}
+
 /// One parsed Neighbor Discovery option. Unknown option codes are
 /// preserved verbatim so emit/parse round-trip works.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -82,6 +106,8 @@ pub enum NdOption {
     TargetLinkLayerAddress(LinkLayerAddress),
     PrefixInformation(PrefixInfo),
     Mtu(u32),
+    Rdnss(Rdnss),
+    Dnssl(Dnssl),
     Unknown { typ: u8, value: Vec<u8> },
 }
 
@@ -146,6 +172,22 @@ impl NdOption {
                 let mtu = u32::from_be_bytes([value[2], value[3], value[4], value[5]]);
                 NdOption::Mtu(mtu)
             }
+            // RFC 8106 has the host ignore an invalid RDNSS or DNSSL
+            // option, not the whole RA: such a one stays `Unknown`.
+            Some(OptionType::Rdnss) => match parse_rdnss(value) {
+                Some(rdnss) => NdOption::Rdnss(rdnss),
+                None => NdOption::Unknown {
+                    typ,
+                    value: value.to_vec(),
+                },
+            },
+            Some(OptionType::Dnssl) => match parse_dnssl(value) {
+                Some(dnssl) => NdOption::Dnssl(dnssl),
+                None => NdOption::Unknown {
+                    typ,
+                    value: value.to_vec(),
+                },
+            },
             None => NdOption::Unknown {
                 typ,
                 value: value.to_vec(),
@@ -181,6 +223,34 @@ impl NdOption {
                 buf.put_u16(0); // reserved
                 buf.put_u32(*mtu);
             }
+            NdOption::Rdnss(rdnss) => {
+                buf.put_u8(OptionType::Rdnss.into());
+                buf.put_u8((1 + 2 * rdnss.servers.len()) as u8);
+                buf.put_u16(0); // reserved
+                buf.put_u32(rdnss.lifetime);
+                for server in &rdnss.servers {
+                    buf.put_slice(&server.octets());
+                }
+            }
+            NdOption::Dnssl(dnssl) => {
+                let mut names = Vec::new();
+                for domain in &dnssl.domains {
+                    for label in domain.split('.').filter(|label| !label.is_empty()) {
+                        names.push(label.len() as u8);
+                        names.extend_from_slice(label.as_bytes());
+                    }
+                    names.push(0);
+                }
+                let total = round_up_to_8(8 + names.len());
+                buf.put_u8(OptionType::Dnssl.into());
+                buf.put_u8((total / 8) as u8);
+                buf.put_u16(0); // reserved
+                buf.put_u32(dnssl.lifetime);
+                buf.put_slice(&names);
+                for _ in (8 + names.len())..total {
+                    buf.put_u8(0);
+                }
+            }
             NdOption::Unknown { typ, value } => {
                 // Wire length must include the 2-byte header and pad
                 // to an 8-byte multiple; preserve whatever the caller
@@ -209,6 +279,59 @@ fn emit_lla(buf: &mut BytesMut, typ: OptionType, lla: &LinkLayerAddress) {
 
 fn round_up_to_8(n: usize) -> usize {
     (n + 7) & !7
+}
+
+/// The RDNSS option body after the type and length octets. Invalid
+/// when it holds no server: the wire length must be odd and at least 3
+/// (RFC 8106 §5.1), so the body is 6 octets plus 16 per server.
+fn parse_rdnss(value: &[u8]) -> Option<Rdnss> {
+    let servers = value.get(6..)?;
+    if servers.is_empty() || servers.len() % 16 != 0 {
+        return None;
+    }
+    Some(Rdnss {
+        lifetime: u32::from_be_bytes(value[2..6].try_into().ok()?),
+        servers: servers
+            .as_chunks::<16>()
+            .0
+            .iter()
+            .map(|&chunk| Ipv6Addr::from(chunk))
+            .collect(),
+    })
+}
+
+/// The DNSSL option body: domain names in RFC 1035 §3.1 form, without
+/// compression, then zero padding. Invalid when a label runs past the
+/// option, a name does not end in the root label, or no name is given.
+fn parse_dnssl(value: &[u8]) -> Option<Dnssl> {
+    let lifetime = u32::from_be_bytes(value.get(2..6)?.try_into().ok()?);
+    let mut names = &value[6..];
+    let mut domains = Vec::new();
+    // A zero octet where a name would start is padding: the rest is too.
+    while let Some(&first) = names.first()
+        && first != 0
+    {
+        let mut labels = Vec::new();
+        loop {
+            let (&len, rest) = names.split_first()?;
+            names = rest;
+            if len == 0 {
+                break;
+            }
+            // 0xc0 and up would be a compression pointer, which RFC 8106
+            // §5.2 rules out; any length past the option is malformed.
+            if len > 63 || names.len() < len as usize {
+                return None;
+            }
+            labels.push(String::from_utf8_lossy(&names[..len as usize]).into_owned());
+            names = &names[len as usize..];
+        }
+        domains.push(labels.join("."));
+    }
+    if domains.is_empty() || names.iter().any(|&b| b != 0) {
+        return None;
+    }
+    Some(Dnssl { lifetime, domains })
 }
 
 #[cfg(test)]
@@ -262,6 +385,83 @@ mod tests {
                 assert_eq!(pi.prefix, "2001:db8::".parse::<Ipv6Addr>().unwrap());
             }
             other => panic!("expected PIO, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn rdnss_round_trips() {
+        // Type 25, len 5 (two servers), lifetime 600.
+        let wire = hex!(
+            "19 05 00 00 00 00 02 58 "
+            "20 01 0d b8 00 00 00 00 00 00 00 00 00 00 00 53 "
+            "20 01 0d b8 00 00 00 00 00 00 00 00 00 00 00 54"
+        );
+        let (opt, rest) = NdOption::parse(&wire).unwrap();
+        assert!(rest.is_empty());
+        assert_eq!(
+            opt,
+            NdOption::Rdnss(Rdnss {
+                lifetime: 600,
+                servers: vec![
+                    "2001:db8::53".parse().unwrap(),
+                    "2001:db8::54".parse().unwrap()
+                ],
+            })
+        );
+        let mut buf = BytesMut::new();
+        opt.emit(&mut buf);
+        assert_eq!(&buf[..], &wire);
+    }
+
+    #[test]
+    fn rdnss_without_a_server_is_ignored_not_fatal() {
+        // Length 1: no room for an address. The option is kept as
+        // unknown and the parse goes on.
+        let wire = hex!("19 01 00 00 00 00 02 58");
+        let (opt, rest) = NdOption::parse(&wire).unwrap();
+        assert!(rest.is_empty());
+        assert!(matches!(opt, NdOption::Unknown { typ: 25, .. }));
+    }
+
+    #[test]
+    fn dnssl_round_trips() {
+        // example.com and lab.example.net (30 octets after the 8-octet
+        // header), then zero padding to 40.
+        let wire = hex!(
+            "1f 05 00 00 00 00 0e 10 "
+            "07 65 78 61 6d 70 6c 65 03 63 6f 6d 00 "
+            "03 6c 61 62 07 65 78 61 6d 70 6c 65 03 6e 65 74 00 "
+            "00 00"
+        );
+        let (opt, rest) = NdOption::parse(&wire).unwrap();
+        assert!(rest.is_empty());
+        assert_eq!(
+            opt,
+            NdOption::Dnssl(Dnssl {
+                lifetime: 3600,
+                domains: vec!["example.com".into(), "lab.example.net".into()],
+            })
+        );
+        let mut buf = BytesMut::new();
+        opt.emit(&mut buf);
+        assert_eq!(&buf[..], &wire);
+    }
+
+    #[test]
+    fn dnssl_with_a_broken_name_is_ignored_not_fatal() {
+        // A compression pointer, a label running past the option, and a
+        // name missing its root label.
+        for wire in [
+            hex!("1f 02 00 00 00 00 0e 10 c0 0c 00 00 00 00 00 00").to_vec(),
+            hex!("1f 02 00 00 00 00 0e 10 3f 61 62 63 00 00 00 00").to_vec(),
+            hex!("1f 02 00 00 00 00 0e 10 03 63 6f 6d 03 6e 65 74").to_vec(),
+        ] {
+            let (opt, rest) = NdOption::parse(&wire).unwrap();
+            assert!(rest.is_empty());
+            assert!(
+                matches!(opt, NdOption::Unknown { typ: 31, .. }),
+                "{wire:02x?}"
+            );
         }
     }
 
