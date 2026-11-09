@@ -106,6 +106,7 @@ impl BgpShard {
                 self.set_in_policy(ident, policy);
                 Vec::new()
             }
+            ShardMsg::MultipathResyncV4 { cfg } => self.handle_multipath_resync_v4(cfg),
             ShardMsg::NexthopReachableBatchV4 {
                 nlris,
                 nh,
@@ -618,6 +619,25 @@ impl BgpShard {
             survivor_nexthops,
             nexthop_flipped: Vec::new(),
         }
+    }
+
+    /// Adopt main's IPv4-unicast multipath policy and re-run best-path over
+    /// every prefix this shard owns — the pool half of `multipath_resync`.
+    /// Both directions need the re-run: raising `maximum-paths` discovers
+    /// legs never selected, lowering it drops legs that no longer fit.
+    fn handle_multipath_resync_v4(
+        &mut self,
+        cfg: super::super::route::MultipathCfg,
+    ) -> Vec<ShardOut> {
+        self.v4.2 = cfg;
+        let prefixes: Vec<Ipv4Net> = self.v4.0.iter().map(|(p, _)| p).collect();
+        prefixes
+            .into_iter()
+            .map(|prefix| ShardOut::MultipathV4 {
+                prefix,
+                selected: self.v4.select_best_path(prefix),
+            })
+            .collect()
     }
 
     /// Re-evaluate one IPv4-unicast prefix after its next-hop's
