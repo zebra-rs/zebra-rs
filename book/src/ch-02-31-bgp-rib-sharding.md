@@ -33,9 +33,10 @@ measurement shows BGP pinning one core.
 Only **plain IPv4-unicast** is pooled. At `shards > 1` the speaker spawns N
 dedicated worker threads and hashes each IPv4-unicast prefix to one of them;
 that worker owns the prefix's Adj-RIB-In and Loc-RIB entry and does its
-best-path and egress work. IPv6-unicast, VPNv4/VPNv6, EVPN, and
-labeled-unicast continue to run on the main task regardless of the shard
-count — so a v6-heavy or VPN-heavy deployment sees little benefit today.
+best-path and egress work. That includes the IPv4 routes an unnumbered
+neighbor sends with an IPv6 next-hop (RFC 8950). IPv6-unicast, VPNv4/VPNv6,
+EVPN, and labeled-unicast continue to run on the main task regardless of the
+shard count — so a v6-heavy or VPN-heavy deployment sees little benefit today.
 
 Forwarding correctness is unaffected at any shard count: sharding changes
 *where* the work runs, not *what* gets advertised or installed. `show bgp

@@ -1,289 +1,152 @@
 module dhcp {
-  namespace "urn:ietf:params:xml:ns:yang:ietf-dhcp";
+  yang-version "1";
+
+  namespace "urn:ietf:params:xml:ns:yang:zebra-dhcp";
   prefix "dhcp";
 
   import ietf-inet-types {
-    prefix "inet";
+    prefix inet;
   }
 
-  organization "IETF dhc (Dynamic Host Configuration Protocol)
-                   Working Group";
-  contact      "leo.liubing@huawei.com
-                   loukunkun@huawei.com
-                   chin.chen@ericsson.com";
-  description  "The module for implementing DHCP protocol";
-
-  revision "2016-08-25" {
-    description   "initial draft revision";
-    reference     "rfc6020";
+  import extension {
+    prefix ext;
   }
 
-  grouping dhcp-option {
-    description "Configuration option";
-    leaf dhcp-server-identifier {
-      ext:help "DHCP server identifier";
-      type  inet:ipv4-address;
-      description "DHCP server identifier";
-    }
-    leaf domain-name {
-      ext:help "Domain name";
-      type  string;
-      description "Name of the domain";
-    }
-    list domain-name-servers {
-      ext:help "Domain name server (DNS)";
-      key "server";
-      leaf server {
-        ext:help "Domain name server IPv4 address";
-        type  inet:ipv4-address;
-        description "IPv4 address of domain name server";
-      }
-    }
-    list ntp-servers {
-      ext:help "NTP server";
-      key "server";
-      leaf server {
-        ext:help "NTP server IPv4 address";
-        type  inet:ipv4-address;
-        description "IPv4 address of NTP server";
-      }
-    }
-    leaf interface-mtu {
-      ext:help "Interface MTU (bytes)";
-      type  uint32 {
-        range "0..65535";
-      }
-      description "Minimum Transmission Unit (MTU) of the interface";
-    }
-    leaf netbios-name-server {
-      ext:help "NetBIOS name server";
-      type  inet:ip-address;
-      description "NETBIOS name server";
-    }
+  description
+    "VyOS-derived DHCP relay configuration, ported from the VyOS rolling
+     interface definitions (vyos-1x interface-definitions/
+     service_dhcp-relay.xml.in and service_dhcpv6-relay.xml.in).
+     Enforced by the out-of-process insomnia daemon, which renders these
+     trees into the config of its own relay agent (insomnia-dhcp-relay);
+     zebra-rs owns only the schema and the config store.
 
-    leaf netbios-node-type {
-      ext:help "NetBIOS node type";
-      type  uint32 {
-        range "0..65535";
-      }
-      description "NETBIOS node type";
-    }
-    leaf netbios-scope {
-      ext:help "NetBIOS scope";
-      type  string;
-      description "NETBIOS scope";
-    }
-    leaf tftp-server-name {
-      ext:help "TFTP server name (option 66)";
-      type string;
-      description "Option 66: TFTP server name";
-    }
-    leaf bootfile-name {
-      ext:help "Boot file name (option 67)";
-      type string;
-      description "Option 67: boot file name";
-    }
-    list voip-tftp-servers {
-      ext:help "VoIP TFTP server (option 150)";
-      key "server";
-      leaf server {
-        ext:help "VoIP TFTP server name (option 150)";
-        type  inet:ipv4-address;
-        description "Option 150: VoIP TFTP server name";
-      }
-    }
-    list sip-servers {
-      ext:help "SIP server (option 120)";
-      key "server";
-      leaf server {
-        ext:help "SIP server name (option 120)";
-        type  inet:ipv4-address;
-        description "Option 120: SIP server name";
-      }
-    }
-    list classless-routes {
-      ext:help "Classless static route (option 121)";
-      key "prefix";
-      leaf prefix {
-        ext:help "Classless route prefix (option 121)";
-        type  inet:ipv4-prefix;
-        description "Option 121: Classless routes prefix";
-      }
-      leaf nexthop {
-        ext:help "Classless route nexthop (option 121)";
-        type  inet:ipv4-address;
-        description "Option 121: Classless routes nexthop";
-      }
-    }
-    leaf time-offset {
-      ext:help "Time offset (seconds)";
-      type int32;
-      description "Time offset";
-    }
-  }
-  grouping dhcp {
+     This module is a grouping library in the vrrp.yang / ipsec.yang
+     style: config.yang instantiates the groupings under an
+     insomnia-gated top-level `container service`, VyOS's own home for
+     DHCP, so a VyOS `set service dhcp-relay …` line ports verbatim.
+     The same groupings are instantiated again under a per-VRF `vrf`
+     list, zebra-rs's `<feature> vrf <name>` convention; VyOS has no
+     per-VRF relay.
+
+     Scope: `service dhcp-relay` and `service dhcpv6-relay`. The DHCP
+     server trees (`service dhcp-server`, `service dhcpv6-server`) land
+     with insomnia's Kea backend. Deliberately not carried over: the v4
+     relay's `interface` leaf, which VyOS deprecates in favour of
+     `listen-interface` plus `upstream-interface`.
+
+     Value-shape conventions follow vrrp.yang: no `pattern` statements
+     on value leaves; interface references are plain `type string`, so
+     an interface may be configured after the relay that names it.
+     Defaults are not declared here: insomnia applies VyOS's defaults
+     when rendering, so the JSON batch carries only what the operator
+     set. The rules VyOS checks in verify() (a server is required,
+     listen and upstream interfaces come together, each DHCPv6 upstream
+     interface needs an address) are applied by insomnia, which skips
+     what fails them with a warning.";
+
+  revision "2026-11-08" {
     description
-      "DHCP configuration";
-    container server {
-      ext:help "DHCP server configuration";
-      description
-        "DHCP server configuration";
-      leaf default-lease-time {
-        ext:help "Default lease time in seconds";
-        type uint32{
-          range "180..31536000";
-        }
-        description
-          "Default network address lease time assigned to DHCP clients";
-      }
-      leaf max-lease-time {
-        ext:help "Maximum lease time in seconds";
-        type uint32{
-          range "180..31536000";
-        }
-        description
-          "Default network address lease time assigned to DHCP clients";
-      }
-      leaf ping-check {
-        ext:help "Enable ping check before lease";
-        type boolean;
-        description "Enable ping check before lease";
-      }
-      container option {
-        ext:help "DHCP option configuration";
-        description "Configuration option";
-        uses dhcp-option;
-      }
-      list dhcp-ip-pool {
-        ext:help "Global IP address pool";
-        key "ip-pool-name";
-        description   "Global IP pool configuration";
+      "Replaced the unused IETF dhc draft model (2016-08-25, mounted at
+       `system dhcp`) with the VyOS-derived relay trees.";
+  }
 
-        leaf ip-pool-name {
-          ext:help "IP pool name";
-          type string {
-            length "1..64";
+  // ---------------------------------------------------------------
+  // service dhcp-relay — vyos-1x service_dhcp-relay.xml.in
+  // ---------------------------------------------------------------
+
+  grouping dhcp-relay {
+    leaf disable {
+      ext:help "Disable instance";
+      type empty;
+    }
+    leaf-list listen-interface {
+      ext:help "Interface for DHCP Relay Agent to listen for requests";
+      type string;
+    }
+    leaf-list upstream-interface {
+      ext:help "Interface for DHCP Relay Agent forward requests out";
+      type string;
+    }
+    leaf-list server {
+      ext:help "DHCP server address";
+      type inet:ipv4-address;
+    }
+    container relay-options {
+      ext:help "Relay options";
+      leaf hop-count {
+        ext:help "Policy to discard packets that have reached specified hop-count (VyOS default: 10)";
+        type uint8 {
+          range "1..255";
+        }
+      }
+      leaf max-size {
+        ext:help "Maximum packet size to send to a DHCPv4/BOOTP server (VyOS default: 576)";
+        type uint16 {
+          range "64..1400";
+        }
+      }
+      leaf relay-agents-packets {
+        ext:help "Policy to handle incoming DHCPv4 packets which already contain relay agent options (VyOS default: forward)";
+        type enumeration {
+          enum append {
+            description "Append own relay options to packet";
           }
-          description "Name of the IP pool";
-        }
-        leaf interface {
-          ext:help "Interface name";
-          type string;
-          description
-            "Name of the interface";
-        }
-        leaf subnet {
-          ext:help "Subnet prefix of the pool";
-          type inet:ipv4-prefix;
-          description "Network subnet of the interface";
-        }
-        leaf gateway-ip {
-          ext:help "Gateway IPv4 address";
-          type inet:ipv4-address;
-          description "IPv4 address of the gateway";
-        }
-        leaf default-lease-time {
-          ext:help "Default lease time in seconds";
-          type uint32{
-            range "180..31536000";
+          enum replace {
+            description "Replace existing agent option field";
           }
-          description
-            "Default network address lease time assigned to DHCP clients";
-        }
-        leaf max-lease-time {
-          ext:help "Maximum lease time in seconds";
-          type uint32{
-            range "180..31536000";
+          enum forward {
+            description "Forward the packet unchanged";
           }
-          description
-            "Default network address lease time assigned to DHCP clients";
-        }
-        list host {
-          ext:help "Static MAC-to-IP host binding";
-          key "host-name";
-          description "Mapping from MAC address to IP address";
-          leaf host-name {
-            ext:help "Host binding name";
-            type string;
-            description "Host name which statically assign MAC address to IP address";
+          enum discard {
+            description "Discard the packet";
           }
-          leaf mac-address {
-            ext:help "Host MAC address";
-            type string;
-            description "MAC address of the host";
-          }
-          leaf ip-address {
-            ext:help "Host IPv4 address";
-            type inet:ipv4-address;
-            description "IPv4 address of the host";
-          }
-        }
-        list range {
-          ext:help "IPv4 address range";
-          key "range-index";
-          description "IPv4 address for the range";
-          leaf range-index {
-            ext:help "Address range index";
-            type uint16 {
-              range "0..255";
-            }
-            description "Index of IPv4 address range";
-          }
-          leaf range-start-ip {
-            ext:help "Range start IPv4 address";
-            type inet:ipv4-address;
-            mandatory "true";
-            description "Starting IPv4 Address of a section";
-          }
-          leaf range-end-ip {
-            ext:help "Range end IPv4 address";
-            type inet:ipv4-address;
-            description "Last IPv4 Address of a section";
-          }
-        }
-        container option {
-          ext:help "DHCP option configuration";
-          description "Configuration option";
-          uses dhcp-option;
-        }
-        leaf failover-role {
-          ext:help "Failover role (master or backup)";
-          type string;
-          description "DHCP fail over role.  master or backup";
-        }
-        leaf failover-peer-address {
-          ext:help "Failover peer IPv4 address";
-          type inet:ipv4-address;
-          description "DHCP fail over peer IPv4 address";
         }
       }
     }
-    container relay {
-      ext:help "DHCP relay agent configuration";
-      description
-        "DHCP relay agent configuration";
+  }
 
-      list server-group {
-        ext:help "DHCP server group to relay to";
-        key "server-group-name";
-        description
-          "DHCP server group configuration that DHCP relays to";
-        leaf server-group-name {
-          ext:help "Server group name";
-          type string;
-          description "Name of a DHCP server group";
-        }
-        list server-address {
-          ext:help "DHCP server address";
-          key "address";
-          leaf address {
-            ext:help "Server IPv4 address";
-            type inet:ipv4-address;
-            description
-              "IPv4 address of the server";
-          }
-        }
+  // ---------------------------------------------------------------
+  // service dhcpv6-relay — vyos-1x service_dhcpv6-relay.xml.in
+  // ---------------------------------------------------------------
+
+  grouping dhcpv6-relay {
+    leaf disable {
+      ext:help "Disable instance";
+      type empty;
+    }
+    list listen-interface {
+      ext:help "Interface for DHCPv6 Relay Agent to listen for requests";
+      key "name";
+      leaf name {
+        ext:help "Interface name";
+        type string;
       }
+      leaf address {
+        ext:help "IPv6 address on listen-interface listen for requests on";
+        type inet:ipv6-address;
+      }
+    }
+    leaf max-hop-count {
+      ext:help "Maximum hop count for which requests will be processed (VyOS default: 10)";
+      type uint8 {
+        range "1..255";
+      }
+    }
+    list upstream-interface {
+      ext:help "Interface for DHCPv6 Relay Agent forward requests out";
+      key "name";
+      leaf name {
+        ext:help "Interface name";
+        type string;
+      }
+      leaf-list address {
+        ext:help "IPv6 address to forward requests to";
+        type inet:ipv6-address;
+      }
+    }
+    leaf use-interface-id-option {
+      ext:help "Option to set DHCPv6 interface-ID option";
+      type empty;
     }
   }
 }

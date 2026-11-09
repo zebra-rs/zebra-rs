@@ -1,0 +1,25 @@
+# Phase 2: RA on i1, the unnumbered neighbor, and two IPv4 networks for
+# z1 to learn over the extended next-hop: 10.10.2.0/24 (the one the
+# withdraw scenario removes) and 10.0.0.2/32 (which stays). The MRAI is
+# zero so the withdraw and the re-announcement go out at once.
+interface:
+- if-name: i1
+  ipv6:
+    router-advertisements:
+      send-advertisements: true
+router:
+  bgp:
+    global:
+      as: 65002
+      router-id: 2.2.2.2
+    timer:
+      adv-interval:
+        ebgp: 0
+    interface-neighbor:
+    - interface: i1
+      remote-as: 65001
+    afi-safi:
+    - name: ipv4
+      network:
+      - prefix: 10.0.0.2/32
+      - prefix: 10.10.2.0/24
