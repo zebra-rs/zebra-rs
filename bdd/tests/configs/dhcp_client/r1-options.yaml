@@ -1,0 +1,9 @@
+# r1: the lease's routes at distance 220, and a host name of its own.
+interface:
+- if-name: wan0
+  ipv4:
+    address:
+    - dhcp
+    dhcp-options:
+      default-route-distance: 220
+      host-name: edge1

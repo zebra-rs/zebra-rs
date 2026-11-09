@@ -68,6 +68,22 @@ pub enum Message {
     LinkDown {
         ifindex: u32,
     },
+    /// A zebra-rs component (the DHCP client) puts a dynamic address on
+    /// an interface, or refreshes its lifetimes: `Rib::addr_dyn_add`.
+    /// Only the RIB task reaches the kernel's address table, so other
+    /// tasks ask for it this way.
+    AddrDynAdd {
+        ifindex: u32,
+        addr: IpNet,
+        origin: super::link::AddrOrigin,
+        opts: crate::fib::AddrOpts,
+    },
+    /// The component gives the address up: `Rib::addr_dyn_del`.
+    AddrDynDel {
+        ifindex: u32,
+        addr: IpNet,
+        origin: super::link::AddrOrigin,
+    },
     Ipv4Add {
         prefix: Ipv4Net,
         rib: RibEntry,
@@ -964,7 +980,7 @@ fn ilm_distance(rtype: RibType) -> u8 {
         RibType::Ospf => 110,
         RibType::Isis => 115,
         RibType::Bgp => 20,
-        RibType::Dhcp => 254,
+        RibType::Dhcp | RibType::DhcpClient => 254,
         RibType::Other(_) => 255,
     }
 }
@@ -3506,6 +3522,21 @@ impl Rib {
 
     async fn process_msg(&mut self, msg: Message, table_id: u32) {
         match msg {
+            Message::AddrDynAdd {
+                ifindex,
+                addr,
+                origin,
+                opts,
+            } => {
+                self.addr_dyn_add(ifindex, addr, origin, opts).await;
+            }
+            Message::AddrDynDel {
+                ifindex,
+                addr,
+                origin,
+            } => {
+                self.addr_dyn_del(ifindex, addr, origin).await;
+            }
             Message::Ipv4Add { prefix, rib } => {
                 let table_id = self.route_table_for(&rib, table_id);
                 if table_id == RT_TABLE_MAIN {

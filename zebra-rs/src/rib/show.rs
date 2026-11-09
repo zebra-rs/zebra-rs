@@ -874,6 +874,7 @@ fn protocol_long_name(t: super::types::RibType) -> &'static str {
         RibType::Isis => "isis",
         RibType::Bgp => "bgp",
         RibType::Dhcp => "dhcp",
+        RibType::DhcpClient => "dhcp client",
         RibType::Other(_) => "unknown",
     }
 }

@@ -179,6 +179,7 @@ packet-utils = { path = "../crates/packet-utils" }
 pim-packet = { path = "../crates/pim-packet" }
 bfd-packet = { path = "../crates/bfd-packet" }
 nd-packet = { path = "../crates/nd-packet" }
+dhcp-packet = { path = "../crates/dhcp-packet" }
 stamp-packet = { path = "../crates/stamp-packet" }
 bitfield-struct = "0.13"
 rand = "0.10"

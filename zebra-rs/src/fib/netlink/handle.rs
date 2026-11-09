@@ -368,6 +368,8 @@ pub(crate) fn route_protocol(rtype: RibType) -> RouteProtocol {
         RibType::Bgp => RouteProtocol::Bgp,
         RibType::Ospf => RouteProtocol::Ospf,
         RibType::Isis => RouteProtocol::Isis,
+        // What `ip route` shows for any DHCP client's routes.
+        RibType::DhcpClient => RouteProtocol::Dhcp,
         _ => RouteProtocol::Zebra,
     }
 }
@@ -4045,6 +4047,58 @@ impl FibHandle {
         Ok(())
     }
 
+    /// Install a dynamic address, or update the one installed: its
+    /// lifetimes, broadcast address and `noprefixroute` (`RTM_NEWADDR`
+    /// with `NLM_F_REPLACE`). A renewal therefore moves the lifetimes
+    /// without the address ever leaving the interface.
+    pub async fn addr_replace(
+        &self,
+        ifindex: u32,
+        prefix: &IpNet,
+        opts: &crate::fib::AddrOpts,
+    ) -> anyhow::Result<()> {
+        use netlink_packet_route::address::{AddressFlags, CacheInfo, CacheInfoBuffer};
+        use netlink_packet_utils::Parseable;
+
+        let mut msg = AddressMessage::default();
+        msg.header.family = match prefix {
+            IpNet::V4(_) => AddressFamily::Inet,
+            IpNet::V6(_) => AddressFamily::Inet6,
+        };
+        msg.header.prefix_len = prefix.prefix_len();
+        msg.header.index = ifindex;
+        msg.header.scope = AddressScope::Universe;
+        msg.attributes.push(AddressAttribute::Local(prefix.addr()));
+        if let (IpNet::V4(_), Some(broadcast)) = (prefix, opts.broadcast) {
+            msg.attributes.push(AddressAttribute::Broadcast(broadcast));
+        }
+        // struct ifa_cacheinfo: preferred, valid, then two stamps the
+        // kernel fills in.
+        let mut bytes = [0u8; 16];
+        bytes[0..4].copy_from_slice(&opts.preferred_lft.min(opts.valid_lft).to_ne_bytes());
+        bytes[4..8].copy_from_slice(&opts.valid_lft.to_ne_bytes());
+        let cache_info = CacheInfo::parse(&CacheInfoBuffer::new(&bytes))
+            .map_err(|e| anyhow::anyhow!("ifa_cacheinfo: {e}"))?;
+        msg.attributes.push(AddressAttribute::CacheInfo(cache_info));
+        if opts.noprefixroute {
+            msg.attributes
+                .push(AddressAttribute::Flags(AddressFlags::Noprefixroute));
+        }
+
+        let mut req = NetlinkMessage::from(RouteNetlinkMessage::NewAddress(msg));
+        req.header.flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE;
+
+        let mut response = self.handle.clone().request(req)?;
+        while let Some(msg) = response.next().await {
+            if let NetlinkPayload::Error(e) = msg.payload
+                && e.code.is_some()
+            {
+                return Err(anyhow::anyhow!("NewAddress (replace) netlink error: {}", e));
+            }
+        }
+        Ok(())
+    }
+
     pub async fn addr_del_ipv4(&self, ifindex: u32, prefix: &Ipv4Net) {
         let mut msg = AddressMessage::default();
         msg.header.family = AddressFamily::Inet;
@@ -6436,6 +6490,9 @@ pub fn route_from_msg_with(
             RouteProtocol::Ospf => Some(RibType::Ospf),
             RouteProtocol::Isis => Some(RibType::Isis),
             RouteProtocol::Bgp => Some(RibType::Bgp),
+            // Our own DHCP client's, when it has this route installed;
+            // any other `RTPROT_DHCP` route stays a learned `Dhcp` one.
+            RouteProtocol::Dhcp => Some(RibType::DhcpClient),
             _ => None,
         },
         // Before zebra-rs used `RTPROT_ZEBRA` for statics, it installed

@@ -125,6 +125,40 @@ impl Rib {
         }
     }
 
+    /// A route our DHCP client hands over takes the place of a learned
+    /// `RTPROT_DHCP` route at the same table, prefix and priority. The
+    /// install replaces that kernel route in place (`NLM_F_REPLACE` keys
+    /// on prefix and priority, not on who added the route), so its learned
+    /// entry must go: left behind, it would outrank the client's own route
+    /// at distance 0 and keep it out of the kernel.
+    ///
+    /// This is how a lease's routes are taken back after a restart: the
+    /// earlier run left them in the kernel, and the startup dump read them
+    /// as learned. Unlike a static's leftovers they are not swept, because
+    /// `RTPROT_DHCP` is not ours alone (insomnia's delegated-prefix routes
+    /// use it too); only a route the client claims again is taken over.
+    pub(super) fn adopt_learned_dhcp(&mut self, table_id: u32, prefix: IpNet, entry: &RibEntry) {
+        if entry.rtype != RibType::DhcpClient {
+            return;
+        }
+        let priorities = kernel_priorities(entry, matches!(prefix, IpNet::V6(_)));
+        let entries = match prefix {
+            IpNet::V4(p) if table_id == RT_TABLE_MAIN => self.table.get_mut(&p),
+            IpNet::V6(p) if table_id == RT_TABLE_MAIN => self.table_v6.get_mut(&p),
+            IpNet::V4(p) => self
+                .vrf_tables
+                .get_mut(&table_id)
+                .and_then(|t| t.table.get_mut(&p)),
+            IpNet::V6(p) => self
+                .vrf_tables
+                .get_mut(&table_id)
+                .and_then(|t| t.table_v6.get_mut(&p)),
+        };
+        if let Some(entries) = entries {
+            entries.retain(|e| !(e.rtype == RibType::Dhcp && priorities.contains(&e.metric)));
+        }
+    }
+
     /// Withdraw every leftover from an earlier run that its owner has not
     /// replaced by now: statics, IS-IS, and VRF BGP, plus SRv6 routes under
     /// any of our protocols that nothing reinstalled, and the next-hop
@@ -800,6 +834,7 @@ impl Rib {
             .and_then(|t| selected_v4(&t.table, prefix))
             .cloned();
         self.adopt_legacy_static(table_id, (*prefix).into(), &entry);
+        self.adopt_learned_dhcp(table_id, (*prefix).into(), &entry);
         let replace = {
             let Some(t) = self.vrf_tables.get_mut(&table_id) else {
                 tracing::warn!(
@@ -887,6 +922,7 @@ impl Rib {
             .and_then(|t| selected_v6(&t.table_v6, prefix))
             .cloned();
         self.adopt_legacy_static(table_id, (*prefix).into(), &entry);
+        self.adopt_learned_dhcp(table_id, (*prefix).into(), &entry);
         let replace = {
             let Some(t) = self.vrf_tables.get_mut(&table_id) else {
                 tracing::warn!(
@@ -1023,6 +1059,7 @@ impl Rib {
     pub async fn ipv4_route_add(&mut self, prefix: &Ipv4Net, mut entry: RibEntry, table_id: u32) {
         let before = selected_v4(&self.table, prefix).cloned();
         self.adopt_legacy_static(table_id, (*prefix).into(), &entry);
+        self.adopt_learned_dhcp(table_id, (*prefix).into(), &entry);
         if entry.is_protocol() {
             let replace = rib_replace(&mut self.table, prefix, entry.rtype);
             rib_resolve_nexthop(&mut entry, &self.table, &mut self.nmap, table_id);
@@ -1260,6 +1297,7 @@ impl Rib {
 
         let before = selected_v6(&self.table_v6, prefix).cloned();
         self.adopt_legacy_static(table_id, (*prefix).into(), &entry);
+        self.adopt_learned_dhcp(table_id, (*prefix).into(), &entry);
         if entry.is_protocol() {
             let replace = rib_replace_v6(&mut self.table_v6, prefix, entry.rtype);
             rib_resolve_nexthop_v6(&mut entry, &self.table_v6, &mut self.nmap, table_id);

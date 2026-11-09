@@ -256,6 +256,33 @@ impl fmt::Display for AddrFlags {
     }
 }
 
+/// Which zebra-rs component holds a dynamic address (`LinkAddr::dynamic`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum AddrOrigin {
+    /// A DHCPv4 lease, held by the `dhcpc` task.
+    Dhcp4,
+}
+
+impl fmt::Display for AddrOrigin {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            AddrOrigin::Dhcp4 => "dhcp",
+        })
+    }
+}
+
+/// Where an address handed to [`Rib::addr_add_from`] comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AddrFrom {
+    /// A kernel notification: the address is there, whoever added it.
+    Kernel,
+    /// The configuration path, which has just added it to the kernel.
+    Config,
+    /// A zebra-rs component that has just added it to the kernel with
+    /// lifetimes (`Message::AddrDynAdd`).
+    Dynamic(AddrOrigin),
+}
+
 #[derive(Default, Debug, Clone, PartialEq, Serialize)]
 pub struct LinkAddr {
     pub addr: IpNet,
@@ -263,6 +290,15 @@ pub struct LinkAddr {
     pub secondary: bool,
     pub config: bool,
     pub fib: bool,
+    /// Set while a zebra-rs component holds this address dynamically (a
+    /// DHCP lease). Such an address went in with kernel lifetimes and is
+    /// not configuration: when the kernel expires it, it is gone, and
+    /// neither `addr_recover_if_configured` nor `link_up` brings it back.
+    /// An address can be both `config` and `dynamic` (the operator
+    /// configured what the lease also hands out); `config` then decides
+    /// whether it stays.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dynamic: Option<AddrOrigin>,
     pub scope: AddrScope,
     pub flags: AddrFlags,
     /// Remaining valid lifetime in seconds at the time of the last
@@ -287,6 +323,7 @@ impl LinkAddr {
             secondary: osaddr.secondary,
             config: false,
             fib: true,
+            dynamic: None,
             scope: osaddr.scope,
             flags: osaddr.flags,
             valid_lft: osaddr.valid_lft,
@@ -396,6 +433,9 @@ fn addr_tokens_show(buf: &mut String, addr: &LinkAddr) {
     if !addr.flags.display_empty() {
         write!(buf, " {}", addr.flags).unwrap();
     }
+    if let Some(origin) = addr.dynamic {
+        write!(buf, " {}", origin).unwrap();
+    }
     if let (Some(valid), Some(preferred)) = (addr.valid_lft, addr.preferred_lft)
         && valid != u32::MAX
     {
@@ -443,6 +483,9 @@ pub struct InterfaceAddress {
     pub scope: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub flags: Vec<String>,
+    /// Who holds the address dynamically (`dhcp`); absent otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dynamic: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub valid_lft: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -455,6 +498,8 @@ pub struct InterfaceAddressV6 {
     pub scope: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub flags: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dynamic: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub valid_lft: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -567,6 +612,7 @@ fn link_to_detailed_json(rib: &Rib, link: &Link) -> InterfaceDetailed {
             secondary: addr.secondary,
             scope: addr.scope.to_string(),
             flags: addr_flag_tokens(&addr.flags),
+            dynamic: addr.dynamic.map(|o| o.to_string()),
             valid_lft: addr.valid_lft,
             preferred_lft: addr.preferred_lft,
         })
@@ -579,6 +625,7 @@ fn link_to_detailed_json(rib: &Rib, link: &Link) -> InterfaceDetailed {
             address: addr.addr.to_string(),
             scope: addr.scope.to_string(),
             flags: addr_flag_tokens(&addr.flags),
+            dynamic: addr.dynamic.map(|o| o.to_string()),
             valid_lft: addr.valid_lft,
             preferred_lft: addr.preferred_lft,
         })
@@ -714,9 +761,14 @@ pub fn link_addr_update(link: &mut Link, addr: LinkAddr) -> AddrUpdate {
         &mut link.addr6
     };
     if let Some(existing) = bucket.iter_mut().find(|a| a.addr == addr.addr) {
+        // A component claiming the address (`dynamic`) is a change; a
+        // kernel or config event never clears the claim — only
+        // `Rib::addr_dyn_del` does.
+        let claimed = addr.dynamic.is_some() && existing.dynamic != addr.dynamic;
         let changed = (addr.config && !existing.config)
             || (addr.fib && !existing.fib)
-            || existing.secondary != addr.secondary;
+            || existing.secondary != addr.secondary
+            || claimed;
         // Kernel metadata (scope, DAD/lifetime state) is only knowable
         // from netlink events — the config path (`addr.config`) carries
         // defaults and must not wipe what the kernel told us. The
@@ -736,6 +788,9 @@ pub fn link_addr_update(link: &mut Link, addr: LinkAddr) -> AddrUpdate {
         existing.config |= addr.config;
         existing.fib |= addr.fib;
         existing.secondary = addr.secondary;
+        if addr.dynamic.is_some() {
+            existing.dynamic = addr.dynamic;
+        }
         return if changed {
             AddrUpdate::Merged
         } else if refreshed {
@@ -1419,6 +1474,23 @@ impl Rib {
     ///   from kernel-only addresses (e.g. SLAAC, manual `ip addr add`) and
     ///   recover them across link bounces.
     pub fn addr_add(&mut self, osaddr: FibAddr, from_config: bool) {
+        self.addr_add_from(
+            osaddr,
+            if from_config {
+                AddrFrom::Config
+            } else {
+                AddrFrom::Kernel
+            },
+        );
+    }
+
+    /// [`Rib::addr_add`] with the source spelled out. `Config` and
+    /// `Dynamic` both mean zebra-rs has just made the kernel change
+    /// itself, so no notification will follow and the kernel's verdicts
+    /// (scope, IPv4 secondary, IPv6 DAD flags) are mirrored here.
+    pub fn addr_add_from(&mut self, osaddr: FibAddr, from: AddrFrom) {
+        let from_config = from == AddrFrom::Config;
+        let local = from != AddrFrom::Kernel;
         // Validate against zero prefix length - prevents default route addresses on interfaces
         if osaddr.addr.prefix_len() == 0 {
             println!("FIB: zero prefixlen addr!");
@@ -1434,8 +1506,11 @@ impl Rib {
         }
 
         let mut addr = LinkAddr::from(osaddr);
-        if from_config {
-            addr.config = true;
+        addr.config = from_config;
+        if let AddrFrom::Dynamic(origin) = from {
+            addr.dynamic = Some(origin);
+        }
+        if local {
             // Our own RTM_NEWADDR never echoes back, so mirror the scope
             // the kernel will assign, and for IPv6 the flags it adds the
             // address with: permanent, and tentative until DAD is through.
@@ -1449,14 +1524,15 @@ impl Rib {
             addr.scope = AddrScope::derive(&addr.addr);
             if !addr.is_v4() {
                 addr.flags.tentative = true;
-                addr.flags.permanent = true;
+                // A dynamic address has lifetimes: not permanent.
+                addr.flags.permanent = from_config;
             }
         }
         if let Some(link) = self.links.get_mut(&addr.ifindex) {
             // Our own RTM_NEWADDR never echoes back (the kernel excludes
             // the originating socket from the RTNLGRP broadcast), so the
             // config path computes the kernel's secondary verdict locally.
-            if from_config && let IpNet::V4(v4) = addr.addr {
+            if local && let IpNet::V4(v4) = addr.addr {
                 addr.secondary = v4_secondary_verdict(link, v4);
             }
             let update = link_addr_update(link, addr.clone());
@@ -1567,6 +1643,191 @@ impl Rib {
     }
 }
 
+impl Rib {
+    /// Remove an IPv4 address zebra-rs put on `ifindex` from the kernel
+    /// and the RIB, and mirror what the kernel does to its same-subnet
+    /// secondaries. The caller has already cleared whatever claim
+    /// (`config`, `dynamic`) kept the address.
+    pub(super) async fn addr4_remove(&mut self, ifindex: u32, v4addr: Ipv4Net) {
+        // Read the primary verdict first: deleting a primary triggers the
+        // kernel's purge cascade on its same-subnet secondaries.
+        let was_primary = self.links.get(&ifindex).is_some_and(|link| {
+            link.addr4
+                .iter()
+                .any(|a| a.addr == IpNet::V4(v4addr) && !a.secondary)
+        });
+        self.fib_handle.addr_del_ipv4(ifindex, &v4addr).await;
+        let addr = FibAddr {
+            addr: ipnet::IpNet::V4(v4addr),
+            link_index: ifindex,
+            secondary: false,
+            ..Default::default()
+        };
+        self.addr_del(addr);
+
+        if !was_primary {
+            return;
+        }
+        // Kernel cascade mirror: deleting a primary also purged
+        // its same-subnet secondaries in the kernel
+        // (promote_secondaries=0 is the default), and none of it
+        // is visible here — the kernel excludes the originating
+        // socket from the RTNLGRP broadcast. Drop kernel-only
+        // siblings to match, and re-install configured ones so
+        // deleting the primary doesn't silently take them down.
+        // The re-add tolerates EEXIST for hosts running
+        // promote_secondaries=1, where the kernel promoted the
+        // first secondary instead of purging.
+        let siblings: Vec<(Ipv4Net, bool)> = self
+            .links
+            .get(&ifindex)
+            .map(|link| {
+                link.addr4
+                    .iter()
+                    .filter_map(|a| match a.addr {
+                        IpNet::V4(ev)
+                            if ev.prefix_len() == v4addr.prefix_len()
+                                && ev.network() == v4addr.network() =>
+                        {
+                            Some((ev, a.config))
+                        }
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        for (sib, config) in siblings {
+            let fib_sib = FibAddr {
+                addr: IpNet::V4(sib),
+                link_index: ifindex,
+                secondary: false,
+                ..Default::default()
+            };
+            if config {
+                let _ = self.fib_handle.addr_add_ipv4(ifindex, &sib).await;
+                self.addr_add(fib_sib, true);
+            } else {
+                self.addr_del(fib_sib);
+            }
+        }
+    }
+
+    /// Take the lifetimes off an address in the kernel: the configuration
+    /// owns it now, and a lease's end must not take it away.
+    ///
+    /// Called when the configuration claims an address a lease already
+    /// holds (it went in with the lease's lifetime, and renewals no
+    /// longer refresh a configured address), and when a lease lets go of
+    /// an address the configuration also names. Without it the kernel
+    /// would expire the address at the lease's old deadline; recovery
+    /// would put it back, but only after it had gone, and with it its
+    /// same-subnet secondaries.
+    pub(super) async fn addr_make_permanent(&mut self, ifindex: u32, addr: IpNet) {
+        let permanent = crate::fib::AddrOpts::permanent();
+        if let Err(e) = self
+            .fib_handle
+            .addr_replace(ifindex, &addr, &permanent)
+            .await
+        {
+            tracing::warn!(ifindex, %addr, "configured address not made permanent: {e}");
+            return;
+        }
+        // No netlink self-echo follows: mirror what the kernel now holds.
+        let Some(link) = self.links.get_mut(&ifindex) else {
+            return;
+        };
+        let bucket = match addr {
+            IpNet::V4(_) => &mut link.addr4,
+            IpNet::V6(_) => &mut link.addr6,
+        };
+        if let Some(existing) = bucket.iter_mut().find(|a| a.addr == addr) {
+            existing.valid_lft = Some(u32::MAX);
+            existing.preferred_lft = Some(u32::MAX);
+            existing.flags.permanent = true;
+            existing.flags.deprecated = false;
+        }
+    }
+
+    /// `Message::AddrDynAdd`: put a dynamic address on an interface, or
+    /// refresh the one there (a lease renewal moves its lifetimes).
+    ///
+    /// An address the operator configured as well is only marked: its
+    /// kernel entry is permanent (`addr_make_permanent`), because the
+    /// configuration outlives the lease.
+    pub async fn addr_dyn_add(
+        &mut self,
+        ifindex: u32,
+        addr: IpNet,
+        origin: AddrOrigin,
+        opts: crate::fib::AddrOpts,
+    ) {
+        let Some(link) = self.links.get_mut(&ifindex) else {
+            tracing::warn!(ifindex, %addr, "dynamic address: no such interface");
+            return;
+        };
+        let bucket = match addr {
+            IpNet::V4(_) => &mut link.addr4,
+            IpNet::V6(_) => &mut link.addr6,
+        };
+        if let Some(existing) = bucket.iter_mut().find(|a| a.addr == addr && a.config) {
+            existing.dynamic = Some(origin);
+            return;
+        }
+        if let Err(e) = self.fib_handle.addr_replace(ifindex, &addr, &opts).await {
+            tracing::warn!(ifindex, %addr, "dynamic address not installed: {e}");
+            return;
+        }
+        let mut osaddr = FibAddr {
+            addr,
+            link_index: ifindex,
+            valid_lft: Some(opts.valid_lft),
+            preferred_lft: Some(opts.preferred_lft.min(opts.valid_lft)),
+            ..Default::default()
+        };
+        osaddr.flags.noprefixroute = opts.noprefixroute;
+        self.addr_add_from(osaddr, AddrFrom::Dynamic(origin));
+        // No netlink self-echo follows (see `link_config_exec`).
+        self.router_id_update();
+    }
+
+    /// `Message::AddrDynDel`: the component gives a dynamic address up (a
+    /// lease ended or was released). A no-op when the kernel has already
+    /// expired it, or when someone else holds it now.
+    pub async fn addr_dyn_del(&mut self, ifindex: u32, addr: IpNet, origin: AddrOrigin) {
+        let Some(link) = self.links.get_mut(&ifindex) else {
+            return;
+        };
+        let bucket = match addr {
+            IpNet::V4(_) => &mut link.addr4,
+            IpNet::V6(_) => &mut link.addr6,
+        };
+        let Some(existing) = bucket.iter_mut().find(|a| a.addr == addr) else {
+            return;
+        };
+        if existing.dynamic != Some(origin) {
+            return;
+        }
+        existing.dynamic = None;
+        if existing.config {
+            // The operator's address now.
+            self.addr_make_permanent(ifindex, addr).await;
+            return;
+        }
+        match addr {
+            IpNet::V4(v4addr) => self.addr4_remove(ifindex, v4addr).await,
+            IpNet::V6(v6addr) => {
+                self.fib_handle.addr_del_ipv6(ifindex, &v6addr).await;
+                self.addr_del(FibAddr {
+                    addr,
+                    link_index: ifindex,
+                    ..Default::default()
+                });
+            }
+        }
+        self.router_id_update();
+    }
+}
+
 pub struct LinkConfig {}
 
 impl LinkConfig {
@@ -1658,12 +1919,23 @@ pub async fn link_config_exec(
                     // learned from the kernel), just mark it configured: the
                     // kernel add would EEXIST, and adopting a kernel-learned
                     // address lets a later config delete remove it.
+                    let mut present = None;
                     if let Some(link) = rib.links.get_mut(&ifindex)
                         && let Some(existing) =
                             link.addr4.iter_mut().find(|a| a.addr == IpNet::V4(v4addr))
                     {
                         existing.config = true;
-                        continue;
+                        present = Some(existing.dynamic.is_some());
+                    }
+                    match present {
+                        // A lease holds it too, with the lease's lifetime
+                        // on it: the configuration must outlive the lease.
+                        Some(true) => {
+                            rib.addr_make_permanent(ifindex, IpNet::V4(v4addr)).await;
+                            continue;
+                        }
+                        Some(false) => continue,
+                        None => {}
                     }
 
                     let result = rib.fib_handle.addr_add_ipv4(ifindex, &v4addr).await;
@@ -1702,73 +1974,28 @@ pub async fn link_config_exec(
                         .collect();
                 }
                 for v4addr in values {
-                    // Clear `config` on the existing LinkAddr so addr_del
-                    // below removes the entry instead of keeping it as a
-                    // recovery candidate. Read the primary verdict first:
-                    // deleting a primary triggers the kernel's purge cascade
-                    // on its same-subnet secondaries.
-                    let mut was_primary = false;
+                    // Clear `config` on the existing LinkAddr so the
+                    // removal below drops the entry instead of keeping it
+                    // as a recovery candidate. An address a DHCP lease
+                    // also holds stays where it is: the lease owns it now.
+                    let mut leased = None;
                     if let Some(link) = rib.links.get_mut(&ifindex) {
                         let target = IpNet::V4(v4addr);
                         if let Some(existing) = link.addr4.iter_mut().find(|a| a.addr == target) {
-                            was_primary = !existing.secondary;
                             existing.config = false;
+                            if existing.dynamic.is_some() {
+                                leased = Some(existing.clone());
+                            }
                         }
                     }
-                    rib.fib_handle.addr_del_ipv4(ifindex, &v4addr).await;
-                    let addr = FibAddr {
-                        addr: ipnet::IpNet::V4(v4addr),
-                        link_index: ifindex,
-                        secondary: false,
-                        ..Default::default()
-                    };
-                    rib.addr_del(addr);
-
-                    if !was_primary {
+                    if let Some(addr) = leased {
+                        // It is still permanent in the kernel, as the
+                        // configuration made it. Tell its holder, which
+                        // puts the lease's lifetime back on it.
+                        rib.api_addr_add(&addr);
                         continue;
                     }
-                    // Kernel cascade mirror: deleting a primary also purged
-                    // its same-subnet secondaries in the kernel
-                    // (promote_secondaries=0 is the default), and none of it
-                    // is visible here — the kernel excludes the originating
-                    // socket from the RTNLGRP broadcast. Drop kernel-only
-                    // siblings to match, and re-install configured ones so
-                    // deleting the primary doesn't silently take them down.
-                    // The re-add tolerates EEXIST for hosts running
-                    // promote_secondaries=1, where the kernel promoted the
-                    // first secondary instead of purging.
-                    let siblings: Vec<(Ipv4Net, bool)> = rib
-                        .links
-                        .get(&ifindex)
-                        .map(|link| {
-                            link.addr4
-                                .iter()
-                                .filter_map(|a| match a.addr {
-                                    IpNet::V4(ev)
-                                        if ev.prefix_len() == v4addr.prefix_len()
-                                            && ev.network() == v4addr.network() =>
-                                    {
-                                        Some((ev, a.config))
-                                    }
-                                    _ => None,
-                                })
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    for (sib, config) in siblings {
-                        let fib_sib = FibAddr {
-                            addr: IpNet::V4(sib),
-                            link_index: ifindex,
-                            secondary: false,
-                            ..Default::default()
-                        };
-                        if config {
-                            let _ = rib.fib_handle.addr_add_ipv4(ifindex, &sib).await;
-                            rib.addr_add(fib_sib, true);
-                        } else {
-                            rib.addr_del(fib_sib);
-                        }
-                    }
+                    rib.addr4_remove(ifindex, v4addr).await;
                 }
             }
         }
@@ -2301,6 +2528,84 @@ mod tests {
         rib.addr_add(fib_addr(done), false);
         let flags = drain();
         assert!(matches!(flags.as_slice(), [f] if !f.tentative), "{flags:?}");
+    }
+
+    /// A lease's address is claimed (`dynamic`), not configured: a
+    /// renewal only moves its lifetimes, a kernel notification keeps the
+    /// claim, and once the kernel expires it, it is gone for good instead
+    /// of being kept as a recovery candidate.
+    #[tokio::test]
+    async fn a_dynamic_address_is_claimed_not_configured() {
+        use crate::rib::api::RibRx;
+        use crate::rib::client::ProtoId;
+
+        let mut rib = Rib::new(false).expect("rib");
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        rib.client_registry
+            .register_with_id(ProtoId::from_raw(0), "dhcpc", tx, 0, false);
+        rib.links.insert(1, test_link());
+        let lease = |valid| FibAddr {
+            addr: "192.0.2.10/24".parse().unwrap(),
+            link_index: 1,
+            valid_lft: Some(valid),
+            preferred_lft: Some(valid),
+            ..Default::default()
+        };
+
+        rib.addr_add_from(lease(3600), AddrFrom::Dynamic(AddrOrigin::Dhcp4));
+        let addr = rib.links[&1].addr4[0].clone();
+        assert_eq!(addr.dynamic, Some(AddrOrigin::Dhcp4));
+        assert!(!addr.config && addr.fib);
+        assert_eq!(addr.scope, AddrScope::Universe);
+        assert_eq!(addr.valid_lft, Some(3600));
+        assert!(
+            matches!(rx.try_recv(), Ok(RibRx::AddrAdd(a)) if a.dynamic == Some(AddrOrigin::Dhcp4))
+        );
+        let mut text = String::new();
+        addr_tokens_show(&mut text, &addr);
+        assert_eq!(text, " dhcp valid-lft 3600 preferred-lft 3600");
+
+        // A renewal: the lifetimes move and nobody is told again.
+        rib.addr_add_from(lease(7200), AddrFrom::Dynamic(AddrOrigin::Dhcp4));
+        assert_eq!(rib.links[&1].addr4[0].valid_lft, Some(7200));
+        assert!(rx.try_recv().is_err());
+
+        // The kernel reporting on the address does not clear the claim.
+        let mut deprecated = lease(60);
+        deprecated.flags.deprecated = true;
+        rib.addr_add(deprecated, false);
+        assert_eq!(rib.links[&1].addr4[0].dynamic, Some(AddrOrigin::Dhcp4));
+        assert!(matches!(rx.try_recv(), Ok(RibRx::AddrAdd(a)) if a.flags.deprecated));
+
+        // The kernel expires it.
+        rib.addr_del(lease(0));
+        assert!(rib.links[&1].addr4.is_empty());
+        assert!(matches!(rx.try_recv(), Ok(RibRx::AddrDel(_))));
+    }
+
+    /// The operator configured the address a lease also hands out: both
+    /// claims stand side by side, and the kernel deleting it leaves the
+    /// configured entry behind for recovery, as for any configured address.
+    #[test]
+    fn test_link_addr_update_dynamic_beside_config() {
+        let mut link = test_link();
+        let configured = test_addr_v4(Ipv4Addr::new(192, 0, 2, 10), 24, true, true);
+        link_addr_update(&mut link, configured.clone());
+
+        let mut lease = test_addr_v4(Ipv4Addr::new(192, 0, 2, 10), 24, false, true);
+        lease.dynamic = Some(AddrOrigin::Dhcp4);
+        assert_eq!(
+            link_addr_update(&mut link, lease.clone()),
+            AddrUpdate::Merged
+        );
+        assert!(link.addr4[0].config);
+        assert_eq!(link.addr4[0].dynamic, Some(AddrOrigin::Dhcp4));
+        // Claiming it again is no change.
+        assert_eq!(link_addr_update(&mut link, lease), AddrUpdate::Unchanged);
+
+        assert!(link_addr_del(&mut link, configured).is_some());
+        assert_eq!(link.addr4.len(), 1);
+        assert!(link.addr4[0].config && !link.addr4[0].fib);
     }
 
     #[test]

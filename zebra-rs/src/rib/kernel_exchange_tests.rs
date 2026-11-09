@@ -130,6 +130,50 @@ async fn installed_protocol_route_echoes_do_not_enter_kernel_rib() {
     }
 }
 
+/// `RTPROT_DHCP` has two readings. A route our DHCP client installed
+/// comes back under it and is its own echo; any other one is learned
+/// (`RibType::Dhcp`), and one at the priority the client's route is about
+/// to be installed at is taken over by it.
+#[tokio::test]
+async fn dhcp_client_routes_own_their_echo_and_adopt_a_leftover() {
+    let mut rib = Rib::new(false).unwrap();
+    let prefix: IpNet = "198.51.100.0/24".parse().unwrap();
+    let event = |metric| kernel_route(prefix, RouteProtocol::Dhcp, false, metric, RT_TABLE_MAIN);
+    assert_eq!(event(0).entry.rtype, RibType::Dhcp);
+    assert_eq!(event(0).kernel_protocol, Some(RibType::DhcpClient));
+    assert!(!rib.is_kernel_route_echo(&event(0)));
+
+    // Nobody owns them: learned, one per priority.
+    rib.process_fib_msg(FibMessage::NewRoute(event(0))).await;
+    rib.process_fib_msg(FibMessage::NewRoute(event(100))).await;
+    assert_eq!(entries(&rib, prefix, RT_TABLE_MAIN).len(), 2);
+
+    // The client's route goes in at priority 0 and takes that one over.
+    let mut owner = RibEntry::new(RibType::DhcpClient);
+    owner.distance = 210;
+    owner.nexthop = Nexthop::Uni(crate::rib::NexthopUni::default());
+    assert!(owner.is_protocol());
+    rib.adopt_learned_dhcp(RT_TABLE_MAIN, prefix, &owner);
+    let rows = entries(&rib, prefix, RT_TABLE_MAIN);
+    assert_eq!(rows.len(), 1);
+    assert_eq!((rows[0].rtype, rows[0].metric), (RibType::Dhcp, 100));
+
+    // Installed, its echo is not learned a second time, while the route
+    // at the other priority is still somebody else's.
+    owner.valid = true;
+    owner.selected = true;
+    owner.fib = true;
+    insert(&mut rib, prefix, RT_TABLE_MAIN, owner);
+    assert!(rib.is_kernel_route_echo(&event(0)));
+    assert!(!rib.is_kernel_route_echo(&event(100)));
+    rib.process_fib_msg(FibMessage::NewRoute(event(0))).await;
+    rib.process_fib_msg(FibMessage::DelRoute(event(0))).await;
+    let rows = entries(&rib, prefix, RT_TABLE_MAIN);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].rtype, RibType::DhcpClient);
+    assert!(rows[0].selected && rows[0].fib);
+}
+
 #[tokio::test]
 async fn external_protocol_routes_and_startup_leftovers_are_not_echoes() {
     let mut rib = Rib::new(false).unwrap();

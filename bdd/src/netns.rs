@@ -416,6 +416,11 @@ pub async fn spawn_in_netns_env(
         assignments.push(format!(
             "ZEBRA_OSPF_CHECKPOINT_DIR=/tmp/zebra-rs-ckpt/{netns}"
         ));
+        // The DHCP client's leases, for the same reason: the default
+        // /var/lib/zebra-rs/dhcp is host-global, and a lease file is keyed
+        // by interface name only. Stable per namespace, so a restarted
+        // daemon finds its lease again.
+        assignments.push(format!("ZEBRA_DHCP_STATE_DIR=/tmp/zebra-rs-dhcp/{netns}"));
         // Name the cradle engine outright. Otherwise zebra-rs prefers
         // `$HOME/.zebra/bin/cradle`, and under sudo that is root's: a stale
         // dev copy there replaced the packaged engine for every BDD daemon

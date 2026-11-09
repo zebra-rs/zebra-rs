@@ -1,0 +1,9 @@
+# r1: the DHCP uplink is in VRF red; the default table has no uplink.
+vrf:
+- name: red
+interface:
+- if-name: wan0
+  vrf: red
+  ipv4:
+    address:
+    - dhcp
