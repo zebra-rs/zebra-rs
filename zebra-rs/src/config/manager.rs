@@ -8148,6 +8148,17 @@ module test-insomnia-gated {
                 "/show/vrrp/detail/group",
                 vec!["WAN"],
             ),
+            ("show vrrp vrf red", "/show/vrrp/vrf", vec!["red"]),
+            (
+                "show vrrp vrf red statistics",
+                "/show/vrrp/vrf/statistics",
+                vec!["red"],
+            ),
+            (
+                "show vrrp vrf red detail group WAN",
+                "/show/vrrp/vrf/detail/group",
+                vec!["red", "WAN"],
+            ),
         ];
         for (cmd, want_path, want_args) in &cases {
             let (code, _, state) = parse(cmd, entry.clone(), None, State::new());
@@ -8195,6 +8206,9 @@ module test-insomnia-gated {
             "set vrrp group WAN peer-address 192.0.2.1",
             "set vrrp group WAN peer-address 192.0.2.2",
             "set vrrp sync-group SG member WAN",
+            "set vrrp vrf red group LAN interface eth3",
+            "set vrrp vrf red group LAN vrid 10",
+            "set vrrp vrf red group LAN address 10.1.0.254/24",
         ] {
             let candidate = store.candidate.borrow().clone();
             let (code, _, state) = parse(cmd, entry.clone(), None, State::new());
@@ -8217,7 +8231,7 @@ module test-insomnia-gated {
 
         assert_eq!(
             json,
-            r#"{"global-parameters":{"version":3},"group": [{"name":"WAN","address": [{"address":"192.0.2.253/24","interface":"eth1"},{"address":"192.0.2.254/24"}],"advertise-interval":0.5,"interface":"eth0","no-preempt":null,"peer-address": ["192.0.2.1","192.0.2.2"],"priority":200,"vrid":10}],"sync-group": [{"name":"SG","member": ["WAN"]}]}"#
+            r#"{"global-parameters":{"version":3},"group": [{"name":"WAN","address": [{"address":"192.0.2.253/24","interface":"eth1"},{"address":"192.0.2.254/24"}],"advertise-interval":0.5,"interface":"eth0","no-preempt":null,"peer-address": ["192.0.2.1","192.0.2.2"],"priority":200,"vrid":10}],"sync-group": [{"name":"SG","member": ["WAN"]}],"vrf": [{"name":"red","group": [{"name":"LAN","address": [{"address":"10.1.0.254/24"}],"interface":"eth3","vrid":10}]}]}"#
         );
     }
 

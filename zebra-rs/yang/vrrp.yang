@@ -39,9 +39,14 @@ module vrrp {
      `advertise-interval`. A config that omits them is exactly VyOS's.
 
      Current scope: `disable`, `global-parameters`, `group` and
-     `sync-group`. Deliberately deferred: VyOS `virtual-server`
-     (IPVS; would be its own top-level node), `vrrp snmp trap`, the
-     conntrack-sync failover hook, and the per-VRF `vrf` list.
+     `sync-group`, for the global table and per VRF: config.yang
+     instantiates the grouping again under a `vrf <name>` list, zebra-rs's
+     `<feature> vrf <name>` convention (VyOS has no per-VRF VRRP).
+     insomnia runs one keepalived per VRF, bound to it, and requires
+     every interface a VRF's groups name to be a member of that VRF.
+     Deliberately deferred: VyOS `virtual-server` (IPVS; would be its
+     own top-level node), `vrrp snmp trap` and the conntrack-sync
+     failover hook.
 
      Value-shape conventions follow ipsec.yang: no `pattern` statements
      on value leaves (a patterned string leaf consumes the rest of the
