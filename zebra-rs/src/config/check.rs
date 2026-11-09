@@ -91,9 +91,74 @@ pub fn startup_tolerant_check(path: &str) -> Option<ValueCheck> {
     }
 }
 
+/// The key of a `vrf` list, if `path` (a callback path, keys removed)
+/// opens with one whose VRF names must not be `default`: the top-level
+/// `vrf` list, and the per-VRF lists of the insomnia-enforced trees
+/// (`service dhcp-server vrf <name>`, `vrrp vrf <name>`, …). Their first
+/// key is that VRF's name.
+fn names_a_vrf(path: &str) -> bool {
+    path == "/vrf"
+        || path.starts_with("/vrf/")
+        || path
+            .strip_prefix("/service/")
+            .and_then(|rest| rest.split_once('/'))
+            .is_some_and(|(_, rest)| rest == "vrf" || rest.starts_with("vrf/"))
+        || path == "/vrrp/vrf"
+        || path.starts_with("/vrrp/vrf/")
+}
+
+/// `default` names the global routing table wherever a VRF is named:
+/// the `<feature> vrf <name>` lists keep it for their top level, and
+/// insomnia names its per-VRF daemon instances and their VRF bindings
+/// after it (`kea-dhcp4@default`). A VRF called `default` would collide
+/// with all of these, so the VRF lists refuse the name. Startup-tolerant
+/// like [`startup_tolerant_check`]: an earlier release took the name.
+pub fn reserved_vrf(path: &str, keys: &[&str]) -> Result<(), String> {
+    match keys.first() {
+        Some(&"default") if names_a_vrf(path) => {
+            Err("VRF name \"default\" is reserved for the global routing table".to_string())
+        }
+        _ => Ok(()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_is_not_a_vrf_name() {
+        for (path, keys) in [
+            ("/vrf", vec!["default"]),
+            ("/vrf/table-id", vec!["default", "10"]),
+            (
+                "/service/dhcp-server/vrf/shared-network-name/subnet/subnet-id",
+                vec!["default", "LAN", "10.1.0.0/24", "1"],
+            ),
+            (
+                "/service/dhcpv6-relay/vrf/listen-interface",
+                vec!["default", "eth1"],
+            ),
+            ("/vrrp/vrf/group/vrid", vec!["default", "WAN", "10"]),
+        ] {
+            assert!(reserved_vrf(path, &keys).is_err(), "{path} {keys:?}");
+        }
+        for (path, keys) in [
+            ("/vrf", vec!["red"]),
+            (
+                "/service/dhcp-server/vrf/shared-network-name/subnet/subnet-id",
+                vec!["red", "default", "10.1.0.0/24", "1"],
+            ),
+            // Not a VRF list: a shared network may be called anything.
+            (
+                "/service/dhcp-server/shared-network-name/subnet/subnet-id",
+                vec!["default", "10.1.0.0/24", "1"],
+            ),
+            ("/interface/description", vec!["default", "x"]),
+        ] {
+            assert!(reserved_vrf(path, &keys).is_ok(), "{path} {keys:?}");
+        }
+    }
 
     #[test]
     fn loss_leaves_are_checked_in_every_igp() {

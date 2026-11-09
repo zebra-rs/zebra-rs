@@ -770,6 +770,14 @@ impl ConfigManager {
                     errors.push(format!("'{line}': {e}"));
                 }
             }
+            let keys: Vec<&str> = args.0.iter().map(String::as_str).collect();
+            if let Err(e) = check::reserved_vrf(&path, &keys) {
+                if startup {
+                    tracing::warn!("startup config: '{line}': {e}");
+                } else {
+                    errors.push(format!("'{line}': {e}"));
+                }
+            }
         }
         errors
     }
@@ -2875,6 +2883,42 @@ mod save_config_tests {
         let mut candidate = String::new();
         cm.store.candidate.borrow().list(&mut candidate);
         assert!(candidate.contains(&valid), "{candidate}");
+        let errors = cm.value_errors(candidate.lines().map(str::to_string), false);
+        assert_eq!(errors, Vec::<String>::new(), "{candidate}");
+    }
+
+    /// `default` names the global routing table (and insomnia's
+    /// instances and VRF bindings of it), so a VRF of that name is
+    /// refused at commit; the startup config only warns.
+    #[test]
+    fn a_vrf_named_default_fails_the_commit_but_not_the_startup_config() {
+        let path = temp_path("vrf-default");
+        let cm = manager_with_config(&path);
+        let mode = cm.modes.get("configure").expect("configure mode");
+        let (code, output, _) = cm.execute(mode, "set vrf default");
+        assert_eq!(code, ExecCode::Show, "schema accepts the name: {output:?}");
+        let err = cm.commit_config().expect_err("vrf default").to_string();
+        assert_eq!(
+            err,
+            "'vrf default': VRF name \"default\" is reserved for the global routing table"
+        );
+        let mut running = String::new();
+        cm.store.running.borrow().list(&mut running);
+        assert_eq!(
+            running, "",
+            "`vrf default` must not reach the running config"
+        );
+        let mut candidate = String::new();
+        cm.store.candidate.borrow().list(&mut candidate);
+        let errors = cm.value_errors(candidate.lines().map(str::to_string), true);
+        assert_eq!(errors, Vec::<String>::new(), "{candidate}");
+        cm.store.discard();
+
+        // Any other name passes.
+        let (code, output, _) = cm.execute(mode, "set vrf red");
+        assert_eq!(code, ExecCode::Show, "set rejected: {output:?}");
+        let mut candidate = String::new();
+        cm.store.candidate.borrow().list(&mut candidate);
         let errors = cm.value_errors(candidate.lines().map(str::to_string), false);
         assert_eq!(errors, Vec::<String>::new(), "{candidate}");
     }
@@ -8591,7 +8635,19 @@ module test-insomnia-gated {
                 "/show/dhcpv6/relay/statistics".into(),
                 vec![],
             ),
+            (
+                "show dhcp relay vrf red statistics".into(),
+                "/show/dhcp/relay/vrf/statistics".into(),
+                vec!["red"],
+            ),
+            (
+                "show dhcpv6 relay vrf red statistics".into(),
+                "/show/dhcpv6/relay/vrf/statistics".into(),
+                vec!["red"],
+            ),
         ];
+        // `show <feature> vrf <name> <view>`, VyOS's `show dhcp server
+        // vrf <name> leases` order.
         for family in ["dhcp", "dhcpv6"] {
             for view in ["leases", "statistics", "static-mappings"] {
                 let base = format!("show {family} server {view}");
@@ -8603,16 +8659,26 @@ module test-insomnia-gated {
                     vec!["LAN"],
                 ));
                 cases.push((
-                    format!("{base} vrf red"),
-                    format!("{path}/vrf"),
+                    format!("show {family} server vrf red {view}"),
+                    format!("/show/{family}/server/vrf/{view}"),
                     vec!["red"],
                 ));
                 cases.push((
-                    format!("{base} vrf red pool LAN"),
-                    format!("{path}/vrf/pool"),
+                    format!("show {family} server vrf red {view} pool LAN"),
+                    format!("/show/{family}/server/vrf/{view}/pool"),
                     vec!["red", "LAN"],
                 ));
             }
+        }
+        // The view comes after the VRF, never before it. (A bare `show
+        // dhcp server vrf red` parses, as list keys do; insomnia answers
+        // it with the views to choose from.)
+        for cmd in [
+            "show dhcp server leases vrf red",
+            "show dhcp relay statistics vrf red",
+        ] {
+            let (code, _, _) = parse(cmd, entry.clone(), None, State::new());
+            assert_ne!(code, ExecCode::Success, "`{cmd}` must not parse");
         }
         for (cmd, want_path, want_args) in &cases {
             let (code, _, state) = parse(cmd, entry.clone(), None, State::new());
