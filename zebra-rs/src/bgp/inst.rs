@@ -9617,3 +9617,7 @@ mod multipath_pool_tests;
 #[cfg(test)]
 #[path = "enhe_pool_tests.rs"]
 mod enhe_pool_tests;
+
+#[cfg(test)]
+#[path = "replica_flags_tests.rs"]
+mod replica_flags_tests;

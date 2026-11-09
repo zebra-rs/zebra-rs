@@ -306,6 +306,37 @@ impl BgpShard {
         }
     }
 
+    /// Copy the owning pool shard's selection flags (`best_path`,
+    /// `multipath`, `best_reason`) onto the mirrored candidates of `prefix`,
+    /// from the `selected` rows its delta reports (matched by source peer
+    /// and path-id); a candidate `selected` does not hold lost, as
+    /// `select_best_path` resets it. [`Self::mirror_v4`] adds a row as it
+    /// was before selection, and a selection can change the flags of every
+    /// other candidate, so without this the N>1 `show bgp ipv4` shows no
+    /// `>` or `=`.
+    pub fn mirror_v4_selection(&mut self, prefix: Ipv4Net, selected: &[BgpRib]) {
+        let Some(cands) = self.v4.0.get_mut(&prefix) else {
+            return;
+        };
+        for c in cands.iter_mut() {
+            match selected
+                .iter()
+                .find(|s| s.ident == c.ident && s.remote_id == c.remote_id)
+            {
+                Some(s) => {
+                    c.best_path = s.best_path;
+                    c.multipath = s.multipath;
+                    c.best_reason = s.best_reason;
+                }
+                None => {
+                    c.best_path = false;
+                    c.multipath = false;
+                    c.best_reason = super::super::route::Reason::NotSelected;
+                }
+            }
+        }
+    }
+
     /// Replace mirrored candidates in place with `rows` (matched by source
     /// peer and path-id) — the N>1 read replica's half of a next-hop flip,
     /// which changes a candidate's reachability without adding or removing
