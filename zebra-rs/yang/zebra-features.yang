@@ -25,7 +25,9 @@ module zebra-features {
          - `firewall` and `show firewall`;
          - `vpn` (IPsec) and `show vpn`;
          - `vrrp` and `show vrrp`;
-       all three enforced by the out-of-process insomnia daemon; and
+         - `service` (the DHCP relay trees today) and `show dhcp` /
+           `show dhcpv6`;
+       all enforced by the out-of-process insomnia daemon; and
        the `dhcp` value of `interface <name> ipv4 address`, which is
        schema only (zebra-rs has no DHCP client yet).
 

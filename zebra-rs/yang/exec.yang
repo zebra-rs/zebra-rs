@@ -437,6 +437,33 @@ module exec {
       presence "VRRP group summary";
       uses vrrp-show-views;
     }
+    // `show dhcp …` / `show dhcpv6 …` — served by the external insomnia
+    // provider (zebra.show.v1 name "dhcp"); insomnia-gated like the
+    // config tree. The relay counters (an extension: VyOS has no relay
+    // view) cover every VRF; the server views land with insomnia's Kea
+    // backend.
+    container dhcp {
+      if-feature feat:insomnia;
+      ext:help "DHCP information";
+      container relay {
+        ext:help "DHCP relay agent information";
+        container statistics {
+          ext:help "DHCP relay agent statistics";
+          presence "DHCP relay agent statistics";
+        }
+      }
+    }
+    container dhcpv6 {
+      if-feature feat:insomnia;
+      ext:help "DHCPv6 information";
+      container relay {
+        ext:help "DHCPv6 relay agent information";
+        container statistics {
+          ext:help "DHCPv6 relay agent statistics";
+          presence "DHCPv6 relay agent statistics";
+        }
+      }
+    }
     container evpn {
       ext:help "EVPN information";
       container vni {
