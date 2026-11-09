@@ -9887,6 +9887,153 @@ mod neighbor_group_wiring_tests {
         );
     }
 
+    /// `remote-as external`: the peer keeps the placeholder AS 0 but
+    /// dials as soon as an RA supplies the neighbor's link-local.
+    #[tokio::test]
+    async fn interface_neighbor_remote_as_external_dials() {
+        use super::super::interface_neighbor::{
+            config_interface_neighbor, config_interface_neighbor_remote_as, materialize_peer,
+        };
+        use super::super::peer::PeerType;
+        use super::super::peer_key::PeerKey;
+
+        let mut bgp = fresh_bgp();
+        bgp.asn = 65001;
+        bgp.link_index_by_name.insert("i1".to_string(), 7);
+        bgp.link_name_by_index.insert(7, "i1".to_string());
+        config_interface_neighbor(&mut bgp, arg_words(&["i1"]), ConfigOp::Set).unwrap();
+        config_interface_neighbor_remote_as(
+            &mut bgp,
+            arg_words(&["i1", "external"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+        let peer = bgp.peers.get_by_key(&PeerKey::Interface(7)).unwrap();
+        assert!(peer.config.remote_as_external);
+        assert_eq!((peer.remote_as, peer.peer_type), (0, PeerType::EBGP));
+        assert!(!peer.active, "dormant until the RA");
+
+        let link_local: std::net::Ipv6Addr = "fe80::2".parse().unwrap();
+        materialize_peer(&mut bgp, "i1", 7, link_local).expect("peer materializes");
+        let peer = bgp.peers.get_by_key(&PeerKey::Interface(7)).unwrap();
+        assert!(peer.is_dialable() && peer.active, "the RA kicks the FSM");
+    }
+
+    /// A changed `remote-as` reaches the interface peer that already
+    /// exists, as it does for an addressed neighbor: the AS, the
+    /// `external` flag and the session type follow the new spec.
+    #[tokio::test]
+    async fn interface_neighbor_remote_as_change_reaches_the_peer() {
+        use super::super::interface_neighbor::{
+            config_interface_neighbor, config_interface_neighbor_remote_as, materialize_peer,
+        };
+        use super::super::peer::PeerType;
+        use super::super::peer_key::PeerKey;
+
+        let mut bgp = fresh_bgp();
+        bgp.asn = 65001;
+        bgp.link_index_by_name.insert("i1".to_string(), 7);
+        bgp.link_name_by_index.insert(7, "i1".to_string());
+        config_interface_neighbor(&mut bgp, arg_words(&["i1"]), ConfigOp::Set).unwrap();
+        config_interface_neighbor_remote_as(&mut bgp, arg_words(&["i1", "65002"]), ConfigOp::Set)
+            .unwrap();
+        let link_local: std::net::Ipv6Addr = "fe80::2".parse().unwrap();
+        materialize_peer(&mut bgp, "i1", 7, link_local).expect("peer materializes");
+
+        let state = |bgp: &Bgp| {
+            let peer = bgp.peers.get_by_key(&PeerKey::Interface(7)).unwrap();
+            (
+                peer.remote_as,
+                peer.config.remote_as_external,
+                peer.peer_type,
+            )
+        };
+        let set = |bgp: &mut Bgp, spec: &str| {
+            config_interface_neighbor_remote_as(bgp, arg_words(&["i1", spec]), ConfigOp::Set)
+                .unwrap();
+        };
+        assert_eq!(state(&bgp), (65002, false, PeerType::EBGP));
+        set(&mut bgp, "external");
+        assert_eq!(state(&bgp), (0, true, PeerType::EBGP));
+        set(&mut bgp, "65003");
+        assert_eq!(state(&bgp), (65003, false, PeerType::EBGP));
+        set(&mut bgp, "internal");
+        assert_eq!(state(&bgp), (bgp.asn, false, PeerType::IBGP));
+    }
+
+    /// A live session switched to `remote-as external` keeps the AS its
+    /// OPEN carried instead of the placeholder 0.
+    #[tokio::test]
+    async fn interface_neighbor_external_keeps_a_live_sessions_as() {
+        use super::super::interface_neighbor::{
+            config_interface_neighbor, config_interface_neighbor_remote_as, materialize_peer,
+        };
+        use super::super::peer::State;
+        use super::super::peer_key::PeerKey;
+
+        let mut bgp = fresh_bgp();
+        bgp.asn = 65001;
+        bgp.link_index_by_name.insert("i1".to_string(), 7);
+        bgp.link_name_by_index.insert(7, "i1".to_string());
+        config_interface_neighbor(&mut bgp, arg_words(&["i1"]), ConfigOp::Set).unwrap();
+        config_interface_neighbor_remote_as(&mut bgp, arg_words(&["i1", "65002"]), ConfigOp::Set)
+            .unwrap();
+        let link_local: std::net::Ipv6Addr = "fe80::2".parse().unwrap();
+        materialize_peer(&mut bgp, "i1", 7, link_local).expect("peer materializes");
+        bgp.peers
+            .get_mut_by_key(&PeerKey::Interface(7))
+            .unwrap()
+            .state = State::Established;
+
+        config_interface_neighbor_remote_as(
+            &mut bgp,
+            arg_words(&["i1", "external"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+        let peer = bgp.peers.get_by_key(&PeerKey::Interface(7)).unwrap();
+        assert_eq!(peer.remote_as, 65002);
+        assert!(peer.config.remote_as_external);
+    }
+
+    /// Setting the same `remote-as external` again (a re-applied config)
+    /// leaves the AS a live session learned from the OPEN alone.
+    #[tokio::test]
+    async fn interface_neighbor_same_remote_as_keeps_the_learned_as() {
+        use super::super::interface_neighbor::{
+            config_interface_neighbor, config_interface_neighbor_remote_as, materialize_peer,
+        };
+        use super::super::peer_key::PeerKey;
+
+        let mut bgp = fresh_bgp();
+        bgp.asn = 65001;
+        bgp.link_index_by_name.insert("i1".to_string(), 7);
+        bgp.link_name_by_index.insert(7, "i1".to_string());
+        config_interface_neighbor(&mut bgp, arg_words(&["i1"]), ConfigOp::Set).unwrap();
+        config_interface_neighbor_remote_as(
+            &mut bgp,
+            arg_words(&["i1", "external"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+        let link_local: std::net::Ipv6Addr = "fe80::2".parse().unwrap();
+        materialize_peer(&mut bgp, "i1", 7, link_local).expect("peer materializes");
+        // What the OPEN does on a live session.
+        bgp.peers
+            .get_mut_by_key(&PeerKey::Interface(7))
+            .unwrap()
+            .remote_as = 65002;
+
+        config_interface_neighbor_remote_as(
+            &mut bgp,
+            arg_words(&["i1", "external"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+        let peer = bgp.peers.get_by_key(&PeerKey::Interface(7)).unwrap();
+        assert_eq!(peer.remote_as, 65002);
+    }
+
     /// The group supplies the remote-as after an interface-neighbor
     /// referenced it: the group callback must surface the dormant
     /// member — the remote-as sweep only reaches peers that already

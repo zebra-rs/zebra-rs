@@ -1,0 +1,6 @@
+# Phase 1 for z2 — see z1-base.yaml for the warm-up rationale.
+router:
+  bgp:
+    global:
+      as: 65002
+      router-id: 2.2.2.2

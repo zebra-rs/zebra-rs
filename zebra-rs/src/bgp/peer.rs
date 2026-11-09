@@ -595,6 +595,12 @@ pub struct PeerConfig {
     /// per-peer config callbacks to decide whether a change to the
     /// group should propagate (or unset) the peer's remote-as.
     pub remote_as_inherited: bool,
+    /// `remote-as external` (an `interface-neighbor` only, FRR's
+    /// shorthand): any AS other than ours is accepted. [`Peer::remote_as`]
+    /// holds the placeholder 0 until the neighbor's OPEN supplies the AS,
+    /// and every OPEN is judged against our own AS instead of a stored
+    /// one, so a neighbor re-cabled to another AS still comes up.
+    pub remote_as_external: bool,
     /// BFD attachment for this neighbor.
     pub bfd: PeerBfdConfig,
     /// Per-neighbor `allowas-in` (zebra-bgp-allowas-in.yang). `None`
@@ -787,6 +793,7 @@ impl Default for PeerConfig {
             sub: Default::default(),
             neighbor_group: None,
             remote_as_inherited: false,
+            remote_as_external: false,
             bfd: PeerBfdConfig::default(),
             allowas_in: None,
             as_override: false,
@@ -1559,20 +1566,21 @@ impl Peer {
     }
 
     /// Whether the FSM may dial this peer: it needs a resolved remote AS
-    /// and a specified remote address.
+    /// (or `remote-as external`, which learns it from the OPEN) and a
+    /// specified remote address.
     ///
     /// Both halves can be unmet on an `interface-neighbor`, which is
-    /// materialized from config before the peer is reachable: one
-    /// created from `remote-as external` carries the placeholder ASN 0
-    /// until the OPEN backfills it, and one materialized before its
-    /// first Router Advertisement sits at `address == ::`.
+    /// materialized from config before the peer is reachable: one whose
+    /// remote-as comes from a neighbor-group that has none yet sits at
+    /// AS 0, and one materialized before its first Router Advertisement
+    /// sits at `address == ::`.
     ///
     /// [`timer::update_timers`] re-checks neither, so **any caller that
     /// arms the idle-hold timer outside [`Peer::start`] must consult
     /// this first** — an ungated arm sends the peer into `fsm_start`,
     /// which dials whatever `address` holds.
     pub fn is_dialable(&self) -> bool {
-        self.remote_as != 0 && !self.address.is_unspecified()
+        (self.remote_as != 0 || self.config.remote_as_external) && !self.address.is_unspecified()
     }
 
     pub fn start(&mut self) {
@@ -2563,8 +2571,14 @@ fn process_open(peer: &mut Peer, conn: ConnTag, packet: OpenPacket) -> State {
         None => true,
     };
 
-    // Compare with configured asn.
-    if peer.remote_as != asn || !open_consistent {
+    // Compare with configured asn. `remote-as external` accepts any AS
+    // but ours (FRR: an eBGP session with our own AS is a config error).
+    let asn_ok = if peer.config.remote_as_external {
+        asn != peer.local_as
+    } else {
+        peer.remote_as == asn
+    };
+    if !asn_ok || !open_consistent {
         // The OPEN that fails this check came on `conn`. For Primary
         // this matches today's behaviour. For Collision we just tear
         // the collision conn down and stay in our current state — the
@@ -2586,6 +2600,12 @@ fn process_open(peer: &mut Peer, conn: ConnTag, packet: OpenPacket) -> State {
             Vec::new(),
         );
         return State::Idle;
+    }
+    // `remote-as external` learns the AS here, on every session: the
+    // checks below and the session itself (enforce-first-as, show) read
+    // the neighbor's actual AS.
+    if peer.config.remote_as_external {
+        peer.remote_as = asn;
     }
 
     // RFC 9234 §4.2 role correctness. Same connection-tag split as the
@@ -5658,6 +5678,63 @@ mod as4_negotiation_tests {
         assert_eq!(next, State::OpenConfirm);
         assert!(!peer.as4, "one-sided capability is not a negotiation");
         assert!(peer.opt.as4.send && !peer.opt.as4.recv);
+    }
+
+    /// `remote-as external` (an interface-neighbor): the placeholder AS 0
+    /// does not stop the dial, and an OPEN from any AS but ours is
+    /// accepted and becomes the peer's AS.
+    #[tokio::test]
+    async fn remote_as_external_accepts_another_as_and_learns_it() {
+        let mut peer = opensent_peer(0);
+        peer.config.remote_as_external = true;
+        assert!(peer.is_dialable(), "AS 0 is a placeholder, not a gate");
+        let _ = build_open_packet(&mut peer);
+
+        let next = fsm_bgp_open(&mut peer, ConnTag::Primary, open_packet(65002, None));
+        assert_eq!(next, State::OpenConfirm);
+        assert_eq!(peer.remote_as, 65002, "the OPEN supplies the AS");
+    }
+
+    /// An eBGP session with our own AS is a configuration error: Bad
+    /// Peer AS, and the placeholder stays.
+    #[tokio::test]
+    async fn remote_as_external_rejects_our_own_as() {
+        let mut peer = opensent_peer(0);
+        peer.config.remote_as_external = true;
+        let _ = build_open_packet(&mut peer);
+
+        let next = fsm_bgp_open(&mut peer, ConnTag::Primary, open_packet(65001, None));
+        assert_eq!(next, State::Idle);
+        assert_eq!(peer.remote_as, 0);
+    }
+
+    /// Every session judges the OPEN against our AS, not the one the
+    /// last session learned: a neighbor re-cabled to another AS comes
+    /// up, and a 4-octet AS is learned from the capability.
+    #[tokio::test]
+    async fn remote_as_external_relearns_the_as_on_every_session() {
+        let mut peer = opensent_peer(0);
+        peer.config.remote_as_external = true;
+        let _ = build_open_packet(&mut peer);
+        let next = fsm_bgp_open(&mut peer, ConnTag::Primary, open_packet(65002, None));
+        assert_eq!(next, State::OpenConfirm);
+
+        peer.state = State::OpenSent;
+        let next = fsm_bgp_open(
+            &mut peer,
+            ConnTag::Primary,
+            open_packet(AS_TRANS, Some(4_200_000_000)),
+        );
+        assert_eq!(next, State::OpenConfirm);
+        assert_eq!(peer.remote_as, 4_200_000_000);
+    }
+
+    /// Without `external`, AS 0 still means "not resolved yet": the peer
+    /// does not dial.
+    #[tokio::test]
+    async fn an_unresolved_remote_as_is_not_dialable() {
+        let peer = opensent_peer(0);
+        assert!(!peer.is_dialable());
     }
 
     /// The OPEN we send for a >65535 local AS: AS_TRANS in My-AS (the

@@ -1,0 +1,19 @@
+# Phase 2: as z1-full.yaml, from AS 65002. Both ends use
+# `remote-as external`, so neither knows the other's AS until the OPEN.
+interface:
+- if-name: i1
+  ipv6:
+    router-advertisements:
+      send-advertisements: true
+router:
+  bgp:
+    global:
+      as: 65002
+      router-id: 2.2.2.2
+    interface-neighbor:
+    - interface: i1
+      remote-as: external
+    afi-safi:
+    - name: ipv4
+      network:
+      - prefix: 10.10.2.0/24

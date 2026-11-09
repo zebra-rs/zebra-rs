@@ -1,0 +1,22 @@
+# Phase 2: RA on i1 and the interface-keyed (IPv6 unnumbered) neighbor
+# with `remote-as external` — no AS to type, as in an FRR-style fabric
+# where every leaf/spine link is configured the same way. z1 learns
+# z2's AS from its OPEN. The LAN /24 on the local `lan` dummy is what
+# the forwarding check pings across.
+interface:
+- if-name: i1
+  ipv6:
+    router-advertisements:
+      send-advertisements: true
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 1.1.1.1
+    interface-neighbor:
+    - interface: i1
+      remote-as: external
+    afi-safi:
+    - name: ipv4
+      network:
+      - prefix: 10.10.1.0/24

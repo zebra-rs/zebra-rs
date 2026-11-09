@@ -70,10 +70,9 @@ module zebra-bgp-interface-neighbor {
         enum external {
           description
             "FRR-style shorthand — the remote AS is anything other
-             than the local one. Accepted, but learning the AS from
-             the neighbor's OPEN is not implemented yet: a peer
-             configured this way stays dormant. Use a numeric AS or
-             `internal`.";
+             than the local one. The neighbor's AS is learned from its
+             OPEN on each session; an OPEN from the local AS is refused
+             with Bad Peer AS.";
         }
         enum internal {
           description
