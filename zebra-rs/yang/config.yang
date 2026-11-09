@@ -5868,9 +5868,7 @@ module config {
           type union {
             type inet:ipv4-prefix;
             type enumeration {
-              enum dhcp {
-                if-feature feat:insomnia;
-              }
+              enum dhcp;
             }
           }
           description
@@ -5881,12 +5879,68 @@ module config {
              first address installed becomes the primary, so on a full
              config replay the leaf-list order decides.
 
-             `dhcp` — acquire the address dynamically instead — is the
-             first consumer of conditional schema: the value exists
-             only when the daemon runs with `--feature insomnia` (RFC 7950
-             if-feature on the enum arm). The daemon-side DHCP client
-             lands in a later change, so setting it today stores
-             config without acting on it.";
+             `dhcp` leases an address from a DHCP server (the dhcpc
+             task, docs/design/dhcp-client.md), beside any configured
+             here. The lease's address, default route and classless
+             routes go through the RIB; `dhcp-options` tunes the client.";
+        }
+        container dhcp-options {
+          ext:help "DHCP client options";
+          description
+            "Options of the DHCP client `address dhcp` starts (VyOS's
+             `dhcp-options` leaves). Without `address dhcp` they are
+             stored and unused.";
+          leaf client-id {
+            ext:help "Client identifier (option 61): xx:xx:... or text";
+            type string {
+              length "1..253";
+            }
+            description
+              "Sent as option 61. Colon-separated hex octets are the
+               identifier as it is; any other value is text, sent with
+               type 0. Unset, no identifier is sent and the server
+               keys the lease on the hardware address.";
+          }
+          leaf host-name {
+            ext:help "Host name (option 12); default: system hostname";
+            type string {
+              length "1..255";
+            }
+          }
+          leaf vendor-class-id {
+            ext:help "Vendor class identifier (option 60)";
+            type string {
+              length "1..255";
+            }
+          }
+          leaf user-class {
+            ext:help "User class (option 77)";
+            type string {
+              length "1..255";
+            }
+          }
+          leaf default-route-distance {
+            ext:help "Administrative distance of the lease's routes (default 210)";
+            type uint8 {
+              range "1..255";
+            }
+            description
+              "Distance of the routes the lease installs. Two DHCP
+               interfaces at one distance share traffic (ECMP); at
+               different distances the lower one carries it and the
+               other is its backup.";
+          }
+          leaf no-default-route {
+            ext:help "Do not install a default route from the lease";
+            type empty;
+          }
+          leaf-list reject {
+            ext:help "Ignore offers from this server address or prefix";
+            type union {
+              type inet:ipv4-address;
+              type inet:ipv4-prefix;
+            }
+          }
         }
       }
       container ipv6 {

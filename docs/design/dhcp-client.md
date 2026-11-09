@@ -1,6 +1,9 @@
 # Native DHCP client (DHCPv4, DHCPv6, RA host)
 
-**Status: design. Nothing here is implemented.**
+**Status: P0 (the codec) and P1 (the RIB plumbing and the DHCPv4 client)
+are implemented. P2 onwards is design.** Where P1 found the code to be
+different from what this document assumed, the text below says what was
+built and why.
 
 zebra-rs gets its own DHCP client: a `dhcpc` task that leases IPv4
 addresses, and IPv6 addresses and delegated prefixes, on WAN interfaces. It
@@ -185,35 +188,68 @@ would bypass the RIB.
 - New `Message` variants for tasks outside the RIB:
   `AddrDynAdd { ifindex, addr, origin, opts }` and
   `AddrDynDel { ifindex, addr, origin }`.
-- An `AddrDynAdd` for an address the operator also configured keeps
-  `config=true`, and the configuration wins on delete.
+- **An address both leased and configured belongs to the
+  configuration**, which outlives the lease:
+  - `AddrDynAdd` for a configured address only marks it; its kernel entry
+    stays permanent.
+  - Configuring an address a lease already holds takes the lease's
+    lifetime off it (`Rib::addr_make_permanent`). Otherwise it would
+    expire at the lease's old deadline, since renewals no longer refresh
+    a configured address.
+  - When the lease ends, the address stays. When the configuration is
+    deleted while the lease holds, the RIB tells the client, which puts
+    the lease's lifetime back.
 - `RibRx::AddrAdd` must also fire when only the lifetimes change. Today it
   is silent (`AddrUpdate::Unchanged`), and `nd` needs the new lifetimes to
   advertise PIOs (D14).
 
 ### D6. Lease routes are protocol routes
 
-- `RibType::Dhcp` covers DHCPv4 lease routes and DHCPv6 discard routes.
-- A new `RibType::Ra` (shown `A`) covers RA default routes and on-link
-  prefixes.
-- Both are protocol routes when `dhcpc` or `nd` submits them:
-  - installed with `proto zebra`, as every zebra-rs route is, so echo
-    suppression and the startup leftover handling are unchanged;
-  - `is_protocol()` is keyed on how the entry arrived, not on its
-    `rtype`.
-- Kernel-learned `proto dhcp` routes stay learn-only at distance 0. This
-  covers insomnia's delegated-prefix routes. insomnia sweeps only inside
-  its configured ranges (insomnia `src/pd_routes.rs:24-30`), so it cannot
-  touch a client's routes.
-- **One entry per (prefix, rtype, ifindex)**, like
-  `rib_rtype_ifindex` (`rib/route.rs:2493`). Two DHCP WANs give two
-  default-route candidates, and the RIB picks by distance. That is VyOS's
-  dual-WAN recipe: a different `default-route-distance` per WAN. When a
-  link goes down, the RIB invalidates its nexthop and the other candidate
-  takes over without `dhcpc` doing anything.
-- **Default distance 210** for both types (VyOS's `default-route-distance`
-  default). That is above iBGP (200), OSPF (110) and IS-IS (115), so any
-  routed default wins over a leased one.
+- **A type of their own.** `RibType::DhcpClient` covers DHCPv4 lease
+  routes (and later DHCPv6 discard routes). It is shown `D`, like the
+  existing `RibType::Dhcp`, which stays what it was: a route the kernel
+  reports under `RTPROT_DHCP` that zebra-rs did not install. Keeping the
+  two apart leaves every kernel-route path treating `Dhcp` as learned.
+  - A new `RibType::Ra` (shown `A`) will cover RA default routes and
+    on-link prefixes (P2).
+- **Installed as `proto dhcp`**, what `ip route` shows for any DHCP
+  client's routes.
+  - Not `proto zebra`, as first planned: echo suppression and the
+    startup leftover handling map each kernel protocol number to one RIB
+    type, and `proto zebra` is the statics'.
+  - A kernel event under `RTPROT_DHCP` is the client's own echo when the
+    client has that route installed at that priority; otherwise it is a
+    learned `Dhcp` route.
+- **Kernel-learned `proto dhcp` routes stay learn-only** at distance 0.
+  This covers insomnia's delegated-prefix routes. insomnia sweeps only
+  inside its configured ranges (insomnia `src/pd_routes.rs:24-30`), so it
+  cannot touch a client's routes.
+- **Restart.** zebra-rs leaves its routes in the kernel when it stops, and
+  the next run's startup dump reads them as learned `Dhcp` routes.
+  - They are not swept like a static's leftovers: `RTPROT_DHCP` is not
+    ours alone.
+  - Instead, when the client hands over a route, a learned `Dhcp` route
+    at the same table, prefix and priority is dropped from the RIB
+    (`Rib::adopt_learned_dhcp`), and the install replaces it in the
+    kernel in place.
+- **One entry per prefix, chosen by the client.** The RIB keeps one entry
+  per protocol for a prefix, so `dhcpc` gathers every interface's lease
+  routes (`dhcpc/routes.rs`) and hands over the legs at the lowest
+  `default-route-distance`, from interfaces whose link is up:
+  - one leg is a plain route;
+  - several at one distance are ECMP, what VyOS gets from FRR for two
+    DHCP uplinks left at the default;
+  - a higher distance is a backup. It takes over when the better
+    uplink's lease ends or its link goes down, and gives way again
+    when it returns.
+  - Not per-interface RIB entries, as first planned (the RIB would need
+    a new entry key), and not the RIB's multi-metric "floating" entry:
+    the kernel flushes a leg's route when its link loses carrier, and
+    the RIB does not put that one leg back while another keeps the entry
+    installed.
+- **Default distance 210** (VyOS's `default-route-distance` default).
+  That is above iBGP (200), OSPF (110) and IS-IS (115), so any routed
+  default wins over a leased one.
 
 ### D7. DHCPv6 starts only from configuration
 
@@ -248,6 +284,34 @@ would bypass the RIB.
 - `dhcp-options client-id` sets one: hex `xx:xx:…` is sent raw, any other
   string as type 0 plus the bytes.
 - RFC 4361's DUID-based identifier is not the default (§16).
+
+**The identity of a lease does not change.** A lease belongs to the
+hardware address and client identifier it was taken with (RFC 2131 §4.2
+has the client use the same identifier in every message about it).
+
+- A `Client` has one identity for its whole life; a changed `client-id`
+  or hardware address never reaches a running one.
+- When either changes, the task stops the client, which releases the
+  lease as who took it, and starts a new client that asks as the new
+  identity.
+- The lease file records the identity. At start, a lease the current
+  identity took is resumed. One taken under another identity is resumed
+  as that identity just long enough to be released and withdrawn.
+  - The RELEASE leaves from the lease's address, which after a reboot is
+    not on the interface until the RIB has installed it. So the release
+    waits until a datagram can leave from that address for the server
+    (the address is local and there is a route), then is sent, and only
+    then is the lease forgotten and the new identity's client started.
+  - With the link down it waits for the link. With the link up it waits
+    10 s for the RIB, then gives up with a warning and leaves the lease
+    to run out at the server.
+  - Meanwhile the old identity's client takes no protocol events (it is
+    shown as `releasing`), and `renew` only looks whether the release
+    can go now. `release` ends the transition there: the RELEASE goes out
+    as well as it can, and the interface is left released as its current
+    identity, not started on a new lease.
+  - The wait is looked at on every event that may end it and on a
+    250 ms tick whose deadline other events do not push back.
 
 **Host name (option 12):** `dhcp-options host-name`, else `system hostname`
 if it is set. Debian's stock `dhclient.conf` sends `gethostname()` the
@@ -299,9 +363,19 @@ same way.
     BOOTREPLY.
   - It sends whole IPv4+UDP datagrams to the broadcast MAC (the relay's
     framing).
-- Once bound: a UDP socket on `<lease>:68`, with `SO_BINDTODEVICE` on the
-  interface and `SO_BROADCAST`. It is used for unicast RENEWING and
-  broadcast REBINDING.
+- Once bound: a UDP socket on `0.0.0.0:68`, with `SO_BINDTODEVICE` on the
+  interface and `SO_BROADCAST`. It is used for unicast RENEWING,
+  broadcast REBINDING and RELEASE.
+  - **Bound to `0.0.0.0`, not to the leased address.** A server
+    broadcasts a DHCPNAK (RFC 2131 §4.1, when `giaddr` is zero), and a
+    socket bound to a unicast address is not given broadcasts: a refused
+    renewal would go unheard and the client would keep a lease the server
+    has taken back.
+  - **Each message names its source** with `IP_PKTINFO`
+    (`ipi_spec_dst`): the leased address, which is the message's
+    `ciaddr`. Left to choose, the kernel takes the interface's primary
+    address, which is another one when addresses are configured beside
+    the lease, and the source would contradict `ciaddr`.
 
 **DHCPv6**
 
@@ -377,8 +451,8 @@ interface <if>
       user-class <string>                # option 77
       default-route-distance <1-255>     # default 210
       no-default-route                   # empty
-      reject <ipv4-prefix>*              # ignore offers from these servers
-      mtu                                # empty: apply option 26
+      reject <ipv4-address|prefix>*      # ignore offers from these servers
+      mtu                                # empty: apply option 26 (P5, not in the schema yet)
   ipv6
     address autoconf                     # new enum arm: RA host + SLAAC
     address dhcpv6                       # new enum arm: IA_NA
@@ -438,14 +512,14 @@ A config-migration tool only has to move paths. No values change.
 | Lease item | RIB | Kernel |
 |---|---|---|
 | DHCPv4 address | `AddrDynAdd(Dhcp4)` | `addr_replace`, valid = preferred = remaining lease, `IFA_BROADCAST` (option 28, else computed) |
-| DHCPv4 default route (option 3, first router) | `Dhcp`, `default-route-distance` | `proto zebra` |
-| DHCPv4 option 121 routes (option 3 ignored when present, RFC 3442) | `Dhcp`, same distance; router `0.0.0.0` → `Nexthop::Link` | `proto zebra` |
-| Gateway outside the leased subnet (a /32 lease) | `Dhcp` host route to the gateway, `Nexthop::Link`, then the default via it | |
+| DHCPv4 default route (option 3, first router) | `DhcpClient`, `default-route-distance` | `proto dhcp` |
+| DHCPv4 option 121 routes (option 3 ignored when present, RFC 3442) | `DhcpClient`, same distance. A router of `0.0.0.0` (an on-link destination) is not installed and is logged: the RIB has no protocol route without a gateway | `proto dhcp` |
+| Gateway outside the leased subnet (a /32 lease) | nothing extra: the nexthop names the lease's interface, and the RIB installs every nexthop object on-link | |
 | SLAAC address | `AddrDynAdd(Slaac)`, `noprefixroute` | RFC 4862 lifetimes |
-| RA default route | `Ra`, `ra-options default-route-distance`, via the router's link-local | `proto zebra` |
+| RA default route | `Ra`, `ra-options default-route-distance`, via the router's link-local | `proto ra` |
 | RA on-link prefix (L=1) | `Ra`, `Nexthop::Link`, lives as long as the PIO's valid lifetime | |
 | IA_NA address | `AddrDynAdd(Dhcp6)`, /128, `noprefixroute` | IA lifetimes |
-| Delegated prefix | `Dhcp` unreachable route (WPD-5); `Nexthop` gains an unreachable form if it lacks one, because WPD-5(a) wants ICMPv6 Destination Unreachable and a blackhole sends nothing | |
+| Delegated prefix | `DhcpClient` unreachable route (WPD-5); `Nexthop` gains an unreachable form if it lacks one, because WPD-5(a) wants ICMPv6 Destination Unreachable and a blackhole sends nothing | |
 | LAN /64 from a delegation | `AddrDynAdd(Pd)` on the LAN interface, prefix route kept (connected) | delegated lifetimes |
 
 **Withdrawal** happens on expiry, NAK, Release, a deleted configuration, a
@@ -496,6 +570,11 @@ state machine (§12).
   T2.
 - REBINDING broadcasts and retries after half the time left on the lease.
 - Both retry no sooner than every 60 s.
+- Each of these transmissions has a transaction id of its own, taken with
+  the time it is sent, and the lease an ACK grants counts from the
+  REQUEST it answers. With one id across retransmissions, a late answer
+  to an earlier copy would be timed from the latest and keep the lease
+  past what the server granted.
 - When the lease expires, everything it produced is withdrawn and the
   client starts again in INIT.
 
@@ -503,15 +582,17 @@ state machine (§12).
 of 1, 2, 4 … up to 64 s stops a server that NAKs everything from causing a
 tight loop.
 
-**MTU (option 26)**
+**MTU (option 26)** is P5: the state machine can ask for it and keeps it
+in the lease, but there is no `mtu` leaf yet and nothing applies it.
 
-- Applied only with `dhcp-options mtu` and no `interface <if> mtu`
-  configured. The configuration wins.
+- It will be applied only with `dhcp-options mtu` and no
+  `interface <if> mtu` configured. The configuration wins.
 - Values below 576 are ignored.
 
 **Release:** a deleted `address dhcp`, or `release dhcp interface <if>`,
 sends a RELEASE to the server and withdraws everything. After the verb,
-the client stays released until `renew` or a configuration change.
+the client stays released until `renew`, or until `address dhcp` or the
+`client-id` is configured anew (other options do not wake it).
 
 ---
 
@@ -622,9 +703,12 @@ reconfigure the client (§16).
 | File | Contents | Lifetime |
 |---|---|---|
 | `/var/lib/zebra-rs/dhcp/duid` | the system DUID (D8) | created once, never rewritten |
-| `/var/lib/zebra-rs/dhcp/<if>.v4.json` | lease, server id, T1/T2/expiry as wall-clock times, routes and address produced | written at bind and renew, deleted on release, expiry or deleted configuration |
+| `/var/lib/zebra-rs/dhcp/<if>.v4.json` | the lease, when it began, and the identity that took it (hardware address, client identifier) | written at bind and renew, deleted on release, expiry or deleted configuration |
 | `/var/lib/zebra-rs/dhcp/<if>.v6.json` | server DUID, IAs with addresses and prefixes, LAN assignments | same |
 
+- `ZEBRA_DHCP_STATE_DIR` overrides the directory, as
+  `ZEBRA_OSPF_CHECKPOINT_DIR` does for checkpoints: for tests, and for
+  several daemons on one host (the BDD harness sets one per namespace).
 - Files are written atomically (a temporary file, then a rename).
 - A file that is unreadable, or that names another interface MAC, is
   ignored and logged.
@@ -705,19 +789,20 @@ crates/dhcp-packet/            moved from insomnia (D2; done in P0)
                                rapid commit)
 crates/nd-packet/              + typed RDNSS, DNSSL, router preference
 zebra-rs/src/config/dhcpc.rs   spawn_dhcpc (lazy, like spawn_nd)
-zebra-rs/src/dhcpc/
+zebra-rs/src/dhcpc/            (P1: the DHCPv4 parts)
   inst.rs                      the task: select! over sockets, timers, RIB,
-                               config, show
+                               config, show; Action -> sockets, RIB, disk
   config.rs                    callbacks for /interface/ipv4/address (dhcp),
-                               …/dhcp-options, /interface/ipv6/address
-                               (dhcpv6), …/dhcpv6-options
-  v4/fsm.rs, v6/fsm.rs         sans-I/O: handle(now, Event) -> Vec<Action>
-  v4/socket.rs, v6/socket.rs   AF_PACKET + BPF, per-interface UDP (D11)
-  v6/pd.rs                     sub-prefix arithmetic, LAN assignments
-  apply.rs                     Action -> RIB messages
-  ident.rs                     DUID, IAIDs, client id
+                               …/dhcp-options, /system/hostname; later
+                               /interface/ipv6/address (dhcpv6),
+                               …/dhcpv6-options
+  v4/client.rs                 sans-I/O: handle(Event, now) -> Vec<Action>
+  v4/frame.rs                  IPv4+UDP framing, ARP probes
+  v4/socket.rs                 AF_PACKET + BPF, ARP, per-interface UDP (D11)
+  routes.rs                    lease routes -> RIB entries (D6)
   lease.rs                     persistence (§9)
-  show.rs                      §11 views and verbs
+  show.rs                      §11 view; the verbs are in inst.rs
+  v6/…, ident.rs               P3, P4: DHCPv6, DUID and IAIDs, PD
 zebra-rs/src/nd/host.rs        RS, RA -> routes and SLAAC addresses (§7)
 zebra-rs/src/rib/              AddrOrigin, AddrDynAdd/Del, addr_replace,
                                RibType::Ra, origin-keyed is_protocol,
@@ -755,8 +840,8 @@ belongs to systemd-resolved.
 
 | Phase | Content | Depends on |
 |---|---|---|
-| P0 | Codec move + typed options + property tests; insomnia switches to the vendored copy (relay goldens unchanged) | – |
-| P1 | RIB plumbing (D5, D6); `dhcpc` task; DHCPv4 state machine, sockets, ACD, persistence; `show dhcp client leases`, `renew/release dhcp`; ungate `address dhcp` | P0 |
+| P0 (done) | Codec move + typed options + property tests; insomnia switches to the vendored copy (relay goldens unchanged) | – |
+| P1 (done) | RIB plumbing (D5, D6); `dhcpc` task; DHCPv4 state machine, sockets, ACD, persistence; `show dhcp client leases`, `renew/release dhcp`; ungate `address dhcp` | P0 |
 | P2 | RA host in `nd`: RS, default route, on-link prefixes, `ipv6 address autoconf`, `ra-options`, `accept_ra=0`; show section | P1's RIB plumbing |
 | P3 | DHCPv6 IA_NA and `parameters-only`; DUID; `show dhcpv6 client leases`, `renew/release dhcpv6` | P0, P2 |
 | P4 | IA_PD: discard route, LAN assignment, prefix change | P3 |
@@ -828,6 +913,7 @@ DHCPv4, IA_NA and RAs, but not PD.
 | Internal address from PD | RFC 7084 WAA-7 | explicit `pd … interface lo` | no implicit interfaces |
 | IPv6-only preferred (option 108) | RFC 8925 | not requested | a dual-stack WAN wants its IPv4 lease |
 | ACD | RFC 5227: 3 probes, 1–2 s apart | 2 probes, 1 s apart | bounded bind delay |
+| On-link classless routes | RFC 3442 routes whose router is `0.0.0.0` | not installed, logged | the RIB has no protocol route without a gateway; an off-subnet gateway still works, because nexthops are installed on-link |
 
 ---
 
@@ -836,9 +922,8 @@ DHCPv4, IA_NA and RAs, but not PD.
 1. **`RibType::Ra` or reuse `Dhcp`?** A separate type tells the operator
    which source the default came from, but costs a show letter (`A` is
    proposed). FRR has neither.
-2. **Equal distances on two WANs.** Per-ifindex entries (D6) give one
-   selected default, while FRR staticd (VyOS) would install ECMP. Should
-   the RIB merge equal-distance `Dhcp` entries into one multipath?
+2. ~~Equal distances on two WANs.~~ Settled in P1: ECMP, as VyOS has it
+   (D6).
 3. **DUID type.** DUID-LLT (proposed) survives an image reinstall only
    through `/var/lib`. DUID-UUID from `/etc/machine-id` survives a NIC swap
    but not a reinstall. ISPs that bind PD to the DUID care about both.

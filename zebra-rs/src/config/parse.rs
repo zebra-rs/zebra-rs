@@ -862,6 +862,11 @@ pub fn parse(
     if s.paths.is_empty() && matches!(path.name.as_str(), "start" | "stop" | "restart") {
         s.show = true;
     }
+    // `renew|release dhcp interface <name>` are answered by the DHCP
+    // client task the same way.
+    if s.paths.is_empty() && matches!(path.name.as_str(), "renew" | "release") {
+        s.show = true;
+    }
     if path.name == "clear" {
         s.clear = true;
     }

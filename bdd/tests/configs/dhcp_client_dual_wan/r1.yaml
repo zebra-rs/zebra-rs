@@ -1,0 +1,13 @@
+# r1: two DHCP uplinks. wan1 is the backup: its lease's routes sit at
+# distance 220, above wan0's default 210.
+interface:
+- if-name: wan0
+  ipv4:
+    address:
+    - dhcp
+- if-name: wan1
+  ipv4:
+    address:
+    - dhcp
+    dhcp-options:
+      default-route-distance: 220

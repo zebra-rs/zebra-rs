@@ -8,6 +8,7 @@ use super::commands::Mode;
 use super::commands::{configure_mode_create, exec_mode_create, prettify_json};
 use super::configs::{carbon_copy, delete, set};
 use super::cradle::spawn_cradle;
+use super::dhcpc::spawn_dhcpc;
 use super::files::load_config_file;
 use super::isis::{despawn_isis, spawn_isis};
 use super::json::{DocError, json_read};
@@ -953,6 +954,7 @@ impl ConfigManager {
         let mut nd = false;
         let mut cradle = false;
         let mut pim = false;
+        let mut dhcpc = false;
         for (proto, tx) in self.cm_clients.borrow().iter() {
             tx.send(ConfigRequest::new(Vec::new(), ConfigOp::CommitStart))
                 .unwrap();
@@ -979,6 +981,9 @@ impl ConfigManager {
             }
             if proto == "pim" {
                 pim = true;
+            }
+            if proto == "dhcpc" {
+                dhcpc = true;
             }
         }
         // Same by-value capture problem for the IS-IS→BGP BGP-LS producer
@@ -1111,6 +1116,18 @@ impl ConfigManager {
             if !nd && op == ConfigOp::Set && line.contains("ipv6 router-advertisements") {
                 nd = true;
                 spawn_nd(self);
+            }
+            // The DHCP client is configured per interface too (`interface
+            // X ipv4 address dhcp`, `interface X ipv4 dhcp-options …`):
+            // spawn on the first line of either, so options committed
+            // ahead of `address dhcp` are not lost on a task spawned later.
+            if !dhcpc
+                && op == ConfigOp::Set
+                && line.starts_with("interface ")
+                && (line.contains(" ipv4 address dhcp") || line.contains(" ipv4 dhcp-options "))
+            {
+                dhcpc = true;
+                spawn_dhcpc(self);
             }
             // The cradle engine supervisor consumes `system ebpf` (its own
             // knob), `system cradle grpc-endpoint` (shared with the FIB
@@ -1623,7 +1640,7 @@ impl ConfigManager {
     /// unconfigured. Every Execute reply carries this so the vty
     /// shell's prompt tracks the configured name (see
     /// `ExecuteResponse::hostname`).
-    fn running_hostname(&self) -> Option<String> {
+    pub(super) fn running_hostname(&self) -> Option<String> {
         hostname_from_config(&self.store.running.borrow())
     }
 
@@ -2043,10 +2060,22 @@ fn is_vrrp(paths: &[CommandPath]) -> bool {
     paths.iter().any(|x| x.name == "vrrp")
 }
 
-/// `show dhcp …` and `show dhcpv6 …` — served by the external insomnia
-/// daemon, which registers the `"dhcp"` show provider (zebra.show.v1);
-/// insomnia-gated exec grammar. With no provider connected the
-/// not-running fallback answers.
+/// `show dhcp client …` and `renew|release dhcp interface <name>` — the
+/// DHCP client task in this process (`dhcpc`). Checked before
+/// [`is_dhcp`], which hands every other `show dhcp …` to insomnia.
+fn is_dhcp_client(paths: &[CommandPath]) -> bool {
+    let name = |i: usize| paths.get(i).map(|p| p.name.as_str());
+    match name(0) {
+        Some("show") => name(1) == Some("dhcp") && name(2) == Some("client"),
+        Some("renew" | "release") => name(1) == Some("dhcp"),
+        _ => false,
+    }
+}
+
+/// `show dhcp server|relay …` and `show dhcpv6 …` — served by the
+/// external insomnia daemon, which registers the `"dhcp"` show provider
+/// (zebra.show.v1); insomnia-gated exec grammar. With no provider
+/// connected the not-running fallback answers.
 fn is_dhcp(paths: &[CommandPath]) -> bool {
     paths.iter().any(|x| x.name == "dhcp" || x.name == "dhcpv6")
 }
@@ -2119,6 +2148,7 @@ const SHOW_PROTOS: &[ShowProto] = &[
     (is_firewall, "firewall", "Firewall"),
     (is_vpn, "ipsec", "IPsec"),
     (is_vrrp, "vrrp", "VRRP"),
+    (is_dhcp_client, "dhcpc", "DHCP client"),
     (is_dhcp, "dhcp", "DHCP"),
     (is_policy, "policy", "Policy"),
 ];
@@ -7193,10 +7223,9 @@ module test-insomnia-gated {
     }
 
     /// Whether the shipped `interface <name> ipv4 address` union
-    /// accepts the `dhcp` value — the first real feature-gated schema
-    /// element (`if-feature feat:insomnia` on the enum arm in config.yang).
-    /// The gate is on the value, not the node: the address leaf-list
-    /// itself must exist either way.
+    /// accepts the `dhcp` value. It was the first feature-gated schema
+    /// element (`if-feature feat:insomnia` on the enum arm) while the
+    /// value was schema only; with the DHCP client it is ungated.
     fn shipped_dhcp_present(features: &[&str]) -> bool {
         let mut yang = YangStore::new();
         yang.add_path(concat!(env!("CARGO_MANIFEST_DIR"), "/yang"));
@@ -7225,59 +7254,106 @@ module test-insomnia-gated {
     }
 
     #[test]
-    fn shipped_interface_ipv4_address_dhcp_gated_on_insomnia() {
+    fn shipped_interface_ipv4_address_dhcp_is_ungated() {
         assert!(
-            !shipped_dhcp_present(&[]),
-            "the dhcp address value must be absent on a stock start"
+            shipped_dhcp_present(&[]),
+            "interface ipv4 address dhcp must be there on a stock start"
         );
-        assert!(
-            shipped_dhcp_present(&["insomnia"]),
-            "interface ipv4 address dhcp must appear with --feature insomnia"
-        );
+        assert!(shipped_dhcp_present(&["insomnia"]));
     }
 
-    /// End-to-end CLI grammar for the gated value: `set interface eth0
-    /// ipv4 address dhcp` parses only when insomnia is enabled, while the
-    /// plain prefix form always parses.
+    /// End-to-end CLI grammar of the DHCP client's configuration:
+    /// `address dhcp` and every `dhcp-options` leaf parse on a stock
+    /// start, beside the plain prefix form.
     #[test]
-    fn address_dhcp_command_parses_only_with_insomnia() {
+    fn address_dhcp_and_its_options_parse_on_a_stock_start() {
         use crate::config::ExecCode;
         use crate::config::parse::{State, parse};
 
-        let tree = |features: &[&str]| {
-            let mut yang = YangStore::new();
-            yang.add_path(concat!(env!("CARGO_MANIFEST_DIR"), "/yang"));
-            let specs: Vec<String> = features.iter().map(|s| s.to_string()).collect();
-            enable_features(&mut yang, &specs);
-            yang.read_with_resolve("configure")
-                .expect("configure loads");
-            yang.identity_resolve();
-            let module = yang.find_module("configure").expect("configure module");
-            to_entry(&yang, module)
-        };
+        let mut yang = YangStore::new();
+        yang.add_path(concat!(env!("CARGO_MANIFEST_DIR"), "/yang"));
+        enable_features(&mut yang, &[]);
+        yang.read_with_resolve("configure")
+            .expect("configure loads");
+        yang.identity_resolve();
+        let module = yang.find_module("configure").expect("configure module");
+        let entry = to_entry(&yang, module);
 
-        let dhcp = "set interface eth0 ipv4 address dhcp";
-        let prefix = "set interface eth0 ipv4 address 10.0.0.1/24";
+        for line in [
+            "set interface eth0 ipv4 address dhcp",
+            "set interface eth0 ipv4 address 10.0.0.1/24",
+            "set interface eth0 ipv4 dhcp-options client-id 01:02:03:04",
+            "set interface eth0 ipv4 dhcp-options host-name edge1",
+            "set interface eth0 ipv4 dhcp-options vendor-class-id zebra",
+            "set interface eth0 ipv4 dhcp-options user-class isp",
+            "set interface eth0 ipv4 dhcp-options default-route-distance 220",
+            "set interface eth0 ipv4 dhcp-options no-default-route",
+            "set interface eth0 ipv4 dhcp-options reject 192.0.2.66",
+            "set interface eth0 ipv4 dhcp-options reject 192.0.2.0/24",
+        ] {
+            let (code, _, _) = parse(line, entry.clone(), None, State::new());
+            assert_eq!(code, ExecCode::Success, "`{line}` must parse");
+        }
+        for line in [
+            "set interface eth0 ipv4 dhcp-options default-route-distance 0",
+            "set interface eth0 ipv4 dhcp-options reject not-an-address",
+        ] {
+            let (code, _, _) = parse(line, entry.clone(), None, State::new());
+            assert_ne!(code, ExecCode::Success, "`{line}` must be refused");
+        }
+    }
 
-        let entry = tree(&[]);
-        let (code, _, _) = parse(dhcp, entry.clone(), None, State::new());
-        assert_ne!(
-            code,
-            ExecCode::Success,
-            "dhcp value must be rejected on a stock start"
-        );
-        let (code, _, _) = parse(prefix, entry, None, State::new());
-        assert_eq!(code, ExecCode::Success, "prefix form must always parse");
+    /// The DHCP client's exec grammar is zebra-rs's own: it parses on a
+    /// stock start and is routed to the `dhcpc` task, ahead of the rule
+    /// that hands every other `show dhcp …` to insomnia.
+    #[test]
+    fn dhcp_client_show_and_verbs_route_to_dhcpc() {
+        use crate::config::parse::{State, parse};
+        use crate::config::path_from_command;
 
-        let entry = tree(&["insomnia"]);
-        let (code, _, _) = parse(dhcp, entry.clone(), None, State::new());
-        assert_eq!(
-            code,
-            ExecCode::Success,
-            "dhcp value must parse with --feature insomnia"
-        );
-        let (code, _, _) = parse(prefix, entry, None, State::new());
-        assert_eq!(code, ExecCode::Success, "prefix form must always parse");
+        for features in [&[][..], &["insomnia"]] {
+            let entry = shipped_tree_mode("exec", features);
+            let cases: [(&str, &str, &[&str]); 4] = [
+                ("show dhcp client leases", "/show/dhcp/client/leases", &[]),
+                (
+                    "show dhcp client leases interface eth0",
+                    "/show/dhcp/client/leases/interface",
+                    &["eth0"],
+                ),
+                (
+                    "renew dhcp interface eth0",
+                    "/renew/dhcp/interface",
+                    &["eth0"],
+                ),
+                (
+                    "release dhcp interface eth0",
+                    "/release/dhcp/interface",
+                    &["eth0"],
+                ),
+            ];
+            for (cmd, path, args) in cases {
+                let (code, _, state) = parse(cmd, entry.clone(), None, State::new());
+                assert_eq!(code, ExecCode::Success, "parse `{cmd}`");
+                assert!(state.show, "`{cmd}` is answered like a show order");
+                assert_eq!(show_proto(&state.paths), "dhcpc", "routing for `{cmd}`");
+                assert_eq!(show_proto_name(&state.paths), "DHCP client");
+                let (got, mut got_args) = path_from_command(&state.paths);
+                assert_eq!(got, path, "path of `{cmd}`");
+                let mut list = Vec::new();
+                while let Some(arg) = got_args.string() {
+                    list.push(arg);
+                }
+                assert_eq!(list, args, "args of `{cmd}`");
+            }
+        }
+        // insomnia's views stay gated, and stay insomnia's.
+        let stock = shipped_tree_mode("exec", &[]);
+        let (code, _, _) = parse("show dhcp server leases", stock, None, State::new());
+        assert_ne!(code, ExecCode::Success, "server view is insomnia-gated");
+        let gated = shipped_tree_mode("exec", &["insomnia"]);
+        let (code, _, state) = parse("show dhcp server leases", gated, None, State::new());
+        assert_eq!(code, ExecCode::Success);
+        assert_eq!(show_proto(&state.paths), "dhcp");
     }
 
     /// Build a shipped mode tree (`configure` or `exec`) with the

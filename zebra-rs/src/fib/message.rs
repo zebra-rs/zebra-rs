@@ -97,6 +97,33 @@ pub struct FibAddr {
     pub preferred_lft: Option<u32>,
 }
 
+/// How a dynamic address (a DHCP lease, later SLAAC and delegated
+/// prefixes) goes into the kernel: with lifetimes, so that it expires on
+/// time even when zebra-rs is not running to remove it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AddrOpts {
+    /// Seconds until the kernel removes the address; `u32::MAX` never.
+    pub valid_lft: u32,
+    /// Seconds until the kernel deprecates it; at most `valid_lft`.
+    pub preferred_lft: u32,
+    /// `IFA_F_NOPREFIXROUTE`: no connected route comes with the address.
+    pub noprefixroute: bool,
+    /// `IFA_BROADCAST`, IPv4 only.
+    pub broadcast: Option<std::net::Ipv4Addr>,
+}
+
+impl AddrOpts {
+    /// No expiry: what an operator-configured address has.
+    pub fn permanent() -> AddrOpts {
+        AddrOpts {
+            valid_lft: u32::MAX,
+            preferred_lft: u32::MAX,
+            noprefixroute: false,
+            broadcast: None,
+        }
+    }
+}
+
 impl FibAddr {
     pub fn new() -> FibAddr {
         Self {

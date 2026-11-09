@@ -25,11 +25,11 @@ module zebra-features {
          - `firewall` and `show firewall`;
          - `vpn` (IPsec) and `show vpn`;
          - `vrrp` and `show vrrp`;
-         - `service` (the DHCP server and relay trees) and `show dhcp` /
-           `show dhcpv6`;
-       all enforced by the out-of-process insomnia daemon; and
-       the `dhcp` value of `interface <name> ipv4 address`, which is
-       schema only (zebra-rs has no DHCP client yet).
+         - `service` (the DHCP server and relay trees) and `show dhcp
+           server|relay` / `show dhcpv6`;
+       all enforced by the out-of-process insomnia daemon. (The DHCP
+       client, `interface <name> ipv4 address dhcp`, is zebra-rs's own
+       and not gated.)
 
        Formerly named `iso`. `--feature iso` still enables it, with a
        deprecation warning at startup; use `--feature insomnia`.";

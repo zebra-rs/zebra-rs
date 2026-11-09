@@ -41,6 +41,7 @@ mod bgp;
 mod check;
 mod commands;
 mod cradle;
+mod dhcpc;
 mod files;
 mod ip;
 mod isis;
