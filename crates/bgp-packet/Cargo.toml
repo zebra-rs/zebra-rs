@@ -14,7 +14,7 @@ bytes = "1.9"
 fixedbuf = { path = "../fixedbuf" }
 packet-utils = { path = "../packet-utils" }
 ipnet = { version = "2.10", features = ["serde"] }
-itertools = "0.14.0"
+itertools = "0.15.0"
 nom = "8"
 nom-derive = { git = "https://github.com/rust-bakery/nom-derive", branch = "master" }
 num_enum = "0.7.5"
