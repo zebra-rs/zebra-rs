@@ -1415,6 +1415,9 @@ pub struct Rib {
     /// when the RA host installs a route at the same key
     /// (`adopt_learned`).
     pub learned_ra: BTreeSet<(u32, IpNet, u32)>,
+    /// The DHCP client's and the RA host's routes, kept on disk so a
+    /// restart knows its own leftovers (`route_record`).
+    pub route_record: super::route_record::RouteRecord,
     /// How long after startup leftovers from an earlier run that no
     /// protocol has replaced are swept (`--leftover-sweep-time`).
     pub leftover_sweep_time: std::time::Duration,
@@ -1638,6 +1641,7 @@ impl Rib {
             evpn_ip_refs: BTreeMap::new(),
             legacy_statics: BTreeSet::new(),
             learned_ra: BTreeSet::new(),
+            route_record: Default::default(),
             leftover_sweep_time: std::time::Duration::from_secs(120),
             es_groups: BTreeSet::new(),
             es_blocked: BTreeSet::new(),
@@ -5037,9 +5041,23 @@ impl Rib {
                 self.ipv6_default_sync().await;
                 self.router_id_update();
             }
-            FibMessage::NewRoute(route) => {
+            FibMessage::NewRoute(mut route) => {
                 if self.is_kernel_route_echo(&route) {
                     return;
+                }
+                // An earlier run's DHCP client or RA host route, which the
+                // route record names: a leftover of that type, replaced
+                // when its owner installs it again and swept otherwise.
+                if let Some((rtype, distance)) = self.route_record.leftover(
+                    route.kernel_protocol,
+                    route.table_id,
+                    route.prefix,
+                    route.entry.metric,
+                ) {
+                    route.entry.rtype = rtype;
+                    route.entry.stale = true;
+                    route.entry.distance = distance;
+                    route.kernel_protocol = None;
                 }
                 if route.legacy_static {
                     self.legacy_statics
@@ -5108,9 +5126,23 @@ impl Rib {
                         .await;
                 }
             }
-            FibMessage::DelRoute(route) => {
+            FibMessage::DelRoute(mut route) => {
                 if self.is_kernel_route_echo(&route) {
                     return;
+                }
+                // A leftover the route record named, gone from the kernel
+                // before its owner or the sweep took it: its stale entry
+                // goes with it.
+                if let Some((rtype, distance)) = self.route_record.leftover(
+                    route.kernel_protocol,
+                    route.table_id,
+                    route.prefix,
+                    route.entry.metric,
+                ) {
+                    route.entry.rtype = rtype;
+                    route.entry.stale = true;
+                    route.entry.distance = distance;
+                    route.kernel_protocol = None;
                 }
                 if route.kernel_protocol == Some(RibType::Ra) {
                     self.learned_ra
@@ -6224,6 +6256,10 @@ impl Rib {
             }
         }
 
+        // Read before the dump, which it sorts the DHCP client's and the
+        // RA host's leftovers out of.
+        self.route_record
+            .load(crate::dhcpc::lease::default_dir().join(super::route_record::FILE));
         if let Err(_err) = fib_dump(self).await {
             // warn!("FIB dump error {}", err);
         }

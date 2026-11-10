@@ -1870,3 +1870,134 @@ async fn configuring_a_slaac_address_keeps_it_past_the_ra_host() {
     assert!(rib.links[&index].addr6[0].config);
     ip(&["link", "del", "perm6"]);
 }
+
+/// A restart with a route record from the earlier run: the DHCP client's
+/// and the RA host's routes it names come back as their owners' leftovers,
+/// a route the owner installs again replaces its leftover, and the sweep
+/// takes the rest. A `proto dhcp` route the record does not name (one of
+/// insomnia's delegated-prefix routes) stays learned.
+#[tokio::test]
+async fn recorded_dhcp_and_ra_leftovers_are_swept_unless_reclaimed() {
+    use crate::rib::route_record::{FILE, RouteRecord};
+    let dir = std::env::temp_dir().join(format!("route-record-rib-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let path = dir.join(FILE);
+    let default4: IpNet = "0.0.0.0/0".parse().unwrap();
+    let default6: IpNet = "::/0".parse().unwrap();
+    let on_link: IpNet = "2001:db8:1::/64".parse().unwrap();
+    let delegated: IpNet = "2001:db8:ff00::/56".parse().unwrap();
+    let gone: IpNet = "2001:db8:2::/64".parse().unwrap();
+    let classless: IpNet = "198.51.100.0/24".parse().unwrap();
+
+    let mut earlier = RouteRecord::default();
+    earlier.load(path.clone());
+    earlier.add(RibType::DhcpClient, RT_TABLE_MAIN, default4, vec![0], 210);
+    earlier.add(RibType::Ra, RT_TABLE_MAIN, default6, vec![1024], 220);
+    earlier.add(RibType::Ra, RT_TABLE_MAIN, on_link, vec![1024], 210);
+    earlier.add(RibType::Ra, RT_TABLE_MAIN, gone, vec![1024], 210);
+
+    let mut rib = Rib::new(false).unwrap();
+    rib.route_record.load(path.clone());
+    for (prefix, protocol, metric) in [
+        (default4, RouteProtocol::Dhcp, 0),
+        (default6, RouteProtocol::Ra, 1024),
+        (on_link, RouteProtocol::Ra, 1024),
+        (gone, RouteProtocol::Ra, 1024),
+        (delegated, RouteProtocol::Dhcp, 1024),
+    ] {
+        rib.process_fib_msg(FibMessage::NewRoute(kernel_route(
+            prefix,
+            protocol,
+            false,
+            metric,
+            RT_TABLE_MAIN,
+        )))
+        .await;
+    }
+    let rows = |rib: &Rib, prefix| {
+        entries(rib, prefix, RT_TABLE_MAIN)
+            .iter()
+            .map(|e| (e.rtype, e.stale, e.distance))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(rows(&rib, default4), vec![(RibType::DhcpClient, true, 210)]);
+    assert_eq!(rows(&rib, default6), vec![(RibType::Ra, true, 220)]);
+    assert_eq!(rows(&rib, delegated), vec![(RibType::Dhcp, false, 0)]);
+    assert!(
+        rib.learned_ra.is_empty(),
+        "a leftover is not a learned route"
+    );
+
+    // A leftover the kernel loses before the sweep goes from the RIB too.
+    rib.process_fib_msg(FibMessage::DelRoute(kernel_route(
+        gone,
+        RouteProtocol::Ra,
+        false,
+        1024,
+        RT_TABLE_MAIN,
+    )))
+    .await;
+    assert!(rows(&rib, gone).is_empty());
+
+    // The RA host still has the on-link prefix, now at another distance:
+    // its route replaces the leftover.
+    if let IpNet::V6(prefix) = on_link {
+        let mut entry = RibEntry::new(RibType::Ra);
+        entry.distance = 220;
+        entry.nexthop = Nexthop::Uni(crate::rib::NexthopUni {
+            addr: "::".parse().unwrap(),
+            ifindex_origin: Some(2),
+            ..Default::default()
+        });
+        rib.ipv6_route_add(&prefix, entry, RT_TABLE_MAIN).await;
+    }
+    assert_eq!(rows(&rib, on_link), vec![(RibType::Ra, false, 220)]);
+    // And this run's lease gives a route the earlier one did not.
+    if let IpNet::V4(prefix) = classless {
+        let mut entry = RibEntry::new(RibType::DhcpClient);
+        entry.distance = 210;
+        entry.nexthop = Nexthop::Uni(crate::rib::NexthopUni {
+            addr: "192.0.2.1".parse().unwrap(),
+            ifindex_origin: Some(2),
+            ..Default::default()
+        });
+        rib.ipv4_route_add(&prefix, entry, RT_TABLE_MAIN).await;
+    }
+
+    rib.process_msg(Message::SweepLeftovers, RT_TABLE_MAIN)
+        .await;
+    assert!(
+        rows(&rib, default4).is_empty(),
+        "the lease's default is gone"
+    );
+    assert!(rows(&rib, default6).is_empty(), "the RA's default is gone");
+    assert_eq!(rows(&rib, on_link), vec![(RibType::Ra, false, 220)]);
+    assert_eq!(rows(&rib, delegated), vec![(RibType::Dhcp, false, 0)]);
+
+    // The record now names only what this run installed, and after
+    // the sweep a dumped route is no leftover.
+    assert_eq!(
+        rib.route_record
+            .leftover(Some(RibType::Ra), RT_TABLE_MAIN, default6, 1024),
+        None
+    );
+    let mut next = RouteRecord::default();
+    next.load(path);
+    assert_eq!(
+        next.leftover(Some(RibType::DhcpClient), RT_TABLE_MAIN, default4, 0),
+        None
+    );
+    assert_eq!(
+        next.leftover(Some(RibType::Ra), RT_TABLE_MAIN, gone, 1024),
+        None
+    );
+    assert_eq!(
+        next.leftover(Some(RibType::Ra), RT_TABLE_MAIN, on_link, 1024),
+        Some((RibType::Ra, 220))
+    );
+    assert_eq!(
+        next.leftover(Some(RibType::DhcpClient), RT_TABLE_MAIN, classless, 0),
+        Some((RibType::DhcpClient, 210))
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

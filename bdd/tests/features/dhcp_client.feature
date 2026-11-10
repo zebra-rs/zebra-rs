@@ -26,6 +26,8 @@ Feature: DHCPv4 client on a WAN interface (interface ipv4 address dhcp)
     220` and `host-name edge1`.
   - r1-id3.yaml: the same as r1.yaml with `dhcp-options client-id
     aa:bb:cc:dd:ee:03`.
+  - r1-no-default.yaml: the same as r1.yaml with `dhcp-options
+    no-default-route`.
 
   Scenario: Setup the server and a router with a DHCP WAN
     Given a clean test environment
@@ -191,6 +193,22 @@ Feature: DHCPv4 client on a WAN interface (interface ipv4 address dhcp)
     And show command "show ip route" in namespace "r1" should eventually contain "D  *> 0.0.0.0/0 [210/0] via 192.0.2.1, wan0"
     And show command "show ip route" in namespace "r1" should not contain "0.0.0.0/0 [0/0]"
     And ping from "r1" to "198.51.100.1" should eventually succeed
+
+  Scenario: A restart without the default route takes the earlier run's away
+    Given the test topology exists
+    # The lease's default route outlives the daemon in the kernel. Started
+    # again with no-default-route, the client never installs it, so only
+    # the route record can tell that `proto dhcp` route is zebra-rs's own
+    # leftover, not another program's: the leftover sweep takes it.
+    When I stop zebra-rs in namespace "r1"
+    Then command "ip route show default" in namespace "r1" should eventually contain "proto dhcp"
+    When I start zebra-rs in namespace "r1" sweeping leftovers after 15 seconds
+    And I apply config "r1-no-default.yaml" to namespace "r1"
+    Then show command "show dhcp client leases" in namespace "r1" should eventually contain "State:        bound"
+    And command "ip route show default" in namespace "r1" should eventually not contain "proto dhcp"
+    And show command "show ip route" in namespace "r1" should eventually not contain "0.0.0.0/0"
+    When I apply config "r1.yaml" to namespace "r1"
+    Then show command "show ip route" in namespace "r1" should eventually contain "D  *> 0.0.0.0/0 [210/0] via 192.0.2.1, wan0"
 
   Scenario: dhcp-options change the route's distance and the host name sent
     Given the test topology exists

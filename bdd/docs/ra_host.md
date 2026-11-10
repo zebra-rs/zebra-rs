@@ -21,6 +21,7 @@ route's gateways and the SLAAC address are known in advance.
 
 - s1.yaml: `send-advertisements` on srv0.
 - r1.yaml: `address autoconf` on wan0 and wan1.
+- r1-wan1.yaml: `address autoconf` on wan1 only.
 
 ## Test Scenarios
 
@@ -35,4 +36,5 @@ route's gateways and the SLAAC address are known in advance.
 | ra-options orders the two interfaces by distance | |
 | A restarted zebra-rs takes its RA routes back from the kernel | |
 | Deleting autoconf withdraws the address and the routes | |
+| A restart without autoconf on an interface takes the earlier run's RA routes away | |
 | Teardown topology | |
