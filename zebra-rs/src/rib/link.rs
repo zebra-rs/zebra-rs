@@ -1951,9 +1951,9 @@ pub async fn link_config_exec(
 
     // let func = self.builder.map.get()
     if path == "/interface/ipv4/address" {
-        // `address` is a leaf-list: each commit line carries one value,
-        // but drain the deque so a bundled delivery would not silently
-        // drop trailing values.
+        // `address` is a keyed list: each commit line carries one entry's
+        // key, but drain the deque so a bundled delivery would not
+        // silently drop trailing values.
         //
         // `dhcp` is the enum arm of the address union the DHCP client
         // (the `dhcpc` task) acts on; the RIB takes no kernel action for
@@ -2080,10 +2080,10 @@ pub async fn link_config_exec(
         // so recompute the auto router-id here.
         rib.router_id_update();
     } else if path == "/interface/ipv6/address" {
-        // `address` is a leaf-list: one callback can carry several
-        // addresses (config-file load, multi-value commit), so drain the
-        // args deque and apply each value independently — reading a
-        // single value would silently drop the rest.
+        // `address` is a keyed list: each commit line carries one
+        // entry's key. Drain the args deque all the same and apply each
+        // value independently, so a bundled delivery would not silently
+        // drop trailing values.
         //
         // `autoconf` is the enum arm the RA host (the `nd` task) acts on.
         // The RIB takes no kernel action for it; its SLAAC addresses come

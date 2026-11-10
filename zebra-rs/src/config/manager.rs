@@ -825,17 +825,30 @@ impl ConfigManager {
             .collect()
     }
 
-    /// The leaves among config `text`'s lines the E-Tree backend check reads
-    /// (`check::etree_backend`), as callback paths and arguments.
-    fn etree_backend_leaves(&self, text: &str) -> Vec<(String, Vec<String>)> {
+    /// The lines among config `text` that `wanted` picks, as callback
+    /// paths and arguments: what a whole-config check of `config::check`
+    /// reads. Only the picked lines are parsed.
+    fn checked_lines(&self, text: &str, wanted: fn(&str) -> bool) -> Vec<(String, Vec<String>)> {
         text.lines()
-            .filter(|line| check::etree_backend_line(line))
+            .filter(|line| wanted(line))
             .filter_map(|line| self.paths(line.to_string()))
             .map(|paths| {
                 let (path, args) = path_from_command(&paths);
                 (path, args.0.into_iter().collect())
             })
             .collect()
+    }
+
+    /// The leaves among config `text`'s lines the E-Tree backend check reads
+    /// (`check::etree_backend`), as callback paths and arguments.
+    fn etree_backend_leaves(&self, text: &str) -> Vec<(String, Vec<String>)> {
+        self.checked_lines(text, check::etree_backend_line)
+    }
+
+    /// The interface IPv4 address entries among config `text`'s lines
+    /// (`check::address_dhcp_exclusive`), as callback paths and arguments.
+    fn ipv4_address_entries(&self, text: &str) -> Vec<(String, Vec<String>)> {
+        self.checked_lines(text, check::ipv4_address_line)
     }
 
     /// Commit the candidate. Refuses it, dispatching nothing, when it
@@ -897,6 +910,21 @@ impl ConfigManager {
                 return Err(anyhow::anyhow!(etree.join("\n")));
             }
             for error in &etree {
+                tracing::warn!("startup config: {error}");
+            }
+        }
+
+        // `interface <name> ipv4 address dhcp` excludes a static address
+        // on the same interface: the `must` on that list in config.yang,
+        // which is a property of the interface's whole list. A startup
+        // config is only warned about, for the same reason; both are
+        // then applied, the lease beside the configured addresses.
+        let addresses = check::address_dhcp_exclusive(&self.ipv4_address_entries(&candidate));
+        if !addresses.is_empty() {
+            if !startup {
+                return Err(anyhow::anyhow!(addresses.join("\n")));
+            }
+            for error in &addresses {
                 tracing::warn!("startup config: {error}");
             }
         }
@@ -2875,6 +2903,81 @@ mod save_config_tests {
             let (code, output, _) = cm.execute(mode, &format!("delete {cradle}"));
             assert_eq!(code, ExecCode::Show, "delete rejected: {output:?}");
         }
+    }
+
+    /// `interface <name> ipv4 address dhcp` and a static address on the
+    /// same interface are refused at commit (the `must` on that list in
+    /// config.yang, enforced by `check::address_dhcp_exclusive`), in
+    /// whichever order they were set, and the refused commit leaves the
+    /// running config alone. Removing either one clears it.
+    #[test]
+    fn address_dhcp_beside_a_static_address_fails_the_commit() {
+        let cm = manager_with_config(&temp_path("address-dhcp"));
+        let mode = cm.modes.get("configure").expect("configure mode");
+        let edit = |line: &str| {
+            let (code, output, _) = cm.execute(mode, line);
+            assert_eq!(code, ExecCode::Show, "`{line}` rejected: {output:?}");
+        };
+        let running = || {
+            let mut running = String::new();
+            cm.store.running.borrow().list(&mut running);
+            running
+        };
+        let violations = || {
+            let mut candidate = String::new();
+            cm.store.candidate.borrow().list(&mut candidate);
+            check::address_dhcp_exclusive(&cm.ipv4_address_entries(&candidate))
+        };
+        let refused = "interface eth0 ipv4 address: dhcp cannot be combined with a static \
+                       address (10.0.0.1/24); delete one or the other";
+
+        // Static addresses alone commit, any number of them; another
+        // interface's are its own business.
+        edit("set interface eth0 ipv4 address 10.0.0.1/24");
+        edit("set interface eth1 ipv4 address 10.1.0.1/24");
+        edit("set interface eth1 ipv4 address 10.1.0.2/24");
+        cm.commit_config().expect("static addresses commit");
+        let committed = running();
+        assert!(
+            committed.contains("interface eth0 ipv4 address 10.0.0.1/24"),
+            "{committed}"
+        );
+
+        // `dhcp` beside the committed static address: refused.
+        edit("set interface eth0 ipv4 address dhcp");
+        let err = cm
+            .commit_config()
+            .expect_err("dhcp beside a static address");
+        assert_eq!(err.to_string(), refused);
+        assert_eq!(running(), committed, "a refused commit changes nothing");
+
+        // Dropping the static address clears it. (Checked without
+        // committing: a commit with `address dhcp` spawns the DHCP client.)
+        edit("delete interface eth0 ipv4 address 10.0.0.1/24");
+        assert_eq!(violations(), Vec::<String>::new());
+
+        // The other order: a static address beside `dhcp`.
+        edit("set interface eth0 ipv4 address 10.0.0.1/24");
+        assert_eq!(violations(), [refused]);
+        let err = cm
+            .commit_config()
+            .expect_err("a static address beside dhcp");
+        assert_eq!(err.to_string(), refused);
+
+        // Dropping `dhcp` clears it too, and that candidate commits.
+        edit("delete interface eth0 ipv4 address dhcp");
+        cm.commit_config().expect("static again");
+        assert_eq!(running(), committed);
+
+        // DHCP on one interface, static on another, is no conflict.
+        edit("set interface eth2 ipv4 address dhcp");
+        assert_eq!(violations(), Vec::<String>::new());
+
+        // The rule is IPv4's: `autoconf` sits beside static IPv6
+        // addresses, and beside `dhcp`.
+        edit("set interface eth2 ipv6 address autoconf");
+        edit("set interface eth2 ipv6 address 2001:db8::1/64");
+        assert_eq!(violations(), Vec::<String>::new());
     }
 
     /// An Ethernet Segment's ESI is checked at commit (RFC 7432 §5 reserves
@@ -7255,7 +7358,8 @@ module test-insomnia-gated {
         let set = child(&entry, "set").expect("set subtree");
         let interface = child(&set, "interface").expect("interface list");
         let ipv4 = child(&interface, "ipv4").expect("ipv4 container");
-        let address = child(&ipv4, "address").expect("address leaf-list");
+        let list = child(&ipv4, "address").expect("address list");
+        let address = child(&list, "address").expect("address key leaf");
         address
             .type_node
             .as_ref()
@@ -7402,6 +7506,295 @@ module test-insomnia-gated {
         let (code, _, state) = parse("show dhcp server leases", gated, None, State::new());
         assert_eq!(code, ExecCode::Success);
         assert_eq!(show_proto(&state.paths), "dhcp");
+    }
+
+    /// `interface <name> {ipv4|ipv6} address` is a keyed list, so one
+    /// command names exactly one address. As a leaf-list the CLI
+    /// repeated the value position: `address dhcp ?` offered the value
+    /// hints again beside `<cr>`, and `address dhcp dhcp` was accepted
+    /// and stored `dhcp` twice.
+    #[test]
+    fn interface_address_takes_one_value_per_command() {
+        use crate::config::parse::{State, parse};
+
+        let entry = shipped_tree(&[]);
+        let complete = |input: &str| {
+            let (code, comps, _) = parse(input, entry.clone(), None, State::new());
+            let names: Vec<String> = comps.into_iter().map(|c| c.name).collect();
+            (code, names)
+        };
+        let names = |list: &[&str]| -> Vec<String> { list.iter().map(|s| s.to_string()).collect() };
+
+        // Before the value: the value hints, no `<cr>`.
+        assert_eq!(
+            complete("set interface enp0s8 ipv4 address "),
+            (ExecCode::Incomplete, names(&["<A.B.C.D/M>", "dhcp"]))
+        );
+        assert_eq!(
+            complete("set interface enp0s8 ipv6 address "),
+            (ExecCode::Incomplete, names(&["<X:X::X:X/M>", "autoconf"]))
+        );
+
+        // After one value: `<cr>` and nothing else.
+        for input in [
+            "set interface enp0s8 ipv4 address dhcp ",
+            "set interface enp0s8 ipv4 address 10.0.0.1/24 ",
+            "set interface enp0s8 ipv6 address 2001:db8::1/64 ",
+            "set interface enp0s8 ipv6 address autoconf ",
+        ] {
+            assert_eq!(
+                complete(input),
+                (ExecCode::Success, names(&["<cr>"])),
+                "`{input}`"
+            );
+        }
+
+        // A second value is an error.
+        for input in [
+            "set interface enp0s8 ipv4 address dhcp dhcp",
+            "set interface enp0s8 ipv4 address dhcp 10.0.0.1/24",
+            "set interface enp0s8 ipv4 address 10.0.0.1/24 dhcp",
+            "set interface enp0s8 ipv4 address 10.0.0.1/24 10.0.0.2/24",
+            "set interface enp0s8 ipv6 address 2001:db8::1/64 2001:db8::2/64",
+            "set interface enp0s8 ipv6 address autoconf autoconf",
+            "set interface enp0s8 ipv6 address autoconf 2001:db8::1/64",
+        ] {
+            assert_eq!(complete(input).0, ExecCode::Nomatch, "`{input}`");
+        }
+    }
+
+    /// The protocol-facing contract did not move with the leaf-list →
+    /// keyed-list change: a line still dispatches to
+    /// `/interface/{ipv4|ipv6}/address` with the interface name and one
+    /// address as arguments (what `rib::link` and `dhcpc` register for),
+    /// and an abbreviated `dhcp` still reaches them spelled out.
+    #[test]
+    fn interface_address_callback_path_and_args_are_unchanged() {
+        use crate::config::parse::{State, parse};
+
+        let entry = shipped_tree(&[]);
+        for (line, path, value) in [
+            (
+                "set interface eth0 ipv4 address 10.0.0.1/24",
+                "/interface/ipv4/address",
+                "10.0.0.1/24",
+            ),
+            (
+                "set interface eth0 ipv4 address dhcp",
+                "/interface/ipv4/address",
+                "dhcp",
+            ),
+            (
+                "set interface eth0 ipv4 address dh",
+                "/interface/ipv4/address",
+                "dhcp",
+            ),
+            (
+                "set interface eth0 ipv6 address 2001:db8::1/64",
+                "/interface/ipv6/address",
+                "2001:db8::1/64",
+            ),
+            (
+                "set interface eth0 ipv6 address autoconf",
+                "/interface/ipv6/address",
+                "autoconf",
+            ),
+            (
+                "set interface eth0 ipv6 address auto",
+                "/interface/ipv6/address",
+                "autoconf",
+            ),
+        ] {
+            let (code, _, state) = parse(line, entry.clone(), None, State::new());
+            assert_eq!(code, ExecCode::Success, "`{line}`");
+            let (got, args) = path_from_command(&path_try_trim("set", state.paths));
+            assert_eq!(got, path, "`{line}`");
+            let args: Vec<String> = args.0.into_iter().collect();
+            assert_eq!(args, ["eth0", value], "`{line}`");
+        }
+    }
+
+    /// The address list through every rendering and back. Entries come
+    /// out one per line in the order they were set (`ordered-by user`:
+    /// within a subnet the first address installed is the primary, so
+    /// the order is configuration), a repeated `set` adds nothing, and
+    /// each format `save` writes loads back to the same lines in the
+    /// same order. So do the shapes written while `address` was a
+    /// leaf-list — a `{ a; b; }` block in a saved `.conf`, a scalar
+    /// sequence in YAML or JSON — which is what keeps existing config
+    /// files loading.
+    #[test]
+    fn interface_address_list_renders_and_reloads() {
+        use crate::config::parse::{State, parse};
+
+        let entry = shipped_tree(&[]);
+        let set_entry = entry
+            .dir
+            .borrow()
+            .iter()
+            .find(|e| e.name == "set")
+            .cloned()
+            .expect("set subtree");
+
+        let apply = |store: &ConfigStore, cmd: &str| {
+            let candidate = store.candidate.borrow().clone();
+            let (code, _, state) = parse(cmd, entry.clone(), Some(candidate.clone()), State::new());
+            assert_eq!(code, ExecCode::Success, "`{cmd}`");
+            if state.set {
+                set(path_try_trim("set", state.paths), candidate);
+            } else {
+                delete(path_try_trim("delete", state.paths), candidate);
+            }
+        };
+        let list = |store: &ConfigStore| {
+            let mut out = String::new();
+            store.candidate.borrow().list(&mut out);
+            out
+        };
+        // A fresh store built from loader output: what a daemon booting
+        // on a saved file ends up with.
+        let reload = |cmds: &[String]| {
+            let store = ConfigStore::new();
+            for cmd in cmds {
+                apply(&store, cmd);
+            }
+            list(&store)
+        };
+
+        // Deliberately not in address order.
+        let store = ConfigStore::new();
+        for cmd in [
+            "set interface eth0 ipv4 address 10.0.0.9/24",
+            "set interface eth0 ipv4 address 10.0.0.1/24",
+            "set interface eth0 ipv4 address 10.0.0.9/24",
+            "set interface eth0 ipv4 address dhcp",
+            "set interface eth0 ipv4 address dhcp",
+            "set interface eth0 ipv6 address 2001:db8::2/64",
+            "set interface eth0 ipv6 address 2001:db8::1/64",
+        ] {
+            apply(&store, cmd);
+        }
+        let lines = "interface eth0\n\
+                     interface eth0 ipv4 address 10.0.0.9/24\n\
+                     interface eth0 ipv4 address 10.0.0.1/24\n\
+                     interface eth0 ipv4 address dhcp\n\
+                     interface eth0 ipv6 address 2001:db8::2/64\n\
+                     interface eth0 ipv6 address 2001:db8::1/64\n";
+        assert_eq!(list(&store), lines);
+
+        // What each loader must hand back: `list` plus the `set` keyword
+        // (the brace loader does not emit the bare `interface eth0`).
+        let set_lines: Vec<String> = lines.lines().map(|l| format!("set {l}")).collect();
+
+        let mut brace = String::new();
+        store.candidate.borrow().format(&mut brace);
+        assert_eq!(
+            brace,
+            "interface eth0 {\n  ipv4 {\n    address 10.0.0.9/24;\n    address 10.0.0.1/24;\n    address dhcp;\n  }\n  ipv6 {\n    address 2001:db8::2/64;\n    address 2001:db8::1/64;\n  }\n}\n"
+        );
+        let loaded = load_config_file(brace);
+        assert_eq!(loaded, set_lines[1..]);
+        assert_eq!(reload(&loaded), lines);
+
+        let mut json = String::new();
+        store.candidate.borrow().json(&mut json);
+        assert_eq!(
+            json,
+            r#"{"interface": [{"if-name":"eth0","ipv4":{"address": [{"address":"10.0.0.9/24"},{"address":"10.0.0.1/24"},{"address":"dhcp"}]},"ipv6":{"address": [{"address":"2001:db8::2/64"},{"address":"2001:db8::1/64"}]}}]}"#
+        );
+        let (loaded, errors) = json_read(set_entry.clone(), &json);
+        assert!(errors.is_empty(), "json: {errors:?}");
+        assert_eq!(loaded, set_lines);
+        assert_eq!(reload(&loaded), lines);
+
+        let mut yaml = String::new();
+        store.candidate.borrow().yaml(&mut yaml);
+        let (loaded, errors) = yaml_read(set_entry.clone(), &yaml);
+        assert!(errors.is_empty(), "yaml: {errors:?}");
+        assert_eq!(loaded, set_lines);
+        assert_eq!(reload(&loaded), lines);
+
+        // The leaf-list era shapes.
+        let old_brace = "interface eth0 {\n  ipv4 {\n    address {\n      10.0.0.9/24;\n      10.0.0.1/24;\n      dhcp;\n    }\n  }\n  ipv6 {\n    address {\n      2001:db8::2/64;\n      2001:db8::1/64;\n    }\n  }\n}\n";
+        let loaded = load_config_file(old_brace.to_string());
+        assert_eq!(loaded, set_lines[1..]);
+        assert_eq!(reload(&loaded), lines);
+
+        let old_yaml = "interface:\n- if-name: eth0\n  ipv4:\n    address:\n    - 10.0.0.9/24\n    - 10.0.0.1/24\n    - dhcp\n  ipv6:\n    address:\n    - 2001:db8::2/64\n    - 2001:db8::1/64\n";
+        let (loaded, errors) = yaml_read(set_entry.clone(), old_yaml);
+        assert!(errors.is_empty(), "old yaml: {errors:?}");
+        assert_eq!(loaded, set_lines);
+        assert_eq!(reload(&loaded), lines);
+
+        let old_json = r#"{"interface":[{"if-name":"eth0","ipv4":{"address":["10.0.0.9/24","10.0.0.1/24","dhcp"]},"ipv6":{"address":["2001:db8::2/64","2001:db8::1/64"]}}]}"#;
+        let (loaded, errors) = json_read(set_entry, old_json);
+        assert!(errors.is_empty(), "old json: {errors:?}");
+        assert_eq!(loaded, set_lines);
+        assert_eq!(reload(&loaded), lines);
+
+        // Delete one entry, then the whole list.
+        apply(&store, "delete interface eth0 ipv4 address dhcp");
+        assert_eq!(
+            list(&store),
+            "interface eth0\n\
+             interface eth0 ipv4 address 10.0.0.9/24\n\
+             interface eth0 ipv4 address 10.0.0.1/24\n\
+             interface eth0 ipv6 address 2001:db8::2/64\n\
+             interface eth0 ipv6 address 2001:db8::1/64\n"
+        );
+        // An entry set again after its delete goes to the end.
+        apply(&store, "delete interface eth0 ipv4 address 10.0.0.9/24");
+        apply(&store, "set interface eth0 ipv4 address 10.0.0.9/24");
+        apply(&store, "delete interface eth0 ipv6 address 2001:db8::2/64");
+        assert_eq!(
+            list(&store),
+            "interface eth0\n\
+             interface eth0 ipv4 address 10.0.0.1/24\n\
+             interface eth0 ipv4 address 10.0.0.9/24\n\
+             interface eth0 ipv6 address 2001:db8::1/64\n"
+        );
+        apply(&store, "delete interface eth0 ipv4 address");
+        assert_eq!(
+            list(&store),
+            "interface eth0\ninterface eth0 ipv6 address 2001:db8::1/64\n"
+        );
+    }
+
+    /// `ordered-by user` is per list: the address lists carry it, and a
+    /// list without it is still sorted by key whatever order its
+    /// entries were set in — here the interfaces themselves, and VRFs.
+    #[test]
+    fn only_ordered_by_user_lists_keep_entry_order() {
+        use crate::config::parse::{State, parse};
+
+        let entry = shipped_tree(&[]);
+        let store = ConfigStore::new();
+        for cmd in [
+            "set vrf red",
+            "set vrf blue",
+            "set interface eth1 ipv4 address 10.1.0.9/24",
+            "set interface eth1 ipv4 address 10.1.0.1/24",
+            "set interface eth0 ipv4 address 10.0.0.9/24",
+            "set interface eth0 ipv4 address 10.0.0.1/24",
+        ] {
+            let candidate = store.candidate.borrow().clone();
+            let (code, _, state) = parse(cmd, entry.clone(), None, State::new());
+            assert_eq!(code, ExecCode::Success, "`{cmd}`");
+            set(path_try_trim("set", state.paths), candidate);
+        }
+        let mut out = String::new();
+        store.candidate.borrow().list(&mut out);
+        assert_eq!(
+            out,
+            "vrf blue\n\
+             vrf red\n\
+             interface eth0\n\
+             interface eth0 ipv4 address 10.0.0.9/24\n\
+             interface eth0 ipv4 address 10.0.0.1/24\n\
+             interface eth1\n\
+             interface eth1 ipv4 address 10.1.0.9/24\n\
+             interface eth1 ipv4 address 10.1.0.1/24\n"
+        );
     }
 
     /// Build a shipped mode tree (`configure` or `exec`) with the

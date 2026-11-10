@@ -110,6 +110,18 @@ Feature: Multiple IPv4 addresses per interface with kernel secondary flag
     And show command "show ip route" in namespace "z2" should eventually not contain "via 10.0.1.1"
     And ping from "z2" to "10.2.0.1" should eventually succeed
 
+  Scenario: Configuration order, not address order, picks the primary
+    Given the test topology exists
+    # Both addresses of a new subnet arrive in one commit, the higher one
+    # first. The address list is `ordered-by user`: they are installed as
+    # entered, so the first is the subnet's primary. Sorted by address,
+    # 10.3.0.1 would have been.
+    When I apply command "set interface vz1ns ipv4 address 10.3.0.9/24\nset interface vz1ns ipv4 address 10.3.0.1/24" in namespace "z1"
+    Then command "ip -4 addr show vz1ns" in namespace "z1" should eventually contain "10.3.0.1/24 scope global secondary"
+    And command "ip -4 addr show vz1ns" in namespace "z1" should eventually contain "10.3.0.9/24 scope global vz1ns"
+    And show command "show interface vz1ns" in namespace "z1" should eventually contain "inet 10.3.0.1/24 secondary"
+    And show command "show interface vz1ns" in namespace "z1" should not contain "inet 10.3.0.9/24 secondary"
+
   Scenario: Teardown topology
     # Separate scenario so cleanup still runs when a step above fails
     # (a failed step skips the rest of its own scenario only).

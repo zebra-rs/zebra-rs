@@ -225,6 +225,11 @@ message CommandPath {
   // this node implicitly deletes them from the candidate store
   // (RFC 7950 §7.9.3) — `config_set_dir` performs the purge.
   repeated string choice_exclude = 7;
+  // On a list node: its entries keep the order they were entered in
+  // instead of being sorted by key (YANG `ordered-by user`, RFC 7950
+  // §7.7.7). `config_set_dir` stamps it on the list's Config node, where
+  // `config_set_key` reads it.
+  bool ordered_by_user = 8;
 }
 
 // Show service.

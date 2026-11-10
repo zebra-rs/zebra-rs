@@ -33,8 +33,8 @@ host (tests/scripts/dhcp_server.sh).
 | The lease gives the address, the default route and the server's options | |
 | Renew by hand keeps the lease | |
 | Release withdraws everything until the next renew | |
-| With a static address beside it, the client still talks from the leased address | |
-| An address both leased and configured belongs to the configuration | |
+| A static address beside the lease is refused | |
+| With another address ahead of it, the client still talks from the leased address | |
 | A renewal the server refuses ends the lease at once | |
 | A changed client-id gives the lease back and asks again as the new identity | |
 | A reboot under another client-id releases the saved lease | |

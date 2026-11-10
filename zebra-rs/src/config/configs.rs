@@ -187,6 +187,10 @@ pub struct Config {
     /// list node, every key entry must carry at least one child; a bare
     /// `... <key>` fails `validate` with this string as the hint.
     pub non_empty: String,
+    /// On a list node, YANG `ordered-by user`: `keys` stay in the order
+    /// the entries were set, which is then the order every rendering and
+    /// the commit replay follow. Unset, they are sorted by key.
+    pub ordered_by_user: bool,
 }
 
 impl Config {
@@ -619,6 +623,7 @@ pub fn carbon_copy(conf: &Rc<Config>, parent: Option<Rc<Config>>) -> Rc<Config> 
         mandatory: conf.mandatory.clone(),
         sort_priority: conf.sort_priority.clone(),
         non_empty: conf.non_empty.clone(),
+        ordered_by_user: conf.ordered_by_user,
         parent,
         ..Default::default()
     });
@@ -661,6 +666,7 @@ fn config_set_dir(config: &Rc<Config>, cpath: &CommandPath) -> Rc<Config> {
                 mandatory: cpath.mandatory.clone(),
                 sort_priority: cpath.sort_priority.into(),
                 non_empty: cpath.non_empty.clone(),
+                ordered_by_user: cpath.ordered_by_user,
                 ..Default::default()
             });
             config.configs.borrow_mut().push(n.clone());
@@ -688,7 +694,10 @@ fn config_set_key(config: &Rc<Config>, cpath: &CommandPath) -> Rc<Config> {
                 ..Default::default()
             });
             config.keys.borrow_mut().push(n.clone());
-            config.keys.borrow_mut().sort_by(compare_configs);
+            // An `ordered-by user` list keeps the entries as entered.
+            if !config.ordered_by_user {
+                config.keys.borrow_mut().sort_by(compare_configs);
+            }
             n.clone()
         }
     }
@@ -893,6 +902,76 @@ mod tests {
         assert_eq!(
             args.afi_safi(),
             Some(AfiSafi::new(Afi::Ip6, Safi::Flowspec))
+        );
+    }
+
+    // YANG `ordered-by user` on a list node (carried as
+    // `CommandPath.ordered_by_user`): its entries stay in the order they
+    // were set, in every rendering, through the candidate → running copy,
+    // and across a delete of one of them. A list without it sorts by key.
+    #[test]
+    fn ordered_by_user_list_keeps_entry_order() {
+        let list = |name: &str, ordered_by_user: bool| CommandPath {
+            name: name.to_string(),
+            ymatch: YangMatch::Key as i32,
+            ordered_by_user,
+            ..Default::default()
+        };
+        let key = |name: &str| CommandPath {
+            name: name.to_string(),
+            ymatch: YangMatch::KeyMatched as i32,
+            key: "name".to_string(),
+            ..Default::default()
+        };
+        let lines = |config: &Rc<Config>| {
+            let mut out = String::new();
+            config.list(&mut out);
+            out
+        };
+
+        let root = Rc::new(Config::new("".to_string(), None));
+        for name in ["c", "a", "b", "a"] {
+            set(vec![list("user", true), key(name)], root.clone());
+            set(vec![list("system", false), key(name)], root.clone());
+        }
+        let expected = "system a\nsystem b\nsystem c\nuser c\nuser a\nuser b\n";
+        assert_eq!(lines(&root), expected);
+
+        let mut brace = String::new();
+        root.format(&mut brace);
+        assert_eq!(
+            brace,
+            "system a;\nsystem b;\nsystem c;\nuser c;\nuser a;\nuser b;\n"
+        );
+        let mut json = String::new();
+        root.json(&mut json);
+        assert_eq!(
+            json,
+            r#"{"system": [{"name":"a"},{"name":"b"},{"name":"c"}],"user": [{"name":"c"},{"name":"a"},{"name":"b"}]}"#
+        );
+
+        // What a commit does with the candidate.
+        let copy = carbon_copy(&root, None);
+        assert_eq!(lines(&copy), expected);
+        // The copy is still user-ordered: a new entry goes last.
+        set(vec![list("user", true), key("0")], copy.clone());
+        set(vec![list("system", false), key("0")], copy.clone());
+        assert_eq!(
+            lines(&copy),
+            "system 0\nsystem a\nsystem b\nsystem c\nuser c\nuser a\nuser b\nuser 0\n"
+        );
+
+        // Deleting from the middle keeps the rest in place; setting the
+        // entry again appends it.
+        delete(vec![list("user", true), key("a")], root.clone());
+        assert_eq!(
+            lines(&root),
+            "system a\nsystem b\nsystem c\nuser c\nuser b\n"
+        );
+        set(vec![list("user", true), key("a")], root.clone());
+        assert_eq!(
+            lines(&root),
+            "system a\nsystem b\nsystem c\nuser c\nuser b\nuser a\n"
         );
     }
 

@@ -39,4 +39,5 @@ nexthops/endpoints always use the primary.
 | Protocols advertise subnets once and pick the primary as nexthop | |
 | Deleting the secondary keeps the connected route and the advertisement | |
 | Deleting the primary hands the subnet to the configured sibling | |
+| Configuration order, not address order, picks the primary | |
 | Teardown topology | |

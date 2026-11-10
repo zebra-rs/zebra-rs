@@ -485,7 +485,7 @@ of them needs the RA default route. SLAAC addresses are made only with
 
 | Condition | Severity | Effect |
 |---|---|---|
-| `address dhcp` beside static addresses | – | allowed (VyOS); the lease is one more address |
+| `address dhcp` beside static addresses | error | an interface is addressed by DHCP or statically: the `must` on the `address` list, enforced by `config::check::address_dhcp_exclusive` (a startup config only warns, and the lease is then one more address) |
 | `dhcp-options` / `dhcpv6-options` / `ra-options` without the address value that uses them | warning | stored, unused |
 | `parameters-only` with `address dhcpv6` or `pd` | error | an Information-Request carries no IAs |
 | `pd … interface X` where X is the WAN interface itself | error | |

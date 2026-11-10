@@ -56,6 +56,61 @@ pub fn etree_backend(leaves: &[(String, Vec<String>)]) -> Vec<String> {
         .collect()
 }
 
+/// The IPv4 address list of an interface (`interface <name> ipv4
+/// address <A.B.C.D/M>|dhcp`), as a callback path.
+pub const IPV4_ADDRESS_PATH: &str = "/interface/ipv4/address";
+
+/// Whether a config line can carry an entry [`address_dhcp_exclusive`]
+/// reads, so the caller parses only those.
+pub fn ipv4_address_line(line: &str) -> bool {
+    line.starts_with("interface ") && line.contains(" ipv4 address ")
+}
+
+/// `interface <name> ipv4 address dhcp` leases the interface's address,
+/// so it excludes a configured one on the same interface: an interface
+/// is addressed by DHCP or statically, not both. This is the `must` on
+/// the list in config.yang, which the schema library parses but does
+/// not evaluate — a property of an interface's whole address list, not
+/// of one line. `entries` are a whole config's [`ipv4_address_line`]s as
+/// (callback path, arguments); the result is one error per interface
+/// that has both, in the order the interfaces first appear.
+pub fn address_dhcp_exclusive(entries: &[(String, Vec<String>)]) -> Vec<String> {
+    // Interface name, whether it has `dhcp`, and its static addresses.
+    let mut interfaces: Vec<(&str, bool, Vec<&str>)> = Vec::new();
+    for (path, args) in entries {
+        let [name, address] = args.as_slice() else {
+            continue;
+        };
+        if path != IPV4_ADDRESS_PATH {
+            continue;
+        }
+        let index = match interfaces.iter().position(|(n, ..)| n == name) {
+            Some(index) => index,
+            None => {
+                interfaces.push((name, false, Vec::new()));
+                interfaces.len() - 1
+            }
+        };
+        let (_, dhcp, statics) = &mut interfaces[index];
+        if address == "dhcp" {
+            *dhcp = true;
+        } else {
+            statics.push(address);
+        }
+    }
+    interfaces
+        .into_iter()
+        .filter(|(_, dhcp, statics)| *dhcp && !statics.is_empty())
+        .map(|(name, _, statics)| {
+            format!(
+                "interface {name} ipv4 address: dhcp cannot be combined with a static \
+                 address ({}); delete one or the other",
+                statics.join(", ")
+            )
+        })
+        .collect()
+}
+
 /// A leaf value check: `Err` holds the reason, shown after the line.
 pub type ValueCheck = fn(&str) -> Result<(), String>;
 
@@ -235,6 +290,75 @@ mod tests {
         assert!(etree_backend_line("system ebpf enabled true"));
         assert!(etree_backend_line("system cradle enabled true"));
         assert!(!etree_backend_line("system cradle grpc-endpoint unix:x"));
+    }
+
+    /// `address dhcp` and a static address exclude each other on one
+    /// interface, and only there: other interfaces, and the IPv6 list,
+    /// are not counted.
+    #[test]
+    fn address_dhcp_excludes_a_static_address() {
+        let v4 = |name: &str, address: &str| leaf(IPV4_ADDRESS_PATH, &[name, address]);
+
+        // Either alone, on any number of interfaces.
+        assert!(address_dhcp_exclusive(&[v4("eth0", "dhcp")]).is_empty());
+        assert!(
+            address_dhcp_exclusive(&[v4("eth0", "10.0.0.1/24"), v4("eth0", "10.0.0.2/24")])
+                .is_empty()
+        );
+        assert!(
+            address_dhcp_exclusive(&[v4("eth0", "dhcp"), v4("eth1", "10.0.0.1/24")]).is_empty()
+        );
+        // An IPv6 address is no IPv4 static address.
+        assert!(
+            address_dhcp_exclusive(&[
+                v4("eth0", "dhcp"),
+                leaf("/interface/ipv6/address", &["eth0", "2001:db8::1/64"]),
+            ])
+            .is_empty()
+        );
+
+        // Both on one interface, in either order, every static named.
+        for entries in [
+            vec![
+                v4("eth0", "10.0.0.1/24"),
+                v4("eth0", "10.0.0.2/24"),
+                v4("eth0", "dhcp"),
+            ],
+            vec![
+                v4("eth0", "dhcp"),
+                v4("eth0", "10.0.0.1/24"),
+                v4("eth0", "10.0.0.2/24"),
+            ],
+        ] {
+            assert_eq!(
+                address_dhcp_exclusive(&entries),
+                [
+                    "interface eth0 ipv4 address: dhcp cannot be combined with a static \
+                     address (10.0.0.1/24, 10.0.0.2/24); delete one or the other"
+                ]
+            );
+        }
+
+        // One error per interface, the clean one left out.
+        let errors = address_dhcp_exclusive(&[
+            v4("eth0", "dhcp"),
+            v4("eth0", "10.0.0.1/24"),
+            v4("eth1", "dhcp"),
+            v4("eth2", "dhcp"),
+            v4("eth2", "10.2.0.1/24"),
+        ]);
+        assert_eq!(errors.len(), 2, "{errors:?}");
+        assert!(errors[0].starts_with("interface eth0 "), "{errors:?}");
+        assert!(errors[1].starts_with("interface eth2 "), "{errors:?}");
+
+        assert!(ipv4_address_line("interface eth0 ipv4 address dhcp"));
+        assert!(ipv4_address_line("interface eth0 ipv4 address 10.0.0.1/24"));
+        assert!(!ipv4_address_line(
+            "interface eth0 ipv6 address 2001:db8::1/64"
+        ));
+        assert!(!ipv4_address_line(
+            "interface eth0 ipv4 dhcp-options host-name edge1"
+        ));
     }
 
     /// An Ethernet Segment's ESI: well-formed and not reserved (RFC 7432

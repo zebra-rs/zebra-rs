@@ -142,8 +142,10 @@ tonic-prost.workspace = true
 tower = { version = "0.5", default-features = false, features = ["util"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 console-subscriber = "0.5"
-# 2.2 evaluates if-feature on enum arms (feature-gated union values).
-libyang = "2.2"
+# 2.2 evaluates if-feature on enum arms (feature-gated union values);
+# 2.3 carries `ordered-by user` to the entry tree (the interface
+# address lists).
+libyang = "2.3"
 #libyang = { git = "https://github.com/zebra-rs/libyang", rev = "1dada0e" }
 #libyang = { path = "../../libyang" }
 regex = "1.10"
