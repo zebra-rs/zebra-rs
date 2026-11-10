@@ -17,7 +17,7 @@
 //! it, and the leftover sweep takes it if none does. Routes the record
 //! does not name stay learned.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use ipnet::IpNet;
@@ -77,6 +77,10 @@ pub struct RouteRecord {
     /// What the record named at startup, until the leftover sweep: a
     /// dumped route matching one of these is a leftover.
     leftovers: BTreeMap<Key, Held>,
+    /// The startup records whose owner has installed the route again in
+    /// this run. At the sweep the others are dropped, whether or not the
+    /// dump held their route.
+    reclaimed: BTreeSet<Key>,
 }
 
 impl RouteRecord {
@@ -136,6 +140,9 @@ impl RouteRecord {
         if !recorded(rtype) {
             return;
         }
+        if self.leftovers.contains_key(&(rtype, table, prefix)) {
+            self.reclaimed.insert((rtype, table, prefix));
+        }
         let held = Held {
             priorities,
             distance,
@@ -153,10 +160,24 @@ impl RouteRecord {
         }
     }
 
-    /// The leftover sweep has run: what was not replaced is gone, and a
-    /// dumped route is no longer a leftover.
+    /// The leftover sweep has run: a dumped route is no longer a leftover,
+    /// and the startup records nothing installed again are dropped. A
+    /// leftover the sweep removed has already left the record (`del`), but
+    /// one whose route was gone from the kernel before this run started
+    /// had no RIB entry for the sweep to remove. Kept, its record would
+    /// outlive it for good, and a later restart would take another
+    /// program's route at that key for this one's and sweep it.
     pub fn sweep_done(&mut self) {
+        let before = self.held.len();
+        let (leftovers, reclaimed) = (&self.leftovers, &self.reclaimed);
+        self.held
+            .retain(|key, _| !leftovers.contains_key(key) || reclaimed.contains(key));
+        let pruned = before != self.held.len();
         self.leftovers.clear();
+        self.reclaimed.clear();
+        if pruned {
+            self.save();
+        }
     }
 
     /// Write the record, replacing the file in one step so a crash leaves
@@ -243,15 +264,52 @@ mod tests {
             None
         );
 
-        // After the sweep nothing is a leftover, and what was swept is out
-        // of the file.
+        // After the sweep nothing is a leftover, and the file names only
+        // what this run installed: the swept route has left it, and so has
+        // the one nothing installed again.
         restarted.del(RibType::DhcpClient, 254, net("0.0.0.0/0"));
+        restarted.add(RibType::Ra, 254, net("2001:db8:2::/64"), vec![1024], 210);
         restarted.sweep_done();
         assert_eq!(leftover(&restarted, RibType::Ra, "::/0", 1024), None);
         let mut again = RouteRecord::default();
         again.load(path.clone());
         assert_eq!(leftover(&again, RibType::DhcpClient, "0.0.0.0/0", 0), None);
-        assert!(leftover(&again, RibType::Ra, "::/0", 1024).is_some());
+        assert_eq!(leftover(&again, RibType::Ra, "::/0", 1024), None);
+        assert!(leftover(&again, RibType::Ra, "2001:db8:2::/64", 1024).is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A record whose route was gone before the restart has no leftover
+    /// for the sweep to remove; the sweep drops it all the same, so a later
+    /// restart cannot take another program's route at that key for its
+    /// own. A record installed again stays.
+    #[test]
+    fn the_sweep_drops_records_nothing_installed_again() {
+        let dir = std::env::temp_dir().join(format!("route-record-prune-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join(FILE);
+        let mut earlier = RouteRecord::default();
+        earlier.load(path.clone());
+        earlier.add(RibType::DhcpClient, 254, net("0.0.0.0/0"), vec![0], 210);
+        earlier.add(RibType::Ra, 254, net("2001:db8:1::/64"), vec![1024], 210);
+
+        let mut record = RouteRecord::default();
+        record.load(path.clone());
+        // The owner installs the on-link route again; the default route's
+        // record has no route left in the kernel, and nothing installs it.
+        record.add(RibType::Ra, 254, net("2001:db8:1::/64"), vec![1024], 210);
+        record.sweep_done();
+
+        let mut next = RouteRecord::default();
+        next.load(path);
+        assert_eq!(
+            next.leftover(Some(RibType::DhcpClient), 254, net("0.0.0.0/0"), 0),
+            None
+        );
+        assert_eq!(
+            next.leftover(Some(RibType::Ra), 254, net("2001:db8:1::/64"), 1024),
+            Some((RibType::Ra, 210))
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

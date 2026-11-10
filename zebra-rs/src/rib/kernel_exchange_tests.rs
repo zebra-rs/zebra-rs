@@ -1887,6 +1887,8 @@ async fn recorded_dhcp_and_ra_leftovers_are_swept_unless_reclaimed() {
     let on_link: IpNet = "2001:db8:1::/64".parse().unwrap();
     let delegated: IpNet = "2001:db8:ff00::/56".parse().unwrap();
     let gone: IpNet = "2001:db8:2::/64".parse().unwrap();
+    // Recorded, but gone from the kernel before this run started.
+    let absent: IpNet = "2001:db8:3::/64".parse().unwrap();
     let classless: IpNet = "198.51.100.0/24".parse().unwrap();
 
     let mut earlier = RouteRecord::default();
@@ -1895,6 +1897,7 @@ async fn recorded_dhcp_and_ra_leftovers_are_swept_unless_reclaimed() {
     earlier.add(RibType::Ra, RT_TABLE_MAIN, default6, vec![1024], 220);
     earlier.add(RibType::Ra, RT_TABLE_MAIN, on_link, vec![1024], 210);
     earlier.add(RibType::Ra, RT_TABLE_MAIN, gone, vec![1024], 210);
+    earlier.add(RibType::Ra, RT_TABLE_MAIN, absent, vec![1024], 210);
 
     let mut rib = Rib::new(false).unwrap();
     rib.route_record.load(path.clone());
@@ -1989,6 +1992,13 @@ async fn recorded_dhcp_and_ra_leftovers_are_swept_unless_reclaimed() {
     );
     assert_eq!(
         next.leftover(Some(RibType::Ra), RT_TABLE_MAIN, gone, 1024),
+        None
+    );
+    // No leftover for the sweep to remove, but its record goes all the
+    // same: a later restart must not take another program's route there
+    // for this one's.
+    assert_eq!(
+        next.leftover(Some(RibType::Ra), RT_TABLE_MAIN, absent, 1024),
         None
     );
     assert_eq!(
