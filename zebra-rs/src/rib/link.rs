@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 
-use ipnet::{IpNet, Ipv4Net};
+use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 use netlink_packet_route::link::LinkFlags;
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -261,12 +261,16 @@ impl fmt::Display for AddrFlags {
 pub enum AddrOrigin {
     /// A DHCPv4 lease, held by the `dhcpc` task.
     Dhcp4,
+    /// A SLAAC address (RFC 4862) the `nd` task's RA host formed from a
+    /// received prefix.
+    Slaac,
 }
 
 impl fmt::Display for AddrOrigin {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             AddrOrigin::Dhcp4 => "dhcp",
+            AddrOrigin::Slaac => "slaac",
         })
     }
 }
@@ -310,6 +314,17 @@ pub struct LinkAddr {
 }
 
 impl LinkAddr {
+    /// Whether the address brings a connected route. A dynamic address
+    /// that went in with `noprefixroute` (a SLAAC address) brings none:
+    /// the kernel installs no prefix route for it, and its prefix is
+    /// on-link only when its owner says so, with a route of its own
+    /// (RFC 5942; the RA host's on-link `Ra` route). An address the
+    /// kernel reports with `noprefixroute` but no component claims
+    /// (NetworkManager adds its own that way) keeps one, as before.
+    pub fn has_connected_route(&self) -> bool {
+        !(self.dynamic.is_some() && self.flags.noprefixroute)
+    }
+
     /// Build a LinkAddr from a FIB (kernel netlink) message.
     ///
     /// The kernel just told us about this address, so it is installed in the
@@ -840,9 +855,9 @@ pub fn link_addr_del(link: &mut Link, addr: LinkAddr) -> Option<()> {
 /// touch the route.
 fn prefix_covered_by_other(bucket: &[LinkAddr], addr: &LinkAddr) -> bool {
     let prefix = addr.addr.apply_mask();
-    bucket
-        .iter()
-        .any(|e| e.fib && e.addr != addr.addr && e.addr.apply_mask() == prefix)
+    bucket.iter().any(|e| {
+        e.fib && e.has_connected_route() && e.addr != addr.addr && e.addr.apply_mask() == prefix
+    })
 }
 
 impl Rib {
@@ -1133,7 +1148,12 @@ impl Rib {
                 // this never touches the kernel FIB. Only meaningful while
                 // the link is up — a down link has no connected shadow.
                 if link.is_up() {
-                    for addr in link.addr4.iter().chain(link.addr6.iter()) {
+                    for addr in link
+                        .addr4
+                        .iter()
+                        .chain(link.addr6.iter())
+                        .filter(|a| a.has_connected_route())
+                    {
                         self.connected_route_del(ifindex, addr.addr, prev_vrf_id)
                             .await;
                         self.connected_route_add(ifindex, addr.addr).await;
@@ -1535,14 +1555,57 @@ impl Rib {
             if local && let IpNet::V4(v4) = addr.addr {
                 addr.secondary = v4_secondary_verdict(link, v4);
             }
+            let had_connected = {
+                let bucket = if addr.is_v4() {
+                    &link.addr4
+                } else {
+                    &link.addr6
+                };
+                bucket
+                    .iter()
+                    .find(|a| a.addr == addr.addr)
+                    .map(LinkAddr::has_connected_route)
+            };
             let update = link_addr_update(link, addr.clone());
+
+            // A component claiming an address the kernel already
+            // reported can take its connected route away: after a
+            // restart a SLAAC address is read back unclaimed, so it
+            // brought one, until the RA host claims it again. Left in
+            // place, that connected route would outrank the RA host's
+            // own on-link route and keep it out of the kernel.
+            if had_connected == Some(true) && link.is_up() {
+                let bucket = if addr.is_v4() {
+                    &link.addr4
+                } else {
+                    &link.addr6
+                };
+                let now = bucket.iter().find(|a| a.addr == addr.addr);
+                if now.is_some_and(|a| !a.has_connected_route())
+                    && !prefix_covered_by_other(bucket, &addr)
+                {
+                    let mut rib = RibEntry::new(RibType::Connected);
+                    rib.ifindex = addr.ifindex;
+                    let msg = match addr.addr {
+                        IpNet::V4(v4_addr) => Message::Ipv4Del {
+                            prefix: v4_addr.apply_mask(),
+                            rib,
+                        },
+                        IpNet::V6(v6_addr) => Message::Ipv6Del {
+                            prefix: v6_addr.apply_mask(),
+                            rib,
+                        },
+                    };
+                    let _ = self.tx.send(msg);
+                }
+            }
 
             // Install the connected route only for the first address that
             // covers the prefix — a sibling address in the same subnet
             // already brought the route up (kernel prefix-route refcount
             // semantics). The interface must be up; link_up replays the
             // connected routes for addresses learned while it was down.
-            if update == AddrUpdate::Added && link.is_up() {
+            if update == AddrUpdate::Added && link.is_up() && addr.has_connected_route() {
                 let bucket = if addr.is_v4() {
                     &link.addr4
                 } else {
@@ -1600,6 +1663,19 @@ impl Rib {
     pub fn addr_del(&mut self, osaddr: FibAddr) {
         let addr = LinkAddr::from(osaddr);
         if let Some(link) = self.links.get_mut(&addr.ifindex) {
+            // Whether the address held brought a connected route: the
+            // removal event carries no claim (`dynamic`) to tell.
+            let connected = {
+                let bucket = if addr.is_v4() {
+                    &link.addr4
+                } else {
+                    &link.addr6
+                };
+                bucket
+                    .iter()
+                    .find(|a| a.addr == addr.addr)
+                    .is_none_or(LinkAddr::has_connected_route)
+            };
             // Ignore a DelAddr for an address we don't hold — the kernel's
             // echo of a config-driven delete, or a repeated notification.
             // Acting on it would tear down the connected route and
@@ -1612,7 +1688,7 @@ impl Rib {
             // covering the prefix went away — a remaining sibling in the
             // same subnet keeps the route alive (kernel prefix-route
             // refcount semantics).
-            if link.is_up() {
+            if link.is_up() && connected {
                 let bucket = if addr.is_v4() {
                     &link.addr4
                 } else {
@@ -1646,8 +1722,8 @@ impl Rib {
 impl Rib {
     /// Remove an IPv4 address zebra-rs put on `ifindex` from the kernel
     /// and the RIB, and mirror what the kernel does to its same-subnet
-    /// secondaries. The caller has already cleared whatever claim
-    /// (`config`, `dynamic`) kept the address.
+    /// secondaries. The caller has already decided that no claim
+    /// (`config`, `dynamic`) keeps the address.
     pub(super) async fn addr4_remove(&mut self, ifindex: u32, v4addr: Ipv4Net) {
         // Read the primary verdict first: deleting a primary triggers the
         // kernel's purge cascade on its same-subnet secondaries.
@@ -1807,12 +1883,14 @@ impl Rib {
         if existing.dynamic != Some(origin) {
             return;
         }
-        existing.dynamic = None;
         if existing.config {
             // The operator's address now.
+            existing.dynamic = None;
             self.addr_make_permanent(ifindex, addr).await;
             return;
         }
+        // The claim stays on until the address is gone: `addr_del` reads
+        // it to tell whether the address brought a connected route.
         match addr {
             IpNet::V4(v4addr) => self.addr4_remove(ifindex, v4addr).await,
             IpNet::V6(v6addr) => {
@@ -1877,12 +1955,11 @@ pub async fn link_config_exec(
         // key, but drain the deque so a bundled delivery would not
         // silently drop trailing values.
         //
-        // `dhcp` is the enum arm of the key's union. The DHCP client
-        // task (`dhcpc`) acts on it; the RIB takes no kernel action for
-        // it here. It must be consumed all the same: an unparsed value
-        // left in the deque would read as the value-less delete form
-        // below, which removes every configured address on the
-        // interface.
+        // `dhcp` is the enum arm of the address union the DHCP client
+        // (the `dhcpc` task) acts on; the RIB takes no kernel action for
+        // it, but must consume it here: an unparsed value left in the
+        // deque would read as the value-less delete form below, which
+        // removes every configured address on the interface.
         let mut dhcp = false;
         let mut values: Vec<Ipv4Net> = Vec::new();
         while let Some(value) = args.string() {
@@ -2007,10 +2084,24 @@ pub async fn link_config_exec(
         // entry's key. Drain the args deque all the same and apply each
         // value independently, so a bundled delivery would not silently
         // drop trailing values.
-        let first = args.v6net().context(IPV6_ADDR_ERR)?;
-        let mut v6addrs = vec![first];
-        while let Some(more) = args.v6net() {
-            v6addrs.push(more);
+        //
+        // `autoconf` is the enum arm the RA host (the `nd` task) acts on.
+        // The RIB takes no kernel action for it; its SLAAC addresses come
+        // back as dynamic addresses (`Message::AddrDynAdd`).
+        let mut autoconf = false;
+        let mut v6addrs = Vec::new();
+        while let Some(value) = args.string() {
+            if value == "autoconf" {
+                autoconf = true;
+            } else if let Ok(v6addr) = value.parse::<Ipv6Net>() {
+                v6addrs.push(v6addr);
+            }
+        }
+        if v6addrs.is_empty() {
+            if autoconf {
+                return Ok(());
+            }
+            return Err(anyhow::anyhow!(IPV6_ADDR_ERR));
         }
 
         let Some(ifindex) = link_lookup(rib, ifname.to_string()) else {
@@ -2759,6 +2850,129 @@ mod tests {
 
         assert!(prefix_covered_by_other(&[a.clone(), b], &a));
         assert!(!prefix_covered_by_other(&[a.clone(), other_net], &a));
+    }
+
+    /// A SLAAC address goes in with `noprefixroute`: it brings no
+    /// connected route, and does not stand in for one a configured
+    /// address in its /64 would bring. An address the kernel reports with
+    /// `noprefixroute` but nobody in zebra-rs claims keeps one.
+    #[test]
+    fn a_slaac_address_brings_no_connected_route() {
+        let mut slaac = test_addr_v6("2001:db8:1::5054:ff:fe12:3456/64", false, true);
+        slaac.flags.noprefixroute = true;
+        assert!(slaac.has_connected_route());
+        slaac.dynamic = Some(AddrOrigin::Slaac);
+        assert!(!slaac.has_connected_route());
+
+        let configured = test_addr_v6("2001:db8:1::1/64", true, true);
+        assert!(!prefix_covered_by_other(
+            &[slaac.clone(), configured.clone()],
+            &configured
+        ));
+        assert!(prefix_covered_by_other(&[slaac, configured.clone()], &{
+            let mut other = configured.clone();
+            other.addr = "2001:db8:1::2/64".parse().unwrap();
+            other
+        }));
+    }
+
+    /// After a restart a SLAAC address is read back from the kernel with
+    /// nobody's claim, and brings a connected route like any unclaimed
+    /// address. The RA host claiming it again takes that route away, or it
+    /// would outrank the host's own on-link route; giving the address up
+    /// sends no second withdrawal.
+    #[tokio::test]
+    async fn claiming_a_read_back_slaac_address_withdraws_its_connected_route() {
+        let mut rib = Rib::new(false).expect("rib");
+        let mut link = test_link();
+        link.flags = LinkFlags::Up | LinkFlags::LowerUp | LinkFlags::Running;
+        rib.links.insert(1, link);
+        let addr = || {
+            let mut addr = FibAddr {
+                addr: "2001:db8:1::5054:ff:fe12:3456/64".parse().unwrap(),
+                link_index: 1,
+                valid_lft: Some(3600),
+                preferred_lft: Some(1800),
+                ..Default::default()
+            };
+            addr.flags.noprefixroute = true;
+            addr
+        };
+        let prefix: ipnet::Ipv6Net = "2001:db8:1::/64".parse().unwrap();
+        let connected = |rib: &mut Rib, add: bool| {
+            let mut found = 0;
+            while let Ok(msg) = rib.rx.try_recv() {
+                match msg {
+                    Message::Ipv6Add { prefix: p, rib } if add && p == prefix => {
+                        assert_eq!(rib.rtype, RibType::Connected);
+                        found += 1;
+                    }
+                    Message::Ipv6Del { prefix: p, rib } if !add && p == prefix => {
+                        assert_eq!(rib.rtype, RibType::Connected);
+                        found += 1;
+                    }
+                    _ => {}
+                }
+            }
+            found
+        };
+
+        rib.addr_add(addr(), false);
+        assert_eq!(connected(&mut rib, true), 1, "read back unclaimed");
+        rib.addr_add_from(addr(), AddrFrom::Dynamic(AddrOrigin::Slaac));
+        assert_eq!(rib.links[&1].addr6[0].dynamic, Some(AddrOrigin::Slaac));
+        assert_eq!(connected(&mut rib, false), 1, "claimed: withdrawn");
+        // Claiming it again, or the kernel's echo, changes nothing more.
+        rib.addr_add_from(addr(), AddrFrom::Dynamic(AddrOrigin::Slaac));
+        rib.addr_add(addr(), false);
+        assert_eq!(connected(&mut rib, false), 0);
+        // The RA host gives it up: no connected route to withdraw.
+        rib.addr_dyn_del(1, addr().addr, AddrOrigin::Slaac).await;
+        assert!(rib.links[&1].addr6.is_empty());
+        assert_eq!(connected(&mut rib, false), 0);
+    }
+
+    /// `autoconf` is the RA host's value: the RIB consumes it and leaves
+    /// the interface's addresses alone, whichever way it is committed. A
+    /// delete with no value at all is still refused, not read as "remove
+    /// every address".
+    #[tokio::test]
+    async fn ipv6_address_autoconf_touches_no_address() {
+        let mut rib = Rib::new(false).expect("rib");
+        let mut link = test_link();
+        link.addr6
+            .push(test_addr_v6("2001:db8:1::1/64", true, true));
+        rib.links.insert(1, link);
+        let args = |values: &[&str]| {
+            Args(
+                std::iter::once("test0")
+                    .chain(values.iter().copied())
+                    .map(String::from)
+                    .collect(),
+            )
+        };
+        for op in [ConfigOp::Set, ConfigOp::Delete] {
+            link_config_exec(
+                &mut rib,
+                "/interface/ipv6/address".into(),
+                args(&["autoconf"]),
+                op,
+            )
+            .await
+            .expect("autoconf is consumed");
+            assert_eq!(rib.links[&1].addr6.len(), 1);
+        }
+        assert!(
+            link_config_exec(
+                &mut rib,
+                "/interface/ipv6/address".into(),
+                args(&[]),
+                ConfigOp::Delete,
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(rib.links[&1].addr6.len(), 1);
     }
 
     #[test]

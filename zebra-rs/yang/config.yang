@@ -5969,7 +5969,7 @@ module config {
       container ipv6 {
         ext:help "IPv6 configuration";
         list address {
-          ext:help "IPv6 interface address";
+          ext:help "IPv6 interface address, or autoconf for SLAAC";
           key "address";
           ordered-by user;
           description
@@ -5979,10 +5979,46 @@ module config {
              IPv4, IPv6 interfaces routinely hold several addresses (a
              link-local plus one or more globals); each entry is
              installed to the kernel independently and removing one
-             leaves the others in place.";
+             leaves the others in place.
+
+             `autoconf` runs the RA host on the interface (the nd task,
+             docs/design/dhcp-client.md §7): it solicits Router
+             Advertisements, installs the default route and on-link
+             prefixes they give through the RIB, and forms a SLAAC
+             address (RFC 4862) from each autonomous /64 prefix, beside
+             any address configured here — unlike IPv4's `dhcp`, it
+             does not exclude static entries. `ra-options` tunes it.";
           leaf address {
-            ext:help "IPv6 interface address";
-            type inet:ipv6-prefix;
+            ext:help "IPv6 interface address, or autoconf for SLAAC";
+            type union {
+              type inet:ipv6-prefix;
+              type enumeration {
+                enum autoconf;
+              }
+            }
+          }
+        }
+        container ra-options {
+          ext:help "RA host options";
+          description
+            "Options of the RA host `address autoconf` starts. VyOS has
+             no counterpart: it leaves RAs to the kernel. Without
+             `address autoconf` they are stored and unused.";
+          leaf default-route-distance {
+            ext:help "Administrative distance of the RA's routes (default 210)";
+            type uint8 {
+              range "1..255";
+            }
+            description
+              "Distance of the default route and on-link prefixes the
+               RA host installs. Two interfaces at one distance share
+               the default (ECMP) unless their routers' preferences
+               differ; at different distances the lower one carries it
+               and the other is its backup.";
+          }
+          leaf no-default-route {
+            ext:help "Do not install a default route from Router Advertisements";
+            type empty;
           }
         }
       }

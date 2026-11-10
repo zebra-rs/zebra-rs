@@ -20,7 +20,7 @@ interface enp0s6 {
 | `/interface/<name>/vrf` | leafref `/vrf/name` | Enslave the interface to a VRF master device. |
 | `/interface/<name>/bridge` | leafref `/bridge/name` | Enslave the interface to a bridge master device. See below. |
 | `/interface/<name>/ipv4/address` | list keyed by `inet:ipv4-prefix`, or `dhcp` | IPv4 address(es) with prefix length — one per command, repeatable. See [Multiple IPv4 Addresses](ch-00-09-multi-address.md). `dhcp` leases one instead, and excludes static addresses on the interface: see [DHCP Client](ch-00-10-dhcp-client.md). |
-| `/interface/<name>/ipv6/address` | list keyed by `inet:ipv6-prefix` | IPv6 address(es) with prefix length — one per command, repeatable. |
+| `/interface/<name>/ipv6/address` | list keyed by `inet:ipv6-prefix`, or `autoconf` | IPv6 address(es) with prefix length — one per command, repeatable. `autoconf` takes the default route, on-link prefixes and SLAAC addresses from Router Advertisements, beside any configured address: see [DHCP Client](ch-00-10-dhcp-client.md#ipv6-router-advertisements-and-slaac). |
 
 The list entry itself is not a separate "create interface" operation —
 it just attaches configuration to a kernel device that already exists

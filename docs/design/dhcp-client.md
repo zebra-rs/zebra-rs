@@ -1,9 +1,9 @@
 # Native DHCP client (DHCPv4, DHCPv6, RA host)
 
-**Status: P0 (the codec) and P1 (the RIB plumbing and the DHCPv4 client)
-are implemented. P2 onwards is design.** Where P1 found the code to be
-different from what this document assumed, the text below says what was
-built and why.
+**Status: P0 (the codec), P1 (the RIB plumbing and the DHCPv4 client)
+and P2 (the RA host) are implemented. P3 onwards is design.** Where P1 or
+P2 found the code to be different from what this document assumed, the
+text below says what was built and why.
 
 zebra-rs gets its own DHCP client: a `dhcpc` task that leases IPv4
 addresses, and IPv6 addresses and delegated prefixes, on WAN interfaces. It
@@ -210,8 +210,13 @@ would bypass the RIB.
   existing `RibType::Dhcp`, which stays what it was: a route the kernel
   reports under `RTPROT_DHCP` that zebra-rs did not install. Keeping the
   two apart leaves every kernel-route path treating `Dhcp` as learned.
-  - A new `RibType::Ra` (shown `A`) will cover RA default routes and
-    on-link prefixes (P2).
+  - `RibType::Ra` (shown `A`, installed as `proto ra`) covers RA default
+    routes and on-link prefixes (P2). A kernel route under `RTPROT_RA`
+    that zebra-rs did not install stays a learned `Kernel` route; the RIB
+    records it (`Rib::learned_ra`), and the RA host takes it over when it
+    installs a route at the same table, prefix and priority
+    (`Rib::adopt_learned`), as the DHCP client does a learned `Dhcp`
+    route.
 - **Installed as `proto dhcp`**, what `ip route` shows for any DHCP
   client's routes.
   - Not `proto zebra`, as first planned: echo suppression and the
@@ -517,7 +522,7 @@ A config-migration tool only has to move paths. No values change.
 | Gateway outside the leased subnet (a /32 lease) | nothing extra: the nexthop names the lease's interface, and the RIB installs every nexthop object on-link | |
 | SLAAC address | `AddrDynAdd(Slaac)`, `noprefixroute` | RFC 4862 lifetimes |
 | RA default route | `Ra`, `ra-options default-route-distance`, via the router's link-local | `proto ra` |
-| RA on-link prefix (L=1) | `Ra`, `Nexthop::Link`, lives as long as the PIO's valid lifetime | |
+| RA on-link prefix (L=1) | `Ra`, lives as long as the PIO's valid lifetime. Built (P2) as a nexthop with no gateway pinned to the interface, not `Nexthop::Link`, which the RIB does not install for a protocol route; the FIB installs it as `dev <if>` with no nexthop object | `proto ra` |
 | IA_NA address | `AddrDynAdd(Dhcp6)`, /128, `noprefixroute` | IA lifetimes |
 | Delegated prefix | `DhcpClient` unreachable route (WPD-5); `Nexthop` gains an unreachable form if it lacks one, because WPD-5(a) wants ICMPv6 Destination Unreachable and a blackhole sends nothing | |
 | LAN /64 from a delegation | `AddrDynAdd(Pd)` on the LAN interface, prefix route kept (connected) | delegated lifetimes |
@@ -628,6 +633,27 @@ the client stays released until `renew`, or until `address dhcp` or the
   are stored with their lifetimes and shown (§13).
 - **MTU option:** shown, not applied.
 - **M/O flags:** shown, not acted on (D7).
+
+**What P2 built** (`zebra-rs/src/nd/host.rs`), beyond the above:
+
+- An RA counts only from a link-local source (RFC 4861 §6.1.2). An RA
+  with a non-zero router lifetime ends the solicitation burst.
+- A Router Solicitation goes out from a usable link-local, with the
+  Source Link-Layer Address option; while the interface's link-local is
+  still in DAD it waits, rather than going out from `::`.
+- Among an interface's routers, and across interfaces, the default route
+  takes the legs at the lowest `default-route-distance` and, among those,
+  the best router preference; several left are ECMP. Two interfaces
+  advertising one on-link prefix in one VRF: the lower ifindex carries it.
+- A SLAAC address is `noprefixroute`, and so the RIB derives no connected
+  route from it (`LinkAddr::has_connected_route`): the prefix is on-link
+  only through the RA host's own route. An address the kernel reports
+  with `noprefixroute` but no component claims keeps its connected route,
+  as before. After a restart a SLAAC address is read back unclaimed; when
+  the RA host claims it again, the RIB withdraws the connected route it
+  had derived, or that route would outrank the on-link `Ra` route.
+- A VRF move (the RIB announces it as a delete and an add) gives the
+  SLAAC addresses up and starts the host again in the new VRF.
 
 ---
 
@@ -842,7 +868,7 @@ belongs to systemd-resolved.
 |---|---|---|
 | P0 (done) | Codec move + typed options + property tests; insomnia switches to the vendored copy (relay goldens unchanged) | – |
 | P1 (done) | RIB plumbing (D5, D6); `dhcpc` task; DHCPv4 state machine, sockets, ACD, persistence; `show dhcp client leases`, `renew/release dhcp`; ungate `address dhcp` | P0 |
-| P2 | RA host in `nd`: RS, default route, on-link prefixes, `ipv6 address autoconf`, `ra-options`, `accept_ra=0`; show section | P1's RIB plumbing |
+| P2 (done) | RA host in `nd`: RS, default route, on-link prefixes, `ipv6 address autoconf`, `ra-options`, `accept_ra=0`; show section | P1's RIB plumbing |
 | P3 | DHCPv6 IA_NA and `parameters-only`; DUID; `show dhcpv6 client leases`, `renew/release dhcpv6` | P0, P2 |
 | P4 | IA_PD: discard route, LAN assignment, prefix change | P3 |
 | ND-PIO | `nd` advertises PIOs for LAN /64s with counted-down lifetimes, deprecates removed ones (L-13), `RibRx::AddrAdd` on lifetime change | P1's RIB plumbing; parallel to P2–P4 |
@@ -919,9 +945,8 @@ DHCPv4, IA_NA and RAs, but not PD.
 
 ## 17. Open questions
 
-1. **`RibType::Ra` or reuse `Dhcp`?** A separate type tells the operator
-   which source the default came from, but costs a show letter (`A` is
-   proposed). FRR has neither.
+1. ~~`RibType::Ra` or reuse `Dhcp`?~~ Settled in P2: `RibType::Ra`,
+   shown `A` (D6).
 2. ~~Equal distances on two WANs.~~ Settled in P1: ECMP, as VyOS has it
    (D6).
 3. **DUID type.** DUID-LLT (proposed) survives an image reinstall only
