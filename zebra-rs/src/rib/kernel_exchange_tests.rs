@@ -1653,3 +1653,220 @@ async fn a_refused_nexthop_install_is_reported() {
 
     ip(&["link", "del", "nhrefuse"]);
 }
+
+/// A dummy link `name` in this namespace, up, registered with `rib` the
+/// way the startup dump would.
+fn dummy_link(rib: &mut Rib, name: &str) -> u32 {
+    ip(&["link", "add", name, "type", "dummy"]);
+    ip(&["link", "set", name, "up"]);
+    let links: serde_json::Value =
+        serde_json::from_str(&ip(&["-j", "link", "show", "dev", name])).unwrap();
+    let index = links[0]["ifindex"].as_u64().unwrap() as u32;
+    rib.links.insert(
+        index,
+        Link {
+            index,
+            name: name.to_string(),
+            mtu: 1500,
+            original_mtu: 1500,
+            metric: 1,
+            flags: netlink_packet_route::link::LinkFlags::Up
+                | netlink_packet_route::link::LinkFlags::LowerUp
+                | netlink_packet_route::link::LinkFlags::Running,
+            link_type: crate::rib::LinkType::Ethernet,
+            label: false,
+            mac: None,
+            addr4: Vec::new(),
+            addr6: Vec::new(),
+            master: None,
+            vni: None,
+            vrf_table: None,
+            bridge: false,
+            vxlan_local: None,
+            vxlan_metadata: None,
+            parent: None,
+            vlan_id: None,
+            mtu_error: None,
+        },
+    );
+    index
+}
+
+/// The valid lifetime and flags the kernel reports for `addr` on `dev`.
+fn kernel_addr(dev: &str, addr: &str) -> (u64, Vec<String>) {
+    let (host, len) = addr.split_once('/').unwrap();
+    let info: serde_json::Value =
+        serde_json::from_str(&ip(&["-j", "addr", "show", "dev", dev])).unwrap();
+    let entry = info[0]["addr_info"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["local"] == host && a["prefixlen"].as_u64() == len.parse().ok())
+        .unwrap_or_else(|| panic!("{addr} not on {dev}: {info}"))
+        .clone();
+    let flags = ["noprefixroute", "dynamic", "permanent"]
+        .iter()
+        .filter(|f| entry.get(**f).is_some_and(|v| v.as_bool() == Some(true)))
+        .map(|f| f.to_string())
+        .collect();
+    (entry["valid_life_time"].as_u64().unwrap(), flags)
+}
+
+const FOREVER: u64 = u32::MAX as u64;
+
+fn config_args(values: &[&str]) -> crate::config::Args {
+    crate::config::Args(values.iter().map(|v| v.to_string()).collect())
+}
+
+/// An address a lease gave, read back after a restart with the lease's
+/// lifetime on it and no claim yet, then named by the configuration: it is
+/// the configuration's now, and must not expire at that lease's deadline.
+#[tokio::test]
+#[ignore = "requires root in an isolated network namespace"]
+async fn configuring_a_read_back_leased_address_makes_it_permanent() {
+    require_netns();
+    let mut rib = Rib::new(false).unwrap();
+    let index = dummy_link(&mut rib, "perm4a");
+    ip(&[
+        "addr",
+        "add",
+        "192.0.2.100/24",
+        "dev",
+        "perm4a",
+        "valid_lft",
+        "3600",
+        "preferred_lft",
+        "3600",
+    ]);
+    rib.addr_add(
+        crate::fib::FibAddr {
+            addr: "192.0.2.100/24".parse().unwrap(),
+            link_index: index,
+            valid_lft: Some(3600),
+            preferred_lft: Some(3600),
+            ..Default::default()
+        },
+        false,
+    );
+    crate::rib::link::link_config_exec(
+        &mut rib,
+        "/interface/ipv4/address".into(),
+        config_args(&["perm4a", "192.0.2.100/24"]),
+        crate::config::ConfigOp::Set,
+    )
+    .await
+    .unwrap();
+    assert_eq!(kernel_addr("perm4a", "192.0.2.100/24").0, FOREVER);
+    assert!(rib.links[&index].addr4[0].config);
+    ip(&["link", "del", "perm4a"]);
+}
+
+/// The configuration claimed the address first (with a lifetime still on
+/// it), and the resumed lease claims it after: sharing it, the lease makes
+/// it permanent rather than leaving the old deadline on a configured
+/// address.
+#[tokio::test]
+#[ignore = "requires root in an isolated network namespace"]
+async fn a_lease_claiming_a_configured_address_with_a_lifetime_makes_it_permanent() {
+    require_netns();
+    let mut rib = Rib::new(false).unwrap();
+    let index = dummy_link(&mut rib, "perm4b");
+    ip(&[
+        "addr",
+        "add",
+        "192.0.2.101/24",
+        "dev",
+        "perm4b",
+        "valid_lft",
+        "3600",
+        "preferred_lft",
+        "3600",
+    ]);
+    rib.addr_add(
+        crate::fib::FibAddr {
+            addr: "192.0.2.101/24".parse().unwrap(),
+            link_index: index,
+            valid_lft: Some(3600),
+            preferred_lft: Some(3600),
+            ..Default::default()
+        },
+        false,
+    );
+    // Configured before any claim, its lifetime still on it.
+    rib.links.get_mut(&index).unwrap().addr4[0].config = true;
+    rib.addr_dyn_add(
+        index,
+        "192.0.2.101/24".parse().unwrap(),
+        crate::rib::link::AddrOrigin::Dhcp4,
+        crate::fib::AddrOpts {
+            valid_lft: 3000,
+            preferred_lft: 3000,
+            noprefixroute: false,
+            broadcast: None,
+        },
+    )
+    .await;
+    assert_eq!(kernel_addr("perm4b", "192.0.2.101/24").0, FOREVER);
+    let addr = &rib.links[&index].addr4[0];
+    assert_eq!(addr.dynamic, Some(crate::rib::link::AddrOrigin::Dhcp4));
+    assert!(addr.config);
+    ip(&["link", "del", "perm4b"]);
+}
+
+/// The operator configures the address the RA host formed: it becomes
+/// configured and permanent, loses `noprefixroute` so its prefix is
+/// connected, and stays when the RA host gives it up.
+#[tokio::test]
+#[ignore = "requires root in an isolated network namespace"]
+async fn configuring_a_slaac_address_keeps_it_past_the_ra_host() {
+    require_netns();
+    let mut rib = Rib::new(false).unwrap();
+    let index = dummy_link(&mut rib, "perm6");
+    let slaac = "2001:db8:1:0:5054:ff:fe12:3456/64";
+    rib.addr_dyn_add(
+        index,
+        slaac.parse().unwrap(),
+        crate::rib::link::AddrOrigin::Slaac,
+        crate::fib::AddrOpts {
+            valid_lft: 3600,
+            preferred_lft: 1800,
+            noprefixroute: true,
+            broadcast: None,
+        },
+    )
+    .await;
+    assert_eq!(kernel_addr("perm6", slaac).0, 3600);
+    while rib.rx.try_recv().is_ok() {}
+
+    crate::rib::link::link_config_exec(
+        &mut rib,
+        "/interface/ipv6/address".into(),
+        config_args(&["perm6", slaac]),
+        crate::config::ConfigOp::Set,
+    )
+    .await
+    .unwrap();
+    let (valid, flags) = kernel_addr("perm6", slaac);
+    assert_eq!(valid, FOREVER);
+    assert!(!flags.contains(&"noprefixroute".to_string()), "{flags:?}");
+    let addr = rib.links[&index].addr6[0].clone();
+    assert!(addr.config && addr.has_connected_route());
+    let prefix: Ipv6Net = "2001:db8:1::/64".parse().unwrap();
+    let mut connected = false;
+    while let Ok(msg) = rib.rx.try_recv() {
+        if let Message::Ipv6Add { prefix: p, rib } = msg {
+            connected |= p == prefix && rib.rtype == RibType::Connected;
+        }
+    }
+    assert!(connected, "the configured address's prefix is connected");
+
+    rib.addr_dyn_del(
+        index,
+        slaac.parse().unwrap(),
+        crate::rib::link::AddrOrigin::Slaac,
+    )
+    .await;
+    assert_eq!(kernel_addr("perm6", slaac).0, FOREVER);
+    assert!(rib.links[&index].addr6[0].config);
+    ip(&["link", "del", "perm6"]);
+}
