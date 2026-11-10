@@ -239,8 +239,11 @@ would bypass the RIB.
     names as a stale leftover of its type, which the owner's route
     replaces in place when it installs it again, and the leftover sweep
     (`--leftover-sweep-time`) removes otherwise: a lease gone, or
-    `no-default-route` set, while zebra-rs was down. Routes the record
-    does not name stay learned `Dhcp` (or `Kernel`) routes.
+    `no-default-route` set, while zebra-rs was down. At the sweep the
+    record also drops what nothing installed again, including a route
+    already gone from the kernel when the run started, so a later run
+    cannot take another program's route at that key for its own. Routes
+    the record does not name stay learned `Dhcp` (or `Kernel`) routes.
   - A learned route the record does not name (an older run's, before the
     record) is still taken over when the client hands over a route at the
     same table, prefix and priority (`Rib::adopt_learned`).
