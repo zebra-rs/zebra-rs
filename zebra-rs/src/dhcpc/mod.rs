@@ -11,10 +11,22 @@
 //! - [`lease`]: leases kept across a restart.
 //! - [`config`], [`show`]: the configuration callbacks and
 //!   `show dhcp client leases`, `renew|release dhcp interface <if>`.
+//!
+//! DHCPv6 (P3 of the design) has its protocol half so far, which the task
+//! does not run yet:
+//!
+//! - [`v6::client`]: the RFC 8415 state machine, without I/O.
+//! - [`ident`]: the system DUID and the IAIDs.
 
 pub mod config;
+// Not called until the task runs the DHCPv6 client (the socket, the RIB
+// and the configuration are the next step of P3).
+#[allow(dead_code)]
+pub mod ident;
 pub mod inst;
 pub mod lease;
 pub mod routes;
 pub mod show;
 pub mod v4;
+#[allow(dead_code)]
+pub mod v6;
