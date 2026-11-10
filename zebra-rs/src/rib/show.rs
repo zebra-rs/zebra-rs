@@ -473,7 +473,7 @@ pub fn rib_entry_show(
     // path's own bracket (and `>>` marker) underneath the first line.
     write!(buf, "{} ", route_tag(&e.rtype, &e.rsubtype))?;
     let marker_col = buf.len();
-    write!(buf, "{} {}", e.selected(), prefix)?;
+    write!(buf, "{} {}", route_markers(e), prefix)?;
     let bracket_col = buf.len() + 1;
 
     // `Nexthop::List` / `Nexthop::Protect` print a per-path bracket in
@@ -579,7 +579,7 @@ pub fn rib_entry_show_v6(
     // path's own bracket (and `>>` marker) underneath the first line.
     write!(buf, "{} ", route_tag(&e.rtype, &e.rsubtype))?;
     let marker_col = buf.len();
-    write!(buf, "{} {}", e.selected(), prefix)?;
+    write!(buf, "{} {}", route_markers(e), prefix)?;
     let bracket_col = buf.len() + 1;
 
     // `Nexthop::List` / `Nexthop::Protect` print a per-path bracket in
@@ -691,6 +691,27 @@ pub fn rib_entry_show_v6(
     Ok(buf)
 }
 
+/// The FIB and selection markers a route's first line opens with. A
+/// floating route (`Nexthop::List`) is in the kernel member by member,
+/// only the members that resolve, and the first line names the first
+/// member: its `*` says that member is installed, not the entry.
+fn route_markers(e: &RibEntry) -> String {
+    match &e.nexthop {
+        Nexthop::List(list) => {
+            let fib = list.nexthops.first().is_some_and(|m| member_in_fib(e, m));
+            let fib = if fib { '*' } else { ' ' };
+            let selected = if e.selected { '>' } else { ' ' };
+            format!("{fib}{selected}")
+        }
+        _ => e.selected(),
+    }
+}
+
+/// Whether a floating route's member has its route in the kernel.
+fn member_in_fib(e: &RibEntry, member: &NexthopMember) -> bool {
+    e.fib && member.is_valid()
+}
+
 /// Render the `Nexthop::List` arm shared by the IPv4 and IPv6 one-line
 /// route views: every member past the first is a backup.
 fn write_nexthop_list(
@@ -702,14 +723,19 @@ fn write_nexthop_list(
     bracket_col: usize,
     uptime: &str,
 ) {
-    let members: Vec<(&NexthopMember, bool)> = pro
+    let members: Vec<ProtectedPath> = pro
         .nexthops
         .iter()
         .enumerate()
-        .map(|(idx, m)| (m, idx > 0))
+        .map(|(idx, m)| (m, idx > 0, member_in_fib(e, m)))
         .collect();
     write_protected_paths(buf, rib, e, &members, marker_col, bracket_col, uptime);
 }
+
+/// One member of a primary-plus-repair path set, for
+/// [`write_protected_paths`]: the member, whether it is a backup, and
+/// whether its route is in the FIB.
+type ProtectedPath<'a> = (&'a NexthopMember, bool, bool);
 
 /// `Nexthop::Protect` sibling: the roles come off the struct's fields
 /// instead of the sort position.
@@ -722,7 +748,9 @@ fn write_nexthop_protect(
     bracket_col: usize,
     uptime: &str,
 ) {
-    write_protected_paths(buf, rib, e, &pro.roles(), marker_col, bracket_col, uptime);
+    // Primary and repair go into the kernel together, or not at all.
+    let members = pro.roles().map(|(m, is_backup)| (m, is_backup, e.fib));
+    write_protected_paths(buf, rib, e, &members, marker_col, bracket_col, uptime);
 }
 
 /// Render a primary-plus-repair path set in the one-line route views.
@@ -737,16 +765,16 @@ fn write_protected_paths(
     buf: &mut String,
     rib: &Rib,
     e: &RibEntry,
-    members: &[(&NexthopMember, bool)],
+    members: &[ProtectedPath],
     marker_col: usize,
     bracket_col: usize,
     uptime: &str,
 ) {
-    // Backups keep the route's FIB state in the marker column and add a
-    // `?` to flag the repair path: `*? ` (FIB) or ` ? ` (not).
-    let backup_marker = if e.fib { "*? " } else { " ? " };
     let mut row = 0;
-    for (member, is_backup) in members {
+    for (member, is_backup, in_fib) in members {
+        // Backups keep their FIB state in the marker column and add a
+        // `?` to flag the repair path: `*? ` (FIB) or ` ? ` (not).
+        let backup_marker = if *in_fib { "*? " } else { " ? " };
         for uni in member.iter_unis() {
             if row == 0 {
                 // First path shares the line already carrying the tag,
@@ -3455,6 +3483,48 @@ mod tests {
         let primary = list_continuation_prefix(marker_col, bracket_col, "", 0, 100);
         assert_eq!(primary, "                  [0/100]");
         assert_eq!(primary.find('[').unwrap(), bracket_col);
+    }
+
+    /// A floating route is in the kernel member by member: the first
+    /// line's `*` is the first member's, not the entry's, so a route
+    /// running on its backup does not show its dead primary as installed.
+    #[test]
+    fn a_floating_route_marks_each_member_installed_on_its_own() {
+        use super::super::nexthop::NexthopUni;
+        use super::super::{NexthopList, NexthopMember};
+
+        let member = |valid| {
+            NexthopMember::Uni(NexthopUni {
+                valid,
+                ..Default::default()
+            })
+        };
+        let floating = |primary, backup, fib| {
+            let mut e = RibEntry::new(RibType::Static);
+            e.nexthop = Nexthop::List(NexthopList {
+                nexthops: vec![member(primary), member(backup)],
+            });
+            e.selected = true;
+            e.fib = fib;
+            e
+        };
+        let markers = |e: &RibEntry| {
+            let Nexthop::List(list) = &e.nexthop else {
+                unreachable!();
+            };
+            (route_markers(e), member_in_fib(e, &list.nexthops[1]))
+        };
+        assert_eq!(markers(&floating(true, true, true)), ("*>".into(), true));
+        assert_eq!(markers(&floating(false, true, true)), (" >".into(), true));
+        assert_eq!(markers(&floating(true, false, true)), ("*>".into(), false));
+        // Not pushed yet: nothing is installed, whatever resolves.
+        assert_eq!(markers(&floating(true, true, false)), (" >".into(), false));
+
+        // Any other route keeps the entry's own marker.
+        let mut e = RibEntry::new(RibType::Static);
+        e.selected = true;
+        e.fib = true;
+        assert_eq!(route_markers(&e), "*>");
     }
 
     #[test]

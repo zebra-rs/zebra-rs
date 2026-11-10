@@ -183,6 +183,13 @@ impl NexthopMember {
         }
     }
 
+    /// Whether the member resolves: its nexthop, or any leg of an ECMP
+    /// member. Only then is there a kernel nexthop object for the
+    /// member's route to name.
+    pub fn is_valid(&self) -> bool {
+        self.iter_unis().any(|uni| uni.valid)
+    }
+
     /// Wrap the member back into a top-level `Nexthop`, used by the
     /// FIB writer to re-dispatch member install through the existing
     /// per-variant install paths.
@@ -275,14 +282,6 @@ impl NexthopList {
         self.nexthops.iter().flat_map(|m| match m {
             NexthopMember::Uni(u) => std::slice::from_ref(u).iter(),
             NexthopMember::Multi(grp) => grp.nexthops.iter(),
-        })
-    }
-
-    /// Mutable counterpart of `iter_unis`, used by the resolver.
-    pub fn iter_unis_mut(&mut self) -> impl Iterator<Item = &mut NexthopUni> + '_ {
-        self.nexthops.iter_mut().flat_map(|m| match m {
-            NexthopMember::Uni(u) => std::slice::from_mut(u).iter_mut(),
-            NexthopMember::Multi(grp) => grp.nexthops.iter_mut(),
         })
     }
 }

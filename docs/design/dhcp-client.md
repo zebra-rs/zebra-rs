@@ -259,9 +259,9 @@ would bypass the RIB.
     when it returns.
   - Not per-interface RIB entries, as first planned (the RIB would need
     a new entry key), and not the RIB's multi-metric "floating" entry:
-    the kernel flushes a leg's route when its link loses carrier, and
-    the RIB does not put that one leg back while another keeps the entry
-    installed.
+    that has one distance for all its members and tells them apart by
+    metric, where the uplinks differ in distance, the value that ranks a
+    leased route against the other protocols' routes.
 - **Default distance 210** (VyOS's `default-route-distance` default).
   That is above iBGP (200), OSPF (110) and IS-IS (115), so any routed
   default wins over a leased one.

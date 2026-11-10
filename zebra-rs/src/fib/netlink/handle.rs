@@ -179,6 +179,19 @@ fn protect_primary_nexthop(pro: &crate::rib::nexthop::NexthopProtect) -> Nexthop
     nh
 }
 
+/// `nexthop`, one path of a floating or protected route, as the kernel
+/// has it: at `priority`, which for IPv6 is not always the path's metric
+/// (`rib::route::kernel_priorities`). The route builders read the
+/// priority off the nexthop.
+fn at_priority(mut nexthop: Nexthop, priority: u32) -> Nexthop {
+    match &mut nexthop {
+        Nexthop::Uni(uni) => uni.metric = priority,
+        Nexthop::Multi(multi) => multi.metric = priority,
+        _ => {}
+    }
+    nexthop
+}
+
 /// Modern rtnetlink multicast group for nexthop objects
 /// (`RTNLGRP_NEXTHOP`, linux/rtnetlink.h). Numbered past the legacy
 /// `RTMGRP_*` bind mask, so it's joined via `add_membership`.
@@ -1667,13 +1680,22 @@ impl FibHandle {
                     .await
             }
             Nexthop::List(pro) => {
+                // One kernel route per member, each at its own metric,
+                // for the members that resolve. One that does not has no
+                // nexthop object for its route to name: sending it anyway
+                // failed the whole entry, which then never counted as
+                // installed and was pushed again by every resolve pass,
+                // for as long as that member stayed down. The RIB pushes
+                // the entry again when the member comes back.
                 let mut ok = true;
-                for member in pro.nexthops.iter() {
+                let mut any = false;
+                for member in pro.nexthops.iter().filter(|m| m.is_valid()) {
+                    any = true;
                     ok &= self
                         .route_ipv4_add_uni(prefix, entry, &member.as_nexthop(), table_id)
                         .await;
                 }
-                ok
+                ok && any
             }
             Nexthop::Protect(pro) => {
                 // Primary and backup install as two kernel routes at
@@ -2343,26 +2365,40 @@ impl FibHandle {
                     .await
             }
             Nexthop::List(pro) => {
+                // Only the members that resolve, as in `route_ipv4_add`,
+                // each at its kernel priority: IPv6 has no priority 0,
+                // and sent as it is a member at metric 0 would land at
+                // 1024, behind its own backups.
+                let priorities = crate::rib::route::kernel_priorities(entry, true);
                 let mut ok = true;
-                for member in pro.nexthops.iter() {
+                let mut any = false;
+                for (member, priority) in pro.nexthops.iter().zip(priorities) {
+                    if !member.is_valid() {
+                        continue;
+                    }
+                    any = true;
+                    let nexthop = at_priority(member.as_nexthop(), priority);
                     ok &= self
-                        .route_ipv6_add_uni(prefix, entry, &member.as_nexthop(), table_id)
+                        .route_ipv6_add_uni(prefix, entry, &nexthop, table_id)
                         .await;
                 }
-                ok
+                ok && any
             }
             Nexthop::Protect(pro) => {
                 // Primary and backup install as two kernel routes at
-                // their own metrics. The primary references the
+                // their own priorities. The primary references the
                 // protection indirection group (when allocated) so a
                 // future membership swap rewires every protected
                 // prefix at once; the backup keeps its member gid.
+                let priorities = crate::rib::route::kernel_priorities(entry, true);
+                let primary = at_priority(protect_primary_nexthop(pro), priorities[0]);
+                let backup = at_priority(pro.backup.as_nexthop(), priorities[1]);
                 let mut ok = true;
                 ok &= self
-                    .route_ipv6_add_uni(prefix, entry, &protect_primary_nexthop(pro), table_id)
+                    .route_ipv6_add_uni(prefix, entry, &primary, table_id)
                     .await;
                 ok &= self
-                    .route_ipv6_add_uni(prefix, entry, &pro.backup.as_nexthop(), table_id)
+                    .route_ipv6_add_uni(prefix, entry, &backup, table_id)
                     .await;
                 ok
             }
@@ -2636,42 +2672,50 @@ impl FibHandle {
         if !entry.is_protocol() {
             return;
         }
-        let del = |metric: u32| {
-            only.is_none_or(|only| only.contains(&crate::rib::route::kernel_priority(metric, true)))
-        };
+        // One per path, as the add path installed them. Every delete
+        // names its route's priority as the kernel has it, never 0: for
+        // IPv6 that matches a route at any priority, and with a next-hop
+        // id the first one through that next hop. That is the route just
+        // installed in this one's place, when it sits at a lower priority
+        // (a metric that changed from 0, a static that gained a backup).
+        let priorities = crate::rib::route::kernel_priorities(entry, true);
+        let del = |priority: u32| only.is_none_or(|only| only.contains(&priority));
 
         match &entry.nexthop {
             Nexthop::Link(_) => {}
-            Nexthop::Uni(uni) if del(uni.metric) => {
-                self.route_ipv6_del_uni(prefix, entry, &entry.nexthop, table_id)
-                    .await;
-            }
-            Nexthop::Multi(multi) if del(multi.metric) => {
-                self.route_ipv6_del_uni(prefix, entry, &entry.nexthop, table_id)
-                    .await;
-            }
-            Nexthop::Uni(_) | Nexthop::Multi(_) => {}
-            Nexthop::List(list) => {
-                for member in list.nexthops.iter().filter(|m| del(m.metric())) {
-                    self.route_ipv6_del_uni(prefix, entry, &member.as_nexthop(), table_id)
+            Nexthop::Uni(_) | Nexthop::Multi(_) => {
+                if del(priorities[0]) {
+                    let nexthop = at_priority(entry.nexthop.clone(), priorities[0]);
+                    self.route_ipv6_del_uni(prefix, entry, &nexthop, table_id)
                         .await;
+                }
+            }
+            Nexthop::List(list) => {
+                for (member, priority) in list.nexthops.iter().zip(priorities) {
+                    if del(priority) {
+                        let nexthop = at_priority(member.as_nexthop(), priority);
+                        self.route_ipv6_del_uni(prefix, entry, &nexthop, table_id)
+                            .await;
+                    }
                 }
             }
             Nexthop::Protect(pro) => {
                 // Mirror the add path: the primary route was keyed to
                 // the indirection gid, so the delete must name it too.
-                if del(pro.primary.metric()) {
-                    self.route_ipv6_del_uni(prefix, entry, &protect_primary_nexthop(pro), table_id)
+                if del(priorities[0]) {
+                    let primary = at_priority(protect_primary_nexthop(pro), priorities[0]);
+                    self.route_ipv6_del_uni(prefix, entry, &primary, table_id)
                         .await;
                 }
-                if del(pro.backup.metric()) {
-                    self.route_ipv6_del_uni(prefix, entry, &pro.backup.as_nexthop(), table_id)
+                if del(priorities[1]) {
+                    let backup = at_priority(pro.backup.as_nexthop(), priorities[1]);
+                    self.route_ipv6_del_uni(prefix, entry, &backup, table_id)
                         .await;
                 }
             }
-            Nexthop::Blackhole(metric) => {
-                if del(*metric) {
-                    self.route_ipv6_blackhole(prefix, entry, *metric, table_id, false)
+            Nexthop::Blackhole(_) => {
+                if del(priorities[0]) {
+                    self.route_ipv6_blackhole(prefix, entry, priorities[0], table_id, false)
                         .await;
                 }
             }

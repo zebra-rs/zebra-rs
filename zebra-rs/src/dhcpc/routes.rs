@@ -13,10 +13,11 @@
 //!   FRR for two DHCP uplinks left at the default distance).
 //!
 //! The backups are not handed to the RIB as a multi-metric (floating)
-//! entry: the kernel flushes a leg's route when its link loses carrier,
-//! and the RIB does not put that one leg back while another keeps the
-//! entry installed. Choosing here, on every link event, uses only the
-//! plain and ECMP shapes every protocol exercises.
+//! entry. Such an entry has one distance and tells its members apart by
+//! metric, where the legs here differ in distance: the value that ranks
+//! a leased route against the other protocols' routes. Choosing here, on
+//! every link event, also uses only the plain and ECMP shapes every
+//! protocol exercises.
 //!
 //! [`Routes::sync`] compares what is wanted with what was last handed to
 //! the RIB and returns only the messages that change something.

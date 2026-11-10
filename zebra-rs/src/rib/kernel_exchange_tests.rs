@@ -236,6 +236,43 @@ async fn ra_routes_own_their_echo_and_adopt_only_a_learned_ra_route() {
     assert_eq!(rows[0].rtype, RibType::Kernel);
 }
 
+/// An IPv6 floating route's path at metric 0 is installed at priority 1,
+/// not at the 1024 a lone route's metric 0 becomes. The echo of each of
+/// its routes is told by the priority it was installed at; missed, the
+/// echo would enter the RIB as a kernel route at distance 0 and displace
+/// its own owner.
+#[tokio::test]
+async fn an_ipv6_floating_routes_echoes_come_back_at_its_kernel_priorities() {
+    let mut rib = Rib::new(false).unwrap();
+    let prefix: IpNet = "2001:db8:113::/48".parse().unwrap();
+    let event = |metric| kernel_route(prefix, RouteProtocol::Zebra, false, metric, RT_TABLE_MAIN);
+    let member = |metric| {
+        crate::rib::NexthopMember::Uni(crate::rib::NexthopUni {
+            metric,
+            ..Default::default()
+        })
+    };
+    let mut owner = RibEntry::new(RibType::Static);
+    owner.nexthop = Nexthop::List(crate::rib::NexthopList {
+        nexthops: vec![member(0), member(10)],
+    });
+    owner.valid = true;
+    owner.selected = true;
+    owner.fib = true;
+    insert(&mut rib, prefix, RT_TABLE_MAIN, owner);
+    assert!(rib.is_kernel_route_echo(&event(1)));
+    assert!(rib.is_kernel_route_echo(&event(10)));
+    // Somebody else's route at the kernel's default priority.
+    assert!(!rib.is_kernel_route_echo(&event(1024)));
+
+    rib.process_fib_msg(FibMessage::NewRoute(event(1))).await;
+    rib.process_fib_msg(FibMessage::NewRoute(event(10))).await;
+    let rows = entries(&rib, prefix, RT_TABLE_MAIN);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].rtype, RibType::Static);
+    assert!(rows[0].selected && rows[0].fib);
+}
+
 #[tokio::test]
 async fn external_protocol_routes_and_startup_leftovers_are_not_echoes() {
     let mut rib = Rib::new(false).unwrap();

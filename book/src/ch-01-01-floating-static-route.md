@@ -101,7 +101,53 @@ unreachable), the metric-100 route is withdrawn from the FIB and the
 metric-200 route carries the traffic. When the primary link recovers,
 its route is reinstalled and preempts the backup automatically.
 
+`show ip route` marks each nexthop on its own: `*` on the lines whose
+route is in the kernel, and `?` on the backups. With the primary down
+the route is still selected (`>`), and only the backup is installed:
+
+```
+S   > 0.0.0.0/0 [1/100] via 192.168.1.254, eth0, 00:10:12
+   *?           [1/200] via 10.0.0.254, eth1, 00:10:12
+```
+
+The same holds for a backup that cannot be reached, at commit time or
+later: the primary is installed and marked, the backup is not, and it
+joins the kernel when its gateway becomes reachable.
+
 Nexthops that share the *same* metric load-balance as ECMP instead —
 metrics separate failover tiers, weights shape the split within a tier
 (see the ECMP section of the [Static Route](ch-01-00-what-is-static-route.md)
 chapter).
+
+### IPv6: a nexthop at metric 0
+
+A nexthop without a `metric` has metric 0, and is the primary. IPv6 has
+no kernel priority 0, though: Linux installs a route sent without one at
+1024. For a static route with a single nexthop that is only the number
+`ip -6 route` shows. Between the nexthops of a floating route it would
+be the wrong order, the primary behind a backup at metric 10, so there
+zebra-rs installs the nexthop at metric 0 at priority 1:
+
+```
+router static {
+  ipv6 {
+    route 2001:db8:113::/48 {
+      nexthop 2001:db8:a::1;
+      nexthop 2001:db8:b::1 {
+        metric 10;
+      }
+    }
+  }
+}
+```
+
+```
+$ ip -6 route show 2001:db8:113::/48
+2001:db8:113::/48 via 2001:db8:a::1 dev eth0 proto zebra metric 1 pref medium
+2001:db8:113::/48 via 2001:db8:b::1 dev eth1 proto zebra metric 10 pref medium
+```
+
+`show ipv6 route` shows the configured metrics, `[1/0]` and `[1/10]`.
+A nexthop configured at metric 1 beside one at 0 moves up to priority 2
+in turn, and so on: the kernel's order is always the configured one.
+IPv4 has a priority 0 and installs every metric as it is.
