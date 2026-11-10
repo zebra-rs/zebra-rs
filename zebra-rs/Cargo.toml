@@ -150,7 +150,7 @@ libyang = "2.4"
 #libyang = { path = "../../libyang" }
 regex = "1.10"
 similar = "3"
-dirs = "6"
+dirs = "7"
 async-trait = "0.1"
 prefix-trie = "0.10.2"
 #prefix-trie = { git = "https://github.com/zebra-rs/prefix-trie" }
