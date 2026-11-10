@@ -22,6 +22,7 @@ use nd_packet::RaFlags;
 use crate::rib::api::RibRx;
 use crate::rib::link::{Link, LinkAddr};
 
+use super::host::{HostLink, RaHosts};
 use super::send::{RaEvent, RaSendConfig, RaSender};
 use super::{DropReason, NdRecv, NdSend};
 
@@ -49,6 +50,8 @@ pub struct NdIfCounters {
     pub tx_ra_unsolicited: u64,
     /// Solicited RAs we transmitted (in response to RS).
     pub tx_ra_solicited: u64,
+    /// Router Solicitations the RA host transmitted.
+    pub tx_rs: u64,
     /// Router Advertisements received.
     pub rx_ra: u64,
     /// Router Solicitations received.
@@ -153,6 +156,11 @@ pub struct NdEngine {
     /// (`bgp::interface_addrs`) on purpose: it ranks a tentative one as
     /// a last resort for its next hop, where ND must not send from one.
     link_locals: BTreeMap<u32, BTreeMap<Ipv6Addr, LinkLocal>>,
+    /// The host side (`ipv6 address autoconf`): Router Solicitations
+    /// out, Router Advertisements in, routes and SLAAC addresses to the
+    /// RIB. Independent of `senders`: an interface can be either, or
+    /// both.
+    hosts: RaHosts,
 }
 
 /// What a link-local can do for RA, from its kernel state.
@@ -286,7 +294,18 @@ impl NdEngine {
             counters: BTreeMap::new(),
             neighbors: BTreeMap::new(),
             link_locals: BTreeMap::new(),
+            hosts: RaHosts::new(),
         }
+    }
+
+    /// The RA host side.
+    pub fn hosts(&self) -> &RaHosts {
+        &self.hosts
+    }
+
+    /// The RA host side, for configuration and to take its actions.
+    pub fn hosts_mut(&mut self) -> &mut RaHosts {
+        &mut self.hosts
     }
 
     /// Dispatch one RIB notification onto the handlers below.
@@ -369,6 +388,18 @@ impl NdEngine {
         {
             self.enable_interface(link.index, cfg, now);
         }
+
+        self.hosts.link_add(
+            link.index,
+            HostLink {
+                name: link.name.clone(),
+                mac: link.mac.map(|mac| mac.octets()),
+                master: link.master,
+                is_vrf: link.vrf_table.is_some(),
+                up: link.is_up(),
+            },
+            now,
+        );
     }
 
     /// Suspend scheduling while down; only a real Down -> Up transition
@@ -388,6 +419,7 @@ impl NdEngine {
     /// nothing. A flapping RA interface therefore costs two lines per
     /// flap — the same as RIB's own link up/down traces.
     pub fn process_link_state(&mut self, ifindex: u32, up: bool, now: Instant) {
+        self.hosts.link_state(ifindex, up, now);
         if up {
             if self.down_links.remove(&ifindex) {
                 // Still held without a usable link-local (the usual
@@ -463,8 +495,13 @@ impl NdEngine {
         paused(&self.down_links, &self.link_locals, ifindex)
     }
 
-    /// Track a link-local add / delete / flag change from RIB.
+    /// Track a link-local add / delete / flag change from RIB, and hand
+    /// every IPv6 address event to the RA host for its SLAAC addresses.
     pub fn process_addr(&mut self, addr: &LinkAddr, add: bool, now: Instant) {
+        if let ipnet::IpNet::V6(net) = addr.addr {
+            self.hosts
+                .addr_event(addr.ifindex, net, addr.flags.dadfailed, add);
+        }
         let Some((ll, state)) = link_local_state(addr) else {
             return;
         };
@@ -548,6 +585,7 @@ impl NdEngine {
     /// interface re-created under the same name picks its RA config
     /// back up through the deferred apply in `process_link_add`.
     pub fn process_link_del(&mut self, ifindex: u32) {
+        self.hosts.link_del(ifindex);
         self.senders.remove(&ifindex);
         self.down_links.remove(&ifindex);
         self.link_locals.remove(&ifindex);
@@ -621,10 +659,14 @@ impl NdEngine {
     /// when no interfaces are enabled — caller can park the timer
     /// indefinitely.
     pub fn next_wakeup(&self) -> Option<Instant> {
+        let host = self
+            .hosts
+            .next_wakeup(|ifindex| ra_source(&self.link_locals, ifindex));
         self.senders
             .iter()
             .filter(|(ifindex, _)| !self.is_paused(**ifindex))
             .map(|(_, sender)| sender.next_wakeup())
+            .chain(host)
             .min()
     }
 
@@ -684,6 +726,7 @@ impl NdEngine {
                     // means nobody's listening, not a fatal state.
                     let _ = tx.send(NdEvent::NeighborDiscovered { ifindex, src });
                 }
+                self.hosts.on_ra(ifindex, src, &ra, now);
             }
             NdRecv::RouterSolicit { ifindex, src, .. } => {
                 self.counters.entry(ifindex).or_default().rx_rs += 1;
@@ -799,6 +842,29 @@ impl NdEngine {
                         );
                     }
                 }
+            }
+        }
+        // The RA host: lifetimes first, so a router whose lifetime ran
+        // out is gone before anything else is decided, then the Router
+        // Solicitations due. An RS that fails to go out is not retried:
+        // the burst goes on, and any RA a router sends answers it.
+        self.hosts.expire(now);
+        let link_locals = &self.link_locals;
+        for frame in self
+            .hosts
+            .solicit(now, |ifindex| ra_source(link_locals, ifindex))
+        {
+            let NdSend::RouterSolicit { ifindex, .. } = frame else {
+                continue;
+            };
+            match send(frame) {
+                Ok(()) => self.counters.entry(ifindex).or_default().tx_rs += 1,
+                Err(e) => tracing::debug!(
+                    "nd: {} (ifindex {ifindex}) RS send failed: {e}",
+                    self.name_by_ifindex
+                        .get(&ifindex)
+                        .map_or("?", String::as_str)
+                ),
             }
         }
     }
@@ -924,8 +990,10 @@ mod tests {
     use super::fixtures::*;
     use super::*;
     use crate::nd::send::RaSendConfig;
+    use ipnet::{IpNet, Ipv6Net};
     use nd_packet::{NaFlags, NeighborAdvert, NeighborSolicit, RouterAdvert, RouterSolicit};
     use netlink_packet_route::link::LinkFlags;
+    use std::time::Duration;
     use tokio::sync::mpsc;
 
     fn t0() -> Instant {
@@ -2512,5 +2580,124 @@ mod tests {
         assert!(eng.is_waiting_for_link_local(7));
         eng.process_link_del(7);
         assert!(!eng.link_locals.contains_key(&7));
+    }
+
+    // ── RA host wiring ──────────────────────────────────────────────
+
+    /// An up link with a MAC whose only link-local is still in DAD.
+    fn host_link(index: u32) -> Link {
+        Link {
+            mac: Some([0x52, 0x54, 0x00, 0x12, 0x34, 0x56].into()),
+            addr6: vec![link_local(index, &format!("fe80::{index:x}"), true)],
+            ..link("wan0", index)
+        }
+    }
+
+    fn rs_frames(frames: &[NdSend]) -> Vec<(u32, Option<Ipv6Addr>)> {
+        frames
+            .iter()
+            .filter_map(|f| match f {
+                NdSend::RouterSolicit { ifindex, src, .. } => Some((*ifindex, *src)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn host_solicits_once_its_link_local_is_through_dad() {
+        let now = t0();
+        let mut eng = NdEngine::new();
+        eng.process_rib_msg(RibRx::LinkAdd(host_link(4)), now);
+        eng.hosts_mut()
+            .update_config("wan0", now, |cfg| cfg.autoconf = true);
+        // Still in DAD: no RS, and no wakeup for one.
+        assert!(rs_frames(&tick_ok(&mut eng, now + Duration::from_secs(2))).is_empty());
+        assert_eq!(eng.next_wakeup(), None);
+        // DAD done: the RS goes out at once, from that link-local.
+        eng.process_rib_msg(RibRx::AddrAdd(usable_link_local(4)), now);
+        assert!(eng.next_wakeup().is_some());
+        let sent = tick_ok(&mut eng, now + Duration::from_secs(2));
+        assert_eq!(rs_frames(&sent), vec![(4, Some(ll("fe80::4")))]);
+        assert_eq!(eng.counters()[&4].tx_rs, 1);
+    }
+
+    #[test]
+    fn host_turns_an_ra_into_actions_and_follows_its_addresses() {
+        use crate::nd::host::{HostAction, RaRoute};
+        use nd_packet::{NdOption, PrefixInfo, PrefixInfoFlags};
+        let now = t0();
+        let mut eng = NdEngine::new();
+        eng.process_rib_msg(RibRx::LinkAdd(host_link(4)), now);
+        eng.hosts_mut()
+            .update_config("wan0", now, |cfg| cfg.autoconf = true);
+        assert_eq!(
+            eng.hosts_mut().take_actions(),
+            vec![HostAction::DisableKernelRa {
+                ifname: "wan0".into()
+            }]
+        );
+        let ra = RouterAdvert {
+            options: vec![NdOption::PrefixInformation(PrefixInfo {
+                prefix_length: 64,
+                flags: PrefixInfoFlags::L | PrefixInfoFlags::A,
+                valid_lifetime: 3600,
+                preferred_lifetime: 1800,
+                prefix: "2001:db8:1::".parse().unwrap(),
+            })],
+            ..make_ra()
+        };
+        eng.on_recv(
+            NdRecv::RouterAdvert {
+                ifindex: 4,
+                src: ll("fe80::1"),
+                ra,
+            },
+            now,
+        );
+        let actions = eng.hosts_mut().take_actions();
+        let slaac: Ipv6Net = "2001:db8:1:0:5054:ff:fe12:3456/64".parse().unwrap();
+        assert!(actions.contains(&HostAction::AddrAdd {
+            ifindex: 4,
+            addr: slaac,
+            valid: 3600,
+            preferred: 1800,
+        }));
+        assert!(actions.contains(&HostAction::Route {
+            vrf: None,
+            prefix: Ipv6Net::default(),
+            route: Some(RaRoute::Routers {
+                distance: 210,
+                legs: vec![(ll("fe80::1"), 4)],
+            }),
+        }));
+        // The kernel says the address failed DAD: the engine hands the
+        // event on, and the host gives the address up.
+        let failed = LinkAddr {
+            addr: IpNet::V6(slaac),
+            ifindex: 4,
+            fib: true,
+            flags: crate::rib::link::AddrFlags {
+                dadfailed: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        eng.process_rib_msg(RibRx::AddrAdd(failed), now);
+        assert_eq!(
+            eng.hosts_mut().take_actions(),
+            vec![HostAction::AddrDel {
+                ifindex: 4,
+                addr: slaac
+            }]
+        );
+        // The link goes: its routes are withdrawn.
+        eng.process_rib_msg(RibRx::LinkDel(4), now);
+        let withdrawn: Vec<_> = eng
+            .hosts_mut()
+            .take_actions()
+            .into_iter()
+            .filter(|a| matches!(a, HostAction::Route { route: None, .. }))
+            .collect();
+        assert_eq!(withdrawn.len(), 2);
     }
 }

@@ -91,7 +91,12 @@ impl RibEntry {
     pub fn is_protocol(&self) -> bool {
         matches!(
             self.rtype,
-            RibType::Static | RibType::Ospf | RibType::Isis | RibType::Bgp | RibType::DhcpClient
+            RibType::Static
+                | RibType::Ospf
+                | RibType::Isis
+                | RibType::Bgp
+                | RibType::DhcpClient
+                | RibType::Ra
         ) && !self.stale
     }
 

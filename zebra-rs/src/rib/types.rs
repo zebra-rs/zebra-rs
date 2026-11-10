@@ -7,6 +7,7 @@ const RIB_ISIS: u8 = 5;
 const RIB_BGP: u8 = 6;
 const RIB_DHCP: u8 = 7;
 const RIB_DHCP_CLIENT: u8 = 8;
+const RIB_RA: u8 = 9;
 
 #[derive(Debug, PartialEq, Eq, Clone, Default, Copy, PartialOrd, Ord, serde::Serialize)]
 pub enum RibType {
@@ -27,6 +28,10 @@ pub enum RibType {
     /// from `Dhcp` so every kernel-route path can go on treating `Dhcp` as
     /// learned.
     DhcpClient,
+    /// A route a received Router Advertisement gives the `nd` task's RA
+    /// host: the default route through the router, or an on-link prefix.
+    /// A protocol route, installed under `RTPROT_RA`.
+    Ra,
     Other(u8),
 }
 
@@ -47,6 +52,7 @@ impl From<u8> for RibType {
             RIB_BGP => Self::Bgp,
             RIB_DHCP => Self::Dhcp,
             RIB_DHCP_CLIENT => Self::DhcpClient,
+            RIB_RA => Self::Ra,
             _ => Self::Other(d),
         }
     }
@@ -63,6 +69,7 @@ impl From<RibType> for u8 {
             RibType::Bgp => RIB_BGP,
             RibType::Dhcp => RIB_DHCP,
             RibType::DhcpClient => RIB_DHCP_CLIENT,
+            RibType::Ra => RIB_RA,
             RibType::Other(d) => d,
         }
     }
@@ -95,6 +102,7 @@ impl RibType {
             Self::Ospf => 'O',
             Self::Isis => 'i',
             Self::Dhcp | Self::DhcpClient => 'D',
+            Self::Ra => 'A',
             Self::Other(_) => '?',
         }
     }

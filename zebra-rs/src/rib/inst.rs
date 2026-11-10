@@ -980,7 +980,7 @@ fn ilm_distance(rtype: RibType) -> u8 {
         RibType::Ospf => 110,
         RibType::Isis => 115,
         RibType::Bgp => 20,
-        RibType::Dhcp | RibType::DhcpClient => 254,
+        RibType::Dhcp | RibType::DhcpClient | RibType::Ra => 254,
         RibType::Other(_) => 255,
     }
 }
@@ -1408,6 +1408,13 @@ pub struct Rib {
     /// under that number. Adopted when the static config installs the
     /// same route (`adopt_legacy_static`); cleared by the leftover sweep.
     pub legacy_statics: BTreeSet<(u32, IpNet, u32)>,
+    /// Kernel routes learned under `RTPROT_RA`, `(table, prefix,
+    /// priority)`: routes zebra-rs did not install (an earlier run's,
+    /// read back by the startup dump, or the kernel's own on an interface
+    /// that accepts RAs). Held as learned `Kernel` entries, and taken over
+    /// when the RA host installs a route at the same key
+    /// (`adopt_learned`).
+    pub learned_ra: BTreeSet<(u32, IpNet, u32)>,
     /// How long after startup leftovers from an earlier run that no
     /// protocol has replaced are swept (`--leftover-sweep-time`).
     pub leftover_sweep_time: std::time::Duration,
@@ -1630,6 +1637,7 @@ impl Rib {
             local_neighbors: BTreeMap::new(),
             evpn_ip_refs: BTreeMap::new(),
             legacy_statics: BTreeSet::new(),
+            learned_ra: BTreeSet::new(),
             leftover_sweep_time: std::time::Duration::from_secs(120),
             es_groups: BTreeSet::new(),
             es_blocked: BTreeSet::new(),
@@ -3905,6 +3913,7 @@ impl Rib {
                             l.addr4
                                 .iter()
                                 .chain(l.addr6.iter())
+                                .filter(|a| a.has_connected_route())
                                 .map(|a| a.addr)
                                 .collect()
                         })
@@ -5036,6 +5045,10 @@ impl Rib {
                     self.legacy_statics
                         .insert((route.table_id, route.prefix, route.entry.metric));
                 }
+                if route.kernel_protocol == Some(RibType::Ra) {
+                    self.learned_ra
+                        .insert((route.table_id, route.prefix, route.entry.metric));
+                }
                 // The startup route dump precedes config-driven VRF adoption.
                 // Preserve routes for a kernel VRF already seen in the link
                 // dump, so later adoption and redistribution can replay them.
@@ -5098,6 +5111,10 @@ impl Rib {
             FibMessage::DelRoute(route) => {
                 if self.is_kernel_route_echo(&route) {
                     return;
+                }
+                if route.kernel_protocol == Some(RibType::Ra) {
+                    self.learned_ra
+                        .remove(&(route.table_id, route.prefix, route.entry.metric));
                 }
                 if let IpNet::V6(prefix) = route.prefix {
                     if route.table_id == RT_TABLE_MAIN {

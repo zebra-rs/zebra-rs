@@ -176,10 +176,10 @@ pub fn send_packet(sock: &Socket, msg: NdSend) -> std::io::Result<()> {
             ra.emit_without_checksum(&mut buf);
             (ifindex, src, dst, buf)
         }
-        NdSend::RouterSolicit { ifindex, rs } => {
+        NdSend::RouterSolicit { ifindex, src, rs } => {
             let mut buf = BytesMut::new();
             rs.emit_without_checksum(&mut buf);
-            (ifindex, None, ALL_ROUTERS, buf)
+            (ifindex, src, ALL_ROUTERS, buf)
         }
     };
 

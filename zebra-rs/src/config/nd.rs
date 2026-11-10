@@ -3,11 +3,13 @@ use crate::nd::socket::nd_socket;
 
 use super::ConfigManager;
 
-/// Spawn the ND instance. Triggered by [`commit_config`] in two
+/// Spawn the ND instance. Triggered by [`commit_config`] in three
 /// places:
 ///
 ///   * the first config line that contains
-///     `ipv6 router-advertisements`, or
+///     `ipv6 router-advertisements`,
+///   * the first `interface X ipv6 address autoconf` or
+///     `interface X ipv6 ra-options …` line (the RA host), or
 ///   * the first `router bgp` line — eagerly, so BGP unnumbered's
 ///     `spawn_bgp` (which captures `nd_client_tx` by value) gets a
 ///     live handle regardless of whether the operator wrote the RA
@@ -65,8 +67,10 @@ pub fn spawn_nd(config: &ConfigManager) {
     //   * A VRF interface's link-local coming, going and finishing
     //     DAD never reaches it, so it cannot tell when RA can be sent
     //     from that interface again.
-    let (_rib_client, rib_rx) = config.subscribe_to_rib_global_links("nd");
-    let nd = inst::Nd::new(socket, rib_rx);
+    //
+    // The RIB client carries the RA host's routes and SLAAC addresses.
+    let (rib_client, rib_rx) = config.subscribe_to_rib_global_links("nd");
+    let nd = inst::Nd::new(socket, rib_client, rib_rx);
     config.subscribe("nd", nd.cm.tx.clone());
     config.subscribe_show("nd", nd.show.tx.clone());
     // Publish the ND client-request channel so other protocol modules

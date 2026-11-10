@@ -33,6 +33,53 @@ bitflags::bitflags! {
         const O = 0b0100_0000;
         /// Home Agent (RFC 6275 mobile IPv6).
         const H = 0b0010_0000;
+        /// Default Router Preference, high bit (RFC 4191 §2.2). Read
+        /// both bits through [`RaFlags::preference`].
+        const PRF_HI = 0b0001_0000;
+        /// Default Router Preference, low bit.
+        const PRF_LO = 0b0000_1000;
+    }
+}
+
+/// Default Router Preference (RFC 4191 §2.1), ordered best first so
+/// `Ord` sorts the preferred router to the front.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RouterPreference {
+    High,
+    #[default]
+    Medium,
+    Low,
+}
+
+impl std::fmt::Display for RouterPreference {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::High => "high",
+            Self::Medium => "medium",
+            Self::Low => "low",
+        })
+    }
+}
+
+impl RaFlags {
+    /// The two Prf bits. The reserved value (10) reads as medium, as
+    /// RFC 4191 §2.2 has the receiver treat it.
+    pub fn preference(self) -> RouterPreference {
+        match (self.contains(Self::PRF_HI), self.contains(Self::PRF_LO)) {
+            (false, true) => RouterPreference::High,
+            (true, true) => RouterPreference::Low,
+            _ => RouterPreference::Medium,
+        }
+    }
+
+    /// These flags with the Prf bits set to `prf`.
+    pub fn with_preference(self, prf: RouterPreference) -> Self {
+        let flags = self - (Self::PRF_HI | Self::PRF_LO);
+        match prf {
+            RouterPreference::High => flags | Self::PRF_LO,
+            RouterPreference::Medium => flags,
+            RouterPreference::Low => flags | Self::PRF_HI | Self::PRF_LO,
+        }
     }
 }
 
@@ -460,6 +507,42 @@ mod tests {
 
         let parsed = RouterAdvert::parse(&buf, Some((ll("fe80::1"), ll("ff02::1")))).unwrap();
         assert_eq!(parsed, ra);
+    }
+
+    #[test]
+    fn ra_router_preference_survives_parse() {
+        // Prf high (01) beside M: 0b1000_1000.
+        let wire = hex!(
+            "86 00 00 00 40 88 07 08 "
+            "00 00 00 00 00 00 00 00"
+        );
+        let ra = RouterAdvert::parse(&wire, None).unwrap();
+        assert!(ra.flags.contains(RaFlags::M));
+        assert_eq!(ra.flags.preference(), RouterPreference::High);
+        let mut buf = BytesMut::new();
+        ra.emit_without_checksum(&mut buf);
+        assert_eq!(&buf[..], &wire);
+    }
+
+    #[test]
+    fn router_preference_bits() {
+        let pref = |bits: u8| RaFlags::from_bits_truncate(bits).preference();
+        assert_eq!(pref(0b0000_0000), RouterPreference::Medium);
+        assert_eq!(pref(0b0000_1000), RouterPreference::High);
+        assert_eq!(pref(0b0001_1000), RouterPreference::Low);
+        // Reserved (10) is read as medium (RFC 4191 §2.2).
+        assert_eq!(pref(0b0001_0000), RouterPreference::Medium);
+        for prf in [
+            RouterPreference::High,
+            RouterPreference::Medium,
+            RouterPreference::Low,
+        ] {
+            let flags = (RaFlags::O | RaFlags::PRF_HI).with_preference(prf);
+            assert_eq!(flags.preference(), prf);
+            assert!(flags.contains(RaFlags::O));
+        }
+        assert!(RouterPreference::High < RouterPreference::Medium);
+        assert!(RouterPreference::Medium < RouterPreference::Low);
     }
 
     #[test]

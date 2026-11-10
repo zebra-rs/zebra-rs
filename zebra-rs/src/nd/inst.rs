@@ -22,10 +22,12 @@ use crate::config::{
 };
 use crate::context::Task;
 use crate::rib::api::RibRx;
+use crate::rib::client::RibClient;
 
 use super::NdRecv;
 use super::config::Callback;
 use super::engine::{NdEngine, NdEvent};
+use super::host::HostAction;
 use super::network::{read_packet, send_packet};
 use super::send::RaSendConfig;
 
@@ -62,6 +64,8 @@ pub struct Nd {
     recv_rx: UnboundedReceiver<NdRecv>,
     client_rx: UnboundedReceiver<NdClientReq>,
     client_tx: UnboundedSender<NdClientReq>,
+    /// The RA host's routes and SLAAC addresses go to the RIB here.
+    rib: RibClient,
     rib_rx: UnboundedReceiver<RibRx>,
     /// Config-manager subscription endpoints. The receive half drains
     /// in the event loop and feeds [`Self::process_cm_msg`].
@@ -95,7 +99,7 @@ impl Nd {
     /// `RibRx` subscriber — otherwise the caller would have to drop
     /// `rib_rx` on the error path, leaving a dead receiver queued in
     /// RIB's inbox and causing a panic when RIB tries to dump links.
-    pub fn new(socket: AsyncFd<Socket>, rib_rx: UnboundedReceiver<RibRx>) -> Self {
+    pub fn new(socket: AsyncFd<Socket>, rib: RibClient, rib_rx: UnboundedReceiver<RibRx>) -> Self {
         let socket = Arc::new(socket);
         let (recv_tx, recv_rx) = mpsc::unbounded_channel();
         let (client_tx, client_rx) = mpsc::unbounded_channel();
@@ -111,6 +115,7 @@ impl Nd {
             recv_rx,
             client_rx,
             client_tx,
+            rib,
             rib_rx,
             cm: ConfigChannel::new(),
             show: ShowChannel::new(),
@@ -162,6 +167,7 @@ impl Nd {
             }
             self.process_rib_msg(msg);
         }
+        self.perform_host_actions();
         loop {
             let wakeup = self.engine.next_wakeup();
             tokio::select! {
@@ -184,6 +190,23 @@ impl Nd {
                     let socket = self.socket.get_ref();
                     self.engine
                         .tick(Instant::now(), |frame| send_packet(socket, frame));
+                }
+            }
+            self.perform_host_actions();
+        }
+    }
+
+    /// Do what the RA host has asked for since the last event: hand its
+    /// routes and addresses to the RIB, and turn the kernel's own RA
+    /// processing off where it runs.
+    fn perform_host_actions(&mut self) {
+        for action in self.engine.hosts_mut().take_actions() {
+            match action {
+                HostAction::DisableKernelRa { ifname } => disable_kernel_ra(&ifname),
+                action => {
+                    if let Some(msg) = action.into_message() {
+                        let _ = self.rib.send(msg);
+                    }
                 }
             }
         }
@@ -226,6 +249,22 @@ impl Nd {
             NdClientReq::SetNotifier { tx } => {
                 self.engine.set_notifier(tx);
             }
+        }
+    }
+}
+
+/// Turn the kernel's own Router Advertisement processing off on `ifname`
+/// (docs/design/dhcp-client.md D4): the RA host handles RAs there, and a
+/// kernel default route under `proto ra` would sit beside its route, at a
+/// distance of 0 to the RIB. Forwarding already makes the kernel ignore
+/// `accept_ra=1`, but not `accept_ra=2`, and not a later per-interface
+/// forwarding change. Written through `/proc` rather than the dotted
+/// sysctl name, which a VLAN interface's own dot (`eth0.100`) would split.
+fn disable_kernel_ra(ifname: &str) {
+    for knob in ["accept_ra", "autoconf"] {
+        let path = format!("/proc/sys/net/ipv6/conf/{ifname}/{knob}");
+        if let Err(e) = std::fs::write(&path, "0") {
+            tracing::warn!("nd: {ifname}: could not turn the kernel's {knob} off ({path}): {e}");
         }
     }
 }

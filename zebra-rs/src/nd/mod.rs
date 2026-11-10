@@ -22,6 +22,7 @@ use nd_packet::{NeighborAdvert, NeighborSolicit, RouterAdvert, RouterSolicit};
 
 pub mod config;
 pub mod engine;
+pub mod host;
 pub mod inst;
 pub mod network;
 pub mod send;
@@ -83,6 +84,11 @@ pub enum NdSend {
         ra: RouterAdvert,
     },
     /// Send a Router Solicitation out `ifindex` to `ff02::2`
-    /// (all-routers multicast).
-    RouterSolicit { ifindex: u32, rs: RouterSolicit },
+    /// (all-routers multicast), from the link-local `src` (`None`
+    /// leaves it to the kernel). The RA host's (`host.rs`).
+    RouterSolicit {
+        ifindex: u32,
+        src: Option<Ipv6Addr>,
+        rs: RouterSolicit,
+    },
 }

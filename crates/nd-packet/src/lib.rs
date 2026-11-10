@@ -4,7 +4,8 @@
 //! Router Solicitation (133), Router Advertisement (134),
 //! Neighbor Solicitation (135), and Neighbor Advertisement (136),
 //! plus the ND options the codec recognises (Source/Target
-//! Link-Layer Address, Prefix Information, MTU).
+//! Link-Layer Address, Prefix Information, MTU, and RFC 8106's RDNSS
+//! and DNSSL).
 //!
 //! NS/NA support exists for passive observation (counters/diagnostics)
 //! — the host kernel still owns the NDP cache and this crate never
@@ -23,9 +24,12 @@ mod packet;
 mod typ;
 
 pub use checksum::compute_icmp6_checksum;
-pub use option::{LinkLayerAddress, NdOption, OptionType, PrefixInfo, PrefixInfoFlags};
+pub use option::{
+    Dnssl, LinkLayerAddress, NdOption, OptionType, PrefixInfo, PrefixInfoFlags, Rdnss,
+};
 pub use packet::{
     MAX_INITIAL_RTR_ADVERTISEMENTS, MIN_NA_LEN, MIN_NS_LEN, MIN_RA_LEN, MIN_RS_LEN, NaFlags,
-    NeighborAdvert, NeighborSolicit, ParseError, RaFlags, RouterAdvert, RouterSolicit,
+    NeighborAdvert, NeighborSolicit, ParseError, RaFlags, RouterAdvert, RouterPreference,
+    RouterSolicit,
 };
 pub use typ::Icmp6Type;
