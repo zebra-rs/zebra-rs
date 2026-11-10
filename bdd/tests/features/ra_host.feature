@@ -24,6 +24,7 @@ Feature: RA host on WAN interfaces (interface ipv6 address autoconf)
   Config files:
   - s1.yaml: `send-advertisements` on srv0.
   - r1.yaml: `address autoconf` on wan0 and wan1.
+  - r1-wan1.yaml: `address autoconf` on wan1 only.
 
   Scenario: Setup two upstream routers and an RA host
     Given a clean test environment
@@ -117,6 +118,18 @@ Feature: RA host on WAN interfaces (interface ipv6 address autoconf)
     And show command "show ipv6 route" in namespace "r1" should eventually not contain "2001:db8:1::/64"
     And show command "show ipv6 route" in namespace "r1" should eventually contain "::/0 [220/0] via fe80::1, wan0"
     And command "ip -6 route show proto ra" in namespace "r1" should eventually not contain "wan1"
+
+  Scenario: A restart without autoconf on an interface takes the earlier run's RA routes away
+    Given the test topology exists
+    # The default route through s1 on wan0 outlives the daemon. Started
+    # again with autoconf on wan1 only, nothing installs it again, so the
+    # leftover sweep takes it: the route record names it as zebra-rs's.
+    When I stop zebra-rs in namespace "r1"
+    Then command "ip -6 route show default" in namespace "r1" should eventually contain "via fe80::1 dev wan0 proto ra"
+    When I start zebra-rs in namespace "r1" sweeping leftovers after 15 seconds
+    And I apply config "r1-wan1.yaml" to namespace "r1"
+    Then command "ip -6 route show default" in namespace "r1" should eventually not contain "fe80::1"
+    And show command "show ipv6 route" in namespace "r1" should eventually not contain "::/0"
 
   Scenario: Teardown topology
     Given the test topology exists

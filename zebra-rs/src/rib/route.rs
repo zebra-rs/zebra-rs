@@ -173,6 +173,19 @@ impl Rib {
         }
     }
 
+    /// Keep the on-disk record of the DHCP client's and the RA host's
+    /// routes current (`route_record`), so a restart can tell its own
+    /// leftovers from other programs' routes under the same protocol
+    /// number. A leftover itself is already recorded.
+    fn record_route(&mut self, table_id: u32, prefix: IpNet, entry: &RibEntry) {
+        if entry.stale {
+            return;
+        }
+        let priorities = kernel_priorities(entry, matches!(prefix, IpNet::V6(_)));
+        self.route_record
+            .add(entry.rtype, table_id, prefix, priorities, entry.distance);
+    }
+
     /// Withdraw every leftover from an earlier run that its owner has not
     /// replaced by now: statics, IS-IS, and VRF BGP, plus SRv6 routes under
     /// any of our protocols that nothing reinstalled, and the next-hop
@@ -184,13 +197,23 @@ impl Rib {
             .chain(self.vrf_tables.keys().copied())
             .collect();
         for table_id in tables {
-            for rtype in [RibType::Static, RibType::Isis, RibType::Bgp] {
+            // The DHCP client's and the RA host's, only those the route
+            // record named (`route_record`): their protocol numbers are
+            // not zebra-rs's alone.
+            for rtype in [
+                RibType::Static,
+                RibType::Isis,
+                RibType::Bgp,
+                RibType::DhcpClient,
+                RibType::Ra,
+            ] {
                 for v6 in [false, true] {
                     self.sweep_stale(rtype, v6, table_id).await;
                 }
             }
         }
         self.legacy_statics.clear();
+        self.route_record.sweep_done();
         // And the leftover ILMs nobody replaced, but OSPF's, which it
         // sweeps itself, as it does its routes: a graceful restart's grace
         // period can outlast this one.
@@ -859,6 +882,7 @@ impl Rib {
             .cloned();
         self.adopt_legacy_static(table_id, (*prefix).into(), &entry);
         self.adopt_learned(table_id, (*prefix).into(), &entry);
+        self.record_route(table_id, (*prefix).into(), &entry);
         let replace = {
             let Some(t) = self.vrf_tables.get_mut(&table_id) else {
                 tracing::warn!(
@@ -899,6 +923,8 @@ impl Rib {
     }
 
     pub async fn ipv4_route_del_vrf(&mut self, table_id: u32, prefix: &Ipv4Net, entry: RibEntry) {
+        self.route_record
+            .del(entry.rtype, table_id, (*prefix).into());
         let before = self
             .vrf_tables
             .get(&table_id)
@@ -947,6 +973,7 @@ impl Rib {
             .cloned();
         self.adopt_legacy_static(table_id, (*prefix).into(), &entry);
         self.adopt_learned(table_id, (*prefix).into(), &entry);
+        self.record_route(table_id, (*prefix).into(), &entry);
         let replace = {
             let Some(t) = self.vrf_tables.get_mut(&table_id) else {
                 tracing::warn!(
@@ -987,6 +1014,8 @@ impl Rib {
     }
 
     pub async fn ipv6_route_del_vrf(&mut self, table_id: u32, prefix: &Ipv6Net, entry: RibEntry) {
+        self.route_record
+            .del(entry.rtype, table_id, (*prefix).into());
         let before = self
             .vrf_tables
             .get(&table_id)
@@ -1084,6 +1113,7 @@ impl Rib {
         let before = selected_v4(&self.table, prefix).cloned();
         self.adopt_legacy_static(table_id, (*prefix).into(), &entry);
         self.adopt_learned(table_id, (*prefix).into(), &entry);
+        self.record_route(table_id, (*prefix).into(), &entry);
         if entry.is_protocol() {
             let replace = rib_replace(&mut self.table, prefix, entry.rtype);
             rib_resolve_nexthop(&mut entry, &self.table, &mut self.nmap, table_id);
@@ -1111,6 +1141,8 @@ impl Rib {
     }
 
     pub async fn ipv4_route_del(&mut self, prefix: &Ipv4Net, entry: RibEntry, table_id: u32) {
+        self.route_record
+            .del(entry.rtype, table_id, (*prefix).into());
         let before = selected_v4(&self.table, prefix).cloned();
         if entry.is_protocol() {
             let replace = rib_replace(&mut self.table, prefix, entry.rtype);
@@ -1322,6 +1354,7 @@ impl Rib {
         let before = selected_v6(&self.table_v6, prefix).cloned();
         self.adopt_legacy_static(table_id, (*prefix).into(), &entry);
         self.adopt_learned(table_id, (*prefix).into(), &entry);
+        self.record_route(table_id, (*prefix).into(), &entry);
         if entry.is_protocol() {
             let replace = rib_replace_v6(&mut self.table_v6, prefix, entry.rtype);
             rib_resolve_nexthop_v6(&mut entry, &self.table_v6, &mut self.nmap, table_id);
@@ -1356,6 +1389,8 @@ impl Rib {
     }
 
     pub async fn ipv6_route_del(&mut self, prefix: &Ipv6Net, entry: RibEntry, table_id: u32) {
+        self.route_record
+            .del(entry.rtype, table_id, (*prefix).into());
         let before = selected_v6(&self.table_v6, prefix).cloned();
         if entry.is_protocol() {
             let replace = rib_replace_v6(&mut self.table_v6, prefix, entry.rtype);

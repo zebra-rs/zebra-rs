@@ -24,6 +24,8 @@ host (tests/scripts/dhcp_server.sh).
   220` and `host-name edge1`.
 - r1-id3.yaml: the same as r1.yaml with `dhcp-options client-id
   aa:bb:cc:dd:ee:03`.
+- r1-no-default.yaml: the same as r1.yaml with `dhcp-options
+  no-default-route`.
 
 ## Test Scenarios
 
@@ -40,6 +42,7 @@ host (tests/scripts/dhcp_server.sh).
 | A reboot under another client-id releases the saved lease | |
 | A release by hand while a saved lease is being given back leaves the interface released | |
 | A restart of zebra-rs resumes the lease | |
+| A restart without the default route takes the earlier run's away | |
 | dhcp-options change the route's distance and the host name sent | |
 | Deleting address dhcp releases the lease | |
 | A lease the server no longer renews expires | |

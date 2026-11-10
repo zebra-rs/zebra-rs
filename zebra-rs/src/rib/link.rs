@@ -325,6 +325,21 @@ impl LinkAddr {
         !(self.dynamic.is_some() && self.flags.noprefixroute)
     }
 
+    /// Whether the kernel will expire the address: it went in with a
+    /// lease's (or an RA's) lifetime. `None` (a configuration-path entry
+    /// the kernel has not reported on yet) is not.
+    pub fn has_lifetime(&self) -> bool {
+        self.valid_lft.is_some_and(|valid| valid != u32::MAX)
+    }
+
+    /// Whether the configuration claiming this address must first make it
+    /// permanent: a lease holds it too, or it still carries the lifetime
+    /// one gave it (read back after a restart, before the lease is
+    /// resumed). The configuration outlives the lease.
+    fn needs_permanence(&self) -> bool {
+        self.dynamic.is_some() || self.has_lifetime()
+    }
+
     /// Build a LinkAddr from a FIB (kernel netlink) message.
     ///
     /// The kernel just told us about this address, so it is installed in the
@@ -1812,15 +1827,39 @@ impl Rib {
         let Some(link) = self.links.get_mut(&ifindex) else {
             return;
         };
+        let up = link.is_up();
         let bucket = match addr {
             IpNet::V4(_) => &mut link.addr4,
             IpNet::V6(_) => &mut link.addr6,
         };
-        if let Some(existing) = bucket.iter_mut().find(|a| a.addr == addr) {
-            existing.valid_lft = Some(u32::MAX);
-            existing.preferred_lft = Some(u32::MAX);
-            existing.flags.permanent = true;
-            existing.flags.deprecated = false;
+        let Some(existing) = bucket.iter_mut().find(|a| a.addr == addr) else {
+            return;
+        };
+        let had_connected = existing.has_connected_route();
+        existing.valid_lft = Some(u32::MAX);
+        existing.preferred_lft = Some(u32::MAX);
+        existing.flags.permanent = true;
+        existing.flags.deprecated = false;
+        // The replace carries the configuration's flags, so a SLAAC
+        // address the operator configured loses `noprefixroute`: the
+        // kernel installs its prefix route, and the RIB its connected one.
+        existing.flags.noprefixroute = false;
+        let claimed = existing.clone();
+        if up && !had_connected && !prefix_covered_by_other(bucket, &claimed) {
+            let mut rib = RibEntry::new(RibType::Connected);
+            rib.ifindex = ifindex;
+            rib.set_valid(true);
+            let msg = match addr {
+                IpNet::V4(v4) => Message::Ipv4Add {
+                    prefix: v4.apply_mask(),
+                    rib,
+                },
+                IpNet::V6(v6) => Message::Ipv6Add {
+                    prefix: v6.apply_mask(),
+                    rib,
+                },
+            };
+            let _ = self.tx.send(msg);
         }
     }
 
@@ -1847,6 +1886,14 @@ impl Rib {
         };
         if let Some(existing) = bucket.iter_mut().find(|a| a.addr == addr && a.config) {
             existing.dynamic = Some(origin);
+            // Configured before the claim, with an earlier lease's
+            // lifetime still on it: the configuration was applied after a
+            // restart, before the lease was resumed, and found no claim
+            // to make it permanent for. Without this it would expire at
+            // that lease's deadline though configured.
+            if existing.has_lifetime() {
+                self.addr_make_permanent(ifindex, addr).await;
+            }
             return;
         }
         if let Err(e) = self.fib_handle.addr_replace(ifindex, &addr, &opts).await {
@@ -2001,11 +2048,11 @@ pub async fn link_config_exec(
                             link.addr4.iter_mut().find(|a| a.addr == IpNet::V4(v4addr))
                     {
                         existing.config = true;
-                        present = Some(existing.dynamic.is_some());
+                        present = Some(existing.needs_permanence());
                     }
                     match present {
-                        // A lease holds it too, with the lease's lifetime
-                        // on it: the configuration must outlive the lease.
+                        // A lease holds it, or its lifetime is still on it
+                        // (`LinkAddr::needs_permanence`).
                         Some(true) => {
                             rib.addr_make_permanent(ifindex, IpNet::V4(v4addr)).await;
                             continue;
@@ -2134,14 +2181,27 @@ pub async fn link_config_exec(
                     continue;
                 }
 
-                // Skip an address already present on the link (config replay
-                // or kernel echo already delivered it).
-                if rib
-                    .links
-                    .get(&ifindex)
-                    .is_some_and(|link| link.addr6.iter().any(|a| a.addr == IpNet::V6(v6addr)))
+                // An address already present on the link (config replay, a
+                // kernel echo, a kernel-learned or SLAAC address) is marked
+                // configured, as on the IPv4 path: the kernel add would
+                // EEXIST, recovery must keep it, and a SLAAC address the RA
+                // host gives up must stay. Made permanent when a claim or a
+                // lifetime is on it (`LinkAddr::needs_permanence`).
+                let mut present = None;
+                if let Some(link) = rib.links.get_mut(&ifindex)
+                    && let Some(existing) =
+                        link.addr6.iter_mut().find(|a| a.addr == IpNet::V6(v6addr))
                 {
-                    continue;
+                    existing.config = true;
+                    present = Some(existing.needs_permanence());
+                }
+                match present {
+                    Some(true) => {
+                        rib.addr_make_permanent(ifindex, IpNet::V6(v6addr)).await;
+                        continue;
+                    }
+                    Some(false) => continue,
+                    None => {}
                 }
 
                 let result = rib.fib_handle.addr_add_ipv6(ifindex, &v6addr).await;

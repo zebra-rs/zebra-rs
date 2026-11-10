@@ -229,14 +229,21 @@ would bypass the RIB.
   This covers insomnia's delegated-prefix routes. insomnia sweeps only
   inside its configured ranges (insomnia `src/pd_routes.rs:24-30`), so it
   cannot touch a client's routes.
-- **Restart.** zebra-rs leaves its routes in the kernel when it stops, and
-  the next run's startup dump reads them as learned `Dhcp` routes.
-  - They are not swept like a static's leftovers: `RTPROT_DHCP` is not
-    ours alone.
-  - Instead, when the client hands over a route, a learned `Dhcp` route
-    at the same table, prefix and priority is dropped from the RIB
-    (`Rib::adopt_learned_dhcp`), and the install replaces it in the
-    kernel in place.
+- **Restart.** zebra-rs leaves its routes in the kernel when it stops.
+  - They cannot be swept blindly like a static's leftovers:
+    `RTPROT_DHCP` is not ours alone (nor is `RTPROT_RA`, the RA host's).
+  - So the RIB keeps a record of the client's and the RA host's routes
+    beside the leases (`<state dir>/routes.json`, `rib/route_record.rs`):
+    type, table, prefix, kernel priorities and distance, rewritten as
+    they change. The next run's startup dump reads a route the record
+    names as a stale leftover of its type, which the owner's route
+    replaces in place when it installs it again, and the leftover sweep
+    (`--leftover-sweep-time`) removes otherwise: a lease gone, or
+    `no-default-route` set, while zebra-rs was down. Routes the record
+    does not name stay learned `Dhcp` (or `Kernel`) routes.
+  - A learned route the record does not name (an older run's, before the
+    record) is still taken over when the client hands over a route at the
+    same table, prefix and priority (`Rib::adopt_learned`).
 - **One entry per prefix, chosen by the client.** The RIB keeps one entry
   per protocol for a prefix, so `dhcpc` gathers every interface's lease
   routes (`dhcpc/routes.rs`) and hands over the legs at the lowest

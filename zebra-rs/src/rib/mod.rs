@@ -23,6 +23,7 @@ pub mod entry;
 pub use entry::RibEntries;
 
 pub mod route;
+pub mod route_record;
 
 pub mod nexthop;
 pub use nexthop::*;

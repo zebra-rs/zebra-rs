@@ -98,7 +98,9 @@ VRF's table and nothing reaches the default table.
   lease is verified with the server when the link returns.
 - **Restart.** Leases are kept in `/var/lib/zebra-rs/dhcp/`. A restart of
   zebra-rs keeps the address and its route in place, resumes the lease
-  and verifies it with the server.
+  and verifies it with the server. A route the lease no longer gives (the
+  lease is gone, or `no-default-route` was set while zebra-rs was down)
+  is removed once `--leftover-sweep-time` has passed (120 s by default).
 - **Deleting `address dhcp`** releases the lease.
 
 ## Commands
@@ -203,7 +205,9 @@ Two interfaces with `autoconf` work like two DHCP uplinks: the lower
 router preference decides, then ECMP. While a link is down its routes are
 withdrawn; when it comes back the host solicits again. An interface in a
 VRF installs its routes in that VRF's table. After a restart of zebra-rs
-the routes left in the kernel are taken over as the first RAs arrive.
+the routes left in the kernel are taken over as the first RAs arrive, and
+those no RA gives any more are removed once `--leftover-sweep-time` has
+passed.
 
 ## Not done yet
 

@@ -1,0 +1,6 @@
+# r1: the RA host on wan1 only.
+interface:
+- if-name: wan1
+  ipv6:
+    address:
+    - autoconf
