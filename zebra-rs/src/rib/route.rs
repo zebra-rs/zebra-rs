@@ -368,34 +368,14 @@ impl Rib {
                 .get(&route.table_id)
                 .and_then(|table| table.table_v6.get(&prefix)),
         };
-        let priority_matches = |metric| {
-            let metric = if matches!(route.prefix, IpNet::V6(_)) && metric == 0 {
-                1024
-            } else {
-                metric
-            };
-            metric == route.entry.metric
-        };
+        let v6 = matches!(route.prefix, IpNet::V6(_));
         entries.is_some_and(|entries| {
             entries.iter().any(|entry| {
                 entry.rtype == protocol
                     && entry.is_protocol()
                     && entry.is_selected()
                     && entry.is_fib()
-                    && match &entry.nexthop {
-                        Nexthop::Uni(uni) => priority_matches(uni.metric),
-                        Nexthop::Multi(multi) => priority_matches(multi.metric),
-                        Nexthop::List(list) => list
-                            .nexthops
-                            .iter()
-                            .any(|member| priority_matches(member.metric())),
-                        Nexthop::Protect(protect) => {
-                            priority_matches(protect.primary.metric())
-                                || priority_matches(protect.backup.metric())
-                        }
-                        Nexthop::Blackhole(metric) => priority_matches(*metric),
-                        Nexthop::Link(_) => priority_matches(entry.metric),
-                    }
+                    && kernel_priorities(entry, v6).contains(&route.entry.metric)
             })
         })
     }
@@ -1573,15 +1553,27 @@ fn static_reresolve_uni_v4(
     before != (uni.gid, uni.addr, uni.mpls_label.clone(), uni.segs.clone())
 }
 
+/// Re-resolve every gateway of a static entry against `table`.
+///
+/// Returns the members of a floating route (`Nexthop::List`) that stopped
+/// resolving while their route was in the kernel, as they were installed.
+/// The entry stays selected on its other members, so nothing withdraws
+/// such a member's route, and unlike on a link down the kernel does not
+/// either: with the gateway's connected route gone but its link up, the
+/// nexthop object lives on and the kernel goes on forwarding through the
+/// member it prefers. The caller deletes these routes by the nexthop id
+/// they name, which the nexthop itself no longer has.
 fn static_reresolve_entry_v4(
     entry: &mut RibEntry,
     table: &PrefixMap<Ipv4Net, RibEntries>,
     nmap: &mut NexthopMap,
     table_id: u32,
-) {
+) -> Vec<NexthopUni> {
+    let mut lost = Vec::new();
     if entry.rtype != RibType::Static {
-        return;
+        return lost;
     }
+    let installed = entry.is_selected() && entry.is_fib();
     let mut changed = false;
     match &mut entry.nexthop {
         Nexthop::Uni(uni) => changed |= static_reresolve_uni_v4(uni, nmap, table, table_id),
@@ -1593,7 +1585,15 @@ fn static_reresolve_entry_v4(
         Nexthop::List(list) => {
             for member in list.nexthops.iter_mut() {
                 if let NexthopMember::Uni(uni) = member {
+                    let was = (installed && uni.valid).then_some(uni.gid);
                     changed |= static_reresolve_uni_v4(uni, nmap, table, table_id);
+                    if !uni.valid
+                        && let Some(gid) = was
+                    {
+                        // A failed resolve leaves the nexthop as it was
+                        // but for the id it gave up.
+                        lost.push(NexthopUni { gid, ..uni.clone() });
+                    }
                 }
             }
         }
@@ -1607,6 +1607,7 @@ fn static_reresolve_entry_v4(
         _ => {}
     }
     static_reinstall_on_change(entry, changed);
+    lost
 }
 
 /// The re-resolve above rewrites the entry's nexthop in place, but the
@@ -1638,15 +1639,20 @@ fn static_reresolve_uni_v6(
     before != (uni.gid, uni.addr, uni.mpls_label.clone(), uni.segs.clone())
 }
 
+/// IPv6 sibling of [`static_reresolve_entry_v4`].
 fn static_reresolve_entry_v6(
     entry: &mut RibEntry,
     table: &PrefixMap<Ipv6Net, RibEntries>,
     nmap: &mut NexthopMap,
     table_id: u32,
-) {
+) -> Vec<NexthopUni> {
+    let mut lost = Vec::new();
     if entry.rtype != RibType::Static {
-        return;
+        return lost;
     }
+    let installed = entry.is_selected() && entry.is_fib();
+    // Not always the members' metrics, for IPv6.
+    let priorities = kernel_priorities(entry, true);
     let mut changed = false;
     match &mut entry.nexthop {
         Nexthop::Uni(uni) => changed |= static_reresolve_uni_v6(uni, nmap, table, table_id),
@@ -1656,9 +1662,21 @@ fn static_reresolve_entry_v6(
             }
         }
         Nexthop::List(list) => {
-            for member in list.nexthops.iter_mut() {
+            for (member, priority) in list.nexthops.iter_mut().zip(priorities) {
                 if let NexthopMember::Uni(uni) = member {
+                    let was = (installed && uni.valid).then_some(uni.gid);
                     changed |= static_reresolve_uni_v6(uni, nmap, table, table_id);
+                    if !uni.valid
+                        && let Some(gid) = was
+                    {
+                        // A failed resolve leaves the nexthop as it was
+                        // but for the id it gave up.
+                        lost.push(NexthopUni {
+                            gid,
+                            metric: priority,
+                            ..uni.clone()
+                        });
+                    }
                 }
             }
         }
@@ -1672,6 +1690,7 @@ fn static_reresolve_entry_v6(
         _ => {}
     }
     static_reinstall_on_change(entry, changed);
+    lost
 }
 
 /// Cheap, allocation-free gate for the static-NHT re-resolve pass.
@@ -1696,12 +1715,15 @@ fn table_has_static_v6(table: &PrefixMap<Ipv6Net, RibEntries>) -> bool {
 }
 
 impl Rib {
-    fn refresh_static_nht_v4(&mut self) {
+    fn refresh_static_nht_v4(&mut self) -> Vec<(u32, Ipv4Net, NexthopUni)> {
+        let mut lost = Vec::new();
         if table_has_static_v4(&self.table) {
             let snapshot = self.table.clone();
-            for (_, entries) in self.table.iter_mut() {
+            for (prefix, entries) in self.table.iter_mut() {
                 for entry in entries.iter_mut() {
-                    static_reresolve_entry_v4(entry, &snapshot, &mut self.nmap, RT_TABLE_MAIN);
+                    let gone =
+                        static_reresolve_entry_v4(entry, &snapshot, &mut self.nmap, RT_TABLE_MAIN);
+                    lost.extend(gone.into_iter().map(|uni| (RT_TABLE_MAIN, prefix, uni)));
                 }
             }
         }
@@ -1714,20 +1736,26 @@ impl Rib {
                 continue;
             }
             let snapshot = vrf.table.clone();
-            for (_, entries) in vrf.table.iter_mut() {
+            for (prefix, entries) in vrf.table.iter_mut() {
                 for entry in entries.iter_mut() {
-                    static_reresolve_entry_v4(entry, &snapshot, &mut self.nmap, table_id);
+                    let gone =
+                        static_reresolve_entry_v4(entry, &snapshot, &mut self.nmap, table_id);
+                    lost.extend(gone.into_iter().map(|uni| (table_id, prefix, uni)));
                 }
             }
         }
+        lost
     }
 
-    fn refresh_static_nht_v6(&mut self) {
+    fn refresh_static_nht_v6(&mut self) -> Vec<(u32, Ipv6Net, NexthopUni)> {
+        let mut lost = Vec::new();
         if table_has_static_v6(&self.table_v6) {
             let snapshot = self.table_v6.clone();
-            for (_, entries) in self.table_v6.iter_mut() {
+            for (prefix, entries) in self.table_v6.iter_mut() {
                 for entry in entries.iter_mut() {
-                    static_reresolve_entry_v6(entry, &snapshot, &mut self.nmap, RT_TABLE_MAIN);
+                    let gone =
+                        static_reresolve_entry_v6(entry, &snapshot, &mut self.nmap, RT_TABLE_MAIN);
+                    lost.extend(gone.into_iter().map(|uni| (RT_TABLE_MAIN, prefix, uni)));
                 }
             }
         }
@@ -1740,16 +1768,25 @@ impl Rib {
                 continue;
             }
             let snapshot = vrf.table_v6.clone();
-            for (_, entries) in vrf.table_v6.iter_mut() {
+            for (prefix, entries) in vrf.table_v6.iter_mut() {
                 for entry in entries.iter_mut() {
-                    static_reresolve_entry_v6(entry, &snapshot, &mut self.nmap, table_id);
+                    let gone =
+                        static_reresolve_entry_v6(entry, &snapshot, &mut self.nmap, table_id);
+                    lost.extend(gone.into_iter().map(|uni| (table_id, prefix, uni)));
                 }
             }
         }
+        lost
     }
 
     pub async fn ipv6_route_resolve(&mut self) {
-        self.refresh_static_nht_v6();
+        // As in `ipv4_route_resolve`.
+        let owner = RibEntry::new(RibType::Static);
+        for (table_id, prefix, uni) in self.refresh_static_nht_v6() {
+            self.fib_handle
+                .route_ipv6_del_uni(&prefix, &owner, &Nexthop::Uni(uni), table_id)
+                .await;
+        }
         ipv6_nexthop_sync(
             &mut self.nmap,
             &self.table_v6,
@@ -1769,7 +1806,15 @@ impl Rib {
     }
 
     pub async fn ipv4_route_resolve(&mut self) {
-        self.refresh_static_nht_v4();
+        // A floating static's member that just stopped resolving leaves
+        // the kernel here, by the nexthop id its route names; the sync
+        // below then pushes the entry again on the members it has left.
+        let owner = RibEntry::new(RibType::Static);
+        for (table_id, prefix, uni) in self.refresh_static_nht_v4() {
+            self.fib_handle
+                .route_ipv4_del_uni(&prefix, &owner, &Nexthop::Uni(uni), table_id)
+                .await;
+        }
         // One nexthop sync handles every table: each group resolves
         // against the table its `table_id` names (default or a VRF).
         ipv4_nexthop_sync(
@@ -2318,8 +2363,22 @@ fn entry_resolve(entry: &mut RibEntry, nmap: &NexthopMap, _ifdown: bool) {
             entry.valid = false;
         }
         Nexthop::List(list) => {
-            for uni in list.iter_unis_mut() {
-                nexthop_uni_resolve(uni, nmap);
+            // A member that came back has no route in the kernel: the
+            // route went with its link, or was never installed. The entry
+            // stayed installed on its other members meanwhile, so nothing
+            // else puts it back; forget the install, and selection pushes
+            // the entry again (as `static_reinstall_on_change` does for a
+            // gateway that resolves differently).
+            let mut back = false;
+            for member in list.nexthops.iter_mut() {
+                let was = member.is_valid();
+                for uni in member.iter_unis_mut() {
+                    nexthop_uni_resolve(uni, nmap);
+                }
+                back |= member.is_valid() && !was;
+            }
+            if back {
+                entry.fib = false;
             }
             for uni in list.iter_unis() {
                 if uni.valid {
@@ -2363,6 +2422,7 @@ fn resolve_nexthop_uni(
         return false;
     }
     let Some(Group::Uni(group)) = nmap.fetch(uni, table_id) else {
+        uni.valid = false;
         return false;
     };
     if group.refcnt() == 0 {
@@ -2376,7 +2436,11 @@ fn resolve_nexthop_uni(
     uni.ifindex_origin = group.ifindex_origin;
     uni.ifindex_resolved = group.ifindex_resolved;
 
-    group.is_valid()
+    // Kept on the nexthop too: a floating route installs its members one
+    // by one on this flag, the first time before any sync pass has copied
+    // it over from the group (`nexthop_uni_resolve`).
+    uni.valid = group.is_valid();
+    uni.valid
 }
 
 fn resolve_nexthop_multi(
@@ -2598,9 +2662,10 @@ fn rib_add(table: &mut PrefixMap<Ipv4Net, RibEntries>, prefix: &Ipv4Net, entry: 
     entries.push(entry);
 }
 
-/// The kernel priorities `entry` is installed with: its next hop's
-/// metric, as each install path sets `RTA_PRIORITY`. Linux reports an
-/// IPv6 priority of 0 as 1024.
+/// The kernel priorities `entry` is installed with, one for each of its
+/// paths in order (a floating route's members; a protected route's
+/// primary, then its backup): what each install path sets `RTA_PRIORITY`
+/// to, and what the kernel reports back. See [`path_priorities`].
 pub(crate) fn kernel_priorities(entry: &RibEntry, v6: bool) -> Vec<u32> {
     let metrics = match &entry.nexthop {
         Nexthop::Uni(uni) => vec![uni.metric],
@@ -2610,15 +2675,50 @@ pub(crate) fn kernel_priorities(entry: &RibEntry, v6: bool) -> Vec<u32> {
         Nexthop::Blackhole(metric) => vec![*metric],
         Nexthop::Link(_) => vec![entry.metric],
     };
-    metrics
-        .into_iter()
-        .map(|metric| kernel_priority(metric, v6))
-        .collect()
+    path_priorities(&metrics, v6)
 }
 
-/// The kernel priority a path installed at `metric` has.
-pub(crate) fn kernel_priority(metric: u32, v6: bool) -> u32 {
-    if v6 && metric == 0 { 1024 } else { metric }
+/// The kernel priority of each path of one route, from the paths' metrics.
+///
+/// IPv4 takes a metric as it is. IPv6 has no priority 0: Linux reads it as
+/// "none given" and installs the route at 1024.
+///
+/// - For a route with one priority that is only another number, and is
+///   left to the kernel.
+/// - Between the paths of a floating or protected route it is a different
+///   order: the path at metric 0, the preferred one, would sit behind
+///   every other path below 1024. There it is installed at 1, the lowest
+///   priority IPv6 has, and a path whose own metric that takes moves up by
+///   one, and so on. The priorities stay distinct and in the metrics'
+///   order, and a route with no path at metric 0 keeps its metrics.
+fn path_priorities(metrics: &[u32], v6: bool) -> Vec<u32> {
+    if !v6 {
+        return metrics.to_vec();
+    }
+    let mut tiers = metrics.to_vec();
+    tiers.sort_unstable();
+    tiers.dedup();
+    if tiers.len() < 2 {
+        return metrics
+            .iter()
+            .map(|&metric| if metric == 0 { 1024 } else { metric })
+            .collect();
+    }
+    let mut last = 0u32;
+    let priorities: Vec<(u32, u32)> = tiers
+        .into_iter()
+        .map(|metric| {
+            last = metric.max(last.saturating_add(1));
+            (metric, last)
+        })
+        .collect();
+    metrics
+        .iter()
+        .map(|metric| {
+            let tier = priorities.iter().find(|(m, _)| m == metric);
+            tier.map_or(*metric, |(_, priority)| *priority)
+        })
+        .collect()
 }
 
 /// The kernel priorities of `old` that installing `new` for the same
@@ -3398,6 +3498,7 @@ fn resolve_nexthop_uni_v6(
         if rib_nexthop() {
             println!("[resolve_nexthop_uni_v6] nmap.fetch returned None");
         }
+        uni.valid = false;
         return false;
     };
     if rib_nexthop() {
@@ -3428,7 +3529,9 @@ fn resolve_nexthop_uni_v6(
     uni.ifindex_origin = group.ifindex_origin;
     uni.ifindex_resolved = group.ifindex_resolved;
 
+    // Kept on the nexthop too, as in `resolve_nexthop_uni`.
     let valid = group.is_valid();
+    uni.valid = valid;
     if rib_nexthop() {
         println!(
             "[resolve_nexthop_uni_v6] returning uni.gid={} uni.ifindex={:?} valid={}",
@@ -4752,6 +4855,195 @@ mod tests {
         assert!(!entry.is_fib());
     }
 
+    /// A floating static, `203.0.113.0/24` through `192.0.2.1` and, at
+    /// metric 10, through `198.51.100.1`, with the connected routes its
+    /// gateways resolve on; `links` says which of the two are there.
+    fn floating_static(
+        links: [bool; 2],
+    ) -> (
+        super::RibEntry,
+        prefix_trie::PrefixMap<ipnet::Ipv4Net, crate::rib::RibEntries>,
+        crate::rib::NexthopMap,
+    ) {
+        use crate::rib::nexthop::NexthopUni;
+        use crate::rib::{Nexthop, NexthopList, NexthopMap, NexthopMember, RibType};
+        use std::net::IpAddr;
+
+        let table = floating_static_table(links);
+        let member = |gateway: &str, metric| {
+            let addr: IpAddr = gateway.parse().unwrap();
+            NexthopMember::Uni(NexthopUni {
+                addr,
+                addr_origin: Some(addr),
+                metric,
+                ..Default::default()
+            })
+        };
+        let mut entry = super::RibEntry::new(RibType::Static);
+        entry.nexthop = Nexthop::List(NexthopList {
+            nexthops: vec![member("192.0.2.1", 0), member("198.51.100.1", 10)],
+        });
+        let mut nmap = NexthopMap::default();
+        super::rib_resolve_nexthop(&mut entry, &table, &mut nmap, 254);
+        (entry, table, nmap)
+    }
+
+    fn floating_static_table(
+        links: [bool; 2],
+    ) -> prefix_trie::PrefixMap<ipnet::Ipv4Net, crate::rib::RibEntries> {
+        let mut table = prefix_trie::PrefixMap::new();
+        for (up, prefix, ifindex) in [
+            (links[0], "192.0.2.0/24", 2),
+            (links[1], "198.51.100.0/24", 3),
+        ] {
+            if up {
+                let mut connected = connected_entry(ifindex);
+                connected.set_selected(true);
+                connected.set_fib(true);
+                table.insert(prefix.parse().unwrap(), vec![connected]);
+            }
+        }
+        table
+    }
+
+    /// Which of a floating route's members resolve, in order.
+    fn members_valid(entry: &super::RibEntry) -> Vec<bool> {
+        let crate::rib::Nexthop::List(list) = &entry.nexthop else {
+            panic!("a floating route is a List");
+        };
+        list.nexthops.iter().map(|m| m.is_valid()).collect()
+    }
+
+    /// The FIB installs a floating route member by member, on each
+    /// member's `valid`, and the first install comes straight after the
+    /// resolve at add time: before any sync pass has copied the flag over
+    /// from the nexthop group. So that resolve must set it, and must
+    /// leave it clear on a member whose gateway is not reachable — a
+    /// floating static committed while its backup's link is down.
+    #[test]
+    fn a_floating_route_knows_its_live_members_when_it_is_added() {
+        let (entry, _, _) = floating_static([true, true]);
+        assert_eq!(members_valid(&entry), [true, true]);
+        assert!(entry.is_valid());
+
+        let (entry, _, _) = floating_static([true, false]);
+        assert_eq!(members_valid(&entry), [true, false]);
+        assert!(entry.is_valid(), "one member is enough for the entry");
+
+        let (entry, _, _) = floating_static([false, false]);
+        assert_eq!(members_valid(&entry), [false, false]);
+        assert!(!entry.is_valid());
+    }
+
+    /// A member whose gateway stops resolving while its link stays up
+    /// (the address it was on-link through is removed) keeps its kernel
+    /// route: the nexthop object outlives the connected route. The
+    /// re-resolve hands the member back as it was installed, nexthop id
+    /// included, so its route can be deleted; and only then, not for a
+    /// member that was already out of the kernel.
+    #[test]
+    fn a_floating_static_reports_the_member_it_lost_while_installed() {
+        use super::static_reresolve_entry_v4;
+
+        let (mut entry, table, mut nmap) = floating_static([true, true]);
+        entry.set_selected(true);
+        entry.set_fib(true);
+        let crate::rib::Nexthop::List(list) = &entry.nexthop else {
+            panic!("a floating route is a List");
+        };
+        let primary_gid = list.nexthops[0].iter_unis().next().unwrap().gid;
+        assert_ne!(primary_gid, 0);
+
+        // Nothing moved: nothing lost, and no reinstall.
+        let lost = static_reresolve_entry_v4(&mut entry, &table, &mut nmap, 254);
+        assert!(lost.is_empty());
+        assert!(entry.is_fib());
+
+        // The primary's connected route goes.
+        let table = floating_static_table([false, true]);
+        let lost = static_reresolve_entry_v4(&mut entry, &table, &mut nmap, 254);
+        assert_eq!(lost.len(), 1, "the primary's route is still in the kernel");
+        assert_eq!(lost[0].gid, primary_gid, "deleted by the id it names");
+        assert_eq!(lost[0].metric, 0);
+        assert_eq!(members_valid(&entry), [false, true]);
+        assert!(!entry.is_fib(), "pushed again on what is left");
+
+        // Still gone on the next pass: it is reported once.
+        entry.set_fib(true);
+        let lost = static_reresolve_entry_v4(&mut entry, &table, &mut nmap, 254);
+        assert!(lost.is_empty());
+        assert!(entry.is_fib());
+
+        // Back: pushed again, with nothing to delete.
+        let table = floating_static_table([true, true]);
+        let lost = static_reresolve_entry_v4(&mut entry, &table, &mut nmap, 254);
+        assert!(lost.is_empty());
+        assert_eq!(members_valid(&entry), [true, true]);
+        assert!(!entry.is_fib());
+    }
+
+    /// Not installed, so no kernel route of ours to delete: an entry
+    /// that lost the selection, or one whose push is still pending.
+    #[test]
+    fn a_floating_static_that_is_not_installed_loses_no_routes() {
+        use super::static_reresolve_entry_v4;
+
+        let gone = floating_static_table([false, true]);
+        let (mut entry, _, mut nmap) = floating_static([true, true]);
+        entry.set_selected(true);
+        entry.set_fib(false);
+        assert!(static_reresolve_entry_v4(&mut entry, &gone, &mut nmap, 254).is_empty());
+
+        let (mut entry, _, mut nmap) = floating_static([true, true]);
+        entry.set_selected(false);
+        entry.set_fib(false);
+        assert!(static_reresolve_entry_v4(&mut entry, &gone, &mut nmap, 254).is_empty());
+    }
+
+    /// A member's link going down takes its kernel route with it, while
+    /// the entry stays installed on the other member. When the link
+    /// returns, the sync pass must push the entry again or that member
+    /// stays out of the kernel for good — for any protocol's floating
+    /// route, not only a static's, whose re-resolve happens to do it.
+    #[test]
+    fn a_floating_route_is_pushed_again_when_a_member_comes_back() {
+        use super::entry_resolve;
+        use crate::rib::nexthop::GroupTrait;
+        use crate::rib::{Nexthop, RibType};
+
+        let (mut entry, _, mut nmap) = floating_static([true, true]);
+        // As an IGP would hand it over: no gateway of its own to re-resolve.
+        entry.rtype = RibType::Ospf;
+        entry.set_selected(true);
+        entry.set_fib(true);
+        let Nexthop::List(list) = &entry.nexthop else {
+            panic!("a floating route is a List");
+        };
+        let backup_gid = list.nexthops[1].iter_unis().next().unwrap().gid;
+
+        // Steady state: a sync pass changes nothing.
+        entry_resolve(&mut entry, &nmap, false);
+        assert!(entry.is_fib());
+
+        // The backup's link goes down: the entry stays installed.
+        nmap.get_mut(backup_gid).unwrap().set_valid(false);
+        entry_resolve(&mut entry, &nmap, true);
+        assert_eq!(members_valid(&entry), [true, false]);
+        assert!(entry.is_valid());
+        assert!(entry.is_fib(), "the primary is still in the kernel");
+
+        // And comes back.
+        nmap.get_mut(backup_gid).unwrap().set_valid(true);
+        entry_resolve(&mut entry, &nmap, false);
+        assert_eq!(members_valid(&entry), [true, true]);
+        assert!(!entry.is_fib(), "the backup's route has to be put back");
+
+        // Once: the next pass leaves the reinstalled entry alone.
+        entry.set_fib(true);
+        entry_resolve(&mut entry, &nmap, false);
+        assert!(entry.is_fib());
+    }
+
     /// A route replacing another for the same prefix takes over the
     /// kernel route at each of its own priorities in place, so only the
     /// old route's other priorities are left to delete.
@@ -4801,5 +5093,156 @@ mod tests {
         let v6 = |metric| entry(Nexthop::Uni(uni("2001:db8::1", metric)));
         assert!(uncovered_priorities(&v6(0), &v6(1024), true).is_empty());
         assert_eq!(uncovered_priorities(&v6(0), &v6(20), true), vec![1024]);
+    }
+
+    /// IPv6 has no kernel priority 0: Linux installs such a route at
+    /// 1024. Between the paths of one route that is another order, the
+    /// path at metric 0 behind every backup below 1024, so there it goes
+    /// in at 1 and whatever is in its way moves up.
+    #[test]
+    fn an_ipv6_routes_paths_keep_their_metrics_order_in_the_kernel() {
+        use super::path_priorities;
+        // IPv4 takes the metrics as they are.
+        assert_eq!(path_priorities(&[0, 10], false), [0, 10]);
+        // One priority: left to the kernel.
+        assert_eq!(path_priorities(&[0], true), [1024]);
+        assert_eq!(path_priorities(&[20], true), [20]);
+        assert_eq!(path_priorities(&[0, 0], true), [1024, 1024]);
+        // Several: the path at 0 first, as configured.
+        assert_eq!(path_priorities(&[0, 10], true), [1, 10]);
+        assert_eq!(path_priorities(&[0, 2000], true), [1, 2000]);
+        // A path whose metric that takes moves up by one, and so on.
+        assert_eq!(path_priorities(&[0, 1, 10], true), [1, 2, 10]);
+        assert_eq!(path_priorities(&[0, 1, 2, 5], true), [1, 2, 3, 5]);
+        assert_eq!(
+            path_priorities(&[0, u32::MAX - 1, u32::MAX], true),
+            [1, u32::MAX - 1, u32::MAX]
+        );
+        // Nothing at 0: the metrics, whatever their order.
+        assert_eq!(path_priorities(&[5, 10], true), [5, 10]);
+        assert_eq!(path_priorities(&[13, 12], true), [13, 12]);
+        // By path, not by rank.
+        assert_eq!(path_priorities(&[10, 0], true), [10, 1]);
+    }
+
+    /// What the mapping means for a route that changes shape: the routes
+    /// to delete are told by kernel priority, so a static that gains or
+    /// loses its backup leaves nothing behind at the priority its primary
+    /// had before.
+    #[test]
+    fn an_ipv6_static_changing_shape_leaves_no_route_behind() {
+        use super::super::entry::RibEntry;
+        use super::super::nexthop::{NexthopProtect, NexthopUni};
+        use super::super::{Nexthop, NexthopList, NexthopMember, RibType};
+        use super::{kernel_priorities, uncovered_priorities};
+
+        let member = |metric| {
+            NexthopMember::Uni(NexthopUni {
+                addr: "2001:db8::1".parse().unwrap(),
+                metric,
+                ..Default::default()
+            })
+        };
+        let entry = |nexthop: Nexthop| {
+            let mut e = RibEntry::new(RibType::Static);
+            e.nexthop = nexthop;
+            e
+        };
+        let floating = |metrics: &[u32]| {
+            entry(Nexthop::List(NexthopList {
+                nexthops: metrics.iter().map(|&m| member(m)).collect(),
+            }))
+        };
+        let single = floating(&[0]);
+        let pair = floating(&[0, 10]);
+        let triple = floating(&[0, 1, 10]);
+        assert_eq!(kernel_priorities(&single, true), [1024]);
+        assert_eq!(kernel_priorities(&pair, true), [1, 10]);
+        assert_eq!(kernel_priorities(&triple, true), [1, 2, 10]);
+        assert_eq!(kernel_priorities(&pair, false), [0, 10]);
+
+        // A backup is added: the primary moves from 1024 to 1.
+        assert_eq!(uncovered_priorities(&single, &pair, true), [1024]);
+        // And removed again.
+        assert_eq!(uncovered_priorities(&pair, &single, true), [1, 10]);
+        // A tier in between: nothing moves.
+        assert!(uncovered_priorities(&pair, &triple, true).is_empty());
+        assert_eq!(uncovered_priorities(&triple, &pair, true), [2]);
+
+        // A protected route's two paths go by the same rule.
+        let protected = entry(Nexthop::Protect(NexthopProtect {
+            primary: member(0),
+            backup: member(1),
+            gid: 0,
+        }));
+        assert_eq!(kernel_priorities(&protected, true), [1, 2]);
+        assert_eq!(kernel_priorities(&protected, false), [0, 1]);
+    }
+
+    /// The IPv6 twin of the lost-member test: the route to delete is at
+    /// the member's kernel priority, which for the member at metric 0 of
+    /// a floating route is 1. Named at its metric, the delete would match
+    /// by nexthop id alone at any priority; a member moved up from its
+    /// metric would not be matched at all.
+    #[test]
+    fn an_ipv6_floating_static_loses_a_member_at_its_kernel_priority() {
+        use super::static_reresolve_entry_v6;
+        use crate::rib::nexthop::NexthopUni;
+        use crate::rib::{Nexthop, NexthopList, NexthopMap, NexthopMember, RibEntries, RibType};
+        use ipnet::Ipv6Net;
+        use prefix_trie::PrefixMap;
+        use std::net::IpAddr;
+
+        let table = |links: [bool; 3]| {
+            let mut table: PrefixMap<Ipv6Net, RibEntries> = PrefixMap::new();
+            for (up, prefix, ifindex) in [
+                (links[0], "2001:db8:a::/64", 2),
+                (links[1], "2001:db8:b::/64", 3),
+                (links[2], "2001:db8:c::/64", 4),
+            ] {
+                if up {
+                    let mut connected = connected_entry(ifindex);
+                    connected.set_selected(true);
+                    connected.set_fib(true);
+                    table.insert(prefix.parse().unwrap(), vec![connected]);
+                }
+            }
+            table
+        };
+        let member = |gateway: &str, metric| {
+            let addr: IpAddr = gateway.parse().unwrap();
+            NexthopMember::Uni(NexthopUni {
+                addr,
+                addr_origin: Some(addr),
+                metric,
+                ..Default::default()
+            })
+        };
+        let mut entry = super::RibEntry::new(RibType::Static);
+        entry.nexthop = Nexthop::List(NexthopList {
+            nexthops: vec![
+                member("2001:db8:a::1", 0),
+                member("2001:db8:b::1", 1),
+                member("2001:db8:c::1", 10),
+            ],
+        });
+        let mut nmap = NexthopMap::default();
+        let all = table([true, true, true]);
+        super::rib_resolve_nexthop_v6(&mut entry, &all, &mut nmap, 254);
+        assert_eq!(members_valid(&entry), [true, true, true]);
+        entry.set_selected(true);
+        entry.set_fib(true);
+        let gids: Vec<usize> = match &entry.nexthop {
+            Nexthop::List(list) => list.iter_unis().map(|uni| uni.gid).collect(),
+            _ => unreachable!(),
+        };
+
+        // The first two gateways stop resolving.
+        let lost =
+            static_reresolve_entry_v6(&mut entry, &table([false, false, true]), &mut nmap, 254);
+        let lost: Vec<(usize, u32)> = lost.iter().map(|uni| (uni.gid, uni.metric)).collect();
+        assert_eq!(lost, [(gids[0], 1), (gids[1], 2)]);
+        assert_eq!(members_valid(&entry), [false, false, true]);
+        assert!(!entry.is_fib());
     }
 }

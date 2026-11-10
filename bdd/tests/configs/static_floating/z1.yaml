@@ -1,0 +1,34 @@
+# z1 — one router, two uplinks, one floating static per family: the
+# primary through g1 on wan0 at the default metric, the backup through
+# g2 on wan1 at metric 10.
+interface:
+- if-name: wan0
+  ipv4:
+    address:
+    - 192.0.2.2/24
+  ipv6:
+    address:
+    - 2001:db8:a::2/64
+- if-name: wan1
+  ipv4:
+    address:
+    - 198.51.100.2/24
+  ipv6:
+    address:
+    - 2001:db8:b::2/64
+router:
+  static:
+    ipv4:
+      route:
+      - prefix: 203.0.113.0/24
+        nexthop:
+        - address: 192.0.2.1
+        - address: 198.51.100.1
+          metric: 10
+    ipv6:
+      route:
+      - prefix: 2001:db8:113::/48
+        nexthop:
+        - address: 2001:db8:a::1
+        - address: 2001:db8:b::1
+          metric: 10

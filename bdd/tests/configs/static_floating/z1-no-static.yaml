@@ -1,0 +1,16 @@
+# z1.yaml without the static routes.
+interface:
+- if-name: wan0
+  ipv4:
+    address:
+    - 192.0.2.2/24
+  ipv6:
+    address:
+    - 2001:db8:a::2/64
+- if-name: wan1
+  ipv4:
+    address:
+    - 198.51.100.2/24
+  ipv6:
+    address:
+    - 2001:db8:b::2/64
