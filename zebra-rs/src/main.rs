@@ -28,6 +28,7 @@ mod isis;
 mod mup_c;
 mod nd;
 mod policy;
+mod resolver;
 use policy::Policy;
 mod rib;
 use rib::{LogFormatType, LogOutputType, Rib, logging_config, tracing_set};

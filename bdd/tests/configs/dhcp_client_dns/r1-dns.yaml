@@ -1,0 +1,10 @@
+# r1: a lease on wan0, whose name servers the host uses.
+system:
+  name-server:
+    dhcp:
+    - wan0
+interface:
+- if-name: wan0
+  ipv4:
+    address:
+    - dhcp

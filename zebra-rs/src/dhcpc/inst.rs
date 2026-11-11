@@ -8,7 +8,7 @@
 //! the RIB, the lease to disk.
 
 use std::collections::{BTreeMap, HashMap};
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use dhcp_packet::v4::Packet;
@@ -21,6 +21,7 @@ use crate::config::{
 };
 use crate::context::Task;
 use crate::fib::AddrOpts;
+use crate::resolver::{LinkDns, Report, ResolverTx, Source};
 use crate::rib::Message;
 use crate::rib::api::RibRx;
 use crate::rib::client::RibClient;
@@ -161,6 +162,10 @@ pub struct Dhcpc {
     release_poll: Option<Instant>,
     /// The DHCPv6 clients ([`super::v6::inst`]).
     pub(super) v6: V6,
+    /// Where the leases' name servers are reported ([`crate::resolver`]),
+    /// and what has been, by interface (`sync_dns`).
+    resolver: Option<ResolverTx>,
+    reported_dns: BTreeMap<String, LinkDns>,
 }
 
 pub(super) fn unix_now() -> u64 {
@@ -204,10 +209,18 @@ impl Dhcpc {
             touched: Vec::new(),
             release_poll: None,
             v6: V6::new(),
+            resolver: None,
+            reported_dns: BTreeMap::new(),
         };
         dhcpc.callback_build();
         dhcpc.show_build();
         dhcpc
+    }
+
+    /// Report the leases' name servers and search domains to the resolver
+    /// task, which decides what the host does with them.
+    pub fn set_resolver(&mut self, resolver: ResolverTx) {
+        self.resolver = Some(resolver);
     }
 
     async fn event_loop(&mut self) {
@@ -353,7 +366,7 @@ impl Dhcpc {
                 if self.is_releasing(&name) {
                     // The old identity's client only has a RELEASE left
                     // to send, which the link coming up may now allow.
-                    self.sync_routes();
+                    self.publish();
                     self.pump_release(&name);
                 } else {
                     self.drive(&name, Event::Carrier(up));
@@ -548,7 +561,7 @@ impl Dhcpc {
         if iface.cfg != IfConfig::default() || iface.client.is_some() {
             self.ifaces.insert(name.to_string(), iface);
         }
-        self.sync_routes();
+        self.publish();
         self.pump_release(name);
     }
 
@@ -758,7 +771,7 @@ impl Dhcpc {
         iface.obtained = None;
         iface.close_all();
         self.store.remove(name);
-        self.sync_routes();
+        self.publish();
     }
 
     /// Feed `event` to `name`'s client and carry out what it asks for.
@@ -779,7 +792,7 @@ impl Dhcpc {
             self.perform(name, ifindex, &mut iface, actions);
         }
         self.ifaces.insert(name.to_string(), iface);
-        self.sync_routes();
+        self.publish();
     }
 
     fn perform(&mut self, name: &str, ifindex: u32, iface: &mut Iface, actions: Vec<Action>) {
@@ -962,6 +975,14 @@ impl Dhcpc {
             .map(|link| link.name.clone())
     }
 
+    /// What the leases held now give, to those who use it: the routes to
+    /// the RIB, the name servers to the resolver task. After every event
+    /// that may have changed a lease or its link.
+    fn publish(&mut self) {
+        self.sync_routes();
+        self.sync_dns();
+    }
+
     /// Hand the RIB whatever the leases held now route. A lease on a link
     /// that is down keeps its address but routes nothing: that is what
     /// lets a backup uplink at a higher distance take over (see
@@ -988,6 +1009,48 @@ impl Dhcpc {
         for message in self.routes.sync(wanted) {
             let _ = self.rib.send(message);
         }
+    }
+
+    /// Tell the resolver task what the leases held now say of name
+    /// servers: every change, once. Whether the host uses them is its
+    /// configuration (`system name-server dhcp <if>`), not ours.
+    ///
+    /// A lease says it for as long as it is held, link up or down: the
+    /// system resolver itself leaves a link without carrier alone. A
+    /// saved lease on its way back to the server (`begin_release`) is
+    /// held only to be released, and says nothing.
+    fn sync_dns(&mut self) {
+        let Some(resolver) = &self.resolver else {
+            return;
+        };
+        let mut now = BTreeMap::new();
+        for (name, iface) in &self.ifaces {
+            if iface.releasing.is_some() {
+                continue;
+            }
+            if let Some(dns) = iface.bound.as_ref().and_then(lease_dns) {
+                now.insert(name.clone(), dns);
+            }
+        }
+        for name in self.reported_dns.keys() {
+            if !now.contains_key(name) {
+                let _ = resolver.send(Report {
+                    ifname: name.clone(),
+                    source: Source::Dhcp4,
+                    dns: None,
+                });
+            }
+        }
+        for (name, dns) in &now {
+            if self.reported_dns.get(name) != Some(dns) {
+                let _ = resolver.send(Report {
+                    ifname: name.clone(),
+                    source: Source::Dhcp4,
+                    dns: Some(dns.clone()),
+                });
+            }
+        }
+        self.reported_dns = now;
     }
 
     fn named_iface(&self, mut args: Args) -> Result<String, String> {
@@ -1051,6 +1114,24 @@ impl Dhcpc {
         self.ifaces.insert(name.to_string(), iface);
         self.reconcile(name);
     }
+}
+
+/// What a lease says of name servers, if anything: the servers (option
+/// 6), and as search domains the domain name (option 15, which some
+/// servers fill with several names) ahead of the search list (option
+/// 119).
+fn lease_dns(lease: &Lease) -> Option<LinkDns> {
+    let dns = LinkDns {
+        servers: lease.dns_servers.iter().copied().map(IpAddr::V4).collect(),
+        domains: lease
+            .domain_name
+            .iter()
+            .flat_map(|names| names.split_whitespace())
+            .map(str::to_string)
+            .chain(lease.domain_search.iter().cloned())
+            .collect(),
+    };
+    (dns != LinkDns::default()).then_some(dns)
 }
 
 /// An identity for a log line: the hardware address and the client
@@ -1320,5 +1401,174 @@ mod tests {
         // Without a pending release there is nothing to poll for.
         b.dhcpc.release(verb(IF));
         assert_eq!(b.dhcpc.next_wakeup(t0 + RELEASE_POLL * 3), None);
+    }
+
+    /// `lease()`, with what a server says of name resolution.
+    fn lease_with_dns() -> Lease {
+        Lease {
+            dns_servers: vec![
+                Ipv4Addr::new(198, 51, 100, 53),
+                Ipv4Addr::new(198, 51, 100, 54),
+            ],
+            domain_name: Some("example.com".to_string()),
+            domain_search: vec!["corp.example".to_string()],
+            ..lease()
+        }
+    }
+
+    fn its_dns() -> LinkDns {
+        LinkDns {
+            servers: vec![
+                "198.51.100.53".parse().unwrap(),
+                "198.51.100.54".parse().unwrap(),
+            ],
+            domains: vec!["example.com".to_string(), "corp.example".to_string()],
+        }
+    }
+
+    /// Take the resolver's place.
+    fn resolver(b: &mut Bench) -> UnboundedReceiver<Report> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        b.dhcpc.set_resolver(tx);
+        rx
+    }
+
+    /// What the task reported of `IF` since the last call.
+    fn reported(rx: &mut UnboundedReceiver<Report>) -> Vec<Option<LinkDns>> {
+        let mut out = Vec::new();
+        while let Ok(report) = rx.try_recv() {
+            assert_eq!((report.ifname.as_str(), report.source), (IF, Source::Dhcp4));
+            out.push(report.dns);
+        }
+        out
+    }
+
+    /// A lease on disk taken as who the interface is: the task resumes
+    /// it, and holds it.
+    fn with_resumed_lease(b: &mut Bench, lease: &Lease) {
+        b.dhcpc
+            .store
+            .save(IF, (MAC, None), unix_now(), lease)
+            .unwrap();
+        b.dhcpc
+            .ifaces
+            .entry(IF.to_string())
+            .or_default()
+            .cfg
+            .enabled = true;
+        b.dhcpc.reconcile(IF);
+        assert!(b.dhcpc.ifaces[IF].bound.is_some());
+    }
+
+    #[test]
+    fn a_lease_says_its_servers_and_its_domains() {
+        assert_eq!(lease_dns(&lease()), None);
+        assert_eq!(lease_dns(&lease_with_dns()), Some(its_dns()));
+        // Option 15 holding several names, as some servers send it.
+        let several = Lease {
+            domain_name: Some("example.com  example.net".to_string()),
+            domain_search: vec![],
+            ..lease_with_dns()
+        };
+        assert_eq!(
+            lease_dns(&several).unwrap().domains,
+            ["example.com", "example.net"]
+        );
+        // Domains without servers are still said: what they are worth
+        // is the resolver's to judge.
+        let domains_only = Lease {
+            dns_servers: vec![],
+            ..lease_with_dns()
+        };
+        assert_eq!(
+            lease_dns(&domains_only).unwrap().domains,
+            ["example.com", "corp.example"]
+        );
+    }
+
+    /// The resolver hears of a lease's name servers when the lease is
+    /// held, once, and that they are gone when it is given up.
+    #[tokio::test]
+    async fn a_held_lease_reports_its_name_servers_until_it_ends() {
+        let mut b = bench("dns-held", true);
+        let mut rx = resolver(&mut b);
+        with_resumed_lease(&mut b, &lease_with_dns());
+        assert_eq!(reported(&mut rx), [Some(its_dns())]);
+
+        // Held through a carrier loss, and nothing is said twice.
+        b.dhcpc.process_rib_msg(RibRx::LinkDown(IFINDEX));
+        assert!(b.dhcpc.ifaces[IF].bound.is_some());
+        b.dhcpc.process_rib_msg(RibRx::LinkUp(IFINDEX));
+        b.dhcpc.reconcile(IF);
+        assert_eq!(reported(&mut rx), []);
+
+        b.dhcpc.release(verb(IF));
+        assert_eq!(reported(&mut rx), [None]);
+        // Released, there is nothing more to take back.
+        b.dhcpc.reconcile(IF);
+        assert_eq!(reported(&mut rx), []);
+    }
+
+    #[tokio::test]
+    async fn deleting_the_configuration_takes_the_name_servers_back() {
+        let mut b = bench("dns-config", true);
+        let mut rx = resolver(&mut b);
+        with_resumed_lease(&mut b, &lease_with_dns());
+        reported(&mut rx);
+        b.dhcpc.ifaces.get_mut(IF).unwrap().cfg.enabled = false;
+        b.dhcpc.reconcile(IF);
+        assert!(!b.dhcpc.ifaces.contains_key(IF));
+        assert_eq!(reported(&mut rx), [None]);
+    }
+
+    #[tokio::test]
+    async fn a_deleted_link_takes_the_name_servers_back() {
+        let mut b = bench("dns-link", true);
+        let mut rx = resolver(&mut b);
+        with_resumed_lease(&mut b, &lease_with_dns());
+        reported(&mut rx);
+        b.dhcpc.process_rib_msg(RibRx::LinkDel(IFINDEX));
+        assert_eq!(reported(&mut rx), [None]);
+    }
+
+    /// A lease without name servers reports nothing, and one that comes
+    /// to have them does.
+    #[tokio::test]
+    async fn a_lease_without_name_servers_reports_nothing() {
+        let mut b = bench("dns-none", true);
+        let mut rx = resolver(&mut b);
+        with_resumed_lease(&mut b, &lease());
+        assert_eq!(reported(&mut rx), []);
+        // The server names some at a renewal.
+        b.dhcpc.ifaces.get_mut(IF).unwrap().bound = Some(lease_with_dns());
+        b.dhcpc.publish();
+        assert_eq!(reported(&mut rx), [Some(its_dns())]);
+        // And others at the next.
+        let mut other = lease_with_dns();
+        other.dns_servers.truncate(1);
+        b.dhcpc.ifaces.get_mut(IF).unwrap().bound = Some(other);
+        b.dhcpc.publish();
+        let mut dns = its_dns();
+        dns.servers.truncate(1);
+        assert_eq!(reported(&mut rx), [Some(dns)]);
+    }
+
+    /// A saved lease resumed only to be released as who took it is on its
+    /// way out: the host is not pointed at its name servers.
+    #[tokio::test]
+    async fn a_lease_on_its_way_back_reports_no_name_servers() {
+        let mut b = bench("dns-releasing", false);
+        let mut rx = resolver(&mut b);
+        b.dhcpc
+            .store
+            .save(IF, (MAC, Some(&OLD)), unix_now(), &lease_with_dns())
+            .unwrap();
+        let cfg = &mut b.dhcpc.ifaces.entry(IF.to_string()).or_default().cfg;
+        cfg.enabled = true;
+        cfg.client_id = Some(NEW.to_vec());
+        b.dhcpc.reconcile(IF);
+        assert!(b.dhcpc.is_releasing(IF));
+        assert!(b.dhcpc.ifaces[IF].bound.is_some());
+        assert_eq!(reported(&mut rx), []);
     }
 }

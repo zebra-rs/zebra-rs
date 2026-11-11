@@ -19,6 +19,10 @@
 # destination beyond the gateway, reachable only through the default
 # route the lease gives. dnsmasq's shortest lease is two minutes.
 #
+# The DHCPv4 lease names 198.51.100.53 as its name server, or the address
+# in DHCP_BDD_DNS: a server that changes its mind is one stopped and
+# started again with another.
+#
 # `start6` is the DHCPv6 server, and the router: dnsmasq also sends the
 # Router Advertisements. They give the prefix as on-link and as
 # autonomous (`slaac`), so a client may form a SLAAC address beside the
@@ -46,7 +50,7 @@ start)
     dnsmasq --conf-file=/dev/null --port=0 --interface="$iface" --bind-interfaces \
         --dhcp-range="$first,$last,255.255.255.0,$lease" \
         --dhcp-option=option:router,"${addr%/*}" \
-        --dhcp-option=option:dns-server,198.51.100.53 \
+        --dhcp-option=option:dns-server,"${DHCP_BDD_DNS:-198.51.100.53}" \
         --dhcp-option=option:domain-name,example.com \
         --dhcp-authoritative --log-dhcp --log-facility="$dir/dnsmasq.log" \
         --pid-file="$dir/dnsmasq.pid" --dhcp-leasefile="$dir/leases" --user=root "$@"
