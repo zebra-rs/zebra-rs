@@ -992,8 +992,11 @@ persistence, show and the BDD features are the rest of P4.
     it went out. When an identity association its server had no record
     of is given again, by whatever server, it is no longer that
     Request's to restore or to drop, and a Request with nothing left to
-    recover is over. A Request names what is held when it is sent, not
-    when it first went out;
+    recover is over. Nor can a late Reply to the Request take it away,
+    though its own server gave it: the Request no longer names it, and
+    what a Reply says of it is an answer to a question from before. A
+    Request names what is held when it is sent, not when it first went
+    out;
   - a Release goes to each server for its own, one after another, and a
     Decline to the server of the addresses. A Decline is exchanged
     alone: the Renews under way begin again when it is over, which is

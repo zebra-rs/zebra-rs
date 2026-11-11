@@ -545,6 +545,22 @@ impl Ias {
         !self.ia_na && self.ia_pd.is_empty()
     }
 
+    /// Add those in `other`.
+    fn include(&mut self, other: &Ias) {
+        self.ia_na |= other.ia_na;
+        for iaid in &other.ia_pd {
+            if !self.ia_pd.contains(iaid) {
+                self.ia_pd.push(*iaid);
+            }
+        }
+    }
+
+    /// Take those in `other` out.
+    fn exclude(&mut self, other: &Ias) {
+        self.ia_na &= !other.ia_na;
+        self.ia_pd.retain(|iaid| !other.ia_pd.contains(iaid));
+    }
+
     /// Add the ones `grant` speaks of.
     fn add(&mut self, grant: &Grant<'_>) {
         self.ia_na |= grant.ia_na.is_some();
@@ -577,6 +593,10 @@ struct Server {
     /// A Request after NoBinding: the identity associations the server
     /// had no record of.
     lost: Ias,
+    /// With a lease held: the identity associations another exchange has
+    /// given something of since this one went out. It has no say about
+    /// them any more (`restored`).
+    settled: Ias,
 }
 
 impl Renewal {
@@ -598,6 +618,7 @@ impl Server {
             count: 0,
             named: Named::default(),
             lost: Ias::default(),
+            settled: Ias::default(),
         }
     }
 }
@@ -1319,6 +1340,7 @@ impl Client {
                 count,
                 named,
                 lost: Ias::default(),
+                settled: Ias::default(),
             });
         }
         // Advertises are collected until the first retransmission is due.
@@ -1645,15 +1667,16 @@ impl Client {
         given
     }
 
-    /// Identity associations have been given again, by whatever server. A
-    /// Request that is out because its server had no record of one of
-    /// them has no say about it any more: what that server gives or does
-    /// not give must not undo what is held now.
+    /// Identity associations have been given again, by whatever server.
+    /// The exchanges that are out have no say about them any more: an
+    /// answer to one of those is to a question from before, and must not
+    /// undo what is held now. A Request is no longer about one of them
+    /// that its server had no record of, and a late Reply to it cannot
+    /// take one of them away either, though its own server gave it.
     fn restored(&mut self, given: &Ias) {
         for renewal in &mut self.renewals {
-            let lost = &mut renewal.server.lost;
-            lost.ia_na &= !given.ia_na;
-            lost.ia_pd.retain(|iaid| !given.ia_pd.contains(iaid));
+            renewal.server.lost.exclude(given);
+            renewal.server.settled.include(given);
         }
     }
 
@@ -2164,7 +2187,9 @@ impl Client {
     }
 
     /// The identity associations the current state's message says nothing
-    /// of: those leased from another server than the one it is for.
+    /// of, and its Reply has no say about: those leased from another
+    /// server than the one it is for, and those another exchange has
+    /// given something of since this one went out.
     ///
     /// That is in a Renew, and in the Request that follows NoBinding,
     /// which does speak of what its server had no record of. No other
@@ -2172,7 +2197,11 @@ impl Client {
     fn left_out(&self) -> Ias {
         let for_one = matches!(self.state, State::Renewing | State::Requesting);
         match (&self.held, &self.server) {
-            (Some(held), Some(server)) if for_one => held.others(&server.id, &server.lost),
+            (Some(held), Some(server)) if for_one => {
+                let mut left_out = held.others(&server.id, &server.lost);
+                left_out.include(&server.settled);
+                left_out
+            }
             _ => Ias::default(),
         }
     }
@@ -6859,6 +6888,73 @@ mod tests {
         };
         assert_eq!(lease.ia_na, None);
         assert_eq!(lease.ia_pd[0].server_id, OTHER_DUID);
+
+        // The server itself gives the address again, in answer to the
+        // Rebind, with its Request still out for the prefix. The Request
+        // is no longer about the address: it does not name it, and a
+        // late answer to it that takes the address away is an answer to
+        // a question from before.
+        let mut c = client_asking(both(), Options::default());
+        let lease = vec![
+            ia(10, 20, &[(ADDRESS, 3600, 7200)]),
+            ia_pd(PD, 10, 20, &[(DELEGATED, 3600, 7200)]),
+        ];
+        acquire_all(&mut c, Instant::now(), lease);
+        let (request, rebind, t) = to_rebind(&mut c);
+        deliver(&mut c, &answer(&rebind, msg::REPLY, vec![one_address()]), t);
+        assert_eq!(c.state(), State::Requesting);
+        let again = loop {
+            let (_, actions) = fire(&mut c);
+            if sent(&actions).msg_type == msg::REQUEST {
+                break sent(&actions).clone();
+            }
+        };
+        assert_eq!(again.transaction_id, request.transaction_id);
+        assert!(again.option(opt::IA_NA).is_none());
+        assert_eq!(pds_of(&again), [named(PD, DELEGATED)]);
+        let late = vec![
+            ia(0, 0, &[(ADDRESS, 0, 0)]),
+            ia_pd_status(PD, status::NO_PREFIX_AVAIL),
+        ];
+        let actions = deliver(&mut c, &answer(&request, msg::REPLY, late), t);
+        let [Action::Log(_), Action::Bind { lease, fresh: true }] = &actions[..] else {
+            panic!("{actions:?}")
+        };
+        assert!(lease.ia_pd.is_empty());
+        assert_eq!(
+            lease.ia_na.as_ref().unwrap().addresses,
+            [address(ADDRESS, 3600, 7200)]
+        );
+        assert_eq!(c.state(), State::Bound);
+
+        // The other way about: the prefix given again by the server
+        // itself, and taken away by a late answer to the Request.
+        let mut c = client_asking(both(), Options::default());
+        let lease = vec![
+            ia(10, 20, &[(ADDRESS, 3600, 7200)]),
+            ia_pd(PD, 10, 20, &[(DELEGATED, 3600, 7200)]),
+        ];
+        acquire_all(&mut c, Instant::now(), lease);
+        let (request, rebind, t) = to_rebind(&mut c);
+        deliver(&mut c, &answer(&rebind, msg::REPLY, vec![one_prefix()]), t);
+        let again = loop {
+            let (_, actions) = fire(&mut c);
+            if sent(&actions).msg_type == msg::REQUEST {
+                break sent(&actions).clone();
+            }
+        };
+        assert_eq!(addresses_of(&again), [ADDRESS]);
+        assert!(pds_of(&again).is_empty());
+        let late = vec![
+            ia_status(status::NO_ADDRS_AVAIL),
+            ia_pd(PD, 0, 0, &[(DELEGATED, 0, 0)]),
+        ];
+        let actions = deliver(&mut c, &answer(&request, msg::REPLY, late), t);
+        let [Action::Log(_), Action::Bind { lease, fresh: true }] = &actions[..] else {
+            panic!("{actions:?}")
+        };
+        assert_eq!(lease.ia_na, None);
+        assert_eq!(lease.ia_pd[0].prefixes, [prefix(DELEGATED, 3600, 7200)]);
 
         // Two servers have no record of the address, and each is sent a
         // Request. What one gives, the other's refusal does not undo.
