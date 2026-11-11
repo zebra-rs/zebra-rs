@@ -32,7 +32,7 @@ use crate::fib::AddrOpts;
 use crate::rib::Message;
 use crate::rib::link::{AddrOrigin, LinkAddr};
 
-use super::client::{Action, Address, Client, Event, Lease, Options, State};
+use super::client::{Action, Address, Asks, Client, Event, Lease, Options, State};
 use super::socket::{self, Input6, Socket6};
 
 /// `interface <if> ipv6 address dhcpv6` and `… ipv6 dhcpv6-options …`.
@@ -53,15 +53,23 @@ impl IfConfig6 {
         self.address || self.parameters_only
     }
 
-    /// An address is asked for whenever `address dhcpv6` is there; a
-    /// commit holding `parameters-only` beside it is refused
-    /// (`config::check`), and a startup config that does is taken this
-    /// way.
     fn options(&self) -> Options {
         Options {
-            parameters_only: self.parameters_only && !self.address,
             rapid_commit: self.rapid_commit,
             no_release: self.no_release,
+        }
+    }
+
+    /// What the client of interface `name` asks for: an address with
+    /// `address dhcpv6`, and nothing but the other configuration with
+    /// `parameters-only` alone. An address is asked for whenever
+    /// `address dhcpv6` is there: a commit holding `parameters-only`
+    /// beside it is refused (`config::check`), and a startup config that
+    /// does is taken this way.
+    fn asks(&self, name: &str) -> Asks {
+        Asks {
+            ia_na: self.address.then(|| ident::iaid(name)),
+            ia_pd: Vec::new(),
         }
     }
 }
@@ -399,27 +407,25 @@ impl Dhcpc {
             let options = iface.cfg.options();
             let identity = if wanted {
                 self.duid_for(&iface.cfg, mac)
-                    .map(|duid| (duid, ident::iaid(name)))
+                    .map(|duid| (duid, iface.cfg.asks(name)))
             } else {
                 None
             };
-            // A client is one identity and one protocol
-            // (`Client::identity`, `Client::set_options`). When the
-            // configuration gives the interface another, or takes the
-            // client away, the lease goes back as who took it.
+            // A client is one DUID and one set of things asked for
+            // (`Client::identity`). When the configuration gives the
+            // interface another, or takes the client away, the lease
+            // goes back as who took it.
             let stale = match (&iface.session, &identity) {
                 (None, _) => false,
                 (Some(_), None) => !wanted,
-                (Some(session), Some((duid, iaid))) => {
-                    session.client.identity() != (duid.as_slice(), *iaid)
-                        || session.client.options().parameters_only != options.parameters_only
+                (Some(session), Some((duid, asks))) => {
+                    session.client.identity() != (duid.as_slice(), asks)
                 }
             };
             // A client that has not been stopped yet stops under the
             // options as they are now: `no-release` set in the commit
             // that takes the client away is meant for that client.
-            // (`set_options` leaves the mode alone, and the identity is
-            // not an option.)
+            // (What it asks for and as whom are not options.)
             if let Some(retiring) = iface.retiring.as_mut()
                 && !retiring.stopped
             {
@@ -428,7 +434,7 @@ impl Dhcpc {
             if stale {
                 if wanted {
                     tracing::info!(
-                        "dhcpv6 client: {name}: the client's identity or its mode changed; what the old one holds is released"
+                        "dhcpv6 client: {name}: the client's identity or what it asks for changed; what the old one holds is released"
                     );
                 } else {
                     tracing::info!("dhcpv6 client: {name}: stopped");
@@ -498,21 +504,22 @@ impl Dhcpc {
         name: &str,
         ifindex: u32,
         iface: &mut Iface6,
-        (duid, iaid): (Vec<u8>, u32),
+        (duid, asks): (Vec<u8>, Asks),
         options: Options,
         now: Instant,
     ) {
         let unix = unix_now();
         let mut resume = None;
         if let Some(kept) = self.store.load6(name, unix) {
-            let same = (kept.duid.as_slice(), kept.iaid) == (duid.as_slice(), iaid);
-            if same && !options.parameters_only {
+            // The file holds an address lease, under the IAID of its
+            // IA_NA.
+            if kept.duid == duid && asks.ia_na == Some(kept.iaid) {
                 resume = Some(kept);
             } else {
                 self.retire_saved6(name, ifindex, iface, kept, now);
             }
         }
-        let client = Client::new(duid, iaid, options, Box::new(rand::random::<u32>));
+        let client = Client::new(duid, asks, options, Box::new(rand::random::<u32>));
         let mut session = Session {
             client,
             bound: None,
@@ -579,7 +586,11 @@ impl Dhcpc {
             no_release: iface.cfg.no_release,
             ..Options::default()
         };
-        let mut client = Client::new(kept.duid, kept.iaid, options, Box::new(rand::random::<u32>));
+        let asks = Asks {
+            ia_na: Some(kept.iaid),
+            ia_pd: Vec::new(),
+        };
+        let mut client = Client::new(kept.duid, asks, options, Box::new(rand::random::<u32>));
         let actions = client.handle(
             Event::Resume {
                 lease: kept.lease,
@@ -818,10 +829,13 @@ impl Dhcpc {
             // Under the identity that took it, which is the client's.
             // What `parameters-only` learns is asked for again instead.
             if save
-                && lease.ia_na.is_some()
-                && let Err(e) = self
-                    .store
-                    .save6(name, session.client.identity(), obtained, &lease)
+                && let Some(ia) = &lease.ia_na
+                && let Err(e) = self.store.save6(
+                    name,
+                    (session.client.identity().0, ia.iaid),
+                    obtained,
+                    &lease,
+                )
             {
                 tracing::warn!("dhcpv6 client: {name}: lease not saved: {e}");
             }
@@ -1002,6 +1016,7 @@ mod tests {
             server_address: SERVER,
             ia_na: Some(Ia {
                 iaid: ident::iaid(IF),
+                server_id: vec![0, 3, 0, 1, 2, 0, 0, 0, 0, 0xfe],
                 t1: 1800,
                 t2: 2880,
                 addresses: addresses
@@ -1013,6 +1028,7 @@ mod tests {
                     })
                     .collect(),
             }),
+            ia_pd: vec![],
             dns_servers: vec![],
             domain_list: vec![],
             ntp_servers: vec![],
@@ -1692,10 +1708,10 @@ mod tests {
         let on_disk = DuidStore::new(&b.dir).load().unwrap();
         assert_eq!(on_disk.as_ref(), Some(&first));
         let other = &b.dhcpc.v6.ifaces["dhcpc6-test1"];
-        let (duid, iaid) = other.session.as_ref().unwrap().client.identity();
+        let (duid, asks) = other.session.as_ref().unwrap().client.identity();
         assert_eq!(duid, first);
-        assert_eq!(iaid, ident::iaid("dhcpc6-test1"));
-        assert_ne!(iaid, ident::iaid(IF));
+        assert_eq!(asks.ia_na, Some(ident::iaid("dhcpc6-test1")));
+        assert_ne!(asks.ia_na, Some(ident::iaid(IF)));
         // Its own DUID for one interface leaves the other's alone.
         configure(&mut b, &OTHER_DUID);
         assert_eq!(duid_of(&b), OTHER_DUID);
