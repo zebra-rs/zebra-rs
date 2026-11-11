@@ -37,6 +37,7 @@ Requires dnsmasq and nft on the host (tests/scripts/dhcp_server.sh).
 | Newly advertised name servers go first, and an option keeps its order | |
 | A lifetime of zero takes a name server away at once | |
 | A name server whose lifetime runs out is taken away | |
+| An advertisement that withdraws a name server and names it too leaves it in | |
 | A DHCP lease's name server goes ahead of the advertised one | |
 | ra-options no-name-server keeps the advertised ones back and leaves the lease's | |
 | What is advertised under no-name-server is only shown | |

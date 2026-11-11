@@ -696,9 +696,11 @@ the client stays released until `renew`, or until `address dhcp` or the
   are stored with their lifetimes and shown, in the order RFC 8106 §6.2
   has a host use them: a server or domain heard of for the first time
   goes in first, those of one option in the option's order, and one
-  that is refreshed stays where it is. The resolver task is told of
-  every change (§13), unless `ra-options no-name-server` keeps them
-  from the host.
+  that is refreshed stays where it is. Of one RA, what it withdraws (a
+  lifetime of zero) is taken in before what it gives, and no more than
+  64 of each are held: both as systemd-networkd has them (§16). The
+  resolver task is told of every change (§13), unless `ra-options
+  no-name-server` keeps them from the host.
 - **The leaves of one commit take effect together.** `address
   autoconf`, `address dhcpv6` and the `ra-options` leaves are noted as
   the commit's lines come in and applied at its end, as the DHCP client
@@ -1399,7 +1401,8 @@ DHCPv4, IA_NA and RAs, but not PD.
 | Internal address from PD | RFC 7084 WAA-7 | explicit `pd … interface lo` | no implicit interfaces |
 | IPv6-only preferred (option 108) | RFC 8925 | not requested | a dual-stack WAN wants its IPv4 lease |
 | ACD | RFC 5227: 3 probes, 1–2 s apart | 2 probes, 1 s apart | bounded bind delay |
-| A full RDNSS or DNSSL list | RFC 8106 §6.2 (d): make room by dropping the entry that expires first | a new entry past 8 held is ignored | the same bound as for routers and prefixes: whoever advertises last does not get to push the others out |
+| A full RDNSS or DNSSL list | RFC 8106 §6.2 (d): make room by dropping the entry that expires first | a new entry past 64 held is ignored | what systemd-networkd does, with its bound (`NDISC_RDNSS_MAX`, `NDISC_DNSSL_MAX`): whoever advertises last does not get to push the others out |
+| RDNSS and DNSSL options of one RA | RFC 8106 §6.2: each option in turn | the options with a lifetime of zero first, then the others | systemd-networkd's two passes: an RA that withdraws an entry and names it leaves it in, and what it withdraws makes room for what it brings |
 | On-link classless routes | RFC 3442 routes whose router is `0.0.0.0` | not installed, logged | the RIB has no protocol route without a gateway; an off-subnet gateway still works, because nexthops are installed on-link |
 
 ---

@@ -67,7 +67,9 @@ const TWO_HOURS: u32 = 7200;
 pub const MAX_ROUTERS: usize = 16;
 pub const MAX_PREFIXES: usize = 64;
 pub const MAX_SLAAC: usize = 16;
-pub const MAX_DNS: usize = 8;
+/// Name servers, and as many search domains: what systemd-networkd
+/// holds of each (`NDISC_RDNSS_MAX`, `NDISC_DNSSL_MAX`).
+pub const MAX_DNS: usize = 64;
 
 /// The operator's configuration for one interface, by name.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -206,9 +208,10 @@ impl Host {
 ///   used first, and an option's own order says which of its items is
 ///   preferred.
 ///
-/// No more than `MAX_DNS` are held. Past that a new one is ignored: the
-/// RFC would make room by dropping the one that expires first, which
-/// lets whoever advertises last push the others out (see `MAX_ROUTERS`).
+/// No more than `MAX_DNS` are held. Past that a new one is ignored, as
+/// systemd-networkd does: the RFC would make room by dropping the one
+/// that expires first, which lets whoever advertises last push the
+/// others out (see `MAX_ROUTERS`).
 fn heard<T: PartialEq + Clone>(
     held: &mut Vec<(T, Option<Instant>)>,
     items: &[T],
@@ -671,16 +674,32 @@ impl RaHosts {
         } else if ra.router_lifetime == 0 {
             host.routers.remove(&src);
         }
+        // What the advertisement takes away of name resolution goes
+        // first, and what it gives comes after, wherever its options
+        // stand: systemd-networkd's two passes over an advertisement. So
+        // one that withdraws a server and also names it leaves it in,
+        // and what it frees of a full list is there for what it brings.
+        for option in &ra.options {
+            match option {
+                NdOption::Rdnss(rdnss) if rdnss.lifetime == 0 => {
+                    heard(&mut host.dns, &rdnss.servers, 0, now);
+                }
+                NdOption::Dnssl(dnssl) if dnssl.lifetime == 0 => {
+                    heard(&mut host.search, &dnssl.domains, 0, now);
+                }
+                _ => {}
+            }
+        }
         for option in &ra.options {
             match option {
                 NdOption::PrefixInformation(pio) => {
                     Self::prefix(host, &mut self.actions, ifindex, pio, &cfg, mac, now);
                 }
                 NdOption::Mtu(mtu) => host.mtu = Some(*mtu),
-                NdOption::Rdnss(rdnss) => {
+                NdOption::Rdnss(rdnss) if rdnss.lifetime != 0 => {
                     heard(&mut host.dns, &rdnss.servers, rdnss.lifetime, now);
                 }
-                NdOption::Dnssl(dnssl) => {
+                NdOption::Dnssl(dnssl) if dnssl.lifetime != 0 => {
                     heard(&mut host.search, &dnssl.domains, dnssl.lifetime, now);
                 }
                 _ => {}
@@ -2138,6 +2157,103 @@ mod tests {
                 ("uplink".to_string(), Some(link_dns(&["2001:db8::53"], &[]))),
             ]
         );
+    }
+
+    /// An advertisement's withdrawals are taken in ahead of what it
+    /// gives, whichever option comes first (systemd-networkd's two
+    /// passes). One that names a server both ways leaves it in: as one
+    /// heard of anew, so at the front.
+    #[test]
+    fn an_advertisement_takes_away_before_it_gives() {
+        let now = t0();
+        let mut hosts = hosts_with(&[(WAN, "wan0")], now);
+        let options = vec![
+            rdnss(600, &["2001:db8::53", "2001:db8::54"]),
+            dnssl(600, &["example.com", "example.net"]),
+        ];
+        hosts.on_ra(WAN, ll("fe80::1"), &ra(1800, options), now);
+        reported(&mut hosts);
+
+        // The second of each, named and withdrawn in one advertisement,
+        // the withdrawal last: it is still held, ahead of the other.
+        let options = vec![
+            rdnss(600, &["2001:db8::54"]),
+            dnssl(600, &["example.net"]),
+            rdnss(0, &["2001:db8::54"]),
+            dnssl(0, &["example.net"]),
+        ];
+        hosts.on_ra(WAN, ll("fe80::1"), &ra(1800, options), now + secs(1));
+        let both = link_dns(
+            &["2001:db8::54", "2001:db8::53"],
+            &["example.net", "example.com"],
+        );
+        assert_eq!(reported(&mut hosts), wan0(Some(both)));
+
+        // The withdrawal first: the same, and nothing new to report.
+        let options = vec![
+            rdnss(0, &["2001:db8::54"]),
+            dnssl(0, &["example.net"]),
+            rdnss(600, &["2001:db8::54"]),
+            dnssl(600, &["example.net"]),
+        ];
+        hosts.on_ra(WAN, ll("fe80::1"), &ra(1800, options), now + secs(2));
+        assert_eq!(reported(&mut hosts), []);
+        assert_eq!(hosts.host(WAN).unwrap().dns.len(), 2);
+    }
+
+    /// With the list full, an advertisement that brings a new server
+    /// and withdraws a held one gets the new one in, though it names it
+    /// first: the room is made before it is needed.
+    #[test]
+    fn a_withdrawal_makes_room_for_what_the_same_advertisement_brings() {
+        let now = t0();
+        let mut hosts = hosts_with(&[(WAN, "wan0")], now);
+        let server = |n: usize| Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, n as u16 + 1);
+        let all: Vec<Ipv6Addr> = (0..MAX_DNS).map(server).collect();
+        let full = NdOption::Rdnss(Rdnss {
+            lifetime: 600,
+            servers: all,
+        });
+        hosts.on_ra(WAN, ll("fe80::1"), &ra(1800, vec![full]), now);
+        assert_eq!(hosts.host(WAN).unwrap().dns.len(), MAX_DNS);
+
+        let options = vec![
+            rdnss(600, &["2001:db8::aaaa"]),
+            NdOption::Rdnss(Rdnss {
+                lifetime: 0,
+                servers: vec![server(0)],
+            }),
+        ];
+        hosts.on_ra(WAN, ll("fe80::1"), &ra(1800, options), now + secs(1));
+        let host = hosts.host(WAN).unwrap();
+        assert_eq!(host.dns.len(), MAX_DNS);
+        assert_eq!(host.dns[0].0, ll("2001:db8::aaaa"));
+        assert!(!host.dns.iter().any(|(a, _)| *a == server(0)));
+    }
+
+    /// Sixty-four of each are held, which is what systemd-networkd
+    /// holds (`NDISC_RDNSS_MAX`, `NDISC_DNSSL_MAX`): the first of an
+    /// option that names more, in its order.
+    #[test]
+    fn as_many_name_servers_are_held_as_networkd_holds() {
+        let now = t0();
+        let mut hosts = hosts_with(&[(WAN, "wan0")], now);
+        let server = |n: u16| Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, n + 1);
+        let options = vec![
+            NdOption::Rdnss(Rdnss {
+                lifetime: 600,
+                servers: (0..65).map(server).collect(),
+            }),
+            NdOption::Dnssl(Dnssl {
+                lifetime: 600,
+                domains: (0..65).map(|n| format!("d{n}.example")).collect(),
+            }),
+        ];
+        hosts.on_ra(WAN, ll("fe80::1"), &ra(1800, options), now);
+        let host = hosts.host(WAN).unwrap();
+        assert_eq!((host.dns.len(), host.search.len()), (64, 64));
+        assert_eq!((host.dns[0].0, host.dns[63].0), (server(0), server(63)));
+        assert_eq!(host.search[63].0, "d63.example");
     }
 
     /// No more than `MAX_DNS` of each are held, and so reported; one
