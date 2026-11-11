@@ -429,6 +429,21 @@ pub async fn spawn_in_netns_env(
             "ZEBRA_CRADLE_BIN={}",
             toolchain::cradle_bin().display()
         ));
+        // A stand-in for `resolvectl`, for every daemon and not only the
+        // ones whose feature looks at it. `resolvectl` hands the system
+        // bus an interface index; the bus is the host's, the index this
+        // namespace's, so the real one would give a lease's name servers
+        // to whichever host interface has that index. zebra-rs refuses to
+        // run it outside the host's namespace by itself; this keeps the
+        // host out of reach of a bug there too, and lets a feature read
+        // what would have been set (tests/scripts/resolvectl_stub.sh).
+        // An absolute path: the daemon does not stay in this directory.
+        if let Ok(dir) = std::env::current_dir() {
+            assignments.push(format!(
+                "ZEBRA_RESOLVECTL={}",
+                dir.join("tests/scripts/resolvectl_stub.sh").display()
+            ));
+        }
     }
     assignments.extend(env.iter().map(|(k, v)| format!("{k}={v}")));
 

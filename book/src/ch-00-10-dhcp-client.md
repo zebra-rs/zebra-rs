@@ -117,6 +117,79 @@ VRF's table and nothing reaches the default table.
   is removed once `--leftover-sweep-time` has passed (120 s by default).
 - **Deleting `address dhcp`** releases the lease.
 
+## Name servers
+
+A lease names name servers and search domains. They are always shown
+(`show dhcp client leases`). The router itself uses them only where
+`system name-server dhcp <name>` says so:
+
+```
+system {
+  name-server {
+    dhcp wan0;
+  }
+}
+```
+
+The interface's name servers (option 6) and search domains (the domain
+name, option 15, then the search list, option 119) are then given to
+systemd-resolved as that link's DNS configuration: what
+`resolvectl dns wan0 …` and `resolvectl domain wan0 …` set, and
+`resolvectl status wan0` shows. zebra-rs does not write
+`/etc/resolv.conf`.
+
+```
+router> show dhcp client leases
+Interface: wan0
+  ...
+  DNS servers:  198.51.100.53
+  Domain:       example.com
+
+$ resolvectl status wan0
+Link 3 (wan0)
+    Current Scopes: DNS
+         Protocols: +DefaultRoute -LLMNR -mDNS -DNSOverTLS DNSSEC=no/unsupported
+Current DNS Server: 198.51.100.53
+       DNS Servers: 198.51.100.53
+        DNS Domain: example.com
+```
+
+- **They follow the lease.** They are set when the lease is bound,
+  replaced when a renewal names others, and taken back
+  (`resolvectl revert`) when the lease is released or expires, when
+  `address dhcp` is deleted, and when the `name-server` entry is.
+- **Link down.** The lease is kept and so are its name servers:
+  systemd-resolved itself leaves a link without carrier alone.
+- **Two uplinks.** Each entry's link gets its own servers, and
+  systemd-resolved asks those of every link that is up.
+- **Addresses and names are checked.** A loopback, unspecified,
+  multicast or broadcast address is not used as a name server, and a
+  search domain that is not a plain domain name is dropped.
+- **If the command fails** (systemd-resolved is not running yet, or is
+  not installed) the lease is unaffected. A log line says so once, and
+  the command is tried again: after 5 seconds at first, then at growing
+  intervals up to 5 minutes.
+
+What it needs:
+
+- systemd-resolved, and `resolvectl` on the path.
+- zebra-rs running as root, which the packaged service does.
+- zebra-rs in the host's network namespace. `resolvectl` identifies an
+  interface to systemd-resolved by its index, and the indexes of another
+  namespace are those of other interfaces on the host. Run in another
+  network namespace, zebra-rs logs `this is not the host's network
+  namespace: the system resolver is left alone` and sets nothing.
+- No other network manager setting the interface's DNS.
+
+**VRF.** systemd-resolved does not know about VRFs. The name servers of
+an interface in a VRF are set all the same, but its queries to them are
+answered only with `net.ipv4.udp_l3mdev_accept` and
+`net.ipv4.tcp_l3mdev_accept` set to 1.
+
+**Restart.** A restart of zebra-rs leaves what was set in place and sets
+it again from the resumed lease. An entry deleted while zebra-rs is not
+running is not taken back: `resolvectl revert <name>` does it by hand.
+
 ## Commands
 
 ```
@@ -225,8 +298,10 @@ passed.
 
 ## Not done yet
 
-- The DNS servers, domain and NTP servers of a lease are shown but not
-  applied to the system.
+- The NTP servers of a lease are shown but not applied to the system.
+- The name servers a DHCPv6 lease or a Router Advertisement gives are
+  not given to the system resolver yet; a DHCPv4 lease's are ([Name
+  servers](#name-servers)).
 - The interface MTU option (26) is not applied.
 - A classless route whose router is `0.0.0.0` (an on-link destination)
   is not installed; a log line says so.

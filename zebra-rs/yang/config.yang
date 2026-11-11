@@ -632,6 +632,31 @@ module config {
         ext:help "Global router identifier";
         type inet:ipv4-address;
       }
+      // The host's own resolver, as far as zebra-rs feeds it (the
+      // resolver task, docs/design/dhcp-client.md §13).
+      container name-server {
+        ext:help "System name servers";
+        list dhcp {
+          ext:help "Use the name servers an interface learns by DHCP";
+          key "if-name";
+          description
+            "The interfaces whose DHCP lease gives the host its name
+             servers and search domains (VyOS's `system name-server
+             <interface>`). They are handed to systemd-resolved as that
+             link's DNS configuration, and taken back when the lease
+             ends or the entry is deleted; zebra-rs never writes
+             resolv.conf. Without an entry a lease's name servers are
+             only shown (`show dhcp client leases`).
+
+             A keyed list and not a leaf-list, so that a command names
+             exactly one interface.";
+          leaf if-name {
+            ext:help "Interface name";
+            ext:dynamic "rib:interface";
+            type string;
+          }
+        }
+      }
       // The zebra-rs side of the cradle-rs eBPF data-plane integration:
       // while the tee is active, every route zebra-rs installs is teed to
       // cradle in addition to the kernel, and cradle's datapath MAC

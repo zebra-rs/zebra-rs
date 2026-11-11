@@ -1,0 +1,6 @@
+# r1: a lease on wan0, and nothing said of its name servers.
+interface:
+- if-name: wan0
+  ipv4:
+    address:
+    - dhcp

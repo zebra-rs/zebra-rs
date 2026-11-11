@@ -47,8 +47,9 @@ zebra-rs's per-family containers. §16 lists the deviations.
   the prefix-exclude option (RFC 6603, WPD-8).
 - The RA Route Information option (RFC 4191), stable-privacy interface
   identifiers (RFC 7217), and privacy addresses (RFC 8981).
-- Writing the system resolver. Lease DNS servers are stored and shown, and
-  §13 has the later plan.
+- Writing `resolv.conf`. A DHCPv4 lease's name servers go to
+  systemd-resolved where `system name-server dhcp <if>` says so (§13);
+  those of a DHCPv6 lease or an RA are stored and shown, and follow.
 - DHCPv4 over PPPoE, and IPv4 link-local (RFC 3927).
 - Starting DHCPv6 because of the RA M/O flags (D7).
 
@@ -999,6 +1000,14 @@ zebra-rs/src/dhcpc/            (P1: the DHCPv4 parts)
   v6/show.rs                   `show dhcpv6 client leases`
   ident.rs                     the DUID file, DUID text form, IAID (P3)
 zebra-rs/src/nd/host.rs        RS, RA -> routes and SLAAC addresses (§7)
+zebra-rs/src/config/resolver.rs  spawn_resolver (with the first source, or
+                               the first `system name-server` line)
+zebra-rs/src/resolver/         (§13)
+  inst.rs                      the task: /system/name-server/dhcp, what
+                               the sources report, what resolved holds;
+                               the difference as commands, retried
+  resolvectl.rs                the commands as `resolvectl` runs, the
+                               namespace check, $ZEBRA_RESOLVECTL
 zebra-rs/src/rib/              AddrOrigin, AddrDynAdd/Del, addr_replace,
                                RibType::Ra, origin-keyed is_protocol,
                                per-ifindex Dhcp/Ra entries, lifetime-change
@@ -1016,16 +1025,93 @@ zebra-rs/src/rib/              AddrOrigin, AddrDynAdd/Del, addr_replace,
 
 ---
 
-## 13. Later: resolver, NTP, MTU
+## 13. Resolver, and later NTP and MTU
 
-zebra-rs writes no resolver files today, and on Ubuntu `resolv.conf`
-belongs to systemd-resolved.
+On Ubuntu `resolv.conf` belongs to systemd-resolved, so zebra-rs never
+writes it. A lease's name servers go to resolved as the DNS
+configuration of the lease's link.
 
-- **Resolver.** The planned shape is an explicit
-  `system name-server dhcp <if>` (VyOS's `system name-server <interface>`).
-  It pushes that interface's lease DNS servers and domains to resolved
-  per link (`SetLinkDNS` / `SetLinkDomains`, what networkd does). zebra-rs
-  never writes the file.
+**Built: DHCPv4 leases.**
+
+- **Explicit.** `system name-server dhcp <if>` (VyOS's
+  `system name-server <interface>`) names the interfaces whose learned
+  name servers the host itself uses. Without an entry they are only
+  shown. The two hazards below are why it is not automatic.
+- **A task of its own**, `resolver`. A source (the DHCP client) reports
+  what it learns on an interface whether or not the interface is named.
+  The task holds the configuration, merges an interface's sources, and
+  makes resolved hold the result. So a source knows nothing of the
+  configuration, and the RA host, which is another task, can become a
+  source without the DHCP client in between.
+- **Per link, by running `resolvectl`:** `dns <if> …`, `domain <if> …`
+  and `revert <if>`. They are the bus calls `SetLinkDNS`,
+  `SetLinkDomains` and `RevertLink`, which is how NetworkManager feeds
+  resolved. A command and not a D-Bus library: the calls are the same,
+  it adds no dependency, and a stand-in program makes it testable.
+- **What resolved does by itself** (checked on systemd 255). It keeps a
+  link's settings while the link exists, across link down and up, and
+  saves them in `/run/systemd/resolve/netif/`. It uses them only while
+  the link is up with a routable address, and drops them with the link.
+  So the servers are set when a lease is bound and reverted when it
+  ends, and carrier loss needs nothing from us (D10 keeps the lease).
+- **Search domains** are the domain name (option 15, split on spaces:
+  some servers put several names there) and then the search list
+  (option 119). networkd uses a lease's domains only with `UseDomains=`;
+  here the entry is the operator saying so.
+- **Checked before use.** An unspecified, loopback, multicast or
+  broadcast address is not a name server. A search domain must be a
+  plain domain name: resolved reads `~name` as "route these names to
+  this link" and `~.` as every name, and a lease must not get to say
+  that. Servers with no usable address set nothing.
+- **Failure.** `dns` runs first, then `domain`. A command that fails is
+  tried again after 5 s, then at doubling intervals up to 5 min, so a
+  resolved that starts after zebra-rs still gets its servers. Between a
+  `dns` that worked and a `domain` that did not, the link holds
+  something of ours, and it is still reverted if it stops being wanted.
+  A revert that fails is retried while the interface exists; when the
+  interface is gone, so are its settings.
+- **A restart of zebra-rs** leaves resolved as it is. The resumed lease
+  is reported and set again.
+
+**Hazards.**
+
+- **Network namespaces.** `resolvectl` turns the interface name into an
+  index where it runs and sends that over the system bus. The bus is
+  one per host; the indexes are one set per namespace. From another
+  namespace the command reads, and would set, whichever host interface
+  has that index (seen: a new namespace's `wanx`, index 2, answered
+  with the host's uplink). So `resolvectl` is run only when
+  `/proc/self/ns/net` is `/proc/1/ns/net`, and otherwise the task says
+  so once and stops. `$ZEBRA_RESOLVECTL` names a program to run in its
+  place, without that check: the BDD harness gives every daemon a
+  stand-in (`bdd/tests/scripts/resolvectl_stub.sh`). The check is by
+  PID 1, so a container with its own PID namespace passes it; there the
+  command finds no resolved, unless the host's bus socket was mounted
+  into the container, which the check cannot see.
+- **VRF.** resolved is not VRF-aware. It sends from a socket that is
+  not bound to the VRF, with `IP_UNICAST_IF` naming the link. Such a
+  socket gets no reply through an interface in a VRF unless
+  `net.ipv4.udp_l3mdev_accept` is 1 (seen with a socket made that way,
+  not with resolved itself), and TCP needs `tcp_l3mdev_accept`. The
+  servers of a VRF interface are set all the same: the entry is the
+  operator's choice.
+- **Not root.** The bus does not refuse an unauthorised caller at once.
+  It waits for a password, and `resolvectl` 255 has no switch against
+  that. Every command therefore has a time limit of 10 s.
+
+**Not built yet.**
+
+- **DHCPv6 leases and RA RDNSS/DNSSL** as sources: both hold their
+  servers and domains already.
+- **Leftovers.** An entry deleted, or a lease lost, while zebra-rs is
+  not running leaves the link's settings in resolved until the link
+  goes or `resolvectl revert`. It needs a record of what was set, as
+  the RIB has for routes (`routes.json`), and a time to wait for the
+  sources after a start.
+- **A show command** for what was set and what failed. `resolvectl
+  status <if>` shows what resolved holds.
+- **Hosts without resolved.** The command fails and is retried at the
+  5 min interval. A `resolvconf` backend would cover them.
 - **NTP** follows the same pattern if zebra-rs ever manages time.
 - **The RA MTU option** gets an `ra-options mtu` leaf if it is needed.
 
@@ -1041,7 +1127,8 @@ belongs to systemd-resolved.
 | P3 (done) | DHCPv6 IA_NA and `parameters-only`; DUID; `show dhcpv6 client leases`, `renew/release dhcpv6` | P0, P2 |
 | P4 | IA_PD: discard route, LAN assignment, prefix change | P3 |
 | ND-PIO | `nd` advertises PIOs for LAN /64s with counted-down lifetimes, deprecates removed ones (L-13), `RibRx::AddrAdd` on lifetime change | P1's RIB plumbing; parallel to P2–P4 |
-| P5 | Resolver integration, MTU options, Reconfigure, IA_TA, prefix exclude, RFC 4191 routes, stable-privacy identifiers, `redistribute dhcp` | as needed |
+| Resolver (DHCPv4 done) | `system name-server dhcp <if>`; the `resolver` task; a DHCPv4 lease's name servers to systemd-resolved (§13). Next: DHCPv6 and RA as sources, leftovers across a restart | P1; P2 and P3 for their sources |
+| P5 | MTU options, Reconfigure, IA_TA, prefix exclude, RFC 4191 routes, stable-privacy identifiers, `redistribute dhcp` | as needed |
 
 Each phase is one PR, or a short series, with its own BDD feature.
 
@@ -1075,6 +1162,10 @@ Each phase is one PR, or a short series, with its own BDD feature.
   - a kernel `proto dhcp` route stays learn-only.
 - **Config:** the `address dhcp` gate tests become positive, and deleting
   an `ipv6 address dhcpv6` value removes no static address.
+- **Resolver:** against a scripted backend, what is set and reverted for
+  every order of configuration, lease and failure; the commands'
+  arguments; the namespace check on made-up links; a program that fails,
+  is missing, or does not answer.
 
 **BDD (`bdd/`, not CI)**
 
@@ -1087,6 +1178,7 @@ DHCPv4, IA_NA and RAs, but not PD.
 | `dhcp_client` | lease → address and `D>* 0.0.0.0/0 [210/0]`; renew; `release`; server gone → expiry withdraws everything; zebra-rs restart keeps the address and re-verifies |
 | `dhcp_client_vrf` | WAN in VRF `red`; the route is in `red`'s table only |
 | `dhcp_client_dual_wan` | two leases at 210 / 220; link down on the first → the second's default is selected |
+| `dhcp_client_dns` | against a stand-in for `resolvectl`: nothing set without `system name-server dhcp`; with it the lease's servers and domains; reverted on `release` and on deleting the entry; replaced at a renewal; retried after a failure; set again after a restart |
 | `ra_host` | RA default route `A`, SLAAC with `autoconf`, router lifetime 0 withdraws, `accept_ra` is 0 |
 | `dhcpv6_client` | IA_NA /128 with `noprefixroute`; default route and on-link prefix from the RA, and no SLAAC address unless `autoconf` is set too; renew; `release`; zebra-rs restart keeps the address and confirms it; `parameters-only`; deleted configuration releases |
 | `dhcpv6_client_pd` | PD → discard route, LAN /64 address; prefix change replaces both; with ND-PIO, a LAN host SLAACs from it |

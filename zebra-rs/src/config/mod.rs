@@ -53,6 +53,7 @@ mod nsap;
 mod ospf;
 mod parse;
 mod pim;
+mod resolver;
 mod show_provider;
 mod stamp;
 mod subscribe;

@@ -1,6 +1,7 @@
 use crate::dhcpc::inst;
 
 use super::ConfigManager;
+use super::resolver::spawn_resolver;
 
 /// Spawn the DHCP client task. Triggered by [`commit_config`] on the
 /// first `interface <if> ipv4 address dhcp` or `… ipv4 dhcp-options …`
@@ -17,13 +18,17 @@ use super::ConfigManager;
 /// line reaches the task only if committed after the spawn, so the
 /// running value is handed over here.
 ///
+/// The leases' name servers go to the resolver task, which is spawned
+/// here if `system name-server …` has not spawned it yet.
+///
 /// [`commit_config`]: crate::config::ConfigManager::commit_config
 pub fn spawn_dhcpc(config: &ConfigManager) {
     if config.protocol_tasks.borrow().contains_key("dhcpc") {
         return;
     }
     let (rib_client, rib_rx) = config.subscribe_to_rib_global_links("dhcpc");
-    let dhcpc = inst::Dhcpc::new(rib_client, rib_rx, config.running_hostname());
+    let mut dhcpc = inst::Dhcpc::new(rib_client, rib_rx, config.running_hostname());
+    dhcpc.set_resolver(spawn_resolver(config));
     config.subscribe("dhcpc", dhcpc.cm.tx.clone());
     config.subscribe_show("dhcpc", dhcpc.show.tx.clone());
     let task = inst::serve(dhcpc);
