@@ -569,6 +569,20 @@ state machine (§12).
   source falls in `reject`, or when it has no yiaddr or lease time.
 - A missing subnet mask gets the classful mask and a warning.
 
+**Which replies count**
+
+- A reply carries the transaction id and the hardware address of the
+  request.
+- One that carries a client identifier (option 61) other than the one the
+  client sent is ignored, and so is any identifier when the client sends
+  none. RFC 6842 §3: a server returns the identifier it was sent and none
+  otherwise, and a client discards a reply whose identifier is not its
+  own.
+- In REQUESTING, only the selected server's ACK or NAK counts: the
+  REQUEST names that server, and the others take it as a refusal of their
+  offers (RFC 2131 §3.1). A lease being verified (INIT-REBOOT) or
+  extended names no server, so any server's NAK ends it.
+
 **Address conflict detection**
 
 - Before binding a new address (not on a renewal), the client sends two

@@ -521,6 +521,21 @@ impl Client {
             return;
         }
         let params = Params::from_packet(packet);
+        // RFC 6842 §3: a reply that carries a client identifier is for
+        // the client that sent it. A server returns the identifier it was
+        // sent and none otherwise, so one that is not ours, or any when
+        // we send none, marks a reply to somebody else. So does one too
+        // short to be an identifier, which the decoder sets aside.
+        let unreadable = params
+            .malformed
+            .iter()
+            .any(|(code, _)| *code == opt::CLIENT_ID);
+        if unreadable
+            || (params.client_id.is_some()
+                && params.client_id.as_deref() != self.options.client_id.as_deref())
+        {
+            return;
+        }
         let Some(msg_type) = params.message_type else {
             return;
         };
@@ -576,6 +591,18 @@ impl Client {
                 State::Requesting | State::Rebooting | State::Renewing | State::Rebinding,
                 msg::NAK,
             ) => {
+                // A REQUEST for an offer names its server, and the others
+                // take it as a refusal of theirs (§3.1). One that answers
+                // anyway does not end the acquisition, as its ACK above
+                // would not complete it. There is an offer only while
+                // such a REQUEST is out: a lease being verified or
+                // extended names no server, and any may refuse that.
+                if self
+                    .offer
+                    .is_some_and(|(_, offered_by)| offered_by != server)
+                {
+                    return;
+                }
                 out.push(Action::Log(match &params.message {
                     Some(reason) => format!("server {server} refused the lease: {reason}"),
                     None => format!("server {server} refused the lease"),
@@ -937,13 +964,22 @@ mod tests {
 
     /// The server's reply to `request`: `msg_type` with `options`.
     fn reply(request: &Packet, msg_type: u8, yiaddr: Ipv4Addr, options: Vec<DhcpOption>) -> Packet {
+        reply_from(Some(SERVER), request, msg_type, yiaddr, options)
+    }
+
+    /// The same from `server`, or from one that does not say who it is.
+    fn reply_from(
+        server: Option<Ipv4Addr>,
+        request: &Packet,
+        msg_type: u8,
+        yiaddr: Ipv4Addr,
+        options: Vec<DhcpOption>,
+    ) -> Packet {
         let mut p = request.clone();
         p.op = BOOTREPLY;
         p.yiaddr = yiaddr;
-        let mut all = vec![
-            DhcpOption::message_type(msg_type),
-            DhcpOption::address(opt::SERVER_ID, SERVER),
-        ];
+        let mut all = vec![DhcpOption::message_type(msg_type)];
+        all.extend(server.map(|server| DhcpOption::address(opt::SERVER_ID, server)));
         all.extend(options);
         p.body = Body::Options(all);
         p
@@ -1263,6 +1299,136 @@ mod tests {
             "{actions:?}"
         );
         assert_eq!(c.remaining(retry), Some((1800, 3150, 3600)));
+    }
+
+    /// RFC 2131 §3.1: a REQUEST for an offer names the server it takes,
+    /// and that server alone answers it.
+    #[test]
+    fn only_the_selected_server_answers_a_request() {
+        const OTHER: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 2);
+        let from_other = |c: &mut Client, packet: &Packet, now: Instant| {
+            c.handle(
+                Event::Packet {
+                    packet,
+                    source: OTHER,
+                },
+                now,
+            )
+        };
+        let t0 = Instant::now();
+        let mut c = client(Options::default(), t0);
+        let discover = sent(&c.handle(Event::Carrier(true), t0)).clone();
+        let offer = reply(&discover, msg::OFFER, ADDRESS, vec![]);
+        let request = sent(&deliver(&mut c, &offer, t0)).clone();
+        assert_eq!(c.state(), State::Requesting);
+        let due = c.deadline();
+        // Another server's NAK does not end the acquisition, nor does
+        // its ACK complete it. One that names no server is told by where
+        // it came from.
+        let none = Ipv4Addr::UNSPECIFIED;
+        for stray in [
+            reply_from(Some(OTHER), &request, msg::NAK, none, vec![]),
+            reply_from(None, &request, msg::NAK, none, vec![]),
+            reply_from(
+                Some(OTHER),
+                &request,
+                msg::ACK,
+                ADDRESS,
+                lease_options(3600),
+            ),
+        ] {
+            assert!(from_other(&mut c, &stray, t0).is_empty(), "{stray:?}");
+            assert_eq!(c.state(), State::Requesting);
+            assert_eq!(c.deadline(), due);
+        }
+        // The selected server's ACK still does.
+        let ack = reply(&request, msg::ACK, ADDRESS, lease_options(3600));
+        assert_eq!(deliver(&mut c, &ack, t0), [Action::Probe(ADDRESS)]);
+
+        // Its NAK ends the acquisition, also when it names no server.
+        for server in [Some(SERVER), None] {
+            let mut c = client(Options::default(), t0);
+            let discover = sent(&c.handle(Event::Carrier(true), t0)).clone();
+            let offer = reply(&discover, msg::OFFER, ADDRESS, vec![]);
+            let request = sent(&deliver(&mut c, &offer, t0)).clone();
+            let nak = reply_from(server, &request, msg::NAK, none, vec![]);
+            let actions = deliver(&mut c, &nak, t0);
+            assert!(matches!(&actions[..], [Action::Log(_)]), "{actions:?}");
+            assert_eq!(c.state(), State::Backoff);
+        }
+
+        // A lease being verified names no server (§4.3.2): any server on
+        // the link may refuse it.
+        let mut c = client(Options::default(), t0);
+        let bound = acquire(&mut c, t0, 3600);
+        c.handle(Event::Carrier(false), bound);
+        let reboot = sent(&c.handle(Event::Carrier(true), bound)).clone();
+        assert_eq!(c.state(), State::Rebooting);
+        let nak = reply_from(Some(OTHER), &reboot, msg::NAK, none, vec![]);
+        let actions = from_other(&mut c, &nak, bound);
+        assert!(actions.contains(&Action::Unbind), "{actions:?}");
+        assert_eq!(c.state(), State::Backoff);
+    }
+
+    /// RFC 6842 §3: a reply that carries a client identifier is for the
+    /// client that sent that identifier.
+    #[test]
+    fn a_reply_for_another_client_identifier_is_ignored() {
+        let t0 = Instant::now();
+        let a = &[0, b'A'][..];
+        let b = &[0, b'B'][..];
+        // What the client sends, what the reply carries, whether it is
+        // taken.
+        let cases = [
+            (Some(a), Some(a), true),
+            // A server from before RFC 6842 does not return it.
+            (Some(a), None, true),
+            (Some(a), Some(b), false),
+            (Some(a), Some(&a[..1]), false),
+            (None, None, true),
+            // A server returns none unless it was sent one.
+            (None, Some(a), false),
+        ];
+        for (mine, theirs, taken) in cases {
+            let options = Options {
+                client_id: mine.map(<[u8]>::to_vec),
+                ..Default::default()
+            };
+            let returned = |extra: Vec<DhcpOption>| -> Vec<DhcpOption> {
+                theirs
+                    .map(|id| DhcpOption::new(opt::CLIENT_ID, id))
+                    .into_iter()
+                    .chain(extra)
+                    .collect()
+            };
+            // An OFFER.
+            let mut c = client(options.clone(), t0);
+            let discover = sent(&c.handle(Event::Carrier(true), t0)).clone();
+            let offer = reply(&discover, msg::OFFER, ADDRESS, returned(vec![]));
+            let actions = deliver(&mut c, &offer, t0);
+            assert_eq!(!actions.is_empty(), taken, "{mine:?} {theirs:?}");
+            let want = if taken {
+                State::Requesting
+            } else {
+                State::Selecting
+            };
+            assert_eq!(c.state(), want, "{mine:?} {theirs:?}");
+
+            // An ACK and a NAK, from the server that was selected.
+            let mut c = client(options, t0);
+            let discover = sent(&c.handle(Event::Carrier(true), t0)).clone();
+            let offer = reply(&discover, msg::OFFER, ADDRESS, vec![]);
+            let request = sent(&deliver(&mut c, &offer, t0)).clone();
+            let nak = reply(&request, msg::NAK, Ipv4Addr::UNSPECIFIED, returned(vec![]));
+            let ack = reply(&request, msg::ACK, ADDRESS, returned(lease_options(3600)));
+            if taken {
+                assert_eq!(deliver(&mut c, &ack, t0), [Action::Probe(ADDRESS)]);
+            } else {
+                assert!(deliver(&mut c, &nak, t0).is_empty(), "{mine:?} {theirs:?}");
+                assert!(deliver(&mut c, &ack, t0).is_empty(), "{mine:?} {theirs:?}");
+                assert_eq!(c.state(), State::Requesting);
+            }
+        }
     }
 
     #[test]
