@@ -1064,12 +1064,25 @@ configuration of the lease's link.
   this link" and `~.` as every name, and a lease must not get to say
   that. Servers with no usable address set nothing.
 - **Failure.** `dns` runs first, then `domain`. A command that fails is
-  tried again after 5 s, then at doubling intervals up to 5 min, so a
-  resolved that starts after zebra-rs still gets its servers. Between a
-  `dns` that worked and a `domain` that did not, the link holds
-  something of ours, and it is still reverted if it stops being wanted.
-  A revert that fails is retried while the interface exists; when the
-  interface is gone, so are its settings.
+  tried again 5 s after it failed, then at doubling intervals up to
+  5 min, so a resolved that starts after zebra-rs still gets its
+  servers. The wait counts from the end of the command: one that runs
+  into its time limit takes longer than the first waits are. A revert
+  that fails is retried while the interface exists; when the interface
+  is gone, so are its settings.
+- **What resolved holds is not always known**, and whatever may be ours
+  is reverted once it is no longer wanted. A command that ran to an
+  exit of its own, or could not be started, changed nothing when it
+  failed. One cut short, by the time limit or a signal, may have made
+  its call first, whether it was setting or reverting. After that what
+  the interface holds is not known: it is set again if wanted, and
+  reverted if not. The same holds between a `dns` that worked and a
+  `domain` that did not.
+- **The settings are an interface's, not a name's.** What was set is
+  noted with the index the name had then. A name that is another
+  interface now, deleted and made again, holds nothing whatever was
+  noted for it. It is set again, also when the lease that comes back on
+  it says nothing new.
 - **A restart of zebra-rs** leaves resolved as it is. The resumed lease
   is reported and set again.
 
@@ -1178,7 +1191,7 @@ DHCPv4, IA_NA and RAs, but not PD.
 | `dhcp_client` | lease → address and `D>* 0.0.0.0/0 [210/0]`; renew; `release`; server gone → expiry withdraws everything; zebra-rs restart keeps the address and re-verifies |
 | `dhcp_client_vrf` | WAN in VRF `red`; the route is in `red`'s table only |
 | `dhcp_client_dual_wan` | two leases at 210 / 220; link down on the first → the second's default is selected |
-| `dhcp_client_dns` | against a stand-in for `resolvectl`: nothing set without `system name-server dhcp`; with it the lease's servers and domains; reverted on `release` and on deleting the entry; replaced at a renewal; retried after a failure; set again after a restart |
+| `dhcp_client_dns` | against a stand-in for `resolvectl`: nothing set without `system name-server dhcp`; with it the lease's servers and domains; reverted on `release` and on deleting the entry; replaced at a renewal; retried after a failure; servers set by a command that got no answer are reverted; an interface deleted and made again is set again; set again after a restart |
 | `ra_host` | RA default route `A`, SLAAC with `autoconf`, router lifetime 0 withdraws, `accept_ra` is 0 |
 | `dhcpv6_client` | IA_NA /128 with `noprefixroute`; default route and on-link prefix from the RA, and no SLAAC address unless `autoconf` is set too; renew; `release`; zebra-rs restart keeps the address and confirms it; `parameters-only`; deleted configuration releases |
 | `dhcpv6_client_pd` | PD → discard route, LAN /64 address; prefix change replaces both; with ND-PIO, a LAN host SLAACs from it |

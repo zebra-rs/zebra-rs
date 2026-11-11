@@ -15,7 +15,11 @@ of the suite runs in a network namespace, from which `resolvectl`
 would configure some other interface of the host. The harness names
 a stand-in to each daemon (ZEBRA_RESOLVECTL,
 tests/scripts/resolvectl_stub.sh). It keeps what it is told, per
-namespace, and `status` prints it: `wan0 dns …`, `wan0 domain …`.
+namespace, and `status` prints it: `wan0 dns …`, `wan0 domain …`. Like
+resolved it holds an interface's settings, not a name's: one deleted
+and made again under the same name holds nothing. It can also be told
+to fail (`break`), at once or after some seconds, or to do what it is
+asked and give no answer (`stall`).
 
 Topology: s1 is the ISP side, a dnsmasq with one address to lease. Its
 lease names 198.51.100.53 as name server, example.com as domain name
@@ -39,6 +43,8 @@ Requires dnsmasq and nft on the host (tests/scripts/dhcp_server.sh).
 | Releasing the lease takes them back, and a new lease gives them again | |
 | Other name servers at a renewal replace the first | |
 | A resolver that is away gets them once it is back | |
+| Name servers set by a command that got no answer are still taken back | |
+| An interface made again is given its name servers again | |
 | Deleting the entry takes them back and leaves the lease | |
 | A restart hands the resumed lease's name servers over again | |
 | Teardown topology | |

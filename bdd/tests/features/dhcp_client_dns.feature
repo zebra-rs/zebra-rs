@@ -15,7 +15,11 @@ Feature: A DHCP lease's name servers for the host (system name-server dhcp)
   would configure some other interface of the host. The harness names
   a stand-in to each daemon (ZEBRA_RESOLVECTL,
   tests/scripts/resolvectl_stub.sh). It keeps what it is told, per
-  namespace, and `status` prints it: `wan0 dns …`, `wan0 domain …`.
+  namespace, and `status` prints it: `wan0 dns …`, `wan0 domain …`. Like
+  resolved it holds an interface's settings, not a name's: one deleted
+  and made again under the same name holds nothing. It can also be told
+  to fail (`break`), at once or after some seconds, or to do what it is
+  asked and give no answer (`stall`).
 
   Topology: s1 is the ISP side, a dnsmasq with one address to lease. Its
   lease names 198.51.100.53 as name server, example.com as domain name
@@ -97,6 +101,52 @@ Feature: A DHCP lease's name servers for the host (system name-server dhcp)
     When I execute "tests/scripts/resolvectl_stub.sh mend" in namespace "r1"
     Then command "tests/scripts/resolvectl_stub.sh status" in namespace "r1" should eventually contain "wan0 dns 198.51.100.54"
     And show command "show dhcp client leases" in namespace "r1" should contain "State:        bound"
+
+  Scenario: Name servers set by a command that got no answer are still taken back
+    Given the test topology exists
+    # The stand-in does what it is asked and then says nothing, as a
+    # command does whose answer is lost: zebra-rs gives up on it after 10
+    # seconds without knowing whether the servers went in. They did. The
+    # entry is deleted before any later try has an answer, and they must
+    # not be left behind for that.
+    Then show command "release dhcp interface wan0" in namespace "r1" should contain "Released"
+    And command "tests/scripts/resolvectl_stub.sh status" in namespace "r1" should eventually not contain "wan0"
+    When I execute "tests/scripts/resolvectl_stub.sh stall" in namespace "r1"
+    Then show command "renew dhcp interface wan0" in namespace "r1" should contain "Renewing"
+    And command "tests/scripts/resolvectl_stub.sh status" in namespace "r1" should eventually contain "wan0 dns 198.51.100.54"
+    And daemon log in namespace "r1" should eventually contain "no answer in 10 s"
+    When I apply command "delete system name-server dhcp wan0" in namespace "r1"
+    Then command "tests/scripts/resolvectl_stub.sh status" in namespace "r1" should eventually not contain "wan0"
+    When I execute "tests/scripts/resolvectl_stub.sh mend" in namespace "r1"
+    And I apply command "set system name-server dhcp wan0" in namespace "r1"
+    Then command "tests/scripts/resolvectl_stub.sh status" in namespace "r1" should eventually contain "wan0 dns 198.51.100.54"
+    And show command "show dhcp client leases" in namespace "r1" should contain "State:        bound"
+
+  Scenario: An interface made again is given its name servers again
+    Given the test topology exists
+    # wan0 is deleted and made again: another interface under the same
+    # name, which holds none of the settings the first was given. The
+    # lease it gets is the same as before, so nothing a lease says has
+    # changed.
+    #
+    # The withdrawal for the old interface is refused, and only after 8
+    # seconds, when the new interface is there. That leaves the old
+    # one's entry in place, saying these very servers are held. They
+    # are not, by this interface, and it must be given them.
+    When I execute "tests/scripts/resolvectl_stub.sh break 8" in namespace "r1"
+    And I execute "ip link del wan0" in namespace "r1"
+    # Made under its own name. The harness's step makes a link under a
+    # temporary name and renames it, and the running daemon would know
+    # the interface by the first.
+    And I execute "ip link add wan0 type veth peer name srv0 netns dhcp_client_dns_s1" in namespace "r1"
+    And I execute "ip link set wan0 up" in namespace "r1"
+    And I execute "tests/scripts/dhcp_server.sh dhcp_client_dns stop" in namespace "s1"
+    And I execute "env DHCP_BDD_DNS=198.51.100.54 tests/scripts/dhcp_server.sh dhcp_client_dns start srv0 192.0.2.1/24 192.0.2.100 192.0.2.100 120" in namespace "s1"
+    And I execute "tests/scripts/resolvectl_stub.sh mend" in namespace "r1"
+    Then show command "show dhcp client leases" in namespace "r1" should eventually contain "State:        bound"
+    And show command "show dhcp client leases" in namespace "r1" should contain "DNS servers:  198.51.100.54"
+    And command "tests/scripts/resolvectl_stub.sh status" in namespace "r1" should eventually contain "wan0 dns 198.51.100.54"
+    And command "tests/scripts/resolvectl_stub.sh status" in namespace "r1" should eventually contain "wan0 domain example.com"
 
   Scenario: Deleting the entry takes them back and leaves the lease
     Given the test topology exists

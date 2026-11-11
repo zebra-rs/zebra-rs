@@ -78,13 +78,11 @@ impl Resolvectl {
 impl Backend for Resolvectl {
     async fn run(&mut self, op: &Op) -> Result<(), Failure> {
         let program = self.program().map_err(Failure::Refused)?;
-        exec(&program, &argv(op), self.timeout)
-            .await
-            .map_err(Failure::Failed)
+        exec(&program, &argv(op), self.timeout).await
     }
 
-    fn link_exists(&self, ifname: &str) -> bool {
-        nix::net::if_::if_nametoindex(ifname).is_ok()
+    fn ifindex(&self, ifname: &str) -> Option<u32> {
+        nix::net::if_::if_nametoindex(ifname).ok()
     }
 }
 
@@ -132,9 +130,15 @@ fn argv(op: &Op) -> Vec<String> {
     argv
 }
 
-/// Run `program` to its end, or for `limit`. The error is for the log:
-/// how it ended and the first line it wrote to standard error.
-async fn exec(program: &OsStr, argv: &[String], limit: Duration) -> Result<(), String> {
+/// Run `program` to its end, or for `limit`. The text is for the log:
+/// how it ended, or the first line it wrote to standard error.
+///
+/// Each command is one call to resolved, and its exit says how the call
+/// went. So a program that ran to an exit of its own, or never started,
+/// has changed nothing when it fails. One that was cut short, by the
+/// time limit or by a signal, may have made its call first: that is
+/// [`Failure::Unanswered`].
+async fn exec(program: &OsStr, argv: &[String], limit: Duration) -> Result<(), Failure> {
     let name = program.to_string_lossy();
     let child = Command::new(program)
         .args(argv)
@@ -144,17 +148,24 @@ async fn exec(program: &OsStr, argv: &[String], limit: Duration) -> Result<(), S
         // Dropped at the time limit, which ends it.
         .kill_on_drop(true)
         .spawn()
-        .map_err(|e| format!("{name}: {e}"))?;
+        .map_err(|e| Failure::Failed(format!("{name}: {e}")))?;
     match tokio::time::timeout(limit, child.wait_with_output()).await {
-        Err(_) => Err(format!("{name}: no answer in {} s", limit.as_secs_f32())),
-        Ok(Err(e)) => Err(format!("{name}: {e}")),
+        Err(_) => Err(Failure::Unanswered(format!(
+            "{name}: no answer in {} s",
+            limit.as_secs_f32()
+        ))),
+        Ok(Err(e)) => Err(Failure::Unanswered(format!("{name}: {e}"))),
         Ok(Ok(output)) if output.status.success() => Ok(()),
+        Ok(Ok(output)) if output.status.code().is_none() => {
+            Err(Failure::Unanswered(format!("{name}: {}", output.status)))
+        }
         Ok(Ok(output)) => {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            match stderr.lines().find(|line| !line.trim().is_empty()) {
-                Some(line) => Err(format!("{name}: {}", line.trim())),
-                None => Err(format!("{name}: {}", output.status)),
-            }
+            let said = stderr.lines().find(|line| !line.trim().is_empty());
+            Err(Failure::Failed(match said {
+                Some(line) => format!("{name}: {}", line.trim()),
+                None => format!("{name}: {}", output.status),
+            }))
         }
     }
 }
@@ -320,15 +331,31 @@ mod tests {
 
         // Nothing on standard error: how it ended.
         let silent = dir.script("silent", "exit 3");
-        let error = exec(&silent, &[], TIMEOUT).await.unwrap_err();
+        let Err(Failure::Failed(error)) = exec(&silent, &[], TIMEOUT).await else {
+            panic!("an exit of its own is a refusal");
+        };
         assert!(error.ends_with("exit status: 3"), "{error}");
+    }
+
+    /// Cut short by a signal, it may have made its call first.
+    #[tokio::test]
+    async fn a_program_that_is_killed_has_not_answered() {
+        let dir = Dir::new("killed");
+        let killed = dir.script("killed", "kill -KILL $$");
+        let Err(Failure::Unanswered(error)) = exec(&killed, &[], TIMEOUT).await else {
+            panic!("a signal is not an answer");
+        };
+        assert!(error.ends_with("signal: 9 (SIGKILL)"), "{error}");
     }
 
     #[tokio::test]
     async fn a_program_that_is_not_there_is_a_failure() {
         let dir = Dir::new("absent");
         let absent = dir.0.join("absent").into_os_string();
-        let error = exec(&absent, &[], TIMEOUT).await.unwrap_err();
+        // It never ran, so it changed nothing.
+        let Err(Failure::Failed(error)) = exec(&absent, &[], TIMEOUT).await else {
+            panic!("a program that cannot be started has done nothing");
+        };
         assert!(error.contains("No such file"), "{error}");
     }
 
@@ -342,9 +369,10 @@ mod tests {
         );
         let mut backend = Resolvectl::new(Some(slow.clone()));
         backend.timeout = Duration::from_millis(300);
+        // What it did before the limit is not known.
         assert_eq!(
             backend.run(&Op::Revert("wan0".into())).await,
-            Err(Failure::Failed(format!(
+            Err(Failure::Unanswered(format!(
                 "{}: no answer in 0.3 s",
                 slow.to_string_lossy()
             )))
@@ -372,10 +400,10 @@ mod tests {
     }
 
     #[test]
-    fn an_interface_exists_or_does_not() {
+    fn an_interface_has_an_index_or_is_not_there() {
         let backend = Resolvectl::new(None);
-        assert!(backend.link_exists("lo"));
-        assert!(!backend.link_exists("zebra-absent0"));
+        assert_eq!(backend.ifindex("lo"), Some(1));
+        assert_eq!(backend.ifindex("zebra-absent0"), None);
     }
 
     /// Against the real `resolvectl` and a running systemd-resolved,
@@ -421,7 +449,7 @@ mod tests {
         // No stand-in: the program is `resolvectl`, and this is the host.
         let mut backend = Resolvectl::new(None);
         assert_eq!(backend.program(), Ok(OsString::from("resolvectl")));
-        assert!(backend.link_exists(IF));
+        let index = backend.ifindex(IF).expect("the dummy interface");
 
         let servers = vec![
             "198.51.100.53".parse().unwrap(),
@@ -441,13 +469,20 @@ mod tests {
         assert_eq!(backend.run(&Op::Revert(IF.into())).await, Ok(()));
         assert_eq!(held("dns"), "");
 
-        // An interface that is gone: the command fails, and there is
+        // An interface that is gone: the command says no, and there is
         // nothing left to take back.
         drop(link);
         assert!(matches!(
             backend.run(&Op::Revert(IF.into())).await,
             Err(Failure::Failed(_))
         ));
-        assert!(!backend.link_exists(IF));
+        assert_eq!(backend.ifindex(IF), None);
+
+        // Made again under the same name it is another interface, and
+        // resolved holds nothing for it.
+        assert!(ip(&["link", "add", IF, "type", "dummy"]));
+        let _link = Link;
+        assert_ne!(backend.ifindex(IF), Some(index));
+        assert_eq!(held("dns"), "");
     }
 }

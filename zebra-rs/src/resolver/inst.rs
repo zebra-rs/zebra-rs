@@ -11,10 +11,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::net::IpAddr;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use tokio::sync::mpsc::{self, UnboundedReceiver};
-use tokio::time::sleep_until;
+use tokio::time::{Instant, sleep_until};
 
 use crate::config::{ConfigChannel, ConfigOp, ConfigRequest, path_from_command};
 use crate::context::Task;
@@ -37,22 +37,38 @@ pub enum Op {
     Revert(String),
 }
 
-/// Why a command did not go through.
+/// Why a command is not known to have gone through.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Failure {
     /// The system resolver is not ours to configure, now or later.
     Refused(String),
-    /// It did not work this time.
+    /// The command said no, or could not be run: nothing was changed.
     Failed(String),
+    /// The command gave no answer (it ran out of time, or was killed).
+    /// What it asked for may have been done all the same.
+    Unanswered(String),
 }
 
 /// What carries the commands out ([`super::resolvectl::Resolvectl`]).
 pub trait Backend: Send + 'static {
     fn run(&mut self, op: &Op) -> impl Future<Output = Result<(), Failure>> + Send;
 
-    /// Whether the interface exists: a command that fails on one that
-    /// does not has nothing left to take back.
-    fn link_exists(&self, ifname: &str) -> bool;
+    /// The index of the interface of that name, if there is one. The
+    /// system resolver keeps an interface's settings for as long as that
+    /// interface exists: one deleted and made again under the same name
+    /// has another index, and none of the settings.
+    fn ifindex(&self, ifname: &str) -> Option<u32>;
+}
+
+/// What the system resolver holds from us for an interface name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Held {
+    /// The interface the name was when the settings were given: they
+    /// are that interface's, not the name's.
+    ifindex: Option<u32>,
+    /// `None`: something, but not known what. A command went unanswered,
+    /// or the servers went in and their domains did not.
+    dns: Option<LinkDns>,
 }
 
 pub struct Resolver<B> {
@@ -64,9 +80,8 @@ pub struct Resolver<B> {
     enabled: BTreeSet<String>,
     /// What each source knows, by interface.
     learned: BTreeMap<String, BTreeMap<Source, LinkDns>>,
-    /// What the system resolver holds from us, by interface. `None`:
-    /// something, but a command failed part-way, so not what.
-    applied: BTreeMap<String, Option<LinkDns>>,
+    /// What the system resolver holds from us, by interface name.
+    applied: BTreeMap<String, Held>,
     /// Interfaces whose failure has been said; said again only after a
     /// success.
     complained: BTreeSet<String>,
@@ -106,7 +121,7 @@ impl<B: Backend> Resolver<B> {
                 Some(msg) = self.cm.rx.recv() => {
                     // Once the whole commit is known.
                     if self.process_cm_msg(msg) {
-                        self.sync(Instant::now()).await;
+                        self.sync().await;
                     }
                 }
                 Some(report) = self.rx.recv() => {
@@ -116,9 +131,9 @@ impl<B: Backend> Resolver<B> {
                     while let Ok(report) = self.rx.try_recv() {
                         self.learn(report);
                     }
-                    self.sync(Instant::now()).await;
+                    self.sync().await;
                 }
-                _ = sleep_until_opt(self.retry) => self.sync(Instant::now()).await,
+                _ = sleep_until_opt(self.retry) => self.sync().await,
             }
         }
     }
@@ -177,11 +192,36 @@ impl<B: Backend> Resolver<B> {
             .collect()
     }
 
-    /// Make the system resolver hold what is wanted.
-    async fn sync(&mut self, now: Instant) {
-        self.retry = None;
+    /// Make the system resolver hold what is wanted and, if a command
+    /// failed, say when to try again.
+    ///
+    /// That wait counts from when the commands are over, not from when
+    /// they began: one that runs into its time limit takes longer than
+    /// the first waits are, and counted from the start they would all be
+    /// over already, each failure followed by the next try at once.
+    async fn sync(&mut self) {
+        let failed = self.reconcile().await;
+        self.schedule(failed, Instant::now());
+    }
+
+    /// When to try again after commands that `failed`, or that there is
+    /// no need to.
+    fn schedule(&mut self, failed: bool, now: Instant) {
+        if failed {
+            self.retry = Some(now + self.backoff);
+            self.backoff = (self.backoff * 2).min(RETRY_MAX);
+        } else {
+            self.retry = None;
+            self.backoff = RETRY_MIN;
+        }
+    }
+
+    /// Have the backend make up the difference between what the system
+    /// resolver holds and what is wanted. True when a command failed and
+    /// is to be tried again.
+    async fn reconcile(&mut self) -> bool {
         if self.refused {
-            return;
+            return false;
         }
         let wanted = self.wanted();
         let mut failed = false;
@@ -193,63 +233,110 @@ impl<B: Backend> Resolver<B> {
             .cloned()
             .collect();
         for name in gone {
-            match self.backend.run(&Op::Revert(name.clone())).await {
+            let failure = match self.backend.run(&Op::Revert(name.clone())).await {
                 Ok(()) => {
                     tracing::info!("resolver: {name}: name servers withdrawn");
                     self.applied.remove(&name);
                     self.complained.remove(&name);
+                    continue;
                 }
-                Err(Failure::Refused(why)) => return self.refuse(&why),
-                Err(Failure::Failed(why)) if self.backend.link_exists(&name) => {
-                    failed = true;
-                    self.complain(&name, "withdrawn", &why);
+                Err(Failure::Refused(why)) => {
+                    self.refuse(&why);
+                    return false;
                 }
+                Err(failure) => failure,
+            };
+            if self.backend.ifindex(&name).is_none() {
                 // The interface went, and its settings with it.
-                Err(Failure::Failed(_)) => {
-                    self.applied.remove(&name);
-                    self.complained.remove(&name);
-                }
+                self.applied.remove(&name);
+                self.complained.remove(&name);
+                continue;
             }
+            // Asked again later. Until then an unanswered withdrawal
+            // may have been carried out: what the interface holds is no
+            // longer known, and wanted again in the meantime it is set
+            // again, not taken for held.
+            if let Failure::Unanswered(_) = failure
+                && let Some(held) = self.applied.get_mut(&name)
+            {
+                held.dns = None;
+            }
+            let (Failure::Failed(why) | Failure::Unanswered(why) | Failure::Refused(why)) = failure;
+            failed = true;
+            self.complain(&name, "withdrawn", &why);
         }
 
         for (name, dns) in wanted {
-            if matches!(self.applied.get(&name), Some(Some(held)) if *held == dns) {
+            // The interface the name is now. Looked up before the
+            // commands, which look it up again themselves: should it be
+            // replaced in between, what is noted here is the older one,
+            // and the next look finds the difference.
+            let ifindex = self.backend.ifindex(&name);
+            // Held already, by this very interface. The same settings
+            // noted for the name's previous interface went with it, and
+            // this one has none: a lease lost and found again on an
+            // interface made anew in between says nothing else changed.
+            if self
+                .applied
+                .get(&name)
+                .is_some_and(|held| held.ifindex == ifindex && held.dns.as_ref() == Some(&dns))
+            {
                 continue;
             }
-            match self.set(&name, &dns).await {
+            match self.set(&name, ifindex, &dns).await {
                 Ok(()) => {
                     tracing::info!("resolver: {name}: {}", describe(&dns));
-                    self.applied.insert(name.clone(), Some(dns));
                     self.complained.remove(&name);
                 }
-                Err(Failure::Refused(why)) => return self.refuse(&why),
-                Err(Failure::Failed(why)) => {
+                Err(Failure::Refused(why)) => {
+                    self.refuse(&why);
+                    return false;
+                }
+                Err(Failure::Failed(why) | Failure::Unanswered(why)) => {
                     failed = true;
                     self.complain(&name, "set", &why);
                 }
             }
         }
-
-        if failed {
-            self.retry = Some(now + self.backoff);
-            self.backoff = (self.backoff * 2).min(RETRY_MAX);
-        } else {
-            self.backoff = RETRY_MIN;
-        }
+        failed
     }
 
-    /// The servers, then the domains. While the first has not worked the
-    /// resolver holds what it held; between the two, something of ours
-    /// that is not `dns`, which `applied` says with `None` so that it is
-    /// still taken back if it is no longer wanted by the next try.
-    async fn set(&mut self, name: &str, dns: &LinkDns) -> Result<(), Failure> {
-        self.backend
-            .run(&Op::Dns(name.to_string(), dns.servers.clone()))
-            .await?;
-        self.applied.insert(name.to_string(), None);
+    /// The servers, then the domains, noting in `applied` what the
+    /// system resolver holds after each, so that it is taken back if it
+    /// stops being wanted before a later try has put it right:
+    ///
+    /// - the servers refused: what it held before, and that stays noted;
+    /// - the servers unanswered: perhaps the new ones, perhaps not;
+    /// - the servers in and the domains not: something of ours that is
+    ///   not `dns`;
+    /// - both in: `dns`.
+    async fn set(
+        &mut self,
+        name: &str,
+        ifindex: Option<u32>,
+        dns: &LinkDns,
+    ) -> Result<(), Failure> {
+        let unknown = Held { ifindex, dns: None };
+        let servers = Op::Dns(name.to_string(), dns.servers.clone());
+        match self.backend.run(&servers).await {
+            Ok(()) => {}
+            Err(failure) => {
+                if matches!(failure, Failure::Unanswered(_)) {
+                    self.applied.insert(name.to_string(), unknown);
+                }
+                return Err(failure);
+            }
+        }
+        self.applied.insert(name.to_string(), unknown);
         self.backend
             .run(&Op::Domains(name.to_string(), dns.domains.clone()))
-            .await
+            .await?;
+        let held = Held {
+            ifindex,
+            dns: Some(dns.clone()),
+        };
+        self.applied.insert(name.to_string(), held);
+        Ok(())
     }
 
     fn complain(&mut self, name: &str, what: &str, why: &str) {
@@ -331,7 +418,7 @@ pub fn serve<B: Backend>(mut resolver: Resolver<B>) -> Task<()> {
 
 async fn sleep_until_opt(when: Option<Instant>) {
     match when {
-        Some(t) => sleep_until(t.into()).await,
+        Some(t) => sleep_until(t).await,
         None => std::future::pending::<()>().await,
     }
 }
@@ -354,6 +441,10 @@ mod tests {
         answers: VecDeque<Result<(), Failure>>,
         /// Interfaces that do not exist.
         missing: Vec<String>,
+        /// The index of the interfaces that do: 1 unless said here.
+        index: BTreeMap<String, u32>,
+        /// How long a command takes.
+        takes: Duration,
     }
 
     #[derive(Clone, Default)]
@@ -361,13 +452,19 @@ mod tests {
 
     impl Backend for Mock {
         async fn run(&mut self, op: &Op) -> Result<(), Failure> {
+            let takes = self.0.lock().unwrap().takes;
+            tokio::time::sleep(takes).await;
             let mut script = self.0.lock().unwrap();
             script.ran.push(op.clone());
             script.answers.pop_front().unwrap_or(Ok(()))
         }
 
-        fn link_exists(&self, ifname: &str) -> bool {
-            !self.0.lock().unwrap().missing.iter().any(|m| m == ifname)
+        fn ifindex(&self, ifname: &str) -> Option<u32> {
+            let script = self.0.lock().unwrap();
+            if script.missing.iter().any(|m| m == ifname) {
+                return None;
+            }
+            Some(script.index.get(ifname).copied().unwrap_or(1))
         }
     }
 
@@ -404,7 +501,7 @@ mod tests {
                 self.resolver
                     .process_cm_msg(ConfigRequest::new(Vec::new(), ConfigOp::CommitEnd))
             );
-            self.resolver.sync(self.now).await;
+            self.sync().await;
         }
 
         async fn report(&mut self, ifname: &str, dns: Option<LinkDns>) {
@@ -413,7 +510,14 @@ mod tests {
                 source: Source::Dhcp4,
                 dns,
             });
-            self.resolver.sync(self.now).await;
+            self.sync().await;
+        }
+
+        /// What the event loop does after a change, at the bench's time
+        /// and not the clock's.
+        async fn sync(&mut self) {
+            let failed = self.resolver.reconcile().await;
+            self.resolver.schedule(failed, self.now);
         }
 
         /// What the backend has been asked since the last look.
@@ -447,6 +551,30 @@ mod tests {
 
     fn failed() -> Result<(), Failure> {
         Err(Failure::Failed("no".to_string()))
+    }
+
+    fn unanswered() -> Result<(), Failure> {
+        Err(Failure::Unanswered("no answer".to_string()))
+    }
+
+    impl Bench {
+        /// The interface is deleted and made again: the same name,
+        /// another index.
+        fn recreate(&mut self, ifname: &str) {
+            let mut script = self.mock.0.lock().unwrap();
+            let index = script.index.entry(ifname.to_string()).or_insert(1);
+            *index += 1;
+        }
+
+        /// A source's report, without the look at what is wanted that
+        /// follows the last of several.
+        fn learn(&mut self, ifname: &str, dns: Option<LinkDns>) {
+            self.resolver.learn(Report {
+                ifname: ifname.to_string(),
+                source: Source::Dhcp4,
+                dns,
+            });
+        }
     }
 
     #[tokio::test]
@@ -540,17 +668,17 @@ mod tests {
         // Again, and it fails again: the wait doubles.
         b.answer(&[failed()]);
         b.now += RETRY_MIN;
-        b.resolver.sync(b.now).await;
+        b.sync().await;
         assert_eq!(b.ran(), set(WAN, &["198.51.100.53"], &[])[..1]);
         assert_eq!(b.resolver.retry, Some(b.now + RETRY_MIN * 2));
 
         // Then it works, and nothing more is due.
         b.now += RETRY_MIN * 2;
-        b.resolver.sync(b.now).await;
+        b.sync().await;
         assert_eq!(b.ran(), set(WAN, &["198.51.100.53"], &[]));
         assert_eq!(b.resolver.retry, None);
         assert_eq!(b.resolver.backoff, RETRY_MIN);
-        b.resolver.sync(b.now).await;
+        b.sync().await;
         assert_eq!(b.ran(), []);
     }
 
@@ -565,7 +693,7 @@ mod tests {
         });
         for _ in 0..12 {
             b.answer(&[failed()]);
-            b.resolver.sync(b.now).await;
+            b.sync().await;
         }
         assert_eq!(b.resolver.retry, Some(b.now + RETRY_MAX));
     }
@@ -606,7 +734,7 @@ mod tests {
         b.report(WAN, None).await;
         assert_eq!(b.ran(), revert(WAN));
         assert_eq!(b.resolver.retry, Some(b.now + RETRY_MIN));
-        b.resolver.sync(b.now).await;
+        b.sync().await;
         assert_eq!(b.ran(), revert(WAN));
         assert_eq!(b.resolver.retry, None);
     }
@@ -622,7 +750,7 @@ mod tests {
         b.report(WAN, None).await;
         assert_eq!(b.ran(), revert(WAN));
         assert_eq!(b.resolver.retry, None);
-        b.resolver.sync(b.now).await;
+        b.sync().await;
         assert_eq!(b.ran(), []);
     }
 
@@ -644,6 +772,190 @@ mod tests {
         b.report(WAN, Some(dns(&["198.51.100.54"], &[]))).await;
         b.commit(ConfigOp::Delete, &[WAN]).await;
         assert_eq!(b.ran(), []);
+    }
+
+    /// The lease goes with its interface and comes back, the same, on
+    /// the interface made again under that name, and both reports are
+    /// taken in before either is acted on. Nothing changed that the
+    /// reports say; the settings went with the old interface all the
+    /// same, and the new one must be given them.
+    #[tokio::test]
+    async fn an_interface_made_again_is_given_its_name_servers_again() {
+        let mut b = Bench::new();
+        let lease = dns(&["198.51.100.53"], &["example.com"]);
+        b.commit(ConfigOp::Set, &[WAN]).await;
+        b.report(WAN, Some(lease.clone())).await;
+        b.ran();
+
+        b.recreate(WAN);
+        b.learn(WAN, None);
+        b.learn(WAN, Some(lease.clone()));
+        b.sync().await;
+        assert_eq!(b.ran(), set(WAN, &["198.51.100.53"], &["example.com"]));
+        // Once: the new interface holds them now.
+        b.sync().await;
+        assert_eq!(b.ran(), []);
+
+        // The same interface losing and finding the same lease has
+        // lost nothing, and is not set again.
+        b.learn(WAN, None);
+        b.learn(WAN, Some(lease));
+        b.sync().await;
+        assert_eq!(b.ran(), []);
+    }
+
+    /// The same, when the withdrawal was acted on by itself and was
+    /// refused, the interface being there again by then. The entry it
+    /// leaves, to be tried again, says the servers are held: by the old
+    /// interface, which is no reason to leave the new one unset.
+    #[tokio::test]
+    async fn an_interface_made_again_during_a_withdrawal_is_given_them_too() {
+        let mut b = Bench::new();
+        let lease = dns(&["198.51.100.53"], &[]);
+        b.commit(ConfigOp::Set, &[WAN]).await;
+        b.report(WAN, Some(lease.clone())).await;
+        b.ran();
+
+        b.recreate(WAN);
+        b.answer(&[failed()]);
+        b.report(WAN, None).await;
+        assert_eq!(b.ran(), revert(WAN));
+        b.report(WAN, Some(lease)).await;
+        assert_eq!(b.ran(), set(WAN, &["198.51.100.53"], &[]));
+    }
+
+    /// A command that got no answer may have been carried out. The
+    /// servers it asked for are ours to take back, should they stop
+    /// being wanted before a try has an answer.
+    #[tokio::test]
+    async fn servers_set_without_an_answer_are_taken_back() {
+        let mut b = Bench::new();
+        b.commit(ConfigOp::Set, &[WAN]).await;
+        b.answer(&[unanswered()]);
+        b.report(WAN, Some(dns(&["198.51.100.53"], &[]))).await;
+        // No answer for the servers, so the domains were not tried.
+        assert_eq!(b.ran(), set(WAN, &["198.51.100.53"], &[])[..1]);
+        assert_eq!(b.resolver.retry, Some(b.now + RETRY_MIN));
+        b.commit(ConfigOp::Delete, &[WAN]).await;
+        assert_eq!(b.ran(), revert(WAN));
+        assert_eq!(b.resolver.retry, None);
+        b.sync().await;
+        assert_eq!(b.ran(), []);
+    }
+
+    /// Still wanted, they are asked for again like any that failed.
+    #[tokio::test]
+    async fn servers_set_without_an_answer_are_asked_for_again() {
+        let mut b = Bench::new();
+        b.commit(ConfigOp::Set, &[WAN]).await;
+        b.answer(&[unanswered()]);
+        b.report(WAN, Some(dns(&["198.51.100.53"], &[]))).await;
+        b.ran();
+        b.sync().await;
+        assert_eq!(b.ran(), set(WAN, &["198.51.100.53"], &[]));
+        assert_eq!(b.resolver.retry, None);
+    }
+
+    /// New servers that got no answer leave it open which the system
+    /// resolver holds, the old or the new. So the old ones, wanted
+    /// again, are not taken for held: they are set.
+    #[tokio::test]
+    async fn an_unanswered_change_leaves_nothing_taken_for_held() {
+        let mut b = Bench::new();
+        b.commit(ConfigOp::Set, &[WAN]).await;
+        b.report(WAN, Some(dns(&["198.51.100.53"], &[]))).await;
+        b.ran();
+        b.answer(&[unanswered()]);
+        b.report(WAN, Some(dns(&["198.51.100.54"], &[]))).await;
+        assert_eq!(b.ran(), set(WAN, &["198.51.100.54"], &[])[..1]);
+        b.report(WAN, Some(dns(&["198.51.100.53"], &[]))).await;
+        assert_eq!(b.ran(), set(WAN, &["198.51.100.53"], &[]));
+    }
+
+    /// New servers that were refused leave the old ones in, and those,
+    /// wanted again, are held.
+    #[tokio::test]
+    async fn a_refused_change_leaves_the_old_servers_held() {
+        let mut b = Bench::new();
+        b.commit(ConfigOp::Set, &[WAN]).await;
+        b.report(WAN, Some(dns(&["198.51.100.53"], &[]))).await;
+        b.ran();
+        b.answer(&[failed()]);
+        b.report(WAN, Some(dns(&["198.51.100.54"], &[]))).await;
+        assert_eq!(b.ran(), set(WAN, &["198.51.100.54"], &[])[..1]);
+        b.report(WAN, Some(dns(&["198.51.100.53"], &[]))).await;
+        assert_eq!(b.ran(), []);
+        // And they are still ours to take back.
+        b.commit(ConfigOp::Delete, &[WAN]).await;
+        assert_eq!(b.ran(), revert(WAN));
+    }
+
+    /// A withdrawal that got no answer may have been carried out. The
+    /// servers wanted again before a later try has an answer are not
+    /// taken for held: they are set.
+    #[tokio::test]
+    async fn an_unanswered_withdrawal_leaves_nothing_taken_for_held() {
+        let mut b = Bench::new();
+        let lease = dns(&["198.51.100.53"], &["example.com"]);
+        b.commit(ConfigOp::Set, &[WAN]).await;
+        b.report(WAN, Some(lease.clone())).await;
+        b.ran();
+        b.answer(&[unanswered()]);
+        b.report(WAN, None).await;
+        assert_eq!(b.ran(), revert(WAN));
+        b.report(WAN, Some(lease)).await;
+        assert_eq!(b.ran(), set(WAN, &["198.51.100.53"], &["example.com"]));
+    }
+
+    /// One that was refused changed nothing: the servers are still in,
+    /// and wanted again they are held.
+    #[tokio::test]
+    async fn a_refused_withdrawal_leaves_the_servers_held() {
+        let mut b = Bench::new();
+        let lease = dns(&["198.51.100.53"], &[]);
+        b.commit(ConfigOp::Set, &[WAN]).await;
+        b.report(WAN, Some(lease.clone())).await;
+        b.ran();
+        b.answer(&[failed()]);
+        b.report(WAN, None).await;
+        assert_eq!(b.ran(), revert(WAN));
+        b.report(WAN, Some(lease)).await;
+        assert_eq!(b.ran(), []);
+        assert_eq!(b.resolver.retry, None);
+    }
+
+    /// The wait before the next try counts from the end of the commands.
+    /// A command that runs into its time limit takes longer than the
+    /// first waits: counted from before it, they were over when it
+    /// ended, and the next try followed at once, time after time.
+    #[tokio::test(start_paused = true)]
+    async fn the_wait_before_a_retry_starts_when_the_commands_are_over() {
+        let mut b = Bench::new();
+        b.commit(ConfigOp::Set, &[WAN]).await;
+        b.learn(WAN, Some(dns(&["198.51.100.53"], &[])));
+        b.mock.0.lock().unwrap().takes = Duration::from_secs(10);
+        b.answer(&[unanswered()]);
+        let began = Instant::now();
+        b.resolver.sync().await;
+        assert_eq!(Instant::now(), began + Duration::from_secs(10));
+        assert_eq!(b.resolver.retry, Some(Instant::now() + RETRY_MIN));
+    }
+
+    /// A withdrawal that got no answer is asked again while the
+    /// interface is there, like one that failed.
+    #[tokio::test]
+    async fn an_unanswered_withdrawal_is_tried_again() {
+        let mut b = Bench::new();
+        b.commit(ConfigOp::Set, &[WAN]).await;
+        b.report(WAN, Some(dns(&["198.51.100.53"], &[]))).await;
+        b.ran();
+        b.answer(&[unanswered()]);
+        b.report(WAN, None).await;
+        assert_eq!(b.ran(), revert(WAN));
+        assert_eq!(b.resolver.retry, Some(b.now + RETRY_MIN));
+        b.sync().await;
+        assert_eq!(b.ran(), revert(WAN));
+        assert_eq!(b.resolver.retry, None);
     }
 
     #[test]
