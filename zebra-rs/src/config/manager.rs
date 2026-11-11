@@ -385,6 +385,16 @@ fn feature_spec(spec: &str) -> (&str, &str) {
     (module, feature)
 }
 
+/// Whether the `--feature` specs enable `feature` of `module`, under its
+/// current name or one it was renamed from. This is for the few places
+/// where a feature changes what the daemon does rather than what the
+/// schema holds (`system hostname`, see `rib::hostname`).
+pub fn feature_enabled(specs: &[String], module: &str, feature: &str) -> bool {
+    specs
+        .iter()
+        .any(|spec| feature_spec(spec) == (module, feature))
+}
+
 /// The startup warnings for the `--feature` specs: one for each spec
 /// using a renamed feature's old name, and one for each spec no loaded
 /// module declares. The schema store records any name it is asked to
@@ -3120,6 +3130,56 @@ mod save_config_tests {
         assert_eq!(err.to_string(), refused);
         edit("delete interface eth0 ipv6 address dhcpv6");
         assert_eq!(violations(), Vec::<String>::new());
+    }
+
+    /// `system hostname` is checked at commit: with `--feature insomnia` it
+    /// becomes the system's host name, the kernel takes 64 characters at
+    /// most, and the schema's pattern admits `r1..x`. The startup config
+    /// only warns: an earlier release took whatever matched the pattern.
+    #[test]
+    fn a_bad_system_hostname_fails_the_commit_but_not_the_startup_config() {
+        let path = temp_path("hostname-check");
+        let cm = manager_with_config(&path);
+        let mode = cm.modes.get("configure").expect("configure mode");
+        let long = "a".repeat(65);
+        for (name, reason) in [
+            (
+                "r1..x",
+                "a host name is labels separated by single dots, with none at either end",
+            ),
+            (
+                "r1-",
+                "a host name's label does not start or end with a hyphen",
+            ),
+            (
+                long.as_str(),
+                "a host name is at most 64 characters, and this one has 65",
+            ),
+        ] {
+            let line = format!("system hostname {name}");
+            let (code, output, _) = cm.execute(mode, &format!("set {line}"));
+            assert_eq!(code, ExecCode::Show, "schema accepts `{line}`: {output:?}");
+            let err = cm.commit_config().expect_err(&line).to_string();
+            assert_eq!(err, format!("'{line}': {reason}"));
+            assert_eq!(
+                cm.running_hostname(),
+                None,
+                "`{line}` must not be committed"
+            );
+
+            // The same candidate, loaded as the startup config, only warns.
+            let mut candidate = String::new();
+            cm.store.candidate.borrow().list(&mut candidate);
+            let errors = cm.value_errors(candidate.lines().map(str::to_string), true);
+            assert_eq!(errors, Vec::<String>::new(), "{candidate}");
+            cm.store.discard();
+        }
+
+        // A name the kernel takes is committed.
+        let (code, output, _) = cm.execute(mode, "set system hostname r1.example.com");
+        assert_eq!(code, ExecCode::Show, "set rejected: {output:?}");
+        cm.commit_config().expect("a host name");
+        assert_eq!(cm.running_hostname().as_deref(), Some("r1.example.com"));
     }
 
     /// An Ethernet Segment's ESI is checked at commit (RFC 7432 §5 reserves
@@ -7399,6 +7459,26 @@ module test-insomnia-gated {
     fn the_old_iso_name_still_enables_insomnia() {
         assert!(gated_node_present(&["iso"]), "--feature iso enables it");
         assert!(gated_node_present(&["zebra-features:iso"]));
+    }
+
+    /// The runtime side of a feature (`system hostname` naming the system)
+    /// follows the same specs as the schema side, old name included: a unit
+    /// file that still says `--feature iso` gets both or neither.
+    #[test]
+    fn feature_enabled_follows_the_specs_and_their_old_names() {
+        let specs = |names: &[&str]| names.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let insomnia =
+            |names: &[&str]| feature_enabled(&specs(names), "zebra-features", "insomnia");
+        assert!(insomnia(&["insomnia"]));
+        assert!(insomnia(&["zebra-features:insomnia"]));
+        assert!(insomnia(&["iso"]));
+        assert!(insomnia(&["zebra-features:iso"]));
+        assert!(insomnia(&["etree", "insomnia"]));
+        assert!(!insomnia(&[]));
+        assert!(!insomnia(&["etree"]));
+        // Another module's feature of the same name is not ours.
+        assert!(!insomnia(&["ietf-bgp:insomnia"]));
+        assert!(!insomnia(&["insomniac"]));
     }
 
     #[test]

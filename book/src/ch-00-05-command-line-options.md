@@ -10,6 +10,7 @@ this chapter explains what each option does and how they interact.
 |---|---|---|---|---|
 | `--yang-path` | `-y` | `PATH` | search order (below) | Directory the YANG schema is loaded from |
 | `--config-file` | `-c` | `FILENAME` | search order (below) | Configuration file loaded at startup |
+| `--feature` | | `[MODULE:]FEATURE` | none | Turn on an optional part of the schema; repeatable |
 | `--daemon` | `-d` | — | foreground | Detach and run in the background |
 | `--log-output` | | `stdout \| syslog \| file` | `stdout` | Where log records are written |
 | `--log-file` | | `PATH` | `./zebra-rs.log` | Log file path when `--log-output=file` |
@@ -105,6 +106,51 @@ exist), the following locations are tried in order:
 Startup aborts if none resolve. The schemas are program data, so both
 `make install` and the `.deb` place them under `/usr/share`, and a bare
 `zebra-rs` on a package host resolves them without a flag.
+
+## `--feature [MODULE:]FEATURE`
+
+Turns on an optional part of the schema. The commands of a feature exist
+only while the daemon runs with it, and the flag can be given several
+times. A bare name refers to the `zebra-features` module.
+
+`--feature insomnia` adds the trees that the separate insomnia daemon
+enforces: `firewall`, `vpn`, `vrrp` and `service` (the DHCP server and
+relay), with their show commands. The insomnia package ships a systemd
+drop-in that sets the flag. `--feature iso` is its old name; it still
+works, with a warning at startup.
+
+### System host name
+
+`system hostname` names the router inside zebra-rs: the vty prompt,
+`show hostname`, and the host name the DHCP client sends. With
+`--feature insomnia` zebra-rs owns the configuration of the whole system,
+and the name also becomes the system's own:
+
+- the kernel host name, which `hostname` and `uname -n` print, changes
+  when the commit ends;
+- `/etc/hostname` is rewritten, so the name holds from the start of the
+  next boot.
+
+`delete system hostname` gives the system back the name it had before
+zebra-rs first changed it; zebra-rs keeps that name in
+`/var/lib/zebra-rs/system/hostname.json`. The same happens at the next
+start when the line was removed from the configuration file while
+zebra-rs was stopped.
+
+Only a zebra-rs in the default network namespace does this. One started
+with `ip netns exec` shares the host's name with every other namespace
+and leaves it alone, and so does one that is not root. `show hostname`
+then says why the name was not applied (see
+[Show Commands](ch-06-03-show-commands.md)).
+
+The name is applied when it is committed and when zebra-rs starts. A name
+somebody sets by hand afterwards (`hostnamectl hostname …`) stays until
+then. `/etc/hosts` is not edited: where neither systemd-resolved nor
+`libnss-myhostname` resolves the local name, add the new name to it.
+
+A host name is at most 64 characters, in labels of letters, digits and
+hyphens separated by single dots. A commit refuses anything else, with or
+without the feature.
 
 ## `-d`, `--daemon`
 

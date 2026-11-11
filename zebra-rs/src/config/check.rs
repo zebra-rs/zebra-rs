@@ -210,6 +210,12 @@ pub fn value_check(path: &str) -> Option<ValueCheck> {
 pub fn startup_tolerant_check(path: &str) -> Option<ValueCheck> {
     match path {
         "/router/bgp/afi-safi/ethernet-segment/esi" => Some(|v| check_es_esi(v).map(drop)),
+        // With `--feature insomnia` the name becomes the system's, and the
+        // kernel takes 64 characters at most; the schema's pattern cannot
+        // count, nor tell `r1..x` and `r1-` from a name. Without the feature
+        // it is the same name, so the rule is the same. A startup name that
+        // fails stays a label and is not applied (`rib::hostname`).
+        "/system/hostname" => Some(crate::rib::hostname::valid),
         _ => None,
     }
 }
@@ -503,6 +509,23 @@ mod tests {
         assert!(!ipv4_address_line(
             "interface eth0 ipv4 dhcp-options host-name edge1"
         ));
+    }
+
+    /// `system hostname` is a name the kernel would take. Only the startup
+    /// config tolerates another: an earlier release took any.
+    #[test]
+    fn system_hostname_is_checked() {
+        let path = "/system/hostname";
+        assert!(value_check(path).is_none());
+        let check = startup_tolerant_check(path).expect("checked");
+        for good in ["r1", "pe1-core", "r1.example.com", &"a".repeat(63)] {
+            assert!(check(good).is_ok(), "{good}");
+        }
+        for bad in ["r1..x", "r1.", "r1-", &"a".repeat(64), &"a.".repeat(40)] {
+            assert!(check(bad).is_err(), "{bad}");
+        }
+        // The other hostname leaves are not system names.
+        assert!(startup_tolerant_check("/router/isis/hostname").is_none());
     }
 
     /// An Ethernet Segment's ESI: well-formed and not reserved (RFC 7432

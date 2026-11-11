@@ -613,12 +613,24 @@ module config {
         // surfaced to the vty shell and interpolated into the prompt
         // eval line (see vtyhelper), so quotes / spaces / shell
         // metacharacters must be impossible by construction.
+        //
+        // The pattern cannot count, nor tell `r1..x` and `r1-` from a
+        // name: a commit also checks that the value is one the kernel
+        // takes (`config::check`, `rib::hostname::valid`).
         type string {
           pattern "[A-Za-z0-9][A-Za-z0-9.-]*";
         }
         description
           "The name of the host. This name can be a single domain label or the
-           fully qualified domain name of the host.";
+           fully qualified domain name of the host: at most 64 characters,
+           in labels of letters, digits and hyphens.
+
+           By itself this names the router inside zebra-rs: the vty
+           prompt, `show hostname`, the DHCP client's host name option.
+           With `--feature insomnia`, and zebra-rs running in the default
+           network namespace, it is also made the system's host name: the
+           kernel's and the one in /etc/hostname. Deleting it gives the
+           system back the name it had before.";
       }
       // Global Router ID, `system router-id A.B.C.D` (the equivalent
       // of FRR/zebra's top-level `router-id`). When set it overrides

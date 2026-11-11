@@ -161,7 +161,20 @@ r1> show hostname
 r1
 ```
 
-JSON: `{ "hostname": "r1" }`, or `null` when there is neither.
+With `--feature insomnia` the configured name is also made the system's
+(see [Command Line Options](ch-00-05-command-line-options.md#system-host-name)).
+When the system's name is not the configured one, a second line says why:
+
+```
+r1> show hostname
+r1
+% not applied to the system: zebra-rs is not in the default network namespace
+```
+
+JSON: `{ "hostname", "managed", "os", "reason" }`. `hostname` is `null`
+when there is neither name. `managed` says whether this zebra-rs writes
+the system's name, `os` is the system's name, and `reason` is the text
+after the `%` line's colon, or `null`.
 
 ### `show task`
 

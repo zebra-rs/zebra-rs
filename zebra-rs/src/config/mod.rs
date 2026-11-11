@@ -9,6 +9,7 @@ mod manager;
 pub use manager::ConfigManager;
 pub use manager::RibSubscriber;
 pub use manager::event_loop;
+pub use manager::feature_enabled;
 
 mod serve;
 pub use serve::Cli;

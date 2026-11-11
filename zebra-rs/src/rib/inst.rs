@@ -1534,6 +1534,15 @@ pub struct Rib {
     /// The vty prompt tracks the same config through the Execute
     /// reply path in the config manager, so the two stay consistent.
     pub hostname_config: Option<String>,
+    /// With `--feature insomnia`: what makes `hostname_config` the
+    /// system's own host name (`rib::hostname`). `None` without the
+    /// feature, and the leaf is then a label inside the daemon only.
+    pub system_hostname: Option<super::hostname::SystemHostname>,
+    /// A commit touched `hostname_config` and `system_hostname` has not
+    /// synced since. Starts set, so that the startup commit syncs even
+    /// when it carries no hostname: that is what gives a saved name back
+    /// after the line was removed while zebra-rs was down.
+    pub hostname_unsynced: bool,
 
     /// Single-shot timer that fires Message::Resolve after a debounce when
     /// the FIB has changed. None when no resolve is pending. Set by
@@ -1685,6 +1694,8 @@ impl Rib {
             router_id: Ipv4Addr::UNSPECIFIED,
             router_id_config: None,
             hostname_config: None,
+            system_hostname: None,
+            hostname_unsynced: true,
             rib_sync_timer: None,
             reserved_srgbs: Vec::new(),
             retired_srgbs: Vec::new(),
@@ -5267,20 +5278,40 @@ impl Rib {
 
     /// `set system hostname <name>` — store the configured hostname so
     /// `show hostname` prefers it over the OS hostname. Deleting falls
-    /// back to the OS hostname. Purely daemon-internal (FRR-style): no
-    /// `sethostname(2)`, no OS side effects; the vty prompt tracks the
-    /// same leaf via the config manager's Execute-reply path.
+    /// back to the OS hostname. The vty prompt tracks the same leaf via
+    /// the config manager's Execute-reply path.
+    ///
+    /// By itself this is daemon-internal (FRR-style): no
+    /// `sethostname(2)`, no OS side effects. With `--feature insomnia`
+    /// the commit's end makes it the system's name
+    /// ([`Self::system_hostname_sync`]).
     pub(crate) fn hostname_config_exec(
         &mut self,
         mut args: crate::config::Args,
         op: ConfigOp,
     ) -> Option<()> {
+        self.hostname_unsynced = true;
         if op.is_set() {
             self.hostname_config = Some(args.string()?);
         } else {
             self.hostname_config = None;
         }
         Some(())
+    }
+
+    /// At the end of a commit: make the running config's hostname the
+    /// system's, or give the saved name back when the config has none.
+    /// Once per commit and not per line, so that a commit replacing the
+    /// name (a delete and a set) does not restore the saved one in
+    /// between. A commit that leaves the name alone does nothing, unless
+    /// the last attempt failed.
+    fn system_hostname_sync(&mut self) {
+        let Some(system) = &mut self.system_hostname else {
+            return;
+        };
+        if std::mem::take(&mut self.hostname_unsynced) || system.failed() {
+            system.sync(self.hostname_config.as_deref());
+        }
     }
 
     /// `set system cradle enabled <bool>` — the tee's standalone switch
@@ -5830,6 +5861,7 @@ impl Rib {
                 }
             }
             ConfigOp::CommitEnd => {
+                self.system_hostname_sync();
                 self.bridge_config.commit(self.tx.clone());
                 self.vlan_config.commit(self.tx.clone());
                 self.vxlan_config.commit(self.tx.clone());
@@ -9087,5 +9119,225 @@ mod ilm_leftover_tests {
         let mut ipv4 = route(RouteProtocol::Isis, None);
         ipv4.header.address_family = AddressFamily::Inet;
         assert_eq!(ilm_leftover_from_msg(&ipv4), None);
+    }
+}
+
+#[cfg(test)]
+mod system_hostname_tests {
+    //! `system hostname` reaching the system's host name through the
+    //! commit path, on the file-backed stand-in (`rib::hostname`,
+    //! docs/design/system-hostname.md).
+    use super::*;
+    use crate::rib::hostname::SystemHostname;
+    use crate::rib::show::hostname_show;
+    use std::collections::VecDeque;
+    use std::path::PathBuf;
+
+    /// A stand-in directory of this test's own, removed on drop.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(test: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "zebra-rs-rib-hostname-{}-{test}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            Self(dir)
+        }
+
+        fn read(&self, file: &str) -> Option<String> {
+            std::fs::read_to_string(self.0.join(file)).ok()
+        }
+
+        /// The stand-in's kernel name, trimmed.
+        fn kernel(&self) -> Option<String> {
+            self.read("kernel").map(|name| name.trim().to_string())
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// A RIB started with `--feature insomnia` on `scratch`.
+    fn rib_on(scratch: &Scratch) -> Rib {
+        let mut rib = Rib::new(false).unwrap();
+        rib.system_hostname = Some(SystemHostname::stub(&scratch.0));
+        rib
+    }
+
+    fn set(rib: &mut Rib, name: &str) {
+        let args = Args(VecDeque::from([name.to_string()]));
+        rib.hostname_config_exec(args, ConfigOp::Set).unwrap();
+    }
+
+    fn delete(rib: &mut Rib, name: &str) {
+        let args = Args(VecDeque::from([name.to_string()]));
+        rib.hostname_config_exec(args, ConfigOp::Delete).unwrap();
+    }
+
+    async fn commit_end(rib: &mut Rib) {
+        rib.process_cm_msg(ConfigRequest::new(Vec::new(), ConfigOp::CommitEnd))
+            .await;
+    }
+
+    fn show(rib: &Rib) -> String {
+        hostname_show(rib, Args(VecDeque::new()), false)
+    }
+
+    fn show_json(rib: &Rib) -> serde_json::Value {
+        serde_json::from_str(&hostname_show(rib, Args(VecDeque::new()), true)).unwrap()
+    }
+
+    /// The name is the system's when the commit ends, not at the `set`
+    /// line: a candidate edit, or half a commit, changes nothing.
+    #[tokio::test]
+    async fn the_name_is_applied_when_the_commit_ends() {
+        let scratch = Scratch::new("commit-end");
+        let mut rib = rib_on(&scratch);
+        set(&mut rib, "r1");
+        assert_eq!(scratch.kernel(), None, "before the commit ends");
+        commit_end(&mut rib).await;
+        assert_eq!(scratch.kernel().as_deref(), Some("r1"));
+        assert_eq!(scratch.read("hostname").as_deref(), Some("r1\n"));
+        assert_eq!(show(&rib), "r1\n");
+        assert_eq!(
+            show_json(&rib),
+            serde_json::json!({"hostname": "r1", "managed": true, "os": "r1", "reason": null})
+        );
+    }
+
+    /// A commit that replaces the name sends a delete and a set. The saved
+    /// name must not be restored in between: it would be written to the
+    /// system, and the record removed, for the length of a commit.
+    #[tokio::test]
+    async fn replacing_the_name_does_not_pass_through_the_saved_one() {
+        let scratch = Scratch::new("replace");
+        let mut rib = rib_on(&scratch);
+        set(&mut rib, "r1");
+        commit_end(&mut rib).await;
+        let record = scratch.read("saved.json").expect("a record");
+
+        delete(&mut rib, "r1");
+        assert_eq!(scratch.kernel().as_deref(), Some("r1"), "after the delete");
+        set(&mut rib, "r2");
+        commit_end(&mut rib).await;
+        assert_eq!(scratch.kernel().as_deref(), Some("r2"));
+        assert_eq!(scratch.read("saved.json"), Some(record));
+    }
+
+    #[tokio::test]
+    async fn deleting_the_name_restores_the_saved_one() {
+        let scratch = Scratch::new("delete");
+        let mut rib = rib_on(&scratch);
+        set(&mut rib, "r1");
+        commit_end(&mut rib).await;
+        delete(&mut rib, "r1");
+        commit_end(&mut rib).await;
+        // The stand-in's name before anything set one.
+        assert_eq!(scratch.kernel().as_deref(), Some("localhost"));
+        assert_eq!(scratch.read("hostname"), None);
+        assert_eq!(scratch.read("saved.json"), None);
+        assert_eq!(show(&rib), "localhost\n");
+    }
+
+    /// The line was removed from the config while zebra-rs was down: the
+    /// startup commit carries no hostname at all, and still gives the saved
+    /// name back.
+    #[tokio::test]
+    async fn a_startup_commit_without_the_name_restores_the_saved_one() {
+        let scratch = Scratch::new("startup");
+        let mut rib = rib_on(&scratch);
+        set(&mut rib, "r1");
+        commit_end(&mut rib).await;
+        drop(rib);
+
+        let mut rib = rib_on(&scratch);
+        assert_eq!(scratch.kernel().as_deref(), Some("r1"), "before the commit");
+        commit_end(&mut rib).await;
+        assert_eq!(scratch.kernel().as_deref(), Some("localhost"));
+        assert_eq!(scratch.read("saved.json"), None);
+    }
+
+    /// Only a commit touching the name syncs: somebody else's later change
+    /// to the system's name is reported, and stays until then.
+    #[tokio::test]
+    async fn a_commit_that_leaves_the_name_alone_does_not_sync() {
+        let scratch = Scratch::new("untouched");
+        let mut rib = rib_on(&scratch);
+        set(&mut rib, "r1");
+        commit_end(&mut rib).await;
+        std::fs::write(scratch.0.join("kernel"), "other\n").unwrap();
+        commit_end(&mut rib).await;
+        assert_eq!(scratch.kernel().as_deref(), Some("other"));
+        assert_eq!(
+            show(&rib),
+            "r1\n% not applied to the system: the system's host name is other\n"
+        );
+        let json = show_json(&rib);
+        assert_eq!(json["os"], "other");
+        assert_eq!(json["reason"], "the system's host name is other");
+    }
+
+    /// A failed sync is tried again by the next commit, whatever that
+    /// commit is about: the operator cannot commit the same name twice.
+    #[tokio::test]
+    async fn a_failed_sync_is_retried_by_the_next_commit() {
+        let scratch = Scratch::new("retry");
+        std::fs::create_dir_all(scratch.0.join("hostname")).unwrap();
+        let mut rib = rib_on(&scratch);
+        set(&mut rib, "r1");
+        commit_end(&mut rib).await;
+        assert_eq!(scratch.kernel(), None);
+        assert!(
+            show(&rib).starts_with("r1\n% not applied to the system: "),
+            "{}",
+            show(&rib)
+        );
+
+        std::fs::remove_dir(scratch.0.join("hostname")).unwrap();
+        commit_end(&mut rib).await;
+        assert_eq!(scratch.kernel().as_deref(), Some("r1"));
+        assert_eq!(show(&rib), "r1\n");
+    }
+
+    /// Without `--feature insomnia` the name is a label: nothing is
+    /// written anywhere, and `show hostname` says nothing of the system.
+    #[tokio::test]
+    async fn without_the_feature_nothing_is_applied() {
+        let mut rib = Rib::new(false).unwrap();
+        assert!(rib.system_hostname.is_none());
+        set(&mut rib, "r1");
+        commit_end(&mut rib).await;
+        assert_eq!(show(&rib), "r1\n");
+        let json = show_json(&rib);
+        assert_eq!(json["hostname"], "r1");
+        assert_eq!(json["managed"], false);
+        assert_eq!(json["reason"], serde_json::Value::Null);
+    }
+
+    /// With the feature, outside the default network namespace: the name
+    /// stays a label, and `show hostname` says why.
+    #[tokio::test]
+    async fn outside_the_default_namespace_show_says_why() {
+        let reason = "zebra-rs is not in the default network namespace";
+        let mut rib = Rib::new(false).unwrap();
+        rib.system_hostname = Some(SystemHostname::refused(reason));
+        // Nothing configured: nothing to say.
+        commit_end(&mut rib).await;
+        assert!(!show(&rib).contains('%'), "{}", show(&rib));
+
+        set(&mut rib, "r1");
+        commit_end(&mut rib).await;
+        assert_eq!(
+            show(&rib),
+            format!("r1\n% not applied to the system: {reason}\n")
+        );
+        let json = show_json(&rib);
+        assert_eq!(json["managed"], false);
+        assert_eq!(json["reason"], reason);
     }
 }
