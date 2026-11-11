@@ -285,7 +285,8 @@ would bypass the RIB.
   hardware address there is. The address only goes into a DUID made
   then; one on disk stays what it is, and is read without a hardware
   address, so an interface that has none (a tunnel, a PPP link) gets its
-  client all the same. Only making a DUID waits for an address.
+  client all the same. Only making a DUID waits for an address, and a
+  client that waits starts when any interface brings one.
 - Stored in `/var/lib/zebra-rs/dhcp/duid`, next to
   `/var/lib/zebra-rs/checkpoint`. RFC 7084 W-5: the DUID "MUST NOT change
   between network-interface resets or IPv6 CE router reboots".
@@ -836,7 +837,8 @@ ones in `dhcpc`:
   is withdrawn at once and the Release goes out as who took the lease.
   That client stays, beside its successor and on the same socket, until
   the server has answered or the Release has been sent as often as it is
-  to be.
+  to be. It stops under the options as the commit leaves them:
+  `no-release` set together with the deletion means no Release.
 - **A lease saved under another identity** (the DUID or the mode changed
   while zebra-rs was down) is resumed as who took it, which claims its
   address so that it can be withdrawn, and released as that identity

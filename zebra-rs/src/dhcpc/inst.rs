@@ -334,7 +334,7 @@ impl Dhcpc {
                 let name = link.name.clone();
                 self.links.insert(link.index, LinkInfo::from(&link));
                 self.reconcile(&name);
-                self.link_added6(&link);
+                self.link_added6(link.index, &name, &link.addr6);
             }
             RibRx::LinkDel(ifindex) => {
                 if let Some(link) = self.links.remove(&ifindex) {
@@ -371,8 +371,7 @@ impl Dhcpc {
                     link.mac = Some(mac.octets());
                     let name = link.name.clone();
                     self.reconcile(&name);
-                    // The system DUID may have been waiting for one.
-                    self.reconcile6(&name);
+                    self.link_mac6(&name);
                 }
             }
             RibRx::AddrAdd(addr) => {

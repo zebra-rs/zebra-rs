@@ -30,7 +30,7 @@ use crate::dhcpc::inst::{Dhcpc, lifetime, unix_now};
 use crate::dhcpc::lease::Kept6;
 use crate::fib::AddrOpts;
 use crate::rib::Message;
-use crate::rib::link::{AddrOrigin, Link, LinkAddr};
+use crate::rib::link::{AddrOrigin, LinkAddr};
 
 use super::client::{Action, Address, Client, Event, Lease, Options, State};
 use super::socket::{self, Input6, Socket6};
@@ -243,16 +243,46 @@ impl Dhcpc {
         });
     }
 
-    /// A link appeared, or is described anew.
-    pub(in crate::dhcpc) fn link_added6(&mut self, link: &Link) {
-        let link_locals = link
-            .addr6
+    /// A link appeared, or is described anew, with the IPv6 addresses it
+    /// has.
+    pub(in crate::dhcpc) fn link_added6(&mut self, ifindex: u32, name: &str, addr6: &[LinkAddr]) {
+        let link_locals = addr6
             .iter()
             .filter_map(link_local_state)
             .collect::<BTreeMap<_, _>>();
-        self.v6.link_locals.insert(link.index, link_locals);
-        self.reconcile6(&link.name);
-        self.sync_link6(&link.name);
+        self.v6.link_locals.insert(ifindex, link_locals);
+        self.reconcile6(name);
+        self.sync_link6(name);
+        self.start_waiting6();
+    }
+
+    /// A link's hardware address changed, or it has one now.
+    pub(in crate::dhcpc) fn link_mac6(&mut self, name: &str) {
+        self.reconcile6(name);
+        self.start_waiting6();
+    }
+
+    /// Look again at the clients that could not start because the system
+    /// DUID has to be made and no interface had a hardware address to
+    /// make it from (`duid_for`). The address may now be there, and on
+    /// any interface: the event that brought it reconciles only its own.
+    /// Nothing waits once the system has its DUID.
+    fn start_waiting6(&mut self) {
+        if self.v6.duid.is_some() {
+            return;
+        }
+        let waiting: Vec<String> = self
+            .v6
+            .ifaces
+            .iter()
+            .filter(|(_, iface)| {
+                iface.session.is_none() && iface.cfg.wanted() && iface.cfg.duid.is_none()
+            })
+            .map(|(name, _)| name.clone())
+            .collect();
+        for name in waiting {
+            self.reconcile6(&name);
+        }
     }
 
     /// The link is gone (deleted, or moved to another VRF, which the RIB
@@ -385,6 +415,16 @@ impl Dhcpc {
                         || session.client.options().parameters_only != options.parameters_only
                 }
             };
+            // A client that has not been stopped yet stops under the
+            // options as they are now: `no-release` set in the commit
+            // that takes the client away is meant for that client.
+            // (`set_options` leaves the mode alone, and the identity is
+            // not an option.)
+            if let Some(retiring) = iface.retiring.as_mut()
+                && !retiring.stopped
+            {
+                retiring.session.client.set_options(options.clone());
+            }
             if stale {
                 if wanted {
                     tracing::info!(
@@ -392,6 +432,9 @@ impl Dhcpc {
                     );
                 } else {
                     tracing::info!("dhcpv6 client: {name}: stopped");
+                }
+                if let Some(session) = iface.session.as_mut() {
+                    session.client.set_options(options.clone());
                 }
                 self.retire6(name, ifindex, &mut iface, now);
             }
@@ -1433,6 +1476,90 @@ mod tests {
         b.dhcpc.links.get_mut(&IFINDEX).unwrap().mac = Some([0; 6]);
         want_address(&mut b);
         assert!(b.dhcpc.v6.ifaces[IF].session.is_none());
+    }
+
+    /// `no-release` set in the commit that takes the client away is for
+    /// that client: it stops without a Release.
+    #[tokio::test]
+    async fn no_release_set_with_the_deletion_stops_without_a_release() {
+        for no_release in [true, false] {
+            let mut b = bench("no-release");
+            save(&b, &DUID, 0, &lease(&[ADDRESS]));
+            configure(&mut b, &DUID);
+            make_ready(&mut b);
+            asked(&mut b);
+            let cfg = &mut b.dhcpc.v6.ifaces.get_mut(IF).unwrap().cfg;
+            cfg.address = false;
+            cfg.no_release = no_release;
+            b.dhcpc.reconcile6(IF);
+            assert_eq!(asked(&mut b), [format!("del {ADDRESS}/128")]);
+            let want = (!no_release).then_some(State::Releasing);
+            assert_eq!(retiring(&b), want, "no-release {no_release}");
+        }
+
+        // The same with another DUID in that commit: the old client goes
+        // silently, the new one asks.
+        let mut b = bench("no-release-identity");
+        save(&b, &DUID, 0, &lease(&[ADDRESS]));
+        configure(&mut b, &DUID);
+        make_ready(&mut b);
+        b.dhcpc.v6.ifaces.get_mut(IF).unwrap().cfg.no_release = true;
+        configure(&mut b, &OTHER_DUID);
+        assert_eq!(retiring(&b), None);
+        assert_eq!(duid_of(&b), OTHER_DUID);
+        assert_eq!(state(&b), State::Soliciting);
+
+        // And for a lease saved under another DUID that still waits for
+        // the link: `no-release` set meanwhile holds when it is stopped.
+        let mut b = bench("no-release-waiting");
+        save(&b, &OTHER_DUID, 0, &lease(&[ADDRESS]));
+        configure(&mut b, &DUID);
+        assert_eq!(retiring(&b), Some(State::Bound));
+        b.dhcpc.v6.ifaces.get_mut(IF).unwrap().cfg.no_release = true;
+        b.dhcpc.reconcile6(IF);
+        asked(&mut b);
+        make_ready(&mut b);
+        assert_eq!(asked(&mut b), [format!("del {ADDRESS}/128")]);
+        assert_eq!(retiring(&b), None);
+    }
+
+    /// A client that waits for a hardware address to make the system
+    /// DUID from starts when one appears, also on another interface.
+    #[tokio::test]
+    async fn a_client_waiting_for_the_duid_starts_when_any_interface_brings_an_address() {
+        let other = |mac: Option<[u8; 6]>| LinkInfo {
+            name: "dhcpc6-test1".to_string(),
+            mac,
+            mtu: 1500,
+            up: true,
+            master: None,
+            is_vrf: false,
+        };
+        // The other interface appears with an address, or gets one later.
+        for appears_with_it in [true, false] {
+            let mut b = bench("duid-waiting");
+            b.dhcpc.links.get_mut(&IFINDEX).unwrap().mac = None;
+            let cfg = &mut b.dhcpc.v6.ifaces.entry(IF.to_string()).or_default().cfg;
+            cfg.address = true;
+            b.dhcpc.reconcile6(IF);
+            assert!(b.dhcpc.v6.ifaces[IF].session.is_none());
+
+            let mac = [2, 0, 0, 0, 0, 9];
+            if appears_with_it {
+                b.dhcpc.links.insert(IFINDEX + 1, other(Some(mac)));
+                b.dhcpc.link_added6(IFINDEX + 1, "dhcpc6-test1", &[]);
+            } else {
+                // Without one it changes nothing.
+                b.dhcpc.links.insert(IFINDEX + 1, other(None));
+                b.dhcpc.link_added6(IFINDEX + 1, "dhcpc6-test1", &[]);
+                assert!(b.dhcpc.v6.ifaces[IF].session.is_none());
+                b.dhcpc.links.get_mut(&(IFINDEX + 1)).unwrap().mac = Some(mac);
+                b.dhcpc.link_mac6("dhcpc6-test1");
+            }
+            let made = duid_of(&b);
+            assert_eq!(made[8..], mac, "appears with it: {appears_with_it}");
+            assert_eq!(DuidStore::new(&b.dir).load().unwrap(), Some(made));
+        }
     }
 
     #[tokio::test]
