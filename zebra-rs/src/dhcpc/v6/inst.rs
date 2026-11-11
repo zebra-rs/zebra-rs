@@ -266,11 +266,11 @@ impl Dhcpc {
     /// DUID has to be made and no interface had a hardware address to
     /// make it from (`duid_for`). The address may now be there, and on
     /// any interface: the event that brought it reconciles only its own.
-    /// Nothing waits once the system has its DUID.
+    ///
+    /// Also when the system has its DUID by now: the interface that
+    /// brought the address may have been waiting itself, and its own
+    /// reconciling has then just made the DUID the others wait for.
     fn start_waiting6(&mut self) {
-        if self.v6.duid.is_some() {
-            return;
-        }
         let waiting: Vec<String> = self
             .v6
             .ifaces
@@ -1559,6 +1559,56 @@ mod tests {
             let made = duid_of(&b);
             assert_eq!(made[8..], mac, "appears with it: {appears_with_it}");
             assert_eq!(DuidStore::new(&b.dir).load().unwrap(), Some(made));
+        }
+    }
+
+    /// Two clients wait for the system DUID, and the interface of one of
+    /// them gets the hardware address: that one's own reconciling makes
+    /// the DUID, and the other must not be left waiting for it.
+    #[tokio::test]
+    async fn every_client_waiting_for_the_duid_starts_when_one_of_them_gets_an_address() {
+        const OTHER: &str = "dhcpc6-test1";
+        // The address comes as a change to a known link, or with the
+        // link described anew.
+        for described_anew in [false, true] {
+            let mut b = bench("duid-waiting-two");
+            b.dhcpc.links.get_mut(&IFINDEX).unwrap().mac = None;
+            b.dhcpc.links.insert(
+                IFINDEX + 1,
+                LinkInfo {
+                    name: OTHER.to_string(),
+                    mac: None,
+                    mtu: 1500,
+                    up: true,
+                    master: None,
+                    is_vrf: false,
+                },
+            );
+            for name in [IF, OTHER] {
+                let cfg = &mut b.dhcpc.v6.ifaces.entry(name.to_string()).or_default().cfg;
+                cfg.address = true;
+                b.dhcpc.reconcile6(name);
+                assert!(b.dhcpc.v6.ifaces[name].session.is_none());
+            }
+            // The second one gets it. (The first sorts before it, so it
+            // is not the one the event names.)
+            b.dhcpc.links.get_mut(&(IFINDEX + 1)).unwrap().mac = Some(MAC);
+            if described_anew {
+                b.dhcpc.link_added6(IFINDEX + 1, OTHER, &[]);
+            } else {
+                b.dhcpc.link_mac6(OTHER);
+            }
+            let duid = |name: &str| {
+                let session = b.dhcpc.v6.ifaces[name].session.as_ref();
+                session.map(|session| session.client.identity().0.to_vec())
+            };
+            let made = duid(OTHER).expect("the interface with the address");
+            assert_eq!(made[8..], MAC);
+            assert_eq!(
+                duid(IF),
+                Some(made),
+                "the other waiting client, described anew: {described_anew}"
+            );
         }
     }
 
