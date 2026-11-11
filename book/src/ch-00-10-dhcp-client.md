@@ -167,9 +167,11 @@ Current DNS Server: 198.51.100.53
   at once when it is advertised with a lifetime of zero, and when the RA
   host stops (`address autoconf` and `address dhcpv6` both deleted).
 - **Order.** What DHCP names goes ahead of what Router Advertisements
-  name (RFC 8106), the advertised servers in the order they were first
-  heard. A server or domain both name is given once. When the lease
-  ends, the advertised ones stay, and the other way round.
+  name. Among the advertised ones, a server or domain heard of for the
+  first time goes ahead of those already held, and the entries of one
+  RDNSS or DNSSL option keep the option's order (RFC 8106). A server or
+  domain both DHCP and an advertisement name is given once. When the
+  lease ends, the advertised ones stay, and the other way round.
 - **Link down.** The lease is kept and so are its name servers:
   systemd-resolved itself leaves a link without carrier alone.
 - **Two uplinks.** Each entry's link gets its own servers, and
@@ -263,8 +265,8 @@ interface wan1 {
   interface` tags it `slaac`. An address that fails duplicate address
   detection is removed and not formed again.
 - **DNS servers and search domains** (RDNSS, DNSSL) are kept with their
-  lifetimes, in the order heard, and shown. The router uses them itself
-  under `system name-server dhcp <name>` ([Name
+  lifetimes and shown, the most recently learned first. The router uses
+  them itself under `system name-server dhcp <name>` ([Name
   servers](#name-servers)).
 - **The MTU option** is shown, not applied.
 - The M and O flags are shown and not acted on: DHCPv6 is not started

@@ -7,9 +7,10 @@ Router Advertisements name name servers (RDNSS) and search domains
 `show ipv6 nd interface` shows them; the host itself uses them only
 where `system name-server dhcp <if>` says so (the resolver task,
 docs/design/dhcp-client.md §13). They are then handed to
-systemd-resolved as that link's DNS configuration, in the order they
-were heard, behind those of a DHCP lease on the same interface, and
-taken back as their lifetimes end or the RA host stops.
+systemd-resolved as that link's DNS configuration: the ones heard of
+last first, those of one option in the option's order (RFC 8106
+§6.2), all behind those of a DHCP lease on the same interface. They
+are taken back as their lifetimes end or the RA host stops.
 
 No resolver is running here: the harness names a stand-in for
 `resolvectl` to each daemon (tests/scripts/resolvectl_stub.sh), whose
@@ -32,7 +33,7 @@ Requires dnsmasq and nft on the host (tests/scripts/dhcp_server.sh).
 | Setup a router that advertises a name server and an RA host | |
 | Without the entry what the advertisements name is only shown | |
 | The entry hands the advertised name server and domain to the host | |
-| Name servers are used in the order they were heard | |
+| Newly advertised name servers go first, and an option keeps its order | |
 | A lifetime of zero takes a name server away at once | |
 | A name server whose lifetime runs out is taken away | |
 | A DHCP lease's name server goes ahead of the advertised one | |

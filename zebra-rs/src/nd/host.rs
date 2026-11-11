@@ -153,11 +153,12 @@ pub struct Host {
     /// Prefixes whose SLAAC address failed DAD: not formed again while
     /// the host runs, since nothing would make the next try different.
     pub dad_failed: BTreeSet<Ipv6Net>,
-    /// RDNSS servers (RFC 8106) and when each times out, in the order
-    /// they were first heard: a host uses them in order (§5.3.1).
+    /// RDNSS servers (RFC 8106) and when each times out, in the order a
+    /// host uses them (§6.2): the ones heard of last first, those of
+    /// one option in the option's order.
     pub dns: Vec<(Ipv6Addr, Option<Instant>)>,
-    /// DNSSL domains (RFC 8106) and when each times out, in the order
-    /// they were first heard.
+    /// DNSSL domains (RFC 8106) and when each times out, in the same
+    /// order (§6.3).
     pub search: Vec<(String, Option<Instant>)>,
     /// The last MTU option heard. Shown, not applied.
     pub mtu: Option<u32>,
@@ -191,25 +192,41 @@ impl Host {
     }
 }
 
-/// Take in one RDNSS address or DNSSL domain with the lifetime its
-/// option gave (RFC 8106 §6.2, §6.3): zero takes it out; anything else
-/// refreshes it where it stands, or adds it after the ones held, up to
-/// `MAX_DNS` of them.
+/// Take in one RDNSS or DNSSL option: its addresses or domains, in
+/// order, and the lifetime it gives them all (RFC 8106 §6.2, §6.3).
+///
+/// - A lifetime of zero takes an item out.
+/// - An item held is refreshed where it stands.
+/// - A new one goes in ahead of everything held before this option, and
+///   behind the option's earlier new ones: what was heard of last is
+///   used first, and an option's own order says which of its items is
+///   preferred.
+///
+/// No more than `MAX_DNS` are held. Past that a new one is ignored: the
+/// RFC would make room by dropping the one that expires first, which
+/// lets whoever advertises last push the others out (see `MAX_ROUTERS`).
 fn heard<T: PartialEq + Clone>(
     held: &mut Vec<(T, Option<Instant>)>,
-    item: &T,
+    items: &[T],
     lifetime: u32,
     now: Instant,
 ) {
-    let at = held.iter().position(|(have, _)| have == item);
-    match (at, lifetime) {
-        (Some(at), 0) => {
-            held.remove(at);
+    // How many of this option's new items are in already.
+    let mut front = 0;
+    for item in items {
+        let at = held.iter().position(|(have, _)| have == item);
+        match (at, lifetime) {
+            (Some(at), 0) => {
+                held.remove(at);
+            }
+            (Some(at), _) => held[at].1 = deadline(now, lifetime),
+            (None, 0) => {}
+            (None, _) if held.len() < MAX_DNS => {
+                held.insert(front, (item.clone(), deadline(now, lifetime)));
+                front += 1;
+            }
+            (None, _) => {}
         }
-        (Some(at), _) => held[at].1 = deadline(now, lifetime),
-        (None, 0) => {}
-        (None, _) if held.len() < MAX_DNS => held.push((item.clone(), deadline(now, lifetime))),
-        (None, _) => {}
     }
 }
 
@@ -628,14 +645,10 @@ impl RaHosts {
                 }
                 NdOption::Mtu(mtu) => host.mtu = Some(*mtu),
                 NdOption::Rdnss(rdnss) => {
-                    for server in &rdnss.servers {
-                        heard(&mut host.dns, server, rdnss.lifetime, now);
-                    }
+                    heard(&mut host.dns, &rdnss.servers, rdnss.lifetime, now);
                 }
                 NdOption::Dnssl(dnssl) => {
-                    for domain in &dnssl.domains {
-                        heard(&mut host.search, domain, dnssl.lifetime, now);
-                    }
+                    heard(&mut host.search, &dnssl.domains, dnssl.lifetime, now);
                 }
                 _ => {}
             }
@@ -1728,7 +1741,8 @@ mod tests {
         hosts.on_ra(WAN, ll("fe80::1"), &ra(1800, options), now + secs(60));
         assert_eq!(reported(&mut hosts), []);
 
-        // Another server, from another router.
+        // Another server, from another router: heard of last, used
+        // first.
         hosts.on_ra(
             WAN,
             ll("fe80::2"),
@@ -1738,7 +1752,7 @@ mod tests {
         assert_eq!(
             reported(&mut hosts),
             wan0(Some(link_dns(
-                &["2001:db8::53", "2001:db8::54"],
+                &["2001:db8::54", "2001:db8::53"],
                 &["example.com"]
             )))
         );
@@ -1761,11 +1775,12 @@ mod tests {
         assert_eq!(reported(&mut hosts), []);
     }
 
-    /// RFC 8106 §5.3.1 has a host use the servers in the order they
-    /// came, which is not the order of their addresses, and a refresh
-    /// does not move one.
+    /// RFC 8106 §6.2 (§6.3 for domains): a server heard of for the
+    /// first time goes in first, those of one option in the option's
+    /// order, and one that is only refreshed stays where it is. Neither
+    /// is the order of the addresses.
     #[test]
-    fn name_servers_keep_the_order_they_were_heard_in() {
+    fn a_new_name_server_goes_first_and_an_option_keeps_its_order() {
         let now = t0();
         let mut hosts = hosts_with(&[(WAN, "wan0")], now);
         let options = vec![
@@ -1773,21 +1788,62 @@ mod tests {
             dnssl(600, &["zeta.example", "alpha.example"]),
         ];
         hosts.on_ra(WAN, ll("fe80::1"), &ra(1800, options), now);
-        let in_order = link_dns(
-            &["2001:db8::99", "2001:db8::11"],
-            &["zeta.example", "alpha.example"],
+        assert_eq!(
+            reported(&mut hosts),
+            wan0(Some(link_dns(
+                &["2001:db8::99", "2001:db8::11"],
+                &["zeta.example", "alpha.example"],
+            )))
         );
-        assert_eq!(reported(&mut hosts), wan0(Some(in_order)));
-        // The first of each alone, again: still first, and nothing new
-        // to report.
-        let options = vec![rdnss(900, &["2001:db8::99"]), dnssl(900, &["zeta.example"])];
+
+        // The last of each alone, again: not moved to the front, and
+        // nothing new to report.
+        let options = vec![
+            rdnss(900, &["2001:db8::11"]),
+            dnssl(900, &["alpha.example"]),
+        ];
         hosts.on_ra(WAN, ll("fe80::1"), &ra(1800, options), now + secs(1));
         assert_eq!(reported(&mut hosts), []);
         let host = hosts.host(WAN).unwrap();
-        assert_eq!(host.dns[0], (ll("2001:db8::99"), Some(now + secs(901))));
-        assert_eq!(host.dns[1], (ll("2001:db8::11"), Some(now + secs(600))));
-        assert_eq!(host.search[0].0, "zeta.example");
+        assert_eq!(host.dns[0], (ll("2001:db8::99"), Some(now + secs(600))));
+        assert_eq!(host.dns[1], (ll("2001:db8::11"), Some(now + secs(901))));
         assert_eq!(host.search[1].0, "alpha.example");
+
+        // An option naming one that is held between two that are new:
+        // the new ones go ahead of everything held, in their own order,
+        // and the held one stays.
+        let options = vec![
+            rdnss(600, &["2001:db8::77", "2001:db8::11", "2001:db8::55"]),
+            dnssl(600, &["new.example", "alpha.example", "more.example"]),
+        ];
+        hosts.on_ra(WAN, ll("fe80::2"), &ra(1800, options), now + secs(2));
+        assert_eq!(
+            reported(&mut hosts),
+            wan0(Some(link_dns(
+                &[
+                    "2001:db8::77",
+                    "2001:db8::55",
+                    "2001:db8::99",
+                    "2001:db8::11"
+                ],
+                &[
+                    "new.example",
+                    "more.example",
+                    "zeta.example",
+                    "alpha.example"
+                ],
+            )))
+        );
+
+        // Two options in one advertisement are taken in one after the
+        // other, so what the second one brings is ahead of the first's.
+        let options = vec![rdnss(600, &["2001:db8::33"]), rdnss(600, &["2001:db8::22"])];
+        hosts.on_ra(WAN, ll("fe80::2"), &ra(1800, options), now + secs(3));
+        let servers = reported(&mut hosts).pop().unwrap().1.unwrap().servers;
+        assert_eq!(
+            servers[..3],
+            link_dns(&["2001:db8::22", "2001:db8::33", "2001:db8::77"], &[]).servers[..]
+        );
     }
 
     /// A lifetime that runs out is a change like any other, also when

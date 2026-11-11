@@ -7,9 +7,10 @@ Feature: Name servers from Router Advertisements for the host (system name-serve
   `show ipv6 nd interface` shows them; the host itself uses them only
   where `system name-server dhcp <if>` says so (the resolver task,
   docs/design/dhcp-client.md §13). They are then handed to
-  systemd-resolved as that link's DNS configuration, in the order they
-  were heard, behind those of a DHCP lease on the same interface, and
-  taken back as their lifetimes end or the RA host stops.
+  systemd-resolved as that link's DNS configuration: the ones heard of
+  last first, those of one option in the option's order (RFC 8106
+  §6.2), all behind those of a DHCP lease on the same interface. They
+  are taken back as their lifetimes end or the RA host stops.
 
   No resolver is running here: the harness names a stand-in for
   `resolvectl` to each daemon (tests/scripts/resolvectl_stub.sh), whose
@@ -54,24 +55,30 @@ Feature: Name servers from Router Advertisements for the host (system name-serve
     And command "tests/scripts/resolvectl_stub.sh status" in namespace "r1" should eventually contain "wan0 domain example.com"
     And daemon log in namespace "r1" should eventually contain "resolver: wan0: name servers 2001:db8::53, search example.com"
 
-  Scenario: Name servers are used in the order they were heard
+  Scenario: Newly advertised name servers go first, and an option keeps its order
     Given the test topology exists
-    # Two more, the one with the higher address first: they go behind the
-    # one already held and keep their own order (RFC 8106 §5.3.1), which
-    # is not the order of their addresses.
-    When I execute "tests/scripts/ra_sender.py srv0 --source fe80::1 --rdnss 2001:db8::99,600 --rdnss 2001:db8::11,600" in namespace "s1"
-    Then command "tests/scripts/resolvectl_stub.sh status" in namespace "r1" should eventually contain "wan0 dns 2001:db8::53 2001:db8::99 2001:db8::11"
-    And show command "show ipv6 nd interface wan0" in namespace "r1" should contain "DNS servers: 2001:db8::53 2001:db8::99 2001:db8::11"
+    # One option naming two servers the host has not heard of, the one
+    # with the higher address first, and one naming two domains. RFC 8106
+    # §6.2 puts what is new ahead of what was held, and keeps the order
+    # an option gives: neither is the order of the addresses.
+    When I execute "tests/scripts/ra_sender.py srv0 --source fe80::1 --rdnss 2001:db8::99+2001:db8::11,600 --dnssl new.example+more.example,600" in namespace "s1"
+    Then command "tests/scripts/resolvectl_stub.sh status" in namespace "r1" should eventually contain "wan0 dns 2001:db8::99 2001:db8::11 2001:db8::53"
+    And command "tests/scripts/resolvectl_stub.sh status" in namespace "r1" should eventually contain "wan0 domain new.example more.example example.com"
+    And show command "show ipv6 nd interface wan0" in namespace "r1" should contain "DNS servers: 2001:db8::99 2001:db8::11 2001:db8::53"
+    And show command "show ipv6 nd interface wan0" in namespace "r1" should contain "DNS search: new.example more.example example.com"
 
   Scenario: A lifetime of zero takes a name server away at once
     Given the test topology exists
-    When I execute "tests/scripts/ra_sender.py srv0 --source fe80::1 --rdnss 2001:db8::99,0" in namespace "s1"
-    Then command "tests/scripts/resolvectl_stub.sh status" in namespace "r1" should eventually contain "wan0 dns 2001:db8::53 2001:db8::11"
+    When I execute "tests/scripts/ra_sender.py srv0 --source fe80::1 --rdnss 2001:db8::99,0 --dnssl new.example+more.example,0" in namespace "s1"
+    Then command "tests/scripts/resolvectl_stub.sh status" in namespace "r1" should eventually contain "wan0 dns 2001:db8::11 2001:db8::53"
+    And command "tests/scripts/resolvectl_stub.sh status" in namespace "r1" should eventually not contain "new.example"
+    And command "tests/scripts/resolvectl_stub.sh status" in namespace "r1" should eventually contain "wan0 domain example.com"
 
   Scenario: A name server whose lifetime runs out is taken away
     Given the test topology exists
-    # Advertised again with three seconds to live. Nothing else of the
-    # interface changes when they are over: no route, no address.
+    # Advertised again with three seconds to live, which leaves it where
+    # it stands. Nothing else of the interface changes when they are
+    # over: no route, no address.
     When I execute "tests/scripts/ra_sender.py srv0 --source fe80::1 --rdnss 2001:db8::11,3" in namespace "s1"
     Then command "tests/scripts/resolvectl_stub.sh status" in namespace "r1" should eventually not contain "2001:db8::11"
     And command "tests/scripts/resolvectl_stub.sh status" in namespace "r1" should eventually contain "wan0 dns 2001:db8::53"

@@ -691,8 +691,11 @@ the client stays released until `renew`, or until `address dhcp` or the
     logged; there is no retry with a new identifier (RFC 7217) in this
     design.
 - **RDNSS (25) and DNSSL (31):** become typed options in `nd-packet`. They
-  are stored with their lifetimes, in the order heard, and shown. The
-  resolver task is told of every change (§13).
+  are stored with their lifetimes and shown, in the order RFC 8106 §6.2
+  has a host use them: a server or domain heard of for the first time
+  goes in first, those of one option in the option's order, and one
+  that is refreshed stays where it is. The resolver task is told of
+  every change (§13).
 - **MTU option:** shown, not applied.
 - **M/O flags:** shown, not acted on (D7).
 
@@ -1156,10 +1159,9 @@ configuration of the lease's link.
   tasks that need nothing of each other.
 - **DHCP ahead of Router Advertisements** (RFC 8106 §5.3.1), each
   source's servers in its own order, and what two sources both name
-  once. The RA host keeps its servers and domains in the order they
-  were first heard, which is the order the RFC has a host use them in;
-  a refresh does not move one. One source losing its servers leaves the
-  interface set with the other's.
+  once. The RA host's order is the RFC's (§6.2, §6.3; see §7): the
+  newly heard first. One source losing its servers leaves the interface
+  set with the other's.
 - **The entry is for the interface**, whatever taught it its name
   servers. The `dhcp` in its name is kept from the first source and
   stands for "learned, not configured". The RA host runs for
@@ -1328,7 +1330,7 @@ DHCPv4, IA_NA and RAs, but not PD.
 | `dhcp_client_dual_wan` | two leases at 210 / 220; link down on the first → the second's default is selected |
 | `dhcp_client_dns` | against a stand-in for `resolvectl`: nothing set without `system name-server dhcp`; with it the lease's servers and domains; reverted on `release` and on deleting the entry; replaced at a renewal; retried after a failure; servers set last are set again after an error that came with the old list already dropped; servers set by a command that got no answer are reverted; an interface deleted and made again is set again; set again after a restart |
 | `ra_host` | RA default route `A`, SLAAC with `autoconf`, router lifetime 0 withdraws, `accept_ra` is 0 |
-| `ra_host_dns` | against a stand-in for `resolvectl`: RDNSS and DNSSL set only under `system name-server dhcp`, in the order heard; a lifetime of zero and a lifetime run out take one away; a DHCPv4 lease's server goes ahead and its end leaves the advertised one; stopping the RA host reverts |
+| `ra_host_dns` | against a stand-in for `resolvectl`: RDNSS and DNSSL set only under `system name-server dhcp`, the newly heard first and an option in its own order; a lifetime of zero and a lifetime run out take one away; a DHCPv4 lease's server goes ahead and its end leaves the advertised one; stopping the RA host reverts |
 | `dhcpv6_client` | IA_NA /128 with `noprefixroute`; default route and on-link prefix from the RA, and no SLAAC address unless `autoconf` is set too; renew; `release`; zebra-rs restart keeps the address and confirms it; `parameters-only`; deleted configuration releases |
 | `dhcpv6_client_pd` | PD → discard route, LAN /64 address; prefix change replaces both; with ND-PIO, a LAN host SLAACs from it |
 | `dhcpv6_pd_insomnia` | a zebra-rs + insomnia router serving PD (insomnia's existing DHCPv6 server) to a zebra-rs client router: both sides of the feature in one topology |
@@ -1350,6 +1352,7 @@ DHCPv4, IA_NA and RAs, but not PD.
 | Internal address from PD | RFC 7084 WAA-7 | explicit `pd … interface lo` | no implicit interfaces |
 | IPv6-only preferred (option 108) | RFC 8925 | not requested | a dual-stack WAN wants its IPv4 lease |
 | ACD | RFC 5227: 3 probes, 1–2 s apart | 2 probes, 1 s apart | bounded bind delay |
+| A full RDNSS or DNSSL list | RFC 8106 §6.2 (d): make room by dropping the entry that expires first | a new entry past 8 held is ignored | the same bound as for routers and prefixes: whoever advertises last does not get to push the others out |
 | On-link classless routes | RFC 3442 routes whose router is `0.0.0.0` | not installed, logged | the RIB has no protocol route without a gateway; an off-subnet gateway still works, because nexthops are installed on-link |
 
 ---
