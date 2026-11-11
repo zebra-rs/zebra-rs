@@ -31,6 +31,13 @@ module zebra-features {
        client, `interface <name> ipv4 address dhcp`, is zebra-rs's own
        and not gated.)
 
+       It also changes what one ungated leaf does. With the feature
+       zebra-rs is the configuration owner of the whole system, so
+       `system hostname` is applied to the system by zebra-rs itself:
+       the kernel host name and /etc/hostname, when zebra-rs runs in the
+       default network namespace. Without the feature that leaf names
+       the router inside zebra-rs only.
+
        Formerly named `iso`. `--feature iso` still enables it, with a
        deprecation warning at startup; use `--feature insomnia`.";
   }

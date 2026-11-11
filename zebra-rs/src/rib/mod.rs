@@ -59,6 +59,8 @@ pub mod label_show;
 
 pub mod router_id;
 
+pub mod hostname;
+
 pub mod mac_addr;
 pub use mac_addr::*;
 

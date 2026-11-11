@@ -630,6 +630,140 @@ async fn start_zebra_rs_feature(world: &mut World, namespace: String, feature: S
     );
 }
 
+/// One file of the system host name stand-in of `scoped`
+/// (`netns::hostname_stub_dir`), trimmed; `None` when there is no such
+/// file. Read as root: the daemon that wrote it is.
+async fn hostname_stub_read(scoped: &str, file: &str) -> Option<String> {
+    let path = format!("{}/{file}", netns::hostname_stub_dir(scoped));
+    let out = tokio::process::Command::new("sudo")
+        .args(["cat", &path])
+        .output()
+        .await
+        .expect("Failed to run cat");
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// Poll one stand-in file of `namespace` until it reads `expected`
+/// (`None`: until it is gone).
+async fn hostname_stub_eventually(
+    world: &World,
+    namespace: &str,
+    file: &str,
+    expected: Option<&str>,
+) {
+    let scoped = world.ns(namespace);
+    const ATTEMPTS: u32 = 30;
+    let mut last = None;
+    for i in 0..ATTEMPTS {
+        last = hostname_stub_read(&scoped, file).await;
+        if last.as_deref() == expected {
+            println!("✓ stand-in {file} of namespace {scoped} is {expected:?}");
+            return;
+        }
+        if i + 1 < ATTEMPTS {
+            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+        }
+    }
+    panic!(
+        "stand-in {file} of namespace {scoped} is {last:?} after {ATTEMPTS} attempts, not {expected:?}"
+    );
+}
+
+/// Start from a system nobody has named: the stand-in directory outlives
+/// a run, and a leftover record would be "restored" by the next one.
+#[given(expr = "the system hostname stand-in of namespace {string} is empty")]
+async fn hostname_stub_reset(world: &mut World, namespace: String) {
+    let scoped = world.ns(&namespace);
+    let dir = netns::hostname_stub_dir(&scoped);
+    let status = tokio::process::Command::new("sudo")
+        .args(["rm", "-rf", &dir])
+        .status()
+        .await
+        .expect("Failed to run rm");
+    assert!(status.success(), "rm -rf {dir} failed");
+    println!("✓ stand-in of namespace {scoped} is empty");
+}
+
+/// The kernel host name zebra-rs set, as the stand-in holds it.
+#[then(expr = "the system host name of namespace {string} should eventually be {string}")]
+async fn hostname_stub_kernel_eventually(world: &mut World, namespace: String, name: String) {
+    hostname_stub_eventually(world, &namespace, "kernel", Some(&name)).await;
+}
+
+/// Immediate sibling, for a name that must NOT have changed: pair it with
+/// a preceding wait, and with a positive control showing the daemon did
+/// take the commit.
+#[then(expr = "the system host name of namespace {string} should be {string}")]
+async fn hostname_stub_kernel_is(world: &mut World, namespace: String, name: String) {
+    let scoped = world.ns(&namespace);
+    let kernel = hostname_stub_read(&scoped, "kernel").await;
+    assert_eq!(
+        kernel.as_deref(),
+        Some(name.as_str()),
+        "stand-in kernel name of namespace {scoped}"
+    );
+    println!("✓ stand-in kernel name of namespace {scoped} is {name}");
+}
+
+/// The static host name (`/etc/hostname`), as the stand-in holds it.
+#[then(expr = "the static host name of namespace {string} should eventually be {string}")]
+async fn hostname_stub_static_eventually(world: &mut World, namespace: String, name: String) {
+    hostname_stub_eventually(world, &namespace, "hostname", Some(&name)).await;
+}
+
+/// The static host name file is gone: the system had none when zebra-rs
+/// took the name over, and gets none back.
+#[then(expr = "the static host name of namespace {string} should eventually be unset")]
+async fn hostname_stub_static_unset(world: &mut World, namespace: String) {
+    hostname_stub_eventually(world, &namespace, "hostname", None).await;
+}
+
+/// The record of the name found at the first takeover exists (`kept`) or
+/// is gone (`removed`).
+#[then(expr = "the saved host name of namespace {string} should eventually be {word}")]
+async fn hostname_stub_saved(world: &mut World, namespace: String, state: String) {
+    let scoped = world.ns(&namespace);
+    let kept = match state.as_str() {
+        "kept" => true,
+        "removed" => false,
+        other => panic!("saved host name should be `kept` or `removed`, not `{other}`"),
+    };
+    const ATTEMPTS: u32 = 30;
+    for i in 0..ATTEMPTS {
+        if hostname_stub_read(&scoped, "saved.json").await.is_some() == kept {
+            println!("✓ saved host name of namespace {scoped} is {state}");
+            return;
+        }
+        if i + 1 < ATTEMPTS {
+            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+        }
+    }
+    panic!("saved host name of namespace {scoped} is not {state} after {ATTEMPTS} attempts");
+}
+
+/// Nothing was written: zebra-rs had no name to apply, or does not apply
+/// one at all. Immediate — pair it with a preceding wait.
+#[then(expr = "the system hostname stand-in of namespace {string} should hold no files")]
+async fn hostname_stub_untouched(world: &mut World, namespace: String) {
+    let scoped = world.ns(&namespace);
+    let dir = netns::hostname_stub_dir(&scoped);
+    let out = tokio::process::Command::new("sudo")
+        .args(["find", &dir, "-type", "f"])
+        .output()
+        .await
+        .expect("Failed to run find");
+    // No directory at all is no files; `find` then fails with nothing on
+    // stdout.
+    let files = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        files.trim().is_empty(),
+        "stand-in of namespace {scoped} holds files:\n{files}"
+    );
+    println!("✓ stand-in of namespace {scoped} holds no files");
+}
+
 #[when(expr = "I start zebra-rs in namespace {string} with {int} shards")]
 async fn start_zebra_rs_sharded(world: &mut World, namespace: String, shards: usize) {
     let scoped = world.ns(&namespace);
