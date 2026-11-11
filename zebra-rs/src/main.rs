@@ -259,6 +259,12 @@ async fn run(arg: Arg) -> anyhow::Result<()> {
 
     let mut rib = Rib::new(arg.no_nhid)?;
     rib.leftover_sweep_time = std::time::Duration::from_secs(arg.leftover_sweep_time);
+    // With `--feature insomnia` zebra-rs is the configuration owner of the
+    // whole box, and `system hostname` names the system itself rather than
+    // only the daemon (docs/design/system-hostname.md).
+    if config::feature_enabled(&arg.feature, "zebra-features", "insomnia") {
+        rib.system_hostname = Some(rib::hostname::SystemHostname::from_env());
+    }
 
     let policy = Policy::new();
 

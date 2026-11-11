@@ -2247,21 +2247,44 @@ pub fn router_id_show(rib: &Rib, _args: Args, json: bool) -> String {
 }
 
 pub fn hostname_show(rib: &Rib, _args: Args, json: bool) -> String {
-    // Configured `system hostname` wins; the OS hostname is the
-    // fallback — the same precedence the vty prompt applies.
-    let name = rib.hostname_config.clone().or_else(|| {
+    let system = rib.system_hostname.as_ref();
+    // The system's name: as the applier reads it (`--feature insomnia`),
+    // otherwise the OS hostname.
+    let os = system.and_then(|system| system.os_name()).or_else(|| {
         hostname::get()
             .ok()
             .and_then(|s| s.into_string().ok())
             .filter(|s| !s.is_empty())
     });
+    // Configured `system hostname` wins; the OS hostname is the
+    // fallback — the same precedence the vty prompt applies.
+    let name = rib.hostname_config.clone().or_else(|| os.clone());
+    // With the feature the two are meant to be one name. When they are
+    // not, say why: the namespace rule, a failed write, or somebody
+    // renaming the system since.
+    let reason = system.and_then(|system| system.reason(rib.hostname_config.as_deref()));
     if json {
         // `name` is `Option<String>`: a resolved hostname or JSON `null`.
-        return serde_json::to_string_pretty(&serde_json::json!({ "hostname": name }))
-            .unwrap_or_else(|e| format!("{{\"error\": \"Failed to serialize hostname: {}\"}}", e));
+        return serde_json::to_string_pretty(&serde_json::json!({
+            "hostname": name,
+            "managed": system.is_some_and(|system| system.managed()),
+            "os": os,
+            "reason": reason,
+        }))
+        .unwrap_or_else(|e| format!("{{\"error\": \"Failed to serialize hostname: {}\"}}", e));
     }
-    name.map(|s| format!("{s}\n"))
-        .unwrap_or_else(|| "unknown\n".to_string())
+    let mut out = name
+        .map(|s| format!("{s}\n"))
+        .unwrap_or_else(|| "unknown\n".to_string());
+    if let Some(reason) = reason {
+        let what = if rib.hostname_config.is_some() {
+            "applied to"
+        } else {
+            "restored on"
+        };
+        out.push_str(&format!("% not {what} the system: {reason}\n"));
+    }
+    out
 }
 
 #[derive(Serialize)]

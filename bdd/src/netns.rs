@@ -377,6 +377,16 @@ pub async fn delete_veth(veth_host: &str) -> Result<()> {
     Ok(())
 }
 
+/// The directory standing in for the system's host name for the zebra-rs
+/// of `netns` (`ZEBRA_HOSTNAME_STUB_DIR`, see `zebra-rs/src/rib/hostname.rs`):
+/// `kernel` for the kernel name, `hostname` for `/etc/hostname`,
+/// `saved.json` for the name found at the first takeover. Stable per
+/// namespace, so a restarted daemon finds what the last one left — and so
+/// does the next run: a feature that asserts on it empties it first.
+pub fn hostname_stub_dir(netns: &str) -> String {
+    format!("/tmp/zebra-rs-hostname/{netns}")
+}
+
 /// Spawn a process in a network namespace (non-blocking)
 pub async fn spawn_in_netns(
     netns: &str,
@@ -421,6 +431,16 @@ pub async fn spawn_in_netns_env(
         // by interface name only. Stable per namespace, so a restarted
         // daemon finds its lease again.
         assignments.push(format!("ZEBRA_DHCP_STATE_DIR=/tmp/zebra-rs-dhcp/{netns}"));
+        // `system hostname` with `--feature insomnia` is made the system's
+        // host name, and a network namespace shares the HOST's: the real
+        // `sethostname(2)` from a BDD daemon would rename the development
+        // machine. zebra-rs refuses outside the default network namespace by
+        // itself; this stand-in directory keeps every BDD daemon off the
+        // real name a second time, and is what the features assert on.
+        assignments.push(format!(
+            "ZEBRA_HOSTNAME_STUB_DIR={}",
+            hostname_stub_dir(netns)
+        ));
         // Name the cradle engine outright. Otherwise zebra-rs prefers
         // `$HOME/.zebra/bin/cradle`, and under sudo that is root's: a stale
         // dev copy there replaced the packaged engine for every BDD daemon

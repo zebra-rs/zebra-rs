@@ -186,7 +186,7 @@ stamp-packet = { path = "../crates/stamp-packet" }
 bitfield-struct = "0.13"
 rand = "0.10"
 chrono = { version = "0.4", features = ["serde"] }
-hostname = "0.4"
+hostname = { version = "0.4", features = ["set"] }
 daemonize = "0.5"
 hex = "0.4.3"
 strum = "0.28"
