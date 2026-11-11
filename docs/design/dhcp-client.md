@@ -2,9 +2,11 @@
 
 **Status: P0 (the codec), P1 (the RIB plumbing and the DHCPv4 client),
 P2 (the RA host) and P3 (the DHCPv6 client for an address and for
-`parameters-only`) are implemented. P4 onwards is design.** Where a
-phase found the code to be different from what this document assumed, the
-text below says what was built and why.
+`parameters-only`) are implemented. Of P4, the protocol half is
+implemented: the DHCPv6 state machine asks for delegated prefixes and
+holds them. The task asks for none yet. The rest of P4 and what follows
+is design.** Where a phase found the code to be different from what this
+document assumed, the text below says what was built and why.
 
 zebra-rs gets its own DHCP client: a `dhcpc` task that leases IPv4
 addresses, and IPv6 addresses and delegated prefixes, on WAN interfaces. It
@@ -869,6 +871,51 @@ ones in `dhcpc`:
 - **What `parameters-only` learns is not kept on disk**: it is asked for
   again at start.
 
+**What P4 has built so far** (`v6/client.rs`): the state machine asks
+for delegated prefixes and holds them, alone or with the address. The
+schema (`dhcpv6-options pd`), the discard route, the LAN addresses,
+persistence, show and the BDD features are the rest of P4.
+
+- **What a client asks for is part of who it is.** The IA_NA and each
+  IA_PD (its IAID and the length hinted at) are fixed for a client's
+  life, like the DUID (`Asks`). When the configuration asks for
+  something else, the task stops the client, which releases what it
+  holds, and starts another. So adding a `pd` to an interface that
+  already leases an address gives the address back and asks for both
+  anew; and a changed `length` takes effect at once, in the Solicit of
+  the new client, where a hint counts.
+  - A client that asks for nothing speaks Information-request: that is
+    `parameters-only`, which is no longer an option of its own in the
+    state machine.
+- **One exchange for all of it.** Every message that asks names every
+  identity association: what is held of each, and for one that holds
+  nothing an empty IA_NA or an IA_PD with the hint `::/<length>`. What a
+  server withholds (NoAddrsAvail, NoPrefixAvail, or silence about it) is
+  so asked for again with every Renew and Rebind, while the rest binds
+  (WPD-6).
+- **One Renew for all of it** (RFC 8415 §18.2.4): T1 and T2 are the
+  earliest any identity association the Reply spoke of asks for, each
+  worked out as for an address. A Reply that only takes away gives no
+  time; the client then takes its own, from what is left.
+- **The server that offers more is asked.** Among Advertises, the one
+  that offers more of the identity associations asked for wins, then
+  the higher preference, then the first to arrive; and preference 255
+  ends the wait only from a server that offers all of them. An address
+  without the prefix is half a lease for a CE router (§16).
+- **A lease with a prefix is verified with a Rebind**, not a Confirm,
+  which speaks of addresses only (RFC 8415 §18.2.12). It runs in a
+  Confirm's time: again after a second, over in ten, and the lease is
+  then used as it is. A prefix that is not right for the link comes back
+  with a valid lifetime of 0 and is dropped.
+- **Prefixes run out one by one**, like addresses: each leaves the lease
+  at the end of its valid lifetime, and the lease ends when it holds
+  neither an address nor a prefix. A prefix is what its length says:
+  bits a server leaves set past it are dropped.
+- **Decline is about addresses.** An address that fails DAD is declined
+  and the prefixes stay; Release names everything held.
+- **NoBinding for any identity association** asks for all of them again
+  with a Request, and what is held stays in use meanwhile.
+
 ---
 
 ## 9. Identity and persistence
@@ -982,7 +1029,7 @@ zebra-rs/src/dhcpc/            (P1: the DHCPv4 parts)
   lease.rs                     persistence (§9)
   show.rs                      §11 view; the verbs are in inst.rs
   v6/client.rs                 sans-I/O, as v4/client.rs: IA_NA and
-                               parameters-only (P3). IA_PD is P4
+                               parameters-only (P3), IA_PD (P4)
   v6/inst.rs                   the DHCPv6 clients in the task: link
                                readiness, RIB addresses, retiring, DUID
   v6/socket.rs                 per-interface UDP socket on port 546 (D11)
@@ -1029,7 +1076,7 @@ belongs to systemd-resolved.
 | P1 (done) | RIB plumbing (D5, D6); `dhcpc` task; DHCPv4 state machine, sockets, ACD, persistence; `show dhcp client leases`, `renew/release dhcp`; ungate `address dhcp` | P0 |
 | P2 (done) | RA host in `nd`: RS, default route, on-link prefixes, `ipv6 address autoconf`, `ra-options`, `accept_ra=0`; show section | P1's RIB plumbing |
 | P3 (done) | DHCPv6 IA_NA and `parameters-only`; DUID; `show dhcpv6 client leases`, `renew/release dhcpv6` | P0, P2 |
-| P4 | IA_PD: discard route, LAN assignment, prefix change | P3 |
+| P4 (state machine done) | IA_PD: discard route, LAN assignment, prefix change. Left: the schema (`dhcpv6-options pd`), the unreachable route, `AddrOrigin::Pd` and the `sla-id` arithmetic for the LAN addresses, prefixes in the lease file and in show, the BDD features | P3 |
 | ND-PIO | `nd` advertises PIOs for LAN /64s with counted-down lifetimes, deprecates removed ones (L-13), `RibRx::AddrAdd` on lifetime change | P1's RIB plumbing; parallel to P2–P4 |
 | P5 | Resolver integration, MTU options, Reconfigure, IA_TA, prefix exclude, RFC 4191 routes, stable-privacy identifiers, `redistribute dhcp` | as needed |
 
@@ -1089,6 +1136,7 @@ DHCPv4, IA_NA and RAs, but not PD.
 | Item | Reference | zebra-rs | Why |
 |---|---|---|---|
 | DHCPv6 started by RA M/O flags | RFC 7084 WAA-6, WPD-4 | configuration only (D7) | a configured router is deterministic; VyOS does the same |
+| Choice of DHCPv6 server | RFC 8415 §18.2.9: the highest preference, though a client MAY take a server with "a better set of options" | the server offering more of the IAs asked for, then the preference | a CE router needs the prefix as well as the address |
 | Reconfigure Accept | RFC 7084 WAA-4 (MUST) | not sent | needs Reconfigure authentication; P5 |
 | RA processing | VyOS: kernel `accept_ra=2` | userspace in `nd`, `accept_ra=0` (D4) | RIB ownership, distance, VRF |
 | RA default route | VyOS: kernel metric 1024 | `Ra`, distance 210, `ra-options` | parity with DHCPv4 defaults |

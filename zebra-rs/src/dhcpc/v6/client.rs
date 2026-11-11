@@ -6,10 +6,10 @@
 //! touches the RIB, so every timer and transition is tested with a
 //! scripted server and a clock the test moves.
 //!
-//! A client asks for an address (one IA_NA), or with `parameters-only`
-//! for no address, only for the rest of the configuration (DNS, NTP)
-//! through Information-request. Prefix delegation (IA_PD) is P4 of
-//! docs/design/dhcp-client.md.
+//! A client asks for an address (one IA_NA), for delegated prefixes (an
+//! IA_PD each), or for both in one exchange ([`Asks`]). With nothing to
+//! ask for (`parameters-only`) it asks for the rest of the configuration
+//! alone (DNS, NTP), through Information-request.
 //!
 //! | State | Meaning |
 //! |---|---|
@@ -19,7 +19,7 @@
 //! | `Bound` | lease held, waiting for T1 |
 //! | `Renewing` | Renew sent to the lease's server, T1..T2 |
 //! | `Rebinding` | Rebind sent to any server, T2..expiry |
-//! | `Confirming` | Confirm: is a lease kept across a restart or a link loss right for this link? |
+//! | `Confirming` | is a lease kept across a restart or a link loss right for this link? A Confirm, or a Rebind when the lease holds a prefix |
 //! | `Declining` | Decline sent for an address that failed DAD |
 //! | `Releasing` | Release sent, waiting for the server's Reply |
 //! | `Informing` | Information-request sent or about to be |
@@ -40,22 +40,57 @@ use std::net::Ipv6Addr;
 use std::ops::RangeInclusive;
 use std::time::{Duration, Instant};
 
-use dhcp_packet::v6::params::{INFINITY, IaAddress, IaNa, NtpServer, Params, StatusCode};
+use dhcp_packet::v6::params::{
+    INFINITY, IaAddress, IaNa, IaPd as WirePd, IaPrefix, NtpServer, Params, StatusCode,
+};
 use dhcp_packet::v6::{ClientMessage, Dhcp6Option, msg, opt, status};
+use ipnet::Ipv6Net;
 use serde::{Deserialize, Serialize};
 
 /// `interface <if> ipv6 dhcpv6-options …`, as far as the protocol goes.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Options {
-    /// Ask for no address, only for the other configuration
-    /// (Information-request). It is fixed for the life of a [`Client`]:
-    /// see [`Client::set_options`].
-    pub parameters_only: bool,
     /// Offer the two-message exchange: a Solicit that a server may answer
     /// with a Reply at once.
     pub rapid_commit: bool,
     /// Give the lease up without telling the server.
     pub no_release: bool,
+}
+
+/// What a client asks a server for: the identity associations it wants
+/// filled. With none it asks for the other configuration only
+/// (`parameters-only`, an Information-request).
+///
+/// It is fixed for the life of a [`Client`], like the DUID: see
+/// [`Client::identity`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Asks {
+    /// `address dhcpv6`: an address, in an IA_NA under this IAID.
+    pub ia_na: Option<u32>,
+    /// `dhcpv6-options pd <id>`: a delegated prefix each, in an IA_PD.
+    pub ia_pd: Vec<PdAsk>,
+}
+
+/// One prefix delegation asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PdAsk {
+    /// The IAID of its IA_PD: the `pd <id>` number.
+    pub iaid: u32,
+    /// The prefix length hinted at (`pd <id> length`). A hint: the
+    /// server delegates what it sees fit.
+    pub length: u8,
+}
+
+impl Asks {
+    /// Nothing to lease: the client speaks Information-request.
+    pub fn is_empty(&self) -> bool {
+        self.ia_na.is_none() && self.ia_pd.is_empty()
+    }
+
+    /// How many identity associations.
+    fn count(&self) -> usize {
+        usize::from(self.ia_na.is_some()) + self.ia_pd.len()
+    }
 }
 
 /// What the server granted.
@@ -70,8 +105,12 @@ pub struct Lease {
     /// Where its messages came from, a link-local address. For people:
     /// the protocol knows a server by its DUID.
     pub server_address: Ipv6Addr,
-    /// `None` with `parameters-only`.
+    /// The addresses. `None` when none is held: none was asked for, or
+    /// the server gave none.
     pub ia_na: Option<Ia>,
+    /// The delegated prefixes: an entry for each IA_PD that holds any.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ia_pd: Vec<IaPd>,
     pub dns_servers: Vec<Ipv6Addr>,
     pub domain_list: Vec<String>,
     pub ntp_servers: Vec<Ntp>,
@@ -83,16 +122,36 @@ pub struct Ia {
     pub iaid: u32,
     /// When to renew, already chosen by the client where the server left
     /// it open; [`INFINITY`] never. 0 is "now", not "the client decides"
-    /// as on the wire.
+    /// as on the wire. The same in every identity association of a
+    /// lease: one Renew covers them all (RFC 8415 §18.2.4).
     pub t1: u32,
     /// When to rebind; as `t1`.
     pub t2: u32,
     pub addresses: Vec<Address>,
 }
 
+/// An identity association for delegated prefixes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IaPd {
+    pub iaid: u32,
+    /// As [`Ia::t1`] and [`Ia::t2`].
+    pub t1: u32,
+    pub t2: u32,
+    pub prefixes: Vec<Prefix>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Address {
     pub address: Ipv6Addr,
+    /// Seconds; [`INFINITY`] never ends.
+    pub preferred: u32,
+    pub valid: u32,
+}
+
+/// A delegated prefix.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Prefix {
+    pub prefix: Ipv6Net,
     /// Seconds; [`INFINITY`] never ends.
     pub preferred: u32,
     pub valid: u32,
@@ -119,7 +178,8 @@ impl From<&NtpServer> for Ntp {
 
 impl Lease {
     /// The lease `elapsed` seconds on: every time that much shorter, and
-    /// without the addresses whose valid lifetime has run out.
+    /// without the addresses and prefixes whose valid lifetime has run
+    /// out.
     pub fn aged(&self, elapsed: u32) -> Lease {
         let left = |time: u32| {
             if time == INFINITY {
@@ -138,7 +198,68 @@ impl Lease {
                 a.valid > 0
             });
         }
+        for ia in &mut lease.ia_pd {
+            ia.t1 = left(ia.t1);
+            ia.t2 = left(ia.t2);
+            ia.prefixes.retain_mut(|p| {
+                p.preferred = left(p.preferred);
+                p.valid = left(p.valid);
+                p.valid > 0
+            });
+        }
+        lease.prune();
         lease
+    }
+
+    /// Whether an address or a prefix is held.
+    pub fn has_leases(&self) -> bool {
+        self.ia_na
+            .as_ref()
+            .is_some_and(|ia| !ia.addresses.is_empty())
+            || self.ia_pd.iter().any(|ia| !ia.prefixes.is_empty())
+    }
+
+    /// An identity association that holds nothing is not in the lease:
+    /// it is one to ask for again.
+    fn prune(&mut self) {
+        if self
+            .ia_na
+            .as_ref()
+            .is_some_and(|ia| ia.addresses.is_empty())
+        {
+            self.ia_na = None;
+        }
+        self.ia_pd.retain(|ia| !ia.prefixes.is_empty());
+    }
+
+    /// Keep only the identity associations `asks` asks for.
+    fn keep(&mut self, asks: &Asks) {
+        if self
+            .ia_na
+            .as_ref()
+            .is_some_and(|ia| asks.ia_na != Some(ia.iaid))
+        {
+            self.ia_na = None;
+        }
+        self.ia_pd
+            .retain(|ia| asks.ia_pd.iter().any(|ask| ask.iaid == ia.iaid));
+    }
+
+    /// Renew and rebind every identity association at these times.
+    fn renew_at(&mut self, (t1, t2): (u32, u32)) {
+        if let Some(ia) = &mut self.ia_na {
+            (ia.t1, ia.t2) = (t1, t2);
+        }
+        for ia in &mut self.ia_pd {
+            (ia.t1, ia.t2) = (t1, t2);
+        }
+    }
+
+    /// The lifetimes of everything held: preferred, valid.
+    fn lifetimes(&self) -> Vec<(u32, u32)> {
+        let addresses = self.ia_na.iter().flat_map(|ia| lifetimes(&ia.addresses));
+        let prefixes = self.ia_pd.iter().flat_map(|ia| lifetimes(&ia.prefixes));
+        addresses.chain(prefixes).collect()
     }
 }
 
@@ -215,7 +336,7 @@ pub enum Action {
     /// address.
     Send(ClientMessage),
     /// The lease as it stands, its times counted from now: install or
-    /// refresh its addresses and withdraw any address of an earlier
+    /// refresh its addresses and prefixes, and withdraw any of an earlier
     /// `Bind` that is no longer in it. `fresh` says a server's message or
     /// the passing of time made it what it is (write it to disk);
     /// otherwise it is a lease resumed from disk.
@@ -278,7 +399,7 @@ const BACKOFF_MAX: u64 = 64;
 
 pub struct Client {
     duid: Vec<u8>,
-    iaid: u32,
+    asks: Asks,
     options: Options,
     state: State,
     link: bool,
@@ -326,12 +447,28 @@ struct Exchange {
     not_on_link: Option<Ipv6Addr>,
 }
 
+/// The addresses and prefixes a message names.
+#[derive(Clone, Default)]
+struct Named {
+    addresses: Vec<Ipv6Addr>,
+    /// Each with the IAID of its IA_PD.
+    prefixes: Vec<(u32, Ipv6Net)>,
+}
+
+impl Named {
+    fn is_empty(&self) -> bool {
+        self.addresses.is_empty() && self.prefixes.is_empty()
+    }
+}
+
 /// A server and what it offers.
 struct Server {
     id: Vec<u8>,
     preference: u8,
+    /// How many of the identity associations asked for it offers.
+    count: usize,
     /// Named again in the Request.
-    addresses: Vec<Ipv6Addr>,
+    named: Named,
 }
 
 struct Held {
@@ -342,7 +479,7 @@ struct Held {
 
 struct Returning {
     server_id: Vec<u8>,
-    addresses: Vec<Ipv6Addr>,
+    named: Named,
 }
 
 /// A server's message, past the checks every message gets.
@@ -352,16 +489,25 @@ struct Answer<'a> {
     source: Ipv6Addr,
 }
 
-/// What a server's message says about our IA_NA.
+/// What a server's message holds for the identity associations asked
+/// for: each one that is there without a failure status. Their addresses
+/// and prefixes still need a look: see [`usable`].
+#[derive(Default)]
+struct Grant<'a> {
+    ia_na: Option<&'a IaNa>,
+    ia_pd: Vec<&'a WirePd>,
+}
+
+/// What a server's message says about what is asked for.
 enum Verdict<'a> {
-    /// Here it is. Its addresses still need a look: see [`usable`].
-    Granted(&'a IaNa),
+    Granted(Grant<'a>),
     /// The server could not say (UnspecFail, UseMulticast): the message
     /// goes out again when its retransmission is due.
     Unanswered(String),
-    /// The server has no record of the IA.
+    /// The server has no record of an identity association.
     NoBinding,
-    /// No address: a failure status, or no IA_NA of ours in the message.
+    /// Nothing: a failure status, or none of our identity associations
+    /// in the message.
     Refused(String),
 }
 
@@ -377,31 +523,52 @@ impl Held {
             .map_or(&[], |ia| ia.addresses.as_slice())
     }
 
+    /// The earliest renewal time of any identity association held;
     /// `None` when it never comes.
     fn t1(&self) -> Option<Instant> {
-        self.lease.ia_na.as_ref().and_then(|ia| self.at(ia.t1))
+        let ia_na = self.lease.ia_na.iter().map(|ia| ia.t1);
+        let ia_pd = self.lease.ia_pd.iter().map(|ia| ia.t1);
+        ia_na.chain(ia_pd).filter_map(|t1| self.at(t1)).min()
     }
 
     fn t2(&self) -> Option<Instant> {
-        self.lease.ia_na.as_ref().and_then(|ia| self.at(ia.t2))
+        let ia_na = self.lease.ia_na.iter().map(|ia| ia.t2);
+        let ia_pd = self.lease.ia_pd.iter().map(|ia| ia.t2);
+        ia_na.chain(ia_pd).filter_map(|t2| self.at(t2)).min()
     }
 
-    /// When the first address runs out.
+    /// When the first address or prefix runs out.
     fn first_expiry(&self) -> Option<Instant> {
-        self.addresses()
-            .iter()
-            .filter_map(|a| self.at(a.valid))
-            .min()
+        let valid = self.lease.lifetimes().into_iter().map(|(_, valid)| valid);
+        valid.filter_map(|valid| self.at(valid)).min()
     }
 
     /// When the last one does; `None` when one never does.
     fn last_expiry(&self) -> Option<Instant> {
-        self.addresses()
-            .iter()
-            .map(|a| self.at(a.valid))
+        self.lease
+            .lifetimes()
+            .into_iter()
+            .map(|(_, valid)| self.at(valid))
             .collect::<Option<Vec<Instant>>>()?
             .into_iter()
             .max()
+    }
+
+    /// §18.2.12: a lease with a delegated prefix is verified with a
+    /// Rebind, since a Confirm speaks of addresses only.
+    fn verified_by_rebind(&self) -> bool {
+        !self.lease.ia_pd.is_empty()
+    }
+
+    /// Everything held, as a message names it.
+    fn named(&self) -> Named {
+        let prefixes = self.lease.ia_pd.iter();
+        Named {
+            addresses: self.addresses().iter().map(|a| a.address).collect(),
+            prefixes: prefixes
+                .flat_map(|ia| ia.prefixes.iter().map(|p| (ia.iaid, p.prefix)))
+                .collect(),
+        }
     }
 
     /// Count the lease's times from `now` instead, to the second.
@@ -413,17 +580,17 @@ impl Held {
 }
 
 impl Client {
-    /// `duid` and `iaid` are who the client is to a server; see
-    /// [`Client::identity`].
+    /// `duid` and `asks` are who the client is to a server and what it
+    /// wants of it; see [`Client::identity`].
     pub fn new(
         duid: Vec<u8>,
-        iaid: u32,
+        asks: Asks,
         options: Options,
         random: Box<dyn FnMut() -> u32 + Send>,
     ) -> Client {
         Client {
             duid,
-            iaid,
+            asks,
             options,
             state: State::Stopped,
             link: false,
@@ -454,7 +621,7 @@ impl Client {
     }
 
     /// When to deliver [`Event::Timeout`]: the state's timer or an
-    /// address running out, whichever is first.
+    /// address or a prefix running out, whichever is first.
     pub fn deadline(&self) -> Option<Instant> {
         let expiry = self.held.as_ref().and_then(Held::first_expiry);
         match (self.wake, expiry) {
@@ -475,28 +642,29 @@ impl Client {
         self.ended && self.state == State::Stopped
     }
 
-    /// Who the client is to a server: its DUID, and the IAID of its
-    /// IA_NA.
+    /// Who the client is to a server, and what it asks of it: its DUID,
+    /// and the identity associations it wants filled, each with its
+    /// IAID.
     ///
     /// Both are fixed for the life of a `Client`. A server keys a binding
-    /// on them: a Renew under another DUID or IAID is another client
+    /// on the DUID and the IAID: a Renew under another is another client
     /// asking, and a Release under another leaves the binding in place.
-    /// When the configuration gives the interface another DUID, the task
-    /// stops this client, which releases the lease as who took it, and
-    /// starts a new one.
-    pub fn identity(&self) -> (&[u8], u32) {
-        (&self.duid, self.iaid)
+    /// And with nothing to ask for the client speaks another protocol
+    /// (Information-request). When the configuration gives the interface
+    /// another DUID or asks for something else, the task stops this
+    /// client, which releases the lease as who took it, and starts a new
+    /// one.
+    pub fn identity(&self) -> (&[u8], &Asks) {
+        (&self.duid, &self.asks)
     }
 
+    #[cfg(test)]
     pub fn options(&self) -> &Options {
         &self.options
     }
 
-    /// New options take effect at the next message. `parameters_only` is
-    /// not one of them: it decides which of two protocols the client
-    /// speaks, and the task starts a new client when it changes.
-    pub fn set_options(&mut self, mut options: Options) {
-        options.parameters_only = self.options.parameters_only;
+    /// New options take effect at the next message.
+    pub fn set_options(&mut self, options: Options) {
         self.options = options;
     }
 
@@ -545,7 +713,7 @@ impl Client {
                 // Nothing is sent: the timers that send start again when
                 // the link is back.
                 _ if self.held.is_some() => {
-                    self.idle(if self.options.parameters_only {
+                    self.idle(if self.asks.is_empty() {
                         State::Informed
                     } else {
                         State::Bound
@@ -558,7 +726,7 @@ impl Client {
         match self.state {
             State::Released => {}
             // The link may be another one: ask again (§18.2.6).
-            _ if self.options.parameters_only => self.inform(now),
+            _ if self.asks.is_empty() => self.inform(now),
             _ if self.held.is_some() => self.verify(now, out),
             _ => self.solicit(now),
         }
@@ -567,16 +735,14 @@ impl Client {
     fn on_resume(&mut self, lease: Lease, elapsed: u32, now: Instant, out: &mut Vec<Action>) {
         // Only before anything else has happened: a lease is never held
         // in `Stopped`.
-        if self.state != State::Stopped || self.options.parameters_only {
+        if self.state != State::Stopped {
             return;
         }
-        let lease = lease.aged(elapsed);
-        // Ours, and not run out while we were away.
-        if !lease
-            .ia_na
-            .as_ref()
-            .is_some_and(|ia| ia.iaid == self.iaid && !ia.addresses.is_empty())
-        {
+        // What is asked for now, and has not run out while we were away.
+        // (For a client that asks for nothing, that is nothing.)
+        let mut lease = lease.aged(elapsed);
+        lease.keep(&self.asks);
+        if !lease.has_leases() {
             return;
         }
         self.held = Some(Held {
@@ -644,15 +810,12 @@ impl Client {
             return;
         }
         // One Decline for everything declined so far.
-        let mut addresses = match self.returning.take() {
-            Some(returning) if self.state == State::Declining => returning.addresses,
-            _ => Vec::new(),
+        let mut named = match self.returning.take() {
+            Some(returning) if self.state == State::Declining => returning.named,
+            _ => Named::default(),
         };
-        addresses.push(address);
-        self.returning = Some(Returning {
-            server_id,
-            addresses,
-        });
+        named.addresses.push(address);
+        self.returning = Some(Returning { server_id, named });
         self.server = None;
         self.state = State::Declining;
         self.begin(DEC_TIMEOUT, DEC_MAX_RC, None, now, out);
@@ -816,8 +979,8 @@ impl Client {
             (State::Soliciting, msg::REPLY) => {
                 if self.options.rapid_commit
                     && params.rapid_commit
-                    && let Verdict::Granted(ia) = self.verdict(&answer)
-                    && let Some(lease) = self.grant(&answer, ia, out)
+                    && let Verdict::Granted(grant) = self.verdict(&answer)
+                    && let Some(lease) = self.grant(&answer, &grant, out)
                 {
                     self.bind(lease, now, out);
                 }
@@ -826,7 +989,16 @@ impl Client {
             (State::Renewing | State::Rebinding, msg::REPLY) => {
                 self.on_renewal_reply(&answer, now, out);
             }
-            (State::Confirming, msg::REPLY) => self.on_confirm_reply(&answer, now, out),
+            // A lease with a delegated prefix was asked about with a
+            // Rebind (`transmit`), and is answered as one.
+            (State::Confirming, msg::REPLY) => {
+                let rebind = self.held.as_ref().is_some_and(Held::verified_by_rebind);
+                if rebind {
+                    self.on_renewal_reply(&answer, now, out);
+                } else {
+                    self.on_confirm_reply(&answer, now, out);
+                }
+            }
             // §18.2.10.2: whatever the status, that is that.
             (State::Declining | State::Releasing, msg::REPLY) => {
                 if self
@@ -849,31 +1021,50 @@ impl Client {
         now: Instant,
         out: &mut Vec<Action>,
     ) {
-        // §18.2.9: an Advertise with no address for us is of no use.
-        let Verdict::Granted(ia) = self.verdict(answer) else {
+        // §18.2.9: an Advertise with no address and no prefix for us is
+        // of no use.
+        let Verdict::Granted(grant) = self.verdict(answer) else {
             return;
         };
-        let addresses: Vec<Ipv6Addr> = usable(ia).iter().map(|a| a.address).collect();
-        if addresses.is_empty() {
+        let mut named = Named::default();
+        let mut count = 0;
+        if let Some(ia) = grant.ia_na {
+            let addresses = usable(addresses_in(ia), |a| a.address);
+            named.addresses = addresses.iter().map(|a| a.address).collect();
+            count += usize::from(!addresses.is_empty());
+        }
+        for ia in &grant.ia_pd {
+            let prefixes = usable(prefixes_in(ia), |p| p.prefix);
+            count += usize::from(!prefixes.is_empty());
+            named
+                .prefixes
+                .extend(prefixes.iter().map(|p| (ia.iaid, p.prefix)));
+        }
+        if count == 0 {
             return;
         }
-        // The highest preference wins, the first to arrive among equals.
+        // The server that offers more of what is asked for wins: an
+        // address without the prefix is half a lease. Then the highest
+        // preference, and among equals the first to arrive.
         let preference = answer.params.preference.unwrap_or(0);
         if self
             .server
             .as_ref()
-            .is_none_or(|best| preference > best.preference)
+            .is_none_or(|best| (count, preference) > (best.count, best.preference))
         {
             self.server = Some(Server {
                 id: answer.server_id.clone(),
                 preference,
-                addresses,
+                count,
+                named,
             });
         }
         // Advertises are collected until the first retransmission is due.
-        // Preference 255 ends the wait, and once it is over the first
-        // Advertise does.
-        if preference == 255 || first_wait_over {
+        // Preference 255 ends the wait, when that server offers all that
+        // is asked for, and once the wait is over the first Advertise
+        // does.
+        let all = count == self.asks.count();
+        if (preference == 255 && all) || first_wait_over {
             self.request(now, out);
         }
     }
@@ -887,9 +1078,9 @@ impl Client {
             return;
         }
         let reason = match self.verdict(answer) {
-            Verdict::Granted(ia) => match self.grant(answer, ia, out) {
+            Verdict::Granted(grant) => match self.grant(answer, &grant, out) {
                 Some(lease) => return self.bind(lease, now, out),
-                None => "no usable address in the reply".to_string(),
+                None => "no usable address or prefix in the reply".to_string(),
             },
             Verdict::Unanswered(reason) => {
                 out.push(Action::Log(format!(
@@ -919,10 +1110,10 @@ impl Client {
         if self.state == State::Renewing && held.lease.server_id != answer.server_id {
             return;
         }
-        let ia = match self.verdict(answer) {
-            Verdict::Granted(ia) => ia,
-            // §18.2.10.1: ask that server for the binding again. The
-            // addresses stay in use meanwhile.
+        let grant = match self.verdict(answer) {
+            Verdict::Granted(grant) => grant,
+            // §18.2.10.1: ask that server for the binding again. What is
+            // held stays in use meanwhile.
             Verdict::NoBinding => {
                 out.push(Action::Log(format!(
                     "server {} has no record of the lease; requesting it again",
@@ -931,7 +1122,8 @@ impl Client {
                 self.server = Some(Server {
                     id: answer.server_id.clone(),
                     preference: 0,
-                    addresses: held.addresses().iter().map(|a| a.address).collect(),
+                    count: 0,
+                    named: held.named(),
                 });
                 return self.request(now, out);
             }
@@ -952,32 +1144,45 @@ impl Client {
         // What the Reply does not name keeps its lifetimes (§18.2.10.1):
         // count them from now, like the ones it sets.
         held.rebase(now);
-        let mut addresses = held
-            .lease
-            .ia_na
-            .take()
-            .map(|ia| ia.addresses)
-            .unwrap_or_default();
-        for theirs in &ia.addresses {
-            let failed = theirs.status.as_ref().is_some_and(|s| !s.is_success());
-            if failed || theirs.preferred > theirs.valid {
-                continue;
-            }
-            let mine = addresses.iter().position(|a| a.address == theirs.address);
-            match (mine, theirs.valid) {
-                // A valid lifetime of 0 takes the address away.
-                (Some(i), 0) => {
-                    addresses.remove(i);
-                }
-                (None, 0) => {}
-                (Some(i), _) => {
-                    addresses[i].preferred = theirs.preferred;
-                    addresses[i].valid = theirs.valid;
-                }
-                (None, _) => addresses.push(address_of(theirs)),
+        let mut lease = held.lease;
+        // The renewal times of each identity association the Reply
+        // speaks of.
+        let mut times = Vec::new();
+        if let Some(theirs) = grant.ia_na {
+            let ia = lease.ia_na.get_or_insert(Ia {
+                iaid: theirs.iaid,
+                t1: 0,
+                t2: 0,
+                addresses: Vec::new(),
+            });
+            merge(&mut ia.addresses, addresses_in(theirs), |a| a.address);
+            if !ia.addresses.is_empty() {
+                let lifetimes = lifetimes(&ia.addresses);
+                times.push(renewal_times(theirs.t1, theirs.t2, &lifetimes));
             }
         }
-        if addresses.is_empty() {
+        for theirs in &grant.ia_pd {
+            let at = match lease.ia_pd.iter().position(|ia| ia.iaid == theirs.iaid) {
+                Some(at) => at,
+                None => {
+                    lease.ia_pd.push(IaPd {
+                        iaid: theirs.iaid,
+                        t1: 0,
+                        t2: 0,
+                        prefixes: Vec::new(),
+                    });
+                    lease.ia_pd.len() - 1
+                }
+            };
+            let prefixes = &mut lease.ia_pd[at].prefixes;
+            merge(prefixes, prefixes_in(theirs), |p| p.prefix);
+            if !prefixes.is_empty() {
+                let lifetimes = lifetimes(prefixes);
+                times.push(renewal_times(theirs.t1, theirs.t2, &lifetimes));
+            }
+        }
+        lease.prune();
+        if !lease.has_leases() {
             out.push(Action::Log(format!(
                 "server {} took the lease back",
                 answer.source
@@ -985,14 +1190,20 @@ impl Client {
             out.push(Action::Unbind);
             return self.back_off(now);
         }
-        let (t1, t2) = renewal_times(ia.t1, ia.t2, &addresses);
-        let ia = Ia {
-            iaid: self.iaid,
-            t1,
-            t2,
-            addresses,
+        // One Renew covers every identity association (§18.2.4), at the
+        // earliest time one the Reply spoke of asks for. What it did not
+        // speak of is asked about again then. A Reply that leaves
+        // nothing of what it spoke of gives no time: the client's own
+        // then, for what is left.
+        if times.is_empty() {
+            times.push(renewal_times(0, 0, &lease.lifetimes()));
+        }
+        lease.renew_at(earliest(&times));
+        let lease = Lease {
+            ia_na: lease.ia_na,
+            ia_pd: lease.ia_pd,
+            ..self.lease_from(answer, out)
         };
-        let lease = self.lease_from(answer, Some(ia), out);
         self.bind(lease, now, out);
     }
 
@@ -1030,7 +1241,7 @@ impl Client {
         {
             return;
         }
-        let lease = self.lease_from(answer, None, out);
+        let lease = self.lease_from(answer, out);
         // §21.23: a day when the server names no time, never under ten
         // minutes, and never again when it says so (`INFINITY`).
         let refresh = answer
@@ -1047,10 +1258,10 @@ impl Client {
         self.wake = (refresh != INFINITY).then(|| now + Duration::from_secs(u64::from(refresh)));
     }
 
-    /// What `answer` says about our IA_NA.
+    /// What `answer` says about what is asked for.
     fn verdict<'a>(&self, answer: &Answer<'a>) -> Verdict<'a> {
         let params = answer.params;
-        if let Some(status) = params.status.as_ref().filter(|s| !s.is_success()) {
+        if let Some(status) = failure(&params.status) {
             return match status.code {
                 status::UNSPEC_FAIL | status::USE_MULTICAST => {
                     Verdict::Unanswered(status_text(status))
@@ -1059,39 +1270,99 @@ impl Client {
                 _ => Verdict::Refused(status_text(status)),
             };
         }
-        // §21.4: an IA_NA whose T1 is after its T2 is as good as absent.
-        let ia = params
-            .ia_na
-            .iter()
-            .find(|ia| ia.iaid == self.iaid && !(ia.t2 > 0 && ia.t1 > ia.t2));
-        let Some(ia) = ia else {
-            return Verdict::Refused("no address in the reply".into());
-        };
-        match ia.status.as_ref().filter(|s| !s.is_success()) {
-            None => Verdict::Granted(ia),
-            Some(status) if status.code == status::NO_BINDING => Verdict::NoBinding,
-            Some(status) => Verdict::Refused(status_text(status)),
+        // §21.4, §21.21: an identity association whose T1 is after its T2
+        // is as good as absent.
+        let in_order = |t1: u32, t2: u32| !(t2 > 0 && t1 > t2);
+        let mut grant = Grant::default();
+        // The status of each identity association that has one.
+        let mut failures = Vec::new();
+        let ia_na = self.asks.ia_na.and_then(|iaid| {
+            let mut all = params.ia_na.iter();
+            all.find(|ia| ia.iaid == iaid && in_order(ia.t1, ia.t2))
+        });
+        if let Some(ia) = ia_na {
+            match failure(&ia.status) {
+                None => grant.ia_na = Some(ia),
+                Some(status) => failures.push(status),
+            }
         }
+        for ask in &self.asks.ia_pd {
+            let mut all = params.ia_pd.iter();
+            let Some(ia) = all.find(|ia| ia.iaid == ask.iaid && in_order(ia.t1, ia.t2)) else {
+                continue;
+            };
+            match failure(&ia.status) {
+                None => grant.ia_pd.push(ia),
+                Some(status) => failures.push(status),
+            }
+        }
+        if failures.iter().any(|s| s.code == status::NO_BINDING) {
+            return Verdict::NoBinding;
+        }
+        if grant.ia_na.is_none() && grant.ia_pd.is_empty() {
+            return Verdict::Refused(match failures.first() {
+                Some(status) => status_text(status),
+                None => "no address or prefix in the reply".into(),
+            });
+        }
+        Verdict::Granted(grant)
     }
 
-    /// The lease `ia` gives a client that holds none; `None` when no
-    /// address in it can be used.
-    fn grant(&self, answer: &Answer<'_>, ia: &IaNa, out: &mut Vec<Action>) -> Option<Lease> {
-        let addresses = usable(ia);
-        if addresses.is_empty() {
+    /// The lease `grant` gives a client that holds none: what can be
+    /// used of it. `None` when nothing can.
+    fn grant(
+        &self,
+        answer: &Answer<'_>,
+        grant: &Grant<'_>,
+        out: &mut Vec<Action>,
+    ) -> Option<Lease> {
+        let mut times = Vec::new();
+        let ia_na = grant.ia_na.and_then(|theirs| {
+            let addresses = usable(addresses_in(theirs), |a| a.address);
+            if addresses.is_empty() {
+                return None;
+            }
+            let lifetimes = lifetimes(&addresses);
+            times.push(renewal_times(theirs.t1, theirs.t2, &lifetimes));
+            Some(Ia {
+                iaid: theirs.iaid,
+                t1: 0,
+                t2: 0,
+                addresses,
+            })
+        });
+        let mut ia_pd = Vec::new();
+        for theirs in &grant.ia_pd {
+            let prefixes = usable(prefixes_in(theirs), |p| p.prefix);
+            if prefixes.is_empty() {
+                continue;
+            }
+            let lifetimes = lifetimes(&prefixes);
+            times.push(renewal_times(theirs.t1, theirs.t2, &lifetimes));
+            ia_pd.push(IaPd {
+                iaid: theirs.iaid,
+                t1: 0,
+                t2: 0,
+                prefixes,
+            });
+        }
+        if ia_na.is_none() && ia_pd.is_empty() {
             return None;
         }
-        let (t1, t2) = renewal_times(ia.t1, ia.t2, &addresses);
-        let ia = Ia {
-            iaid: self.iaid,
-            t1,
-            t2,
-            addresses,
+        let mut lease = Lease {
+            ia_na,
+            ia_pd,
+            ..self.lease_from(answer, out)
         };
-        Some(self.lease_from(answer, Some(ia), out))
+        // One Renew covers every identity association (§18.2.4), at the
+        // earliest time any of them asks for.
+        lease.renew_at(earliest(&times));
+        Some(lease)
     }
 
-    fn lease_from(&self, answer: &Answer<'_>, ia_na: Option<Ia>, out: &mut Vec<Action>) -> Lease {
+    /// The server and the other configuration of `answer`, with nothing
+    /// leased yet.
+    fn lease_from(&self, answer: &Answer<'_>, out: &mut Vec<Action>) -> Lease {
         let params = answer.params;
         for (code, error) in &params.malformed {
             out.push(Action::Log(format!(
@@ -1102,7 +1373,8 @@ impl Client {
         Lease {
             server_id: answer.server_id.clone(),
             server_address: answer.source,
-            ia_na,
+            ia_na: None,
+            ia_pd: Vec::new(),
             dns_servers: params.dns_servers.clone(),
             domain_list: params.domain_list.clone(),
             ntp_servers: params.ntp_servers.iter().map(Ntp::from).collect(),
@@ -1134,12 +1406,13 @@ impl Client {
             return;
         };
         ia.addresses.retain(|a| a.address != address);
-        // Counting the lease from now takes every address that has run
-        // out with it, also one whose end is this very moment and whose
-        // timer has not fired yet. So what is left is asked after that,
-        // not before: a lease with no address must not stay held.
+        // Counting the lease from now takes every address and prefix that
+        // has run out with it, also one whose end is this very moment and
+        // whose timer has not fired yet. So what is left is asked after
+        // that, not before: a lease that holds nothing must not stay
+        // held.
         held.rebase(now);
-        if held.addresses().is_empty() {
+        if !held.lease.has_leases() {
             self.held = None;
             out.push(Action::Unbind);
         } else {
@@ -1150,8 +1423,8 @@ impl Client {
         }
     }
 
-    /// Drop the addresses whose valid lifetime has run out. True when
-    /// that was the end of the lease.
+    /// Drop the addresses and prefixes whose valid lifetime has run out.
+    /// True when that was the end of the lease.
     fn expire(&mut self, now: Instant, out: &mut Vec<Action>) -> bool {
         let Some(held) = &mut self.held else {
             return false;
@@ -1162,7 +1435,7 @@ impl Client {
         // Counting the lease from now is what drops them: one rule for
         // what has run out, here and in `remove_address`.
         held.rebase(now);
-        if held.addresses().is_empty() {
+        if !held.lease.has_leases() {
             out.push(Action::Log("lease expired".into()));
             self.held = None;
             out.push(Action::Unbind);
@@ -1184,13 +1457,13 @@ impl Client {
         };
         // §18.2.7: out of use before the Release is sent.
         out.push(Action::Unbind);
-        let addresses: Vec<Ipv6Addr> = held.addresses().iter().map(|a| a.address).collect();
-        if addresses.is_empty() || self.options.no_release || !self.link {
+        let named = held.named();
+        if named.is_empty() || self.options.no_release || !self.link {
             return;
         }
         self.returning = Some(Returning {
             server_id: held.lease.server_id,
-            addresses,
+            named,
         });
         self.release_then = then;
         self.state = State::Releasing;
@@ -1239,7 +1512,7 @@ impl Client {
     }
 
     fn start(&mut self, now: Instant) {
-        if self.options.parameters_only {
+        if self.asks.is_empty() {
             self.inform(now);
         } else {
             self.solicit(now);
@@ -1265,7 +1538,9 @@ impl Client {
     }
 
     /// Check that a lease kept while the client could not talk is still
-    /// right for the link (§18.2.3).
+    /// right for the link (§18.2.3), with a Confirm, or with a Rebind
+    /// when it holds a delegated prefix (§18.2.12): `transmit` sends what
+    /// the lease calls for.
     fn verify(&mut self, now: Instant, out: &mut Vec<Action>) {
         // Past T2 any server is asked about the lease anyway.
         let t2 = self.held.as_ref().and_then(Held::t2);
@@ -1377,33 +1652,30 @@ impl Client {
         let Some(exchange) = &self.exchange else {
             return;
         };
-        let held_addresses = || -> Vec<Ipv6Addr> {
-            self.held
-                .iter()
-                .flat_map(|held| held.addresses())
-                .map(|a| a.address)
-                .collect()
-        };
-        // The type, the server it is for, and the addresses it names.
-        let (msg_type, server_id, addresses) = match self.state {
-            State::Soliciting => (msg::SOLICIT, None, Some(Vec::new())),
+        let held = || self.held.as_ref().map(Held::named).unwrap_or_default();
+        let by_rebind = self.held.as_ref().is_some_and(Held::verified_by_rebind);
+        // The type, the server it is for, what it names, and whether
+        // every identity association asked for is in it or only those it
+        // names something of.
+        let (msg_type, server_id, named, all) = match self.state {
+            State::Soliciting => (msg::SOLICIT, None, Named::default(), true),
             State::Requesting => {
                 let Some(server) = &self.server else {
                     return;
                 };
-                (
-                    msg::REQUEST,
-                    Some(&server.id),
-                    Some(server.addresses.clone()),
-                )
+                (msg::REQUEST, Some(&server.id), server.named.clone(), true)
             }
-            State::Confirming => (msg::CONFIRM, None, Some(held_addresses())),
+            // A Confirm speaks of addresses only. §18.2.12: a lease with
+            // a delegated prefix is asked about with a Rebind instead,
+            // in a Confirm's time (`retransmit`).
+            State::Confirming if !by_rebind => (msg::CONFIRM, None, held(), false),
+            State::Confirming | State::Rebinding => (msg::REBIND, None, held(), true),
             State::Renewing => (
                 msg::RENEW,
                 self.held.as_ref().map(|held| &held.lease.server_id),
-                Some(held_addresses()),
+                held(),
+                true,
             ),
-            State::Rebinding => (msg::REBIND, None, Some(held_addresses())),
             State::Declining | State::Releasing => {
                 let Some(returning) = &self.returning else {
                     return;
@@ -1416,10 +1688,11 @@ impl Client {
                 (
                     msg_type,
                     Some(&returning.server_id),
-                    Some(returning.addresses.clone()),
+                    returning.named.clone(),
+                    false,
                 )
             }
-            State::Informing => (msg::INFORMATION_REQUEST, None, None),
+            State::Informing => (msg::INFORMATION_REQUEST, None, Named::default(), false),
             _ => return,
         };
         let mut message = ClientMessage::new(msg_type, exchange.xid);
@@ -1453,12 +1726,22 @@ impl Client {
         if msg_type == msg::SOLICIT && self.options.rapid_commit {
             message.options.push(Dhcp6Option::rapid_commit());
         }
-        if let Some(addresses) = addresses {
-            // §21.4, §21.6: a client leaves T1, T2 and the lifetimes 0.
-            let mut ia = IaNa::new(self.iaid);
+        message.options.extend(self.ia_options(&named, all));
+        out.push(Action::Send(message));
+    }
+
+    /// The identity associations of a message: every one asked for
+    /// (`all`), or only those `named` has something of. A client leaves
+    /// T1, T2 and the lifetimes 0 (§21.4, §21.6, §21.21, §21.22).
+    fn ia_options(&self, named: &Named, all: bool) -> Vec<Dhcp6Option> {
+        let mut options = Vec::new();
+        if let Some(iaid) = self.asks.ia_na
+            && (all || !named.addresses.is_empty())
+        {
+            let mut ia = IaNa::new(iaid);
+            let addresses = named.addresses.iter();
             ia.addresses = addresses
-                .into_iter()
-                .map(|address| IaAddress {
+                .map(|&address| IaAddress {
                     address,
                     preferred: 0,
                     valid: 0,
@@ -1466,11 +1749,32 @@ impl Client {
                     other: Vec::new(),
                 })
                 .collect();
-            if let Ok(option) = ia.emit() {
-                message.options.push(option);
-            }
+            options.extend(ia.emit().ok());
         }
-        out.push(Action::Send(message));
+        for ask in &self.asks.ia_pd {
+            let mut ia = WirePd::new(ask.iaid);
+            let prefixes = named.prefixes.iter();
+            ia.prefixes = prefixes
+                .filter(|(iaid, _)| *iaid == ask.iaid)
+                .map(|(_, prefix)| IaPrefix {
+                    prefix: prefix.addr(),
+                    prefix_len: prefix.prefix_len(),
+                    preferred: 0,
+                    valid: 0,
+                    status: None,
+                    other: Vec::new(),
+                })
+                .collect();
+            if ia.prefixes.is_empty() {
+                if !all {
+                    continue;
+                }
+                // Nothing to name: ask, with the length wanted as a hint.
+                ia.prefixes.push(IaPrefix::hint(ask.length));
+            }
+            options.extend(ia.emit().ok());
+        }
+        options
     }
 }
 
@@ -1478,32 +1782,122 @@ fn not_after(at: Instant, limit: Option<Instant>) -> Instant {
     limit.map_or(at, |limit| at.min(limit))
 }
 
-fn address_of(theirs: &IaAddress) -> Address {
-    Address {
-        address: theirs.address,
-        preferred: theirs.preferred,
-        valid: theirs.valid,
+/// An address or a prefix as a lease holds it: something with lifetimes.
+trait Timed {
+    /// Preferred, valid.
+    fn lifetimes(&self) -> (u32, u32);
+    fn set_lifetimes(&mut self, preferred: u32, valid: u32);
+}
+
+impl Timed for Address {
+    fn lifetimes(&self) -> (u32, u32) {
+        (self.preferred, self.valid)
+    }
+
+    fn set_lifetimes(&mut self, preferred: u32, valid: u32) {
+        (self.preferred, self.valid) = (preferred, valid);
     }
 }
 
-/// The addresses of `ia` a client can use: with a valid lifetime, not
-/// preferred for longer than valid (§21.6), without a failure status,
-/// each once.
-fn usable(ia: &IaNa) -> Vec<Address> {
-    let mut addresses: Vec<Address> = Vec::new();
-    for theirs in &ia.addresses {
-        if theirs.valid > 0
-            && theirs.preferred <= theirs.valid
-            && theirs.status.as_ref().is_none_or(StatusCode::is_success)
-            && !addresses.iter().any(|a| a.address == theirs.address)
+impl Timed for Prefix {
+    fn lifetimes(&self) -> (u32, u32) {
+        (self.preferred, self.valid)
+    }
+
+    fn set_lifetimes(&mut self, preferred: u32, valid: u32) {
+        (self.preferred, self.valid) = (preferred, valid);
+    }
+}
+
+fn lifetimes<T: Timed>(items: &[T]) -> Vec<(u32, u32)> {
+    items.iter().map(Timed::lifetimes).collect()
+}
+
+/// A status that is not Success.
+fn failure(status: &Option<StatusCode>) -> Option<&StatusCode> {
+    status.as_ref().filter(|s| !s.is_success())
+}
+
+/// The addresses a server's IA_NA holds, each with whether the server
+/// marked it with a failure status.
+fn addresses_in(ia: &IaNa) -> Vec<(Address, bool)> {
+    let theirs = ia.addresses.iter();
+    theirs
+        .map(|a| {
+            let address = Address {
+                address: a.address,
+                preferred: a.preferred,
+                valid: a.valid,
+            };
+            (address, failure(&a.status).is_some())
+        })
+        .collect()
+}
+
+/// The prefixes a server's IA_PD holds, likewise. A server may leave bits
+/// set past the prefix length: they are not part of the prefix.
+fn prefixes_in(ia: &WirePd) -> Vec<(Prefix, bool)> {
+    let theirs = ia.prefixes.iter();
+    theirs
+        .filter_map(|p| {
+            let prefix = Prefix {
+                prefix: Ipv6Net::new(p.prefix, p.prefix_len).ok()?.trunc(),
+                preferred: p.preferred,
+                valid: p.valid,
+            };
+            Some((prefix, failure(&p.status).is_some()))
+        })
+        .collect()
+}
+
+/// The addresses or prefixes among `theirs` a client can use: with a
+/// valid lifetime, not preferred for longer than valid (§21.6, §21.22),
+/// without a failure status, each once.
+fn usable<T: Timed, K: PartialEq>(theirs: Vec<(T, bool)>, key: impl Fn(&T) -> K) -> Vec<T> {
+    let mut mine: Vec<T> = Vec::new();
+    for (item, failed) in theirs {
+        let (preferred, valid) = item.lifetimes();
+        if valid > 0 && preferred <= valid && !failed && !mine.iter().any(|m| key(m) == key(&item))
         {
-            addresses.push(address_of(theirs));
+            mine.push(item);
         }
     }
-    addresses
+    mine
 }
 
-/// T1 and T2 for an IA with `addresses`, from the server's `t1` and `t2`.
+/// Apply what a Reply to a Renew or a Rebind holds for an identity
+/// association to what is held of it (§18.2.10.1): what it gives a valid
+/// lifetime of 0 goes, what it gives lifetimes is added or updated, and
+/// what it does not name stays as it is.
+fn merge<T: Timed, K: PartialEq>(mine: &mut Vec<T>, theirs: Vec<(T, bool)>, key: impl Fn(&T) -> K) {
+    for (item, failed) in theirs {
+        let (preferred, valid) = item.lifetimes();
+        if failed || preferred > valid {
+            continue;
+        }
+        let at = mine.iter().position(|m| key(m) == key(&item));
+        match (at, valid) {
+            // A valid lifetime of 0 takes it away.
+            (Some(at), 0) => {
+                mine.remove(at);
+            }
+            (None, 0) => {}
+            (Some(at), _) => mine[at].set_lifetimes(preferred, valid),
+            (None, _) => mine.push(item),
+        }
+    }
+}
+
+/// The earliest of each: one Renew, and one Rebind, for every identity
+/// association.
+fn earliest(times: &[(u32, u32)]) -> (u32, u32) {
+    let t1 = times.iter().map(|(t1, _)| *t1).min().unwrap_or(INFINITY);
+    let t2 = times.iter().map(|(_, t2)| *t2).min().unwrap_or(INFINITY);
+    (t1, t2)
+}
+
+/// T1 and T2 for an identity association whose addresses or prefixes
+/// have `lifetimes` (preferred, valid), from the server's `t1` and `t2`.
 ///
 /// A time the server sets is used as it is (§21.4: "the client MUST use
 /// the values in the T1 and T2 fields … unless values in those fields
@@ -1519,26 +1913,27 @@ fn usable(ia: &IaNa) -> Vec<Address> {
 ///   is the proportion of 0.5 to 0.8, so that the lease's own server is
 ///   asked before any other;
 /// - T2 alone: the same, but no earlier than 8/5 of the server's T1.
-fn renewal_times(t1: u32, t2: u32, addresses: &[Address]) -> (u32, u32) {
-    let (own_t1, own_t2) = own_renewal_times(addresses);
+fn renewal_times(t1: u32, t2: u32, lifetimes: &[(u32, u32)]) -> (u32, u32) {
+    let (own_t1, own_t2) = own_renewal_times(lifetimes);
     match (t1, t2) {
         (0, 0) => (own_t1, own_t2),
         (0, t2) => (own_t1.min(scaled(t2, 5, 8)).max(1), t2),
         (t1, 0) => (t1, own_t2.max(scaled(t1, 8, 5))),
-        // Out of order. `verdict` drops such an IA_NA (§21.4), so this
-        // is not reached from a server's message.
+        // Out of order. `verdict` drops such an identity association
+        // (§21.4), so this is not reached from a server's message.
         (t1, t2) if t1 > t2 => (own_t1, own_t2),
         (t1, t2) => (t1, t2),
     }
 }
 
-/// The T1 and T2 a client chooses for `addresses` when the server names
+/// The T1 and T2 a client chooses for `lifetimes` when the server names
 /// neither.
-fn own_renewal_times(addresses: &[Address]) -> (u32, u32) {
-    let shortest_valid = addresses.iter().map(|a| a.valid).min().unwrap_or(INFINITY);
-    let base = addresses
+fn own_renewal_times(lifetimes: &[(u32, u32)]) -> (u32, u32) {
+    let valid = lifetimes.iter().map(|(_, valid)| *valid);
+    let shortest_valid = valid.min().unwrap_or(INFINITY);
+    let base = lifetimes
         .iter()
-        .map(|a| a.preferred)
+        .map(|(preferred, _)| *preferred)
         .filter(|&preferred| preferred > 0)
         .min()
         .unwrap_or(shortest_valid);
@@ -1594,19 +1989,38 @@ mod tests {
         Duration::from_secs(n)
     }
 
+    /// An address, and nothing else.
+    fn address_only() -> Asks {
+        Asks {
+            ia_na: Some(IAID),
+            ia_pd: vec![],
+        }
+    }
+
+    /// A client that asks for an address.
     fn client(options: Options) -> Client {
+        client_asking(address_only(), options)
+    }
+
+    fn client_asking(asks: Asks, options: Options) -> Client {
         // A fixed "random" source that counts up: transaction ids differ,
         // and the delays and the jitter are small and known.
         let mut next = 1299u32;
         Client::new(
             DUID.to_vec(),
-            IAID,
+            asks,
             options,
             Box::new(move || {
                 next += 1;
                 next
             }),
         )
+    }
+
+    /// A client with nothing to ask for but the other configuration
+    /// (`parameters-only`).
+    fn parameters_client() -> Client {
+        client_asking(Asks::default(), Options::default())
     }
 
     /// What `server` answers to `request`: its transaction and client
@@ -1800,6 +2214,7 @@ mod tests {
                 t2: 2880,
                 addresses: vec![address(ADDRESS, 3600, 7200)],
             }),
+            ia_pd: vec![],
             dns_servers: vec![DNS],
             domain_list: vec!["example.com".into()],
             ntp_servers: vec![Ntp::Fqdn("ntp.example.com".into())],
@@ -1818,7 +2233,7 @@ mod tests {
         let t0 = Instant::now();
         let mut c = client(Options::default());
         assert!(!c.wants_socket());
-        assert_eq!(c.identity(), (&DUID[..], IAID));
+        assert_eq!(c.identity(), (&DUID[..], &address_only()));
 
         // The first Solicit waits a random moment, up to a second.
         assert!(c.handle(Event::Link(true), t0).is_empty());
@@ -1990,7 +2405,7 @@ mod tests {
             next += 0x0001_0001;
             next
         });
-        let mut c = Client::new(DUID.to_vec(), IAID, Options::default(), random);
+        let mut c = Client::new(DUID.to_vec(), address_only(), Options::default(), random);
         c.handle(Event::Link(true), t0);
         let (t, solicit) = first_solicit(&mut c);
         assert_eq!(solicit.transaction_id & !0x00ff_ffff, 0);
@@ -2119,9 +2534,10 @@ mod tests {
     #[test]
     fn only_the_first_solicit_wait_is_never_short() {
         // The lowest draw there is: no delay, and RAND at its least.
-        let lowest = |options: Options| Client::new(DUID.to_vec(), IAID, options, Box::new(|| 0));
+        let lowest =
+            |asks: Asks| Client::new(DUID.to_vec(), asks, Options::default(), Box::new(|| 0));
         let t0 = Instant::now();
-        let mut c = lowest(Options::default());
+        let mut c = lowest(address_only());
         c.handle(Event::Link(true), t0);
         assert_eq!(c.deadline(), Some(t0));
         let (t, _) = first_solicit(&mut c);
@@ -2136,7 +2552,7 @@ mod tests {
             "{first:?} then {second:?}"
         );
         // An Information-request waits for one answer, not for the best.
-        let mut c = lowest(parameters_only());
+        let mut c = lowest(Asks::default());
         c.handle(Event::Link(true), t0);
         let (t, _) = first_information_request(&mut c);
         assert_eq!(c.deadline().unwrap() - t, INF_TIMEOUT.mul_f64(0.9));
@@ -2646,7 +3062,7 @@ mod tests {
 
     #[test]
     fn renewal_times_are_the_servers_where_it_names_them() {
-        let a = |preferred, valid| address(ADDRESS, preferred, valid);
+        let a = |preferred: u32, valid: u32| (preferred, valid);
         let usual = [a(3600, 7200)];
         // The server's, as they are: also after the address has run out,
         // also never.
@@ -3448,13 +3864,6 @@ mod tests {
         assert_eq!(c.deadline(), None);
     }
 
-    fn parameters_only() -> Options {
-        Options {
-            parameters_only: true,
-            ..Options::default()
-        }
-    }
-
     /// From `Informing` with its delay running: the Information-request.
     fn first_information_request(c: &mut Client) -> (Instant, ClientMessage) {
         assert_eq!(c.state(), State::Informing);
@@ -3467,7 +3876,7 @@ mod tests {
     #[test]
     fn parameters_only_asks_for_information() {
         let t0 = Instant::now();
-        let mut c = client(parameters_only());
+        let mut c = parameters_client();
         // A lease on disk is not this client's business.
         let resume = Event::Resume {
             lease: kept(),
@@ -3505,6 +3914,7 @@ mod tests {
             server_id: SERVER_DUID.to_vec(),
             server_address: SERVER,
             ia_na: None,
+            ia_pd: vec![],
             dns_servers: vec![DNS],
             domain_list: vec![],
             ntp_servers: vec![],
@@ -3536,7 +3946,7 @@ mod tests {
             (None, Some(86400)),
             (Some(INFINITY), None),
         ] {
-            let mut c = client(parameters_only());
+            let mut c = parameters_client();
             c.handle(Event::Link(true), t0);
             let (t, request) = first_information_request(&mut c);
             let options = refresh
@@ -3552,7 +3962,7 @@ mod tests {
     #[test]
     fn an_information_request_is_retransmitted_up_to_inf_max_rt() {
         let t0 = Instant::now();
-        let mut c = client(parameters_only());
+        let mut c = parameters_client();
         c.handle(Event::Link(true), t0);
         let (t, request) = first_information_request(&mut c);
         let gap = c.deadline().unwrap() - t;
@@ -3597,7 +4007,7 @@ mod tests {
     #[test]
     fn information_follows_the_link_and_the_operator() {
         let t0 = Instant::now();
-        let mut c = client(parameters_only());
+        let mut c = parameters_client();
         c.handle(Event::Link(true), t0);
         let (t, request) = first_information_request(&mut c);
         deliver(&mut c, &answer(&request, msg::REPLY, vec![]), t);
@@ -3627,16 +4037,14 @@ mod tests {
         let mut c = client(Options::default());
         c.handle(Event::Link(true), t0);
         c.set_options(Options {
-            parameters_only: true,
             rapid_commit: true,
             no_release: false,
         });
-        // Rapid commit, yes; another protocol, no.
-        let (t, solicit) = first_solicit(&mut c);
+        let (_, solicit) = first_solicit(&mut c);
         assert!(solicit.option(opt::RAPID_COMMIT).is_some());
-        c.handle(Event::Release, t);
-        c.handle(Event::Renew, t);
-        assert_eq!(c.state(), State::Soliciting);
+        assert!(c.options().rapid_commit);
+        // What is asked for is not an option: it stays what it was.
+        assert_eq!(c.identity().1, &address_only());
     }
 
     #[test]
@@ -3644,7 +4052,7 @@ mod tests {
         let draw = |value: u32, fixed: u64, base: u64, positive: bool| {
             let mut c = Client::new(
                 DUID.to_vec(),
-                IAID,
+                address_only(),
                 Options::default(),
                 Box::new(move || value),
             );
@@ -3662,6 +4070,629 @@ mod tests {
             let rt = draw(value, 1, 1, true);
             assert!(rt > secs(1) && rt <= Duration::from_millis(1100), "{rt:?}");
         }
+    }
+
+    /// The IAID of the prefix delegation the tests ask for.
+    const PD: u32 = 7;
+    const DELEGATED: &str = "2001:db8:100::/56";
+
+    fn ask_pd(iaid: u32, length: u8) -> PdAsk {
+        PdAsk { iaid, length }
+    }
+
+    /// An address and a prefix.
+    fn both() -> Asks {
+        Asks {
+            ia_na: Some(IAID),
+            ia_pd: vec![ask_pd(PD, 56)],
+        }
+    }
+
+    fn prefixes_only() -> Asks {
+        Asks {
+            ia_na: None,
+            ia_pd: vec![ask_pd(PD, 56)],
+        }
+    }
+
+    /// An IA_PD as a server sends it: prefix, preferred, valid.
+    fn ia_pd(iaid: u32, t1: u32, t2: u32, prefixes: &[(&str, u32, u32)]) -> Dhcp6Option {
+        let mut ia = WirePd::new(iaid);
+        ia.t1 = t1;
+        ia.t2 = t2;
+        ia.prefixes = prefixes
+            .iter()
+            .map(|&(prefix, preferred, valid)| {
+                let (address, length) = prefix.split_once('/').unwrap();
+                IaPrefix {
+                    prefix: address.parse().unwrap(),
+                    prefix_len: length.parse().unwrap(),
+                    preferred,
+                    valid,
+                    status: None,
+                    other: Vec::new(),
+                }
+            })
+            .collect();
+        ia.emit().unwrap()
+    }
+
+    /// The usual delegation: one /56, valid for 7200 s.
+    fn one_prefix() -> Dhcp6Option {
+        ia_pd(PD, 1800, 2880, &[(DELEGATED, 3600, 7200)])
+    }
+
+    /// An IA_PD with a status and no prefix.
+    fn ia_pd_status(iaid: u32, code: u16) -> Dhcp6Option {
+        let mut ia = WirePd::new(iaid);
+        ia.status = Some(StatusCode::new(code, "no"));
+        ia.emit().unwrap()
+    }
+
+    /// The IA_PDs of a client's message: the IAID of each, and what it
+    /// names. A client leaves the times in them 0.
+    fn pds_of(message: &ClientMessage) -> Vec<(u32, Vec<String>)> {
+        let options = message.options.iter().filter(|o| o.code == opt::IA_PD);
+        options
+            .map(|option| {
+                let ia = WirePd::parse(&option.data).unwrap();
+                assert_eq!((ia.t1, ia.t2), (0, 0));
+                let prefixes = ia.prefixes.iter().map(|p| {
+                    assert_eq!((p.preferred, p.valid), (0, 0));
+                    format!("{}/{}", p.prefix, p.prefix_len)
+                });
+                (ia.iaid, prefixes.collect())
+            })
+            .collect()
+    }
+
+    fn named(iaid: u32, prefix: &str) -> (u32, Vec<String>) {
+        (iaid, vec![prefix.to_string()])
+    }
+
+    fn prefix(prefix: &str, preferred: u32, valid: u32) -> Prefix {
+        Prefix {
+            prefix: prefix.parse().unwrap(),
+            preferred,
+            valid,
+        }
+    }
+
+    /// `kept` with the usual delegation beside the address.
+    fn kept_with_prefix() -> Lease {
+        Lease {
+            ia_pd: vec![IaPd {
+                iaid: PD,
+                t1: 1800,
+                t2: 2880,
+                prefixes: vec![prefix(DELEGATED, 3600, 7200)],
+            }],
+            ..kept()
+        }
+    }
+
+    /// Link up, then Solicit, an Advertise and a Reply that both hold
+    /// `options`: bound to what they grant. Returns when, and the lease.
+    fn acquire_all(c: &mut Client, t0: Instant, options: Vec<Dhcp6Option>) -> (Instant, Lease) {
+        c.handle(Event::Link(true), t0);
+        let (mut now, solicit) = first_solicit(c);
+        let mut offered = vec![preference(255)];
+        offered.extend(options.clone());
+        let mut actions = deliver(c, &answer(&solicit, msg::ADVERTISE, offered), now);
+        if actions.is_empty() {
+            // Not all that is asked for: the wait for a better offer
+            // runs out first.
+            (now, actions) = fire(c);
+        }
+        let request = sent(&actions).clone();
+        assert_eq!(request.msg_type, msg::REQUEST);
+        let actions = deliver(c, &answer(&request, msg::REPLY, options), now);
+        let [Action::Bind { lease, fresh: true }] = &actions[..] else {
+            panic!("{actions:?}")
+        };
+        assert_eq!(c.state(), State::Bound);
+        (now, lease.clone())
+    }
+
+    #[test]
+    fn a_prefix_is_asked_for_with_the_address() {
+        let t0 = Instant::now();
+        let mut c = client_asking(both(), Options::default());
+        assert_eq!(c.identity(), (&DUID[..], &both()));
+        c.handle(Event::Link(true), t0);
+        let (t, solicit) = first_solicit(&mut c);
+        // An empty IA_NA, and an IA_PD that hints at the length wanted.
+        assert!(ia_of(&solicit).addresses.is_empty());
+        assert_eq!(pds_of(&solicit), [named(PD, "::/56")]);
+
+        let lease = vec![
+            one_address(),
+            ia_pd(PD, 1000, 1600, &[(DELEGATED, 3600, 7200)]),
+        ];
+        let mut offered = vec![preference(255)];
+        offered.extend(lease.clone());
+        let advertise = answer(&solicit, msg::ADVERTISE, offered);
+        let request = sent(&deliver(&mut c, &advertise, t)).clone();
+        // The Request names what was offered.
+        assert_eq!(request.msg_type, msg::REQUEST);
+        assert_eq!(addresses_of(&request), [ADDRESS]);
+        assert_eq!(pds_of(&request), [named(PD, DELEGATED)]);
+
+        let actions = deliver(&mut c, &answer(&request, msg::REPLY, lease), t);
+        let [Action::Bind { lease, fresh: true }] = &actions[..] else {
+            panic!("{actions:?}")
+        };
+        // One Renew for both, at the earlier of the times they ask for.
+        let ia_na = lease.ia_na.as_ref().unwrap();
+        assert_eq!((ia_na.t1, ia_na.t2), (1000, 1600));
+        assert_eq!(ia_na.addresses, [address(ADDRESS, 3600, 7200)]);
+        assert_eq!(
+            lease.ia_pd,
+            [IaPd {
+                iaid: PD,
+                t1: 1000,
+                t2: 1600,
+                prefixes: vec![prefix(DELEGATED, 3600, 7200)],
+            }]
+        );
+        assert_eq!(c.deadline(), Some(t + secs(1000)));
+
+        // Renew, Rebind and Release name both.
+        let (_, renew) = first_renew(&mut c);
+        assert_eq!(addresses_of(&renew), [ADDRESS]);
+        assert_eq!(pds_of(&renew), [named(PD, DELEGATED)]);
+        let rebind = loop {
+            let (_, actions) = fire(&mut c);
+            if c.state() == State::Rebinding {
+                break sent(&actions).clone();
+            }
+        };
+        assert_eq!(rebind.msg_type, msg::REBIND);
+        assert_eq!(addresses_of(&rebind), [ADDRESS]);
+        assert_eq!(pds_of(&rebind), [named(PD, DELEGATED)]);
+        let t = c.deadline().unwrap();
+        let actions = c.handle(Event::Release, t);
+        let [Action::Unbind, Action::Send(release)] = &actions[..] else {
+            panic!("{actions:?}")
+        };
+        assert_eq!(release.msg_type, msg::RELEASE);
+        assert_eq!(addresses_of(release), [ADDRESS]);
+        assert_eq!(pds_of(release), [named(PD, DELEGATED)]);
+    }
+
+    #[test]
+    fn prefixes_can_be_all_that_is_asked_for() {
+        let t0 = Instant::now();
+        let asks = Asks {
+            ia_na: None,
+            ia_pd: vec![ask_pd(PD, 56), ask_pd(PD + 1, 60)],
+        };
+        let mut c = client_asking(asks, Options::default());
+        c.handle(Event::Link(true), t0);
+        let (t, solicit) = first_solicit(&mut c);
+        assert!(solicit.option(opt::IA_NA).is_none());
+        assert_eq!(
+            pds_of(&solicit),
+            [named(PD, "::/56"), named(PD + 1, "::/60")]
+        );
+        // The server delegates one of the two.
+        let lease = vec![
+            ia_pd(PD, 0, 0, &[(DELEGATED, 3600, 7200)]),
+            ia_pd_status(PD + 1, status::NO_PREFIX_AVAIL),
+        ];
+        let advertise = answer(&solicit, msg::ADVERTISE, lease.clone());
+        assert!(deliver(&mut c, &advertise, t).is_empty());
+        let (t, actions) = fire(&mut c);
+        let request = sent(&actions).clone();
+        // What was offered is named; the other is asked for all the same.
+        assert!(request.option(opt::IA_NA).is_none());
+        assert_eq!(
+            pds_of(&request),
+            [named(PD, DELEGATED), named(PD + 1, "::/60")]
+        );
+        let actions = deliver(&mut c, &answer(&request, msg::REPLY, lease), t);
+        let [Action::Bind { lease, fresh: true }] = &actions[..] else {
+            panic!("{actions:?}")
+        };
+        assert_eq!(lease.ia_na, None);
+        assert_eq!(
+            lease.ia_pd,
+            [IaPd {
+                iaid: PD,
+                t1: 1800,
+                t2: 2880,
+                prefixes: vec![prefix(DELEGATED, 3600, 7200)],
+            }]
+        );
+        // The Renew asks for the other again.
+        let (t, renew) = first_renew(&mut c);
+        assert!(renew.option(opt::IA_NA).is_none());
+        assert_eq!(
+            pds_of(&renew),
+            [named(PD, DELEGATED), named(PD + 1, "::/60")]
+        );
+        // With its last prefix a lease of prefixes is over.
+        c.handle(Event::Link(false), t);
+        let (ended, actions) = fire(&mut c);
+        assert_eq!(ended, t + secs(7200 - 1800));
+        assert!(
+            matches!(&actions[..], [Action::Log(_), Action::Unbind]),
+            "{actions:?}"
+        );
+        assert_eq!(c.state(), State::Stopped);
+    }
+
+    #[test]
+    fn the_server_that_offers_more_is_asked() {
+        let t0 = Instant::now();
+        let mut c = client_asking(both(), Options::default());
+        c.handle(Event::Link(true), t0);
+        let (t, solicit) = first_solicit(&mut c);
+        // The highest preference there is, and half of what is asked
+        // for: it does not end the wait.
+        let half = answer_from(
+            &OTHER_DUID,
+            &solicit,
+            msg::ADVERTISE,
+            vec![preference(255), one_address()],
+        );
+        assert!(deliver(&mut c, &half, t).is_empty());
+        assert_eq!(c.state(), State::Soliciting);
+        // No preference at all, and all of it: that one is asked.
+        let whole = answer(&solicit, msg::ADVERTISE, vec![one_address(), one_prefix()]);
+        assert!(deliver(&mut c, &whole, t).is_empty());
+        let request = sent(&fire(&mut c).1).clone();
+        assert_eq!(request.msg_type, msg::REQUEST);
+        assert_eq!(request.option(opt::SERVER_ID), Some(&SERVER_DUID[..]));
+        assert_eq!(pds_of(&request), [named(PD, DELEGATED)]);
+
+        // Preference 255 with all of it is taken at once.
+        let mut c = client_asking(both(), Options::default());
+        c.handle(Event::Link(true), t0);
+        let (t, solicit) = first_solicit(&mut c);
+        let whole = answer(
+            &solicit,
+            msg::ADVERTISE,
+            vec![preference(255), one_address(), one_prefix()],
+        );
+        assert_eq!(sent(&deliver(&mut c, &whole, t)).msg_type, msg::REQUEST);
+    }
+
+    #[test]
+    fn what_a_server_withholds_is_asked_for_at_the_next_renewal() {
+        let t0 = Instant::now();
+        // The address without the prefix.
+        let mut c = client_asking(both(), Options::default());
+        let granted = vec![one_address(), ia_pd_status(PD, status::NO_PREFIX_AVAIL)];
+        let (_, lease) = acquire_all(&mut c, t0, granted);
+        assert!(lease.ia_na.is_some() && lease.ia_pd.is_empty());
+        let (t, renew) = first_renew(&mut c);
+        assert_eq!(addresses_of(&renew), [ADDRESS]);
+        assert_eq!(pds_of(&renew), [named(PD, "::/56")]);
+        // Now it is there.
+        let reply = answer(&renew, msg::REPLY, vec![one_address(), one_prefix()]);
+        let actions = deliver(&mut c, &reply, t);
+        let [Action::Bind { lease, fresh: true }] = &actions[..] else {
+            panic!("{actions:?}")
+        };
+        assert_eq!(lease.ia_pd[0].prefixes, [prefix(DELEGATED, 3600, 7200)]);
+        assert!(lease.ia_na.is_some());
+
+        // The prefix without the address.
+        let mut c = client_asking(both(), Options::default());
+        let granted = vec![ia_status(status::NO_ADDRS_AVAIL), one_prefix()];
+        let (_, lease) = acquire_all(&mut c, t0, granted);
+        assert!(lease.ia_na.is_none() && lease.ia_pd.len() == 1);
+        let (t, renew) = first_renew(&mut c);
+        assert!(ia_of(&renew).addresses.is_empty());
+        assert_eq!(pds_of(&renew), [named(PD, DELEGATED)]);
+        // A renewal that still has no address extends what is held, and
+        // the client goes on asking at the times the server gives.
+        let reply = answer(
+            &renew,
+            msg::REPLY,
+            vec![ia_status(status::NO_ADDRS_AVAIL), one_prefix()],
+        );
+        let actions = deliver(&mut c, &reply, t);
+        assert!(
+            matches!(&actions[..], [Action::Bind { fresh: true, .. }]),
+            "{actions:?}"
+        );
+        assert_eq!(c.state(), State::Bound);
+        assert_eq!(c.deadline(), Some(t + secs(1800)));
+        // A Release names what is held, and no identity association
+        // that holds nothing.
+        let actions = c.handle(Event::Release, t);
+        let release = sent(&actions);
+        assert_eq!(release.msg_type, msg::RELEASE);
+        assert!(release.option(opt::IA_NA).is_none());
+        assert_eq!(pds_of(release), [named(PD, DELEGATED)]);
+    }
+
+    #[test]
+    fn a_delegation_changes_and_runs_out() {
+        let t0 = Instant::now();
+        let mut c = client_asking(both(), Options::default());
+        acquire_all(&mut c, t0, vec![one_address(), one_prefix()]);
+        let (t, renew) = first_renew(&mut c);
+        // The server moves the delegation: the old prefix gets a valid
+        // lifetime of 0, and another comes.
+        let moved = ia_pd(
+            PD,
+            1800,
+            2880,
+            &[(DELEGATED, 0, 0), ("2001:db8:200::/56", 100, 200)],
+        );
+        let reply = answer(&renew, msg::REPLY, vec![one_address(), moved]);
+        let actions = deliver(&mut c, &reply, t);
+        let [Action::Bind { lease, fresh: true }] = &actions[..] else {
+            panic!("{actions:?}")
+        };
+        assert_eq!(
+            lease.ia_pd[0].prefixes,
+            [prefix("2001:db8:200::/56", 100, 200)]
+        );
+        // The new prefix runs out before the address does: the lease
+        // goes on without it.
+        c.handle(Event::Link(false), t);
+        let (expired, actions) = fire(&mut c);
+        assert_eq!(expired, t + secs(200));
+        let [Action::Bind { lease, fresh: true }] = &actions[..] else {
+            panic!("{actions:?}")
+        };
+        assert!(lease.ia_pd.is_empty());
+        assert_eq!(
+            lease.ia_na.as_ref().unwrap().addresses,
+            [address(ADDRESS, 3400, 7000)]
+        );
+        assert_eq!(c.state(), State::Bound);
+    }
+
+    #[test]
+    fn a_reply_that_only_takes_away_still_sets_a_time() {
+        let t0 = Instant::now();
+        let mut c = client_asking(both(), Options::default());
+        acquire_all(&mut c, t0, vec![one_address(), one_prefix()]);
+        let (t, renew) = first_renew(&mut c);
+        // The Reply speaks of the delegation alone, and takes its prefix
+        // away. The address it says nothing of stays as it is, and is
+        // asked about again at a time of the client's choosing: half of
+        // what is left of its preferred lifetime.
+        let reply = answer(
+            &renew,
+            msg::REPLY,
+            vec![ia_pd(PD, 1800, 2880, &[(DELEGATED, 0, 0)])],
+        );
+        let actions = deliver(&mut c, &reply, t);
+        let [Action::Bind { lease, fresh: true }] = &actions[..] else {
+            panic!("{actions:?}")
+        };
+        assert!(lease.ia_pd.is_empty());
+        let ia_na = lease.ia_na.as_ref().unwrap();
+        assert_eq!(ia_na.addresses, [address(ADDRESS, 1800, 5400)]);
+        assert_eq!((ia_na.t1, ia_na.t2), (900, 1440));
+        assert_eq!(c.deadline(), Some(t + secs(900)));
+    }
+
+    #[test]
+    fn a_prefix_is_what_its_length_says() {
+        let t0 = Instant::now();
+        let mut c = client_asking(prefixes_only(), Options::default());
+        // Bits set past the length are not part of the prefix; the same
+        // prefix named again is the same prefix; and one that is
+        // preferred for longer than it is valid, or not valid at all, is
+        // not used.
+        let odd = ia_pd(
+            PD,
+            0,
+            0,
+            &[
+                ("2001:db8:100:ff::1/56", 3600, 7200),
+                (DELEGATED, 100, 200),
+                ("2001:db8:300::/56", 7200, 3600),
+                ("2001:db8:400::/56", 0, 0),
+            ],
+        );
+        let (_, lease) = acquire_all(&mut c, t0, vec![odd]);
+        assert_eq!(lease.ia_pd[0].prefixes, [prefix(DELEGATED, 3600, 7200)]);
+    }
+
+    #[test]
+    fn a_lease_with_a_prefix_is_verified_with_a_rebind() {
+        let t0 = Instant::now();
+        let resume = || Event::Resume {
+            lease: kept_with_prefix(),
+            elapsed: 600,
+        };
+        let mut c = client_asking(both(), Options::default());
+        let actions = c.handle(resume(), t0);
+        assert_eq!(
+            actions,
+            [Action::Bind {
+                lease: kept_with_prefix().aged(600),
+                fresh: false
+            }]
+        );
+        c.handle(Event::Link(true), t0);
+        assert_eq!(c.state(), State::Confirming);
+        let (first, actions) = fire(&mut c);
+        // A Confirm speaks of addresses only: any server is asked about
+        // all of it, with a Rebind.
+        let rebind = sent(&actions).clone();
+        assert_eq!(rebind.msg_type, msg::REBIND);
+        assert!(rebind.option(opt::SERVER_ID).is_none());
+        assert_eq!(addresses_of(&rebind), [ADDRESS]);
+        assert_eq!(pds_of(&rebind), [named(PD, DELEGATED)]);
+        // In a Confirm's time: again after about a second, and over in
+        // ten, after which the lease is used as it is.
+        let gap = c.deadline().unwrap() - first;
+        assert!(gap <= CNF_TIMEOUT.mul_f64(1.1), "{gap:?}");
+        let (ended, actions) = loop {
+            let (t, actions) = fire(&mut c);
+            if c.state() != State::Confirming {
+                break (t, actions);
+            }
+            assert_eq!(sent(&actions).msg_type, msg::REBIND);
+            assert_eq!(sent(&actions).transaction_id, rebind.transaction_id);
+        };
+        assert_eq!(ended, first + CNF_MAX_RD);
+        assert!(matches!(&actions[..], [Action::Log(_)]), "{actions:?}");
+        assert_eq!(c.state(), State::Bound);
+        assert_eq!(c.deadline(), Some(t0 + secs(1200)));
+
+        // Answered, by any server: what it says of the lease is taken. A
+        // prefix that is not right for this link comes back with a valid
+        // lifetime of 0.
+        let mut c = client_asking(both(), Options::default());
+        c.handle(resume(), t0);
+        c.handle(Event::Link(true), t0);
+        let (t, actions) = fire(&mut c);
+        let rebind = sent(&actions).clone();
+        let reply = answer_from(
+            &OTHER_DUID,
+            &rebind,
+            msg::REPLY,
+            vec![one_address(), ia_pd(PD, 0, 0, &[(DELEGATED, 0, 0)])],
+        );
+        let actions = deliver(&mut c, &reply, t);
+        let [Action::Bind { lease, fresh: true }] = &actions[..] else {
+            panic!("{actions:?}")
+        };
+        assert!(lease.ia_pd.is_empty());
+        assert_eq!(lease.server_id, OTHER_DUID);
+        assert_eq!(c.state(), State::Bound);
+
+        // A lease of addresses alone is confirmed, also for a client
+        // that asks for a prefix as well.
+        let mut c = client_asking(both(), Options::default());
+        c.handle(
+            Event::Resume {
+                lease: kept(),
+                elapsed: 0,
+            },
+            t0,
+        );
+        c.handle(Event::Link(true), t0);
+        let confirm = sent(&fire(&mut c).1).clone();
+        assert_eq!(confirm.msg_type, msg::CONFIRM);
+        assert_eq!(addresses_of(&confirm), [ADDRESS]);
+        assert!(pds_of(&confirm).is_empty());
+    }
+
+    #[test]
+    fn only_what_is_asked_for_is_resumed() {
+        let t0 = Instant::now();
+        let resume = || Event::Resume {
+            lease: kept_with_prefix(),
+            elapsed: 0,
+        };
+        // The address, without the prefix nobody asks for now.
+        let mut c = client(Options::default());
+        assert_eq!(
+            c.handle(resume(), t0),
+            [Action::Bind {
+                lease: kept(),
+                fresh: false
+            }]
+        );
+        // The prefix, without the address.
+        let mut c = client_asking(prefixes_only(), Options::default());
+        let actions = c.handle(resume(), t0);
+        let [
+            Action::Bind {
+                lease,
+                fresh: false,
+            },
+        ] = &actions[..]
+        else {
+            panic!("{actions:?}")
+        };
+        assert_eq!(lease.ia_na, None);
+        assert_eq!(lease.ia_pd, kept_with_prefix().ia_pd);
+        // Another delegation: nothing of the lease is this client's.
+        let other = Asks {
+            ia_na: None,
+            ia_pd: vec![ask_pd(PD + 1, 56)],
+        };
+        let mut c = client_asking(other, Options::default());
+        assert!(c.handle(resume(), t0).is_empty());
+        assert_eq!(c.state(), State::Stopped);
+    }
+
+    #[test]
+    fn declining_the_address_leaves_the_prefix() {
+        let t0 = Instant::now();
+        let mut c = client_asking(both(), Options::default());
+        let (t, _) = acquire_all(&mut c, t0, vec![one_address(), one_prefix()]);
+        let actions = c.handle(Event::AddressConflict(ADDRESS), t);
+        let [
+            Action::Log(_),
+            Action::Bind { lease, fresh: true },
+            Action::Send(decline),
+        ] = &actions[..]
+        else {
+            panic!("{actions:?}")
+        };
+        assert_eq!(lease.ia_na, None);
+        assert_eq!(lease.ia_pd.len(), 1);
+        // A Decline is about addresses.
+        assert_eq!(decline.msg_type, msg::DECLINE);
+        assert_eq!(addresses_of(decline), [ADDRESS]);
+        assert!(pds_of(decline).is_empty());
+        // The lease goes on, and another address is asked for with the
+        // next Renew.
+        let decline = decline.clone();
+        assert!(deliver(&mut c, &answer(&decline, msg::REPLY, vec![]), t).is_empty());
+        assert_eq!(c.state(), State::Bound);
+        let (_, renew) = first_renew(&mut c);
+        assert!(ia_of(&renew).addresses.is_empty());
+        assert_eq!(pds_of(&renew), [named(PD, DELEGATED)]);
+    }
+
+    #[test]
+    fn no_binding_for_one_requests_all_of_it_again() {
+        let t0 = Instant::now();
+        let mut c = client_asking(both(), Options::default());
+        acquire_all(&mut c, t0, vec![one_address(), one_prefix()]);
+        let (t, renew) = first_renew(&mut c);
+        let reply = answer(
+            &renew,
+            msg::REPLY,
+            vec![one_address(), ia_pd_status(PD, status::NO_BINDING)],
+        );
+        let actions = deliver(&mut c, &reply, t);
+        let [Action::Log(_), Action::Send(request)] = &actions[..] else {
+            panic!("{actions:?}")
+        };
+        assert_eq!(request.msg_type, msg::REQUEST);
+        assert_eq!(addresses_of(request), [ADDRESS]);
+        assert_eq!(pds_of(request), [named(PD, DELEGATED)]);
+        assert_eq!(c.state(), State::Requesting);
+        assert!(c.lease(t).is_some());
+    }
+
+    #[test]
+    fn a_delegated_prefix_keeps_its_shape_on_disk() {
+        let json = serde_json::to_value(kept_with_prefix()).unwrap();
+        assert_eq!(
+            json["ia_pd"],
+            serde_json::json!([{
+                "iaid": 7,
+                "t1": 1800,
+                "t2": 2880,
+                "prefixes": [
+                    {"prefix": "2001:db8:100::/56", "preferred": 3600, "valid": 7200}
+                ],
+            }])
+        );
+        let back: Lease = serde_json::from_value(json).unwrap();
+        assert_eq!(back, kept_with_prefix());
+        // A lease written before prefixes were held has no such key, and
+        // reads as a lease without any.
+        let old = serde_json::to_value(kept()).unwrap();
+        assert!(old.get("ia_pd").is_none());
+        let back: Lease = serde_json::from_value(old).unwrap();
+        assert_eq!(back, kept());
     }
 
     #[test]

@@ -87,13 +87,11 @@ fn view(dhcpc: &Dhcpc, name: &str, iface: &Iface6, now: Instant) -> LeaseView6 {
     let Some(session) = &iface.session else {
         return view;
     };
-    let (duid, iaid) = session.client.identity();
+    let (duid, asks) = session.client.identity();
     view.duid = Some(format_duid(duid));
     // The IAID names the IA_NA: a client that asks for no address has
     // none.
-    if !session.client.options().parameters_only {
-        view.iaid = Some(iaid);
-    }
+    view.iaid = asks.ia_na;
     // What is in the RIB, with the time it has left now.
     let Some(lease) = session
         .bound

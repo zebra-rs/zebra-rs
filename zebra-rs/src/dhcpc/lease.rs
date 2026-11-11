@@ -297,6 +297,7 @@ mod tests {
                     valid: 7200,
                 }],
             }),
+            ia_pd: vec![],
             dns_servers: vec!["2001:db8::53".parse().unwrap()],
             domain_list: vec!["example.com".into()],
             ntp_servers: vec![],
