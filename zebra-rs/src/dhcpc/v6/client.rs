@@ -1121,7 +1121,7 @@ impl Client {
     }
 
     /// Take `address` out of the lease, which goes on without it or, when
-    /// it was the last, ends.
+    /// nothing is left, ends.
     fn remove_address(&mut self, address: Ipv6Addr, now: Instant, out: &mut Vec<Action>) {
         let Some(held) = &mut self.held else {
             return;
@@ -1130,11 +1130,15 @@ impl Client {
             return;
         };
         ia.addresses.retain(|a| a.address != address);
-        if ia.addresses.is_empty() {
+        // Counting the lease from now takes every address that has run
+        // out with it, also one whose end is this very moment and whose
+        // timer has not fired yet. So what is left is asked after that,
+        // not before: a lease with no address must not stay held.
+        held.rebase(now);
+        if held.addresses().is_empty() {
             self.held = None;
             out.push(Action::Unbind);
         } else {
-            held.rebase(now);
             out.push(Action::Bind {
                 lease: held.lease.clone(),
                 fresh: true,
@@ -1148,25 +1152,19 @@ impl Client {
         let Some(held) = &mut self.held else {
             return false;
         };
-        let since = held.since;
-        let Some(ia) = &mut held.lease.ia_na else {
-            return false;
-        };
-        let before = ia.addresses.len();
-        ia.addresses.retain(|a| {
-            a.valid == INFINITY || now < since + Duration::from_secs(u64::from(a.valid))
-        });
-        if ia.addresses.len() == before {
+        if !held.first_expiry().is_some_and(|expiry| now >= expiry) {
             return false;
         }
-        if ia.addresses.is_empty() {
+        // Counting the lease from now is what drops them: one rule for
+        // what has run out, here and in `remove_address`.
+        held.rebase(now);
+        if held.addresses().is_empty() {
             out.push(Action::Log("lease expired".into()));
             self.held = None;
             out.push(Action::Unbind);
             self.restart(now);
             return true;
         }
-        held.rebase(now);
         out.push(Action::Bind {
             lease: held.lease.clone(),
             fresh: true,
@@ -3071,6 +3069,51 @@ mod tests {
         let (t, renew) = first_renew(&mut c);
         assert_eq!(t, bound + secs(1000));
         assert_eq!(addresses_of(&renew), [ADDRESS2]);
+    }
+
+    #[test]
+    fn addresses_that_end_together_end_the_lease() {
+        let t0 = Instant::now();
+        // The kernel reports the first one gone, or a duplicate, at the
+        // moment both run out and before the client's own timer fires.
+        for conflict in [false, true] {
+            let mut c = client(Options::default());
+            // Never renewed: nothing but the lifetimes is on the clock.
+            let two = ia(
+                INFINITY,
+                INFINITY,
+                &[(ADDRESS, 100, 200), (ADDRESS2, 100, 200)],
+            );
+            let bound = acquire(&mut c, t0, two);
+            let end = bound + secs(200);
+            assert_eq!(c.deadline(), Some(end));
+            let event = if conflict {
+                Event::AddressConflict(ADDRESS)
+            } else {
+                Event::AddressLost(ADDRESS)
+            };
+            let actions = c.handle(event, end);
+            // The other address has run out too: no lease is left, and
+            // the client is not left bound to nothing with no timer.
+            assert!(
+                matches!(&actions[..], [Action::Log(_), Action::Unbind, ..]),
+                "{actions:?}"
+            );
+            assert!(c.lease(end).is_none());
+            let want = if conflict {
+                State::Declining
+            } else {
+                State::Soliciting
+            };
+            assert_eq!(c.state(), want);
+            assert!(c.deadline().is_some());
+            assert!(c.handle(Event::AddressLost(ADDRESS2), end).is_empty());
+            // It finds its way back to asking.
+            while c.state() != State::Soliciting {
+                fire(&mut c);
+            }
+            first_solicit(&mut c);
+        }
     }
 
     #[test]
