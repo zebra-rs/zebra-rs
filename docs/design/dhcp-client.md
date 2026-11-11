@@ -717,7 +717,7 @@ the client stays released until `renew`, or until `address dhcp` or the
 |---|---|
 | NoAddrsAvail / NoPrefixAvail | that IA is retried at the next Renew; the others bind |
 | NoBinding on a Renew or Rebind | Request |
-| NotOnLink on a Confirm | Solicit |
+| NotOnLink on a Confirm | Solicit, when the Confirm exchange ends and no server has said Success |
 | UseMulticast, UnspecFail | the message goes out again when its retransmission is due (every message is multicast already) |
 
 **Delegated prefixes**
@@ -762,10 +762,24 @@ show and persistence are the rest of P3. Beyond the above:
 - **NoBinding keeps the address in use** while the Request for the
   binding is out. If that Request is refused or goes unanswered, the
   lease is withdrawn and the client solicits.
-- **T1 and T2.** The server's are used when both are set, in order, and
-  T1 comes before the last address expires. Otherwise the client takes
-  0.5 / 0.8 of the shortest preferred lifetime among the addresses still
-  preferred, at least one second (RFC 8415 §14.2: not at once).
+- **T1 and T2.** A time the server sets is used as it is (RFC 8415
+  §21.4, a MUST), "never" included (§7.7), and also when it comes after
+  the addresses have run out: the lease then ends unrenewed, as the
+  server chose.
+  - A time left 0 is the client's: 0.5 / 0.8 of the shortest preferred
+    lifetime among the addresses still preferred, at least one second
+    (§14.2: not at once).
+  - When the server sets only one of the two, the other is chosen to go
+    with it: T1 no later than 5/8 of the server's T2 (the proportion of
+    0.5 to 0.8, so the lease's own server is asked before any other),
+    T2 no earlier than 8/5 of the server's T1.
+- **A Confirm is decided when its exchange ends, unless a server says
+  Success first** (RFC 8415 §18.2.10.3). One Success, from any server,
+  keeps the lease at once. NotOnLink is noted and the Confirm goes on
+  being sent, because the server that would say Success may have missed
+  it on a link that has only just come up. When the ten seconds are
+  over, a lease that only NotOnLink was said about is withdrawn and the
+  client solicits; one that nothing was said about is kept.
 - **Addresses expire one by one.** An IA_NA can hold several; each
   leaves the lease at the end of its valid lifetime, and the last takes
   the lease with it. A Reply to a Renew adds, updates and (valid

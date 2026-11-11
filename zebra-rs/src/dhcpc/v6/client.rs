@@ -322,6 +322,8 @@ struct Exchange {
     mrc: u32,
     /// Give up at this time (MRD, as an instant).
     until: Option<Instant>,
+    /// A Confirm: the first server to answer NotOnLink.
+    not_on_link: Option<Ipv6Addr>,
 }
 
 /// A server and what it offers.
@@ -719,14 +721,32 @@ impl Client {
                 }
             }
             State::Confirming => {
-                if self.exchange.is_none() {
-                    self.begin(CNF_TIMEOUT, 0, Some(now + CNF_MAX_RD), now, out);
-                } else if !self.retransmit(now, out) {
-                    // §18.2.3: use it with the lifetimes last known.
-                    out.push(Action::Log(
-                        "no server confirmed the lease; using it until it expires".into(),
-                    ));
-                    self.settle(now, out);
+                let Some(exchange) = &self.exchange else {
+                    // The delay before the first Confirm is over.
+                    return self.begin(CNF_TIMEOUT, 0, Some(now + CNF_MAX_RD), now, out);
+                };
+                let not_on_link = exchange.not_on_link;
+                if self.retransmit(now, out) {
+                    return;
+                }
+                match not_on_link {
+                    // §18.2.10.3: NotOnLink and nothing else was heard.
+                    Some(_) => {
+                        out.push(Action::Log(
+                            "no server confirmed the lease; starting over".into(),
+                        ));
+                        self.held = None;
+                        out.push(Action::Unbind);
+                        self.solicit(now);
+                    }
+                    // §18.2.3: nothing was heard. Use it with the
+                    // lifetimes last known.
+                    None => {
+                        out.push(Action::Log(
+                            "no server confirmed the lease; using it until it expires".into(),
+                        ));
+                        self.settle(now, out);
+                    }
                 }
             }
             State::Declining | State::Releasing => {
@@ -803,7 +823,7 @@ impl Client {
                 self.on_renewal_reply(&answer, now, out);
             }
             (State::Confirming, msg::REPLY) => self.on_confirm_reply(&answer, now, out),
-            // §18.2.10.2, §18.2.10.3: whatever the status, that is that.
+            // §18.2.10.2: whatever the status, that is that.
             (State::Declining | State::Releasing, msg::REPLY) => {
                 if self
                     .returning
@@ -972,20 +992,27 @@ impl Client {
         self.bind(lease, now, out);
     }
 
+    /// §18.2.10.3: one Success, said or implied, and the addresses are
+    /// right for this link whatever other servers say. NotOnLink counts
+    /// only when the exchange ends without one (`on_timeout`). Until then
+    /// the Confirm goes on being sent: the server that would say Success
+    /// may have missed it, on a link that has only just come up.
     fn on_confirm_reply(&mut self, answer: &Answer<'_>, now: Instant, out: &mut Vec<Action>) {
         match answer.params.status.as_ref().filter(|s| !s.is_success()) {
-            // §18.2.10.1: the addresses are right for this link.
             None => self.settle(now, out),
             Some(status) if status.code == status::NOT_ON_LINK => {
-                out.push(Action::Log(format!(
-                    "server {} says the lease is not for this link; starting over",
-                    answer.source
-                )));
-                self.held = None;
-                out.push(Action::Unbind);
-                self.solicit(now);
+                // Said once, however often it is heard.
+                if let Some(exchange) = &mut self.exchange
+                    && exchange.not_on_link.is_none()
+                {
+                    exchange.not_on_link = Some(answer.source);
+                    out.push(Action::Log(format!(
+                        "server {} says the lease is not for this link",
+                        answer.source
+                    )));
+                }
             }
-            // Anything else settles nothing: the Confirm goes out again.
+            // Anything else settles nothing.
             Some(_) => {}
         }
     }
@@ -1288,6 +1315,7 @@ impl Client {
             count: 1,
             mrc,
             until,
+            not_on_link: None,
         });
         self.transmit(now, out);
         self.wake = Some(not_after(now + rt, until));
@@ -1475,17 +1503,36 @@ fn usable(ia: &IaNa) -> Vec<Address> {
 
 /// T1 and T2 for an IA with `addresses`, from the server's `t1` and `t2`.
 ///
-/// The server's are taken when both are set, in order, and T1 comes
-/// before the last address runs out: a lease must be asked about before
-/// it ends. Otherwise the client chooses (§14.2, §21.4): 0.5 and 0.8 of
-/// the shortest preferred lifetime among the addresses still preferred
-/// (of the shortest valid lifetime when none is), at least a second, and
-/// never when that lifetime never ends.
+/// A time the server sets is used as it is (§21.4: "the client MUST use
+/// the values in the T1 and T2 fields … unless values in those fields
+/// are 0"), [`INFINITY`] for "never" included (§7.7), and also when it
+/// comes after the addresses have run out.
+///
+/// A time the server leaves 0 is the client's to choose (§14.2):
+///
+/// - both: 0.5 and 0.8 of the shortest preferred lifetime among the
+///   addresses still preferred (of the shortest valid lifetime when none
+///   is), at least a second, and never when that lifetime never ends;
+/// - T1 alone: the same, but no later than 5/8 of the server's T2, which
+///   is the proportion of 0.5 to 0.8, so that the lease's own server is
+///   asked before any other;
+/// - T2 alone: the same, but no earlier than 8/5 of the server's T1.
 fn renewal_times(t1: u32, t2: u32, addresses: &[Address]) -> (u32, u32) {
-    let longest_valid = addresses.iter().map(|a| a.valid).max().unwrap_or(0);
-    if t1 > 0 && t1 <= t2 && t1 < longest_valid {
-        return (t1, t2);
+    let (own_t1, own_t2) = own_renewal_times(addresses);
+    match (t1, t2) {
+        (0, 0) => (own_t1, own_t2),
+        (0, t2) => (own_t1.min(scaled(t2, 5, 8)).max(1), t2),
+        (t1, 0) => (t1, own_t2.max(scaled(t1, 8, 5))),
+        // Out of order. `verdict` drops such an IA_NA (§21.4), so this
+        // is not reached from a server's message.
+        (t1, t2) if t1 > t2 => (own_t1, own_t2),
+        (t1, t2) => (t1, t2),
     }
+}
+
+/// The T1 and T2 a client chooses for `addresses` when the server names
+/// neither.
+fn own_renewal_times(addresses: &[Address]) -> (u32, u32) {
     let shortest_valid = addresses.iter().map(|a| a.valid).min().unwrap_or(INFINITY);
     let base = addresses
         .iter()
@@ -1499,6 +1546,15 @@ fn renewal_times(t1: u32, t2: u32, addresses: &[Address]) -> (u32, u32) {
     let t1 = (base / 2).max(1);
     let t2 = ((u64::from(base) * 4 / 5) as u32).max(t1);
     (t1, t2)
+}
+
+/// `time × numerator / denominator`. Never stays never, and a time too
+/// long for 32 bits is never.
+fn scaled(time: u32, numerator: u64, denominator: u64) -> u32 {
+    if time == INFINITY {
+        return INFINITY;
+    }
+    u32::try_from(u64::from(time) * numerator / denominator).unwrap_or(INFINITY)
 }
 
 fn status_text(status: &StatusCode) -> String {
@@ -2587,38 +2643,91 @@ mod tests {
     }
 
     #[test]
-    fn renewal_times_are_the_servers_or_follow_the_preferred_lifetime() {
+    fn renewal_times_are_the_servers_where_it_names_them() {
         let a = |preferred, valid| address(ADDRESS, preferred, valid);
-        assert_eq!(renewal_times(1000, 2000, &[a(3600, 7200)]), (1000, 2000));
-        // Left to the client, in whole or in part.
-        assert_eq!(renewal_times(0, 0, &[a(3600, 7200)]), (1800, 2880));
-        assert_eq!(renewal_times(1000, 0, &[a(3600, 7200)]), (1800, 2880));
-        assert_eq!(renewal_times(0, 2000, &[a(3600, 7200)]), (1800, 2880));
-        // Out of order, or not before the lease has run out.
-        assert_eq!(renewal_times(3000, 2000, &[a(3600, 7200)]), (1800, 2880));
-        assert_eq!(renewal_times(7200, 7200, &[a(3600, 7200)]), (1800, 2880));
-        assert_eq!(renewal_times(7199, 9000, &[a(3600, 7200)]), (7199, 9000));
+        let usual = [a(3600, 7200)];
+        // The server's, as they are: also after the address has run out,
+        // also never.
+        assert_eq!(renewal_times(1000, 2000, &usual), (1000, 2000));
+        assert_eq!(renewal_times(2000, 2000, &usual), (2000, 2000));
+        assert_eq!(renewal_times(7200, 9000, &usual), (7200, 9000));
+        assert_eq!(renewal_times(1000, INFINITY, &usual), (1000, INFINITY));
         assert_eq!(
-            renewal_times(INFINITY, INFINITY, &[a(3600, 7200)]),
-            (1800, 2880)
+            renewal_times(INFINITY, INFINITY, &usual),
+            (INFINITY, INFINITY)
         );
-        // The shortest preferred lifetime, of the addresses still
-        // preferred. An address on its way out does not undo the
-        // server's times.
+        // Both left to the client: from the preferred lifetime.
+        assert_eq!(renewal_times(0, 0, &usual), (1800, 2880));
+        // T1 left to the client: its own, or earlier to go with the
+        // server's T2, never at once.
+        assert_eq!(renewal_times(0, 5000, &usual), (1800, 5000));
+        assert_eq!(renewal_times(0, 2880, &usual), (1800, 2880));
+        assert_eq!(renewal_times(0, 100, &usual), (62, 100));
+        assert_eq!(renewal_times(0, 1, &usual), (1, 1));
+        assert_eq!(renewal_times(0, INFINITY, &usual), (1800, INFINITY));
+        // T2 left to the client: its own, or later to go with the
+        // server's T1.
+        assert_eq!(renewal_times(1000, 0, &usual), (1000, 2880));
+        assert_eq!(renewal_times(1800, 0, &usual), (1800, 2880));
+        assert_eq!(renewal_times(3000, 0, &usual), (3000, 4800));
+        assert_eq!(renewal_times(INFINITY, 0, &usual), (INFINITY, INFINITY));
+        assert_eq!(
+            renewal_times(0xf000_0000, 0, &usual),
+            (0xf000_0000, INFINITY)
+        );
+        // Out of order: an IA_NA like that is dropped before this.
+        assert_eq!(renewal_times(3000, 2000, &usual), (1800, 2880));
+        // The client's own: the shortest preferred lifetime, of the
+        // addresses still preferred.
         let several = [a(3600, 7200), a(1000, 7200), a(0, 300)];
         assert_eq!(renewal_times(0, 0, &several), (500, 800));
         assert_eq!(renewal_times(900, 1440, &several), (900, 1440));
         assert_eq!(renewal_times(0, 0, &[a(0, 1000)]), (500, 800));
         assert_eq!(renewal_times(0, 0, &[a(1, 2)]), (1, 1));
-        // Never, for a lease that never ends.
+        assert_eq!(renewal_times(0, 0, &[a(3600, INFINITY)]), (1800, 2880));
+        // Never, for a lease that never ends, unless the server names a
+        // time.
         let forever = [a(INFINITY, INFINITY)];
         assert_eq!(renewal_times(0, 0, &forever), (INFINITY, INFINITY));
         assert_eq!(renewal_times(1000, 2000, &forever), (1000, 2000));
-        assert_eq!(
-            renewal_times(INFINITY, INFINITY, &forever),
-            (INFINITY, INFINITY)
+        assert_eq!(renewal_times(0, 2000, &forever), (1250, 2000));
+        assert_eq!(renewal_times(0, INFINITY, &forever), (INFINITY, INFINITY));
+        assert_eq!(renewal_times(1000, 0, &forever), (1000, INFINITY));
+    }
+
+    #[test]
+    fn a_rebind_time_from_the_server_stands_when_t1_is_left_open() {
+        let t0 = Instant::now();
+        let mut c = client(Options::default());
+        let bound = acquire(&mut c, t0, ia(0, 100, &[(ADDRESS, 3600, 7200)]));
+        let ia_na = c.lease(bound).unwrap().ia_na.unwrap();
+        assert_eq!((ia_na.t1, ia_na.t2), (62, 100));
+        let (t, _) = first_renew(&mut c);
+        assert_eq!(t, bound + secs(62));
+        let rebind = loop {
+            let (t, actions) = fire(&mut c);
+            if c.state() == State::Rebinding {
+                assert_eq!(t, bound + secs(100));
+                break sent(&actions).clone();
+            }
+        };
+        assert_eq!(rebind.msg_type, msg::REBIND);
+    }
+
+    #[test]
+    fn a_server_that_says_never_is_never_asked() {
+        let t0 = Instant::now();
+        let mut c = client(Options::default());
+        let never = ia(INFINITY, INFINITY, &[(ADDRESS, 3600, 7200)]);
+        let bound = acquire(&mut c, t0, never);
+        // No Renew, no Rebind: the address runs out and that is that.
+        assert_eq!(c.deadline(), Some(bound + secs(7200)));
+        let (_, actions) = fire(&mut c);
+        assert!(
+            matches!(&actions[..], [Action::Log(_), Action::Unbind]),
+            "{actions:?}"
         );
-        assert_eq!(renewal_times(0, 0, &[a(3600, INFINITY)]), (1800, 2880));
+        assert_eq!(c.state(), State::Soliciting);
     }
 
     #[test]
@@ -2705,18 +2814,73 @@ mod tests {
         );
         assert!(deliver(&mut c, &unsure, t).is_empty());
         assert_eq!(c.state(), State::Confirming);
+        // NotOnLink is noted, once, and the Confirm goes on: another
+        // server may yet say otherwise.
         let reply = answer(
             &confirm,
             msg::REPLY,
             vec![status_option(status::NOT_ON_LINK)],
         );
         let actions = deliver(&mut c, &reply, t);
+        assert!(matches!(&actions[..], [Action::Log(_)]), "{actions:?}");
+        assert!(deliver(&mut c, &reply, t).is_empty());
+        assert_eq!(c.state(), State::Confirming);
+        assert!(c.lease(t).is_some());
+        // None does: when the exchange is over, so is the lease.
+        let (ended, actions) = loop {
+            let (now, actions) = fire(&mut c);
+            if c.state() != State::Confirming {
+                break (now, actions);
+            }
+            assert_eq!(sent(&actions).msg_type, msg::CONFIRM);
+        };
+        assert_eq!(ended, t + CNF_MAX_RD);
         assert!(
             matches!(&actions[..], [Action::Log(_), Action::Unbind]),
             "{actions:?}"
         );
-        assert!(c.lease(t).is_none());
+        assert!(c.lease(ended).is_none());
         first_solicit(&mut c);
+    }
+
+    #[test]
+    fn one_success_outweighs_not_on_link() {
+        let t0 = Instant::now();
+        // The Success right after the NotOnLink, and one retransmission
+        // later.
+        for late in [false, true] {
+            let mut c = client(Options::default());
+            c.handle(
+                Event::Resume {
+                    lease: kept(),
+                    elapsed: 0,
+                },
+                t0,
+            );
+            c.handle(Event::Link(true), t0);
+            let (mut t, actions) = fire(&mut c);
+            let confirm = sent(&actions).clone();
+            let no = answer_from(
+                &OTHER_DUID,
+                &confirm,
+                msg::REPLY,
+                vec![status_option(status::NOT_ON_LINK)],
+            );
+            assert!(matches!(&deliver(&mut c, &no, t)[..], [Action::Log(_)]));
+            if late {
+                let (now, actions) = fire(&mut c);
+                assert_eq!(sent(&actions).msg_type, msg::CONFIRM);
+                t = now;
+            }
+            let yes = answer(&confirm, msg::REPLY, vec![status_option(status::SUCCESS)]);
+            assert!(deliver(&mut c, &yes, t).is_empty());
+            assert_eq!(c.state(), State::Bound);
+            assert_eq!(c.lease(t0), Some(kept()));
+            assert_eq!(c.deadline(), Some(t0 + secs(1800)));
+            // What the other server goes on saying is not heard.
+            assert!(deliver(&mut c, &no, t).is_empty());
+            assert_eq!(c.state(), State::Bound);
+        }
     }
 
     #[test]
