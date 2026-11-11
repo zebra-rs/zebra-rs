@@ -1061,9 +1061,14 @@ pub struct Bgp {
     pub(super) etree_imet_leaf_vnis: BTreeSet<u32>,
     /// Configured hostname for the local BGP speaker. Advertised in
     /// the FQDN capability (capability code 73). When None, falls back
-    /// to the OS hostname; if that also fails, no FQDN capability is
-    /// emitted. See `Bgp::hostname()` for the resolution order.
+    /// to `system hostname` and then to the OS hostname; if that also
+    /// fails, no FQDN capability is emitted. See `Bgp::hostname()` for
+    /// the resolution order.
     pub hostname: Option<String>,
+    /// `system hostname`, as the RIB reports it
+    /// (`RibRx::HostnameUpdate`): the router's name for whatever has none
+    /// of its own configured.
+    pub system_hostname: Option<String>,
     /// `router bgp global no-fib-install`. When true, this instance's
     /// `ctx.rib` drops every forwarding install (IPv4/IPv6 unicast plus
     /// VPN/EVPN/labeled-unicast MPLS ILMs) so selected routes never
@@ -1619,6 +1624,7 @@ impl Bgp {
             etree_role_conflicts_logged: BTreeSet::new(),
             etree_imet_leaf_vnis: BTreeSet::new(),
             hostname: None,
+            system_hostname: None,
             no_fib_install: false,
             fast_external_failover: true,
             as_sets_withdraw: true,
@@ -1743,10 +1749,11 @@ impl Bgp {
     }
 
     /// Resolve the hostname to advertise in the FQDN capability.
-    /// Configured value wins; otherwise we fall back to the OS
-    /// hostname. None means "skip the FQDN capability entirely".
+    /// `router bgp global hostname` wins, then `system hostname`;
+    /// otherwise we fall back to the OS hostname. None means "skip the
+    /// FQDN capability entirely".
     pub fn hostname(&self) -> Option<String> {
-        if let Some(name) = &self.hostname {
+        if let Some(name) = self.hostname.as_ref().or(self.system_hostname.as_ref()) {
             return Some(name.clone());
         }
         hostname::get()
@@ -1765,6 +1772,23 @@ impl Bgp {
             return;
         }
         self.hostname = value;
+        self.refresh_local_hostname();
+    }
+
+    /// `RibRx::HostnameUpdate` handler: `system hostname` is the name
+    /// the FQDN capability carries when BGP has none of its own. As for
+    /// a configured one, a session keeps the name its OPEN carried and
+    /// the next OPEN has the new one. The RIB also sends it, unchanged,
+    /// when the system itself was renamed (`--feature insomnia`), so the
+    /// snapshots are refreshed whether or not the value moved: under
+    /// both names is the OS one.
+    pub fn rib_hostname_update(&mut self, hostname: Option<String>) {
+        self.system_hostname = hostname;
+        self.refresh_local_hostname();
+    }
+
+    /// Give every peer the hostname its next OPEN advertises.
+    fn refresh_local_hostname(&mut self) {
         let resolved = self.hostname();
         for (_, peer) in self.peers.iter_mut_all() {
             peer.local_hostname = resolved.clone();
@@ -5249,6 +5273,9 @@ impl Bgp {
                 // the BGP Identifier whenever the operator hadn't
                 // typed `set router bgp global router-id <ip>`.
                 self.rib_router_id_update(router_id);
+            }
+            RibRx::HostnameUpdate(hostname) => {
+                self.rib_hostname_update(hostname);
             }
             RibRx::FdbAdd(entry) => {
                 // Cache durably so we can replay on `advertise_all_vni`
@@ -9588,6 +9615,10 @@ mod rtc_mid_session_review_tests;
 #[cfg(test)]
 #[path = "router_id_change_review_tests.rs"]
 mod router_id_change_review_tests;
+
+#[cfg(test)]
+#[path = "system_hostname_tests.rs"]
+mod system_hostname_tests;
 
 #[cfg(test)]
 #[path = "pet_sync_review_tests.rs"]

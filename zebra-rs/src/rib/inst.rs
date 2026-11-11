@@ -1543,6 +1543,11 @@ pub struct Rib {
     /// when it carries no hostname: that is what gives a saved name back
     /// after the line was removed while zebra-rs was down.
     pub hostname_unsynced: bool,
+    /// The `system hostname` subscribers were last told
+    /// (`RibRx::HostnameUpdate`), and what one subscribing now is told:
+    /// `hostname_config` as of the last commit's end, not of a line in
+    /// the middle of one.
+    pub hostname_announced: Option<String>,
 
     /// Single-shot timer that fires Message::Resolve after a debounce when
     /// the FIB has changed. None when no resolve is pending. Set by
@@ -1696,6 +1701,7 @@ impl Rib {
             hostname_config: None,
             system_hostname: None,
             hostname_unsynced: true,
+            hostname_announced: None,
             rib_sync_timer: None,
             reserved_srgbs: Vec::new(),
             retired_srgbs: Vec::new(),
@@ -2792,6 +2798,17 @@ impl Rib {
             if tx.send(msg).is_err() {
                 return false;
             }
+        }
+        // System hostname replay, whatever the VRF: a protocol spawned
+        // after the commit that set the name was not there to be told.
+        // `None` is every subscriber's starting point and needs no
+        // message.
+        if let Some(hostname) = &self.hostname_announced
+            && tx
+                .send(RibRx::HostnameUpdate(Some(hostname.clone())))
+                .is_err()
+        {
+            return false;
         }
         // VRF dump — only for default-VRF subscribers (BGP). A
         // per-VRF subscriber wouldn't act on VrfAdd for sibling
@@ -5283,8 +5300,8 @@ impl Rib {
     ///
     /// By itself this is daemon-internal (FRR-style): no
     /// `sethostname(2)`, no OS side effects. With `--feature insomnia`
-    /// the commit's end makes it the system's name
-    /// ([`Self::system_hostname_sync`]).
+    /// the commit's end makes it the system's name. Either way the
+    /// commit's end tells the protocols ([`Self::hostname_commit`]).
     pub(crate) fn hostname_config_exec(
         &mut self,
         mut args: crate::config::Args,
@@ -5299,18 +5316,32 @@ impl Rib {
         Some(())
     }
 
-    /// At the end of a commit: make the running config's hostname the
-    /// system's, or give the saved name back when the config has none.
+    /// At the end of a commit, the running config's hostname takes effect.
     /// Once per commit and not per line, so that a commit replacing the
-    /// name (a delete and a set) does not restore the saved one in
-    /// between. A commit that leaves the name alone does nothing, unless
-    /// the last attempt failed.
-    fn system_hostname_sync(&mut self) {
-        let Some(system) = &mut self.system_hostname else {
-            return;
+    /// name (a delete and a set) does not pass through "no name" in
+    /// between: the saved name restored on the system, and an LSP
+    /// regenerated with the OS name.
+    ///
+    /// With `--feature insomnia` it is made the system's name, or the
+    /// saved name is given back when the config has none. A commit that
+    /// leaves the name alone does nothing there, unless the last attempt
+    /// failed.
+    ///
+    /// Then the protocols are told (`RibRx::HostnameUpdate`): when the
+    /// name changed, and when the system was renamed, which a protocol
+    /// falling back to the OS name has to learn too. The system first, so
+    /// that whoever reads its name on being told reads the new one.
+    fn hostname_commit(&mut self) {
+        let touched = std::mem::take(&mut self.hostname_unsynced);
+        let renamed = match &mut self.system_hostname {
+            Some(system) if touched || system.failed() => {
+                system.sync(self.hostname_config.as_deref())
+            }
+            _ => false,
         };
-        if std::mem::take(&mut self.hostname_unsynced) || system.failed() {
-            system.sync(self.hostname_config.as_deref());
+        if renamed || self.hostname_announced != self.hostname_config {
+            self.hostname_announced = self.hostname_config.clone();
+            self.api_hostname_update(self.hostname_config.clone());
         }
     }
 
@@ -5861,7 +5892,7 @@ impl Rib {
                 }
             }
             ConfigOp::CommitEnd => {
-                self.system_hostname_sync();
+                self.hostname_commit();
                 self.bridge_config.commit(self.tx.clone());
                 self.vlan_config.commit(self.tx.clone());
                 self.vxlan_config.commit(self.tx.clone());
@@ -9317,6 +9348,152 @@ mod system_hostname_tests {
         assert_eq!(json["hostname"], "r1");
         assert_eq!(json["managed"], false);
         assert_eq!(json["reason"], serde_json::Value::Null);
+    }
+
+    /// A protocol subscribed to `rib`, in the VRF of table `vrf_id` (0:
+    /// the default one): its end of the channel.
+    fn subscribe(rib: &mut Rib, id: u32, vrf_id: u32) -> UnboundedReceiver<RibRx> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        rib.subscribe(
+            crate::rib::client::ProtoId::from_raw(id),
+            tx,
+            "isis".to_string(),
+            vrf_id,
+            false,
+        );
+        rx
+    }
+
+    /// The system hostnames `rx` was told since the last call, in order.
+    fn told(rx: &mut UnboundedReceiver<RibRx>) -> Vec<Option<String>> {
+        std::iter::from_fn(|| rx.try_recv().ok())
+            .filter_map(|msg| match msg {
+                RibRx::HostnameUpdate(hostname) => Some(hostname),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn name(name: &str) -> Option<String> {
+        Some(name.to_string())
+    }
+
+    /// The protocols are told the name when the commit ends, once, with
+    /// or without `--feature insomnia`: it is what IS-IS and BGP
+    /// advertise when they have no hostname of their own.
+    #[tokio::test]
+    async fn the_protocols_are_told_the_name_when_the_commit_ends() {
+        let mut rib = Rib::new(false).unwrap();
+        let mut rx = subscribe(&mut rib, 1, 0);
+        // A protocol in a VRF is told as well: the name is the router's.
+        let mut vrf_rx = subscribe(&mut rib, 2, 100);
+        assert_eq!(told(&mut rx), []);
+
+        set(&mut rib, "r1");
+        assert_eq!(told(&mut rx), [], "before the commit ends");
+        commit_end(&mut rib).await;
+        assert_eq!(told(&mut rx), [name("r1")]);
+        assert_eq!(told(&mut vrf_rx), [name("r1")]);
+
+        // A commit about something else says nothing.
+        commit_end(&mut rib).await;
+        assert_eq!(told(&mut rx), []);
+
+        delete(&mut rib, "r1");
+        commit_end(&mut rib).await;
+        assert_eq!(told(&mut rx), [None]);
+        assert_eq!(told(&mut vrf_rx), [None]);
+    }
+
+    /// A commit replacing the name tells the new one only. "No name" in
+    /// between would have IS-IS regenerate its LSP with the OS name, and
+    /// again with the new one.
+    #[tokio::test]
+    async fn a_replacing_commit_tells_the_new_name_only() {
+        let mut rib = Rib::new(false).unwrap();
+        let mut rx = subscribe(&mut rib, 1, 0);
+        set(&mut rib, "r1");
+        commit_end(&mut rib).await;
+        assert_eq!(told(&mut rx), [name("r1")]);
+
+        delete(&mut rib, "r1");
+        set(&mut rib, "r2");
+        commit_end(&mut rib).await;
+        assert_eq!(told(&mut rx), [name("r2")]);
+
+        // The same name set again is no news.
+        delete(&mut rib, "r2");
+        set(&mut rib, "r2");
+        commit_end(&mut rib).await;
+        assert_eq!(told(&mut rx), []);
+    }
+
+    /// A protocol spawned after the commit that set the name was not
+    /// there to be told: it is told when it subscribes, in whatever VRF.
+    /// What it is told is the committed name, not a line of a commit
+    /// still under way.
+    #[tokio::test]
+    async fn a_later_subscriber_is_told_the_committed_name() {
+        let mut rib = Rib::new(false).unwrap();
+        // No name: nothing to tell.
+        assert_eq!(told(&mut subscribe(&mut rib, 1, 0)), []);
+
+        set(&mut rib, "r1");
+        commit_end(&mut rib).await;
+        assert_eq!(told(&mut subscribe(&mut rib, 2, 0)), [name("r1")]);
+        assert_eq!(told(&mut subscribe(&mut rib, 3, 100)), [name("r1")]);
+
+        delete(&mut rib, "r1");
+        set(&mut rib, "r2");
+        let mut rx = subscribe(&mut rib, 4, 0);
+        assert_eq!(told(&mut rx), [name("r1")], "mid-commit");
+        commit_end(&mut rib).await;
+        assert_eq!(told(&mut rx), [name("r2")]);
+    }
+
+    /// With `--feature insomnia` the commit both renames the system and
+    /// tells the protocols, and tells them once: the rename is not a
+    /// second piece of news when the name itself is new.
+    #[tokio::test]
+    async fn with_the_feature_the_protocols_are_told_once_per_commit() {
+        let scratch = Scratch::new("told-once");
+        let mut rib = rib_on(&scratch);
+        let mut rx = subscribe(&mut rib, 1, 0);
+        set(&mut rib, "r1");
+        commit_end(&mut rib).await;
+        assert_eq!(told(&mut rx), [name("r1")]);
+        assert_eq!(scratch.kernel().as_deref(), Some("r1"));
+
+        delete(&mut rib, "r1");
+        commit_end(&mut rib).await;
+        assert_eq!(told(&mut rx), [None]);
+        assert_eq!(scratch.kernel().as_deref(), Some("localhost"));
+    }
+
+    /// The system's name changes at a commit that does not change the
+    /// config's: the retry of a failed sync. The protocols are told
+    /// again, though the name they are told is the same, because one
+    /// with neither a hostname of its own nor a system hostname
+    /// advertises the OS name, and that is what moved.
+    #[tokio::test]
+    async fn a_system_renamed_by_a_retry_is_told_again() {
+        let scratch = Scratch::new("told-retry");
+        std::fs::create_dir_all(scratch.0.join("hostname")).unwrap();
+        let mut rib = rib_on(&scratch);
+        let mut rx = subscribe(&mut rib, 1, 0);
+        set(&mut rib, "r1");
+        commit_end(&mut rib).await;
+        // The config's name is news whether or not the system took it.
+        assert_eq!(told(&mut rx), [name("r1")]);
+        assert_eq!(scratch.kernel(), None);
+
+        std::fs::remove_dir(scratch.0.join("hostname")).unwrap();
+        commit_end(&mut rib).await;
+        assert_eq!(scratch.kernel().as_deref(), Some("r1"));
+        assert_eq!(told(&mut rx), [name("r1")]);
+
+        commit_end(&mut rib).await;
+        assert_eq!(told(&mut rx), []);
     }
 
     /// With the feature, outside the default network namespace: the name
