@@ -378,6 +378,12 @@ name*, with or without the feature.
   moved.** That happens when a failed apply is retried at a later commit.
   A router with neither a protocol hostname nor a system hostname
   advertises the OS name, and has to learn that it changed.
+- **"The system's name moved" is asked of the system**, by reading the
+  kernel name before and after the attempt, and not taken from whether
+  the attempt succeeded. A restore sets the kernel name before it removes
+  the record, so an attempt can rename the system and still fail, and the
+  retry after it finds the name in place and nothing to report. (A review
+  found this: taken from success, neither attempt told the protocols.)
 - **IS-IS** keeps the value in `IsisConfig::system_hostname` and
   regenerates the self LSP at each level whose LSP carries another name.
   It compares with the name the LSP was built with, not the stored value
