@@ -21,6 +21,7 @@ use crate::config::{
     Args, ConfigChannel, ConfigRequest, DisplayRequest, ShowChannel, path_from_command,
 };
 use crate::context::Task;
+use crate::resolver::{Report, ResolverTx, Source};
 use crate::rib::api::RibRx;
 use crate::rib::client::RibClient;
 
@@ -67,6 +68,9 @@ pub struct Nd {
     /// The RA host's routes and SLAAC addresses go to the RIB here.
     rib: RibClient,
     rib_rx: UnboundedReceiver<RibRx>,
+    /// What the RA host learns of name resolution (RDNSS, DNSSL) is
+    /// reported here ([`crate::resolver`]).
+    resolver: Option<ResolverTx>,
     /// Config-manager subscription endpoints. The receive half drains
     /// in the event loop and feeds [`Self::process_cm_msg`].
     pub cm: ConfigChannel,
@@ -117,6 +121,7 @@ impl Nd {
             client_tx,
             rib,
             rib_rx,
+            resolver: None,
             cm: ConfigChannel::new(),
             show: ShowChannel::new(),
             show_cb: HashMap::new(),
@@ -136,6 +141,12 @@ impl Nd {
     /// Internal accessor for callbacks living in [`super::config`].
     pub(super) fn engine_mut(&mut self) -> &mut NdEngine {
         &mut self.engine
+    }
+
+    /// Report the RA host's name servers and search domains to the
+    /// resolver task, which decides what the host does with them.
+    pub fn set_resolver(&mut self, resolver: ResolverTx) {
+        self.resolver = Some(resolver);
     }
 
     /// Clone of the client-request sender. Distribute to YANG callback
@@ -197,12 +208,21 @@ impl Nd {
     }
 
     /// Do what the RA host has asked for since the last event: hand its
-    /// routes and addresses to the RIB, and turn the kernel's own RA
-    /// processing off where it runs.
+    /// routes and addresses to the RIB, its name servers to the resolver
+    /// task, and turn the kernel's own RA processing off where it runs.
     fn perform_host_actions(&mut self) {
         for action in self.engine.hosts_mut().take_actions() {
             match action {
                 HostAction::DisableKernelRa { ifname } => disable_kernel_ra(&ifname),
+                HostAction::Dns { ifname, dns } => {
+                    if let Some(resolver) = &self.resolver {
+                        let _ = resolver.send(Report {
+                            ifname,
+                            source: Source::Ra,
+                            dns,
+                        });
+                    }
+                }
                 action => {
                     if let Some(msg) = action.into_message() {
                         let _ = self.rib.send(msg);

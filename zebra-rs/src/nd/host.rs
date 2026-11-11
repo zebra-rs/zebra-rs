@@ -33,6 +33,7 @@ use nd_packet::{
 };
 
 use crate::fib::AddrOpts;
+use crate::resolver::LinkDns;
 use crate::rib::entry::RibEntry;
 use crate::rib::link::AddrOrigin;
 use crate::rib::{Message, Nexthop, NexthopMulti, NexthopUni, RibType};
@@ -152,10 +153,13 @@ pub struct Host {
     /// Prefixes whose SLAAC address failed DAD: not formed again while
     /// the host runs, since nothing would make the next try different.
     pub dad_failed: BTreeSet<Ipv6Net>,
-    /// RDNSS servers (RFC 8106) and when each times out.
-    pub dns: BTreeMap<Ipv6Addr, Option<Instant>>,
-    /// DNSSL domains (RFC 8106) and when each times out.
-    pub search: BTreeMap<String, Option<Instant>>,
+    /// RDNSS servers (RFC 8106) and when each times out, in the order a
+    /// host uses them (§6.2): the ones heard of last first, those of
+    /// one option in the option's order.
+    pub dns: Vec<(Ipv6Addr, Option<Instant>)>,
+    /// DNSSL domains (RFC 8106) and when each times out, in the same
+    /// order (§6.3).
+    pub search: Vec<(String, Option<Instant>)>,
     /// The last MTU option heard. Shown, not applied.
     pub mtu: Option<u32>,
 }
@@ -171,9 +175,57 @@ impl Host {
             on_link: BTreeMap::new(),
             slaac: BTreeMap::new(),
             dad_failed: BTreeSet::new(),
-            dns: BTreeMap::new(),
-            search: BTreeMap::new(),
+            dns: Vec::new(),
+            search: Vec::new(),
             mtu: None,
+        }
+    }
+
+    /// What the host knows of name resolution, for the system resolver:
+    /// nothing when no RA has named a server or a domain.
+    fn link_dns(&self) -> Option<LinkDns> {
+        let dns = LinkDns {
+            servers: self.dns.iter().map(|&(a, _)| IpAddr::V6(a)).collect(),
+            domains: self.search.iter().map(|(d, _)| d.clone()).collect(),
+        };
+        (dns != LinkDns::default()).then_some(dns)
+    }
+}
+
+/// Take in one RDNSS or DNSSL option: its addresses or domains, in
+/// order, and the lifetime it gives them all (RFC 8106 §6.2, §6.3).
+///
+/// - A lifetime of zero takes an item out.
+/// - An item held is refreshed where it stands.
+/// - A new one goes in ahead of everything held before this option, and
+///   behind the option's earlier new ones: what was heard of last is
+///   used first, and an option's own order says which of its items is
+///   preferred.
+///
+/// No more than `MAX_DNS` are held. Past that a new one is ignored: the
+/// RFC would make room by dropping the one that expires first, which
+/// lets whoever advertises last push the others out (see `MAX_ROUTERS`).
+fn heard<T: PartialEq + Clone>(
+    held: &mut Vec<(T, Option<Instant>)>,
+    items: &[T],
+    lifetime: u32,
+    now: Instant,
+) {
+    // How many of this option's new items are in already.
+    let mut front = 0;
+    for item in items {
+        let at = held.iter().position(|(have, _)| have == item);
+        match (at, lifetime) {
+            (Some(at), 0) => {
+                held.remove(at);
+            }
+            (Some(at), _) => held[at].1 = deadline(now, lifetime),
+            (None, 0) => {}
+            (None, _) if held.len() < MAX_DNS => {
+                held.insert(front, (item.clone(), deadline(now, lifetime)));
+                front += 1;
+            }
+            (None, _) => {}
         }
     }
 }
@@ -244,13 +296,20 @@ pub enum HostAction {
     },
     /// Give a SLAAC address up.
     AddrDel { ifindex: u32, addr: Ipv6Net },
+    /// Tell the resolver task what RAs now say of name resolution on
+    /// `ifname`: `None` when that is nothing (any more). Whether the
+    /// host uses it is the resolver's configuration, not the RA host's.
+    Dns {
+        ifname: String,
+        dns: Option<LinkDns>,
+    },
 }
 
 impl HostAction {
     /// The RIB message, for an action that is one.
     pub fn into_message(self) -> Option<Message> {
         Some(match self {
-            HostAction::DisableKernelRa { .. } => return None,
+            HostAction::DisableKernelRa { .. } | HostAction::Dns { .. } => return None,
             HostAction::Route { vrf, prefix, route } => match (vrf, route) {
                 (None, Some(route)) => Message::Ipv6Add {
                     prefix,
@@ -356,6 +415,8 @@ pub struct RaHosts {
     hosts: BTreeMap<u32, Host>,
     /// What the RIB was last told, per (VRF, prefix).
     installed: BTreeMap<(Option<String>, Ipv6Net), RaRoute>,
+    /// What the resolver task was last told, per interface name.
+    reported_dns: BTreeMap<String, LinkDns>,
     actions: Vec<HostAction>,
     rng: Box<dyn RngSource + Send + Sync>,
 }
@@ -373,6 +434,7 @@ impl RaHosts {
             links: BTreeMap::new(),
             hosts: BTreeMap::new(),
             installed: BTreeMap::new(),
+            reported_dns: BTreeMap::new(),
             actions: Vec::new(),
             rng: Box::new(ThreadRng),
         }
@@ -432,7 +494,7 @@ impl RaHosts {
                 self.follow_autoconf(ifindex, was_autoconf, autoconf, now);
             }
         }
-        self.sync_routes();
+        self.publish();
     }
 
     /// `autoconf` came or went on a host that was running and may go on
@@ -480,7 +542,7 @@ impl RaHosts {
         if let Some(was_up) = was_up {
             self.up_changed(ifindex, was_up, up, now);
         }
-        self.sync_routes();
+        self.publish();
     }
 
     /// The link went up or down. Its routers and prefixes are kept, but
@@ -491,7 +553,7 @@ impl RaHosts {
         };
         let was_up = std::mem::replace(&mut link.up, up);
         self.up_changed(ifindex, was_up, up, now);
-        self.sync_routes();
+        self.publish();
     }
 
     fn up_changed(&mut self, ifindex: u32, was_up: bool, up: bool, now: Instant) {
@@ -511,7 +573,7 @@ impl RaHosts {
     pub fn link_del(&mut self, ifindex: u32) {
         self.links.remove(&ifindex);
         self.stop(ifindex);
-        self.sync_routes();
+        self.publish();
     }
 
     /// An IPv6 address event on `ifindex`. A SLAAC address that failed DAD
@@ -583,28 +645,15 @@ impl RaHosts {
                 }
                 NdOption::Mtu(mtu) => host.mtu = Some(*mtu),
                 NdOption::Rdnss(rdnss) => {
-                    for server in &rdnss.servers {
-                        if rdnss.lifetime == 0 {
-                            host.dns.remove(server);
-                        } else if host.dns.contains_key(server) || host.dns.len() < MAX_DNS {
-                            host.dns.insert(*server, deadline(now, rdnss.lifetime));
-                        }
-                    }
+                    heard(&mut host.dns, &rdnss.servers, rdnss.lifetime, now);
                 }
                 NdOption::Dnssl(dnssl) => {
-                    for domain in &dnssl.domains {
-                        if dnssl.lifetime == 0 {
-                            host.search.remove(domain);
-                        } else if host.search.contains_key(domain) || host.search.len() < MAX_DNS {
-                            host.search
-                                .insert(domain.clone(), deadline(now, dnssl.lifetime));
-                        }
-                    }
+                    heard(&mut host.search, &dnssl.domains, dnssl.lifetime, now);
                 }
                 _ => {}
             }
         }
-        self.sync_routes();
+        self.publish();
     }
 
     /// One Prefix Information option: the on-link prefix (RFC 4861
@@ -749,12 +798,13 @@ impl RaHosts {
                     });
                 }
             }
-            host.dns.retain(|_, at| alive(at));
-            host.search.retain(|_, at| alive(at));
+            host.dns.retain(|(_, at)| alive(at));
+            host.search.retain(|(_, at)| alive(at));
         }
         if changed {
             self.sync_routes();
         }
+        self.sync_dns();
     }
 
     /// The earliest time something is due: a solicitation on an interface
@@ -768,8 +818,8 @@ impl RaHosts {
             times.extend(host.routers.values().map(|r| r.expires));
             times.extend(host.on_link.values().flatten());
             times.extend(host.slaac.values().filter_map(|s| s.valid));
-            times.extend(host.dns.values().flatten());
-            times.extend(host.search.values().flatten());
+            times.extend(host.dns.iter().filter_map(|(_, at)| *at));
+            times.extend(host.search.iter().filter_map(|(_, at)| *at));
         }
         times.into_iter().min()
     }
@@ -838,6 +888,47 @@ impl RaHosts {
     fn restart_solicit(host: &mut Host, rng: &mut (dyn RngSource + Send + Sync), now: Instant) {
         host.rs_sent = 0;
         host.rs_next = Some(now + rng.duration_in(Duration::ZERO, MAX_RTR_SOLICITATION_DELAY));
+    }
+
+    /// What the hosts give now, to those who use it: the routes to the
+    /// RIB, the name servers to the resolver task. After every event that
+    /// may have changed a host.
+    fn publish(&mut self) {
+        self.sync_routes();
+        self.sync_dns();
+    }
+
+    /// Tell the resolver task what the hosts now know of name
+    /// resolution: every change, once, by interface name.
+    ///
+    /// A host says it for as long as it runs and its options have
+    /// lifetime left, link up or down: the system resolver itself leaves
+    /// a link without carrier alone. A host that stops says nothing any
+    /// more, and neither does the old name of an interface renamed.
+    fn sync_dns(&mut self) {
+        let mut now = BTreeMap::new();
+        for (ifindex, host) in &self.hosts {
+            if let (Some(link), Some(dns)) = (self.links.get(ifindex), host.link_dns()) {
+                now.insert(link.name.clone(), dns);
+            }
+        }
+        for ifname in self.reported_dns.keys() {
+            if !now.contains_key(ifname) {
+                self.actions.push(HostAction::Dns {
+                    ifname: ifname.clone(),
+                    dns: None,
+                });
+            }
+        }
+        for (ifname, dns) in &now {
+            if self.reported_dns.get(ifname) != Some(dns) {
+                self.actions.push(HostAction::Dns {
+                    ifname: ifname.clone(),
+                    dns: Some(dns.clone()),
+                });
+            }
+        }
+        self.reported_dns = now;
     }
 
     /// Hand the RIB the routes the hosts give now, and take back the ones
@@ -1582,13 +1673,289 @@ mod tests {
         ];
         hosts.on_ra(WAN, ll("fe80::1"), &ra(0, options), now);
         let host = hosts.host(WAN).unwrap();
-        assert!(host.dns.contains_key(&ll("2001:db8::53")));
-        assert!(host.search.contains_key("example.com"));
+        assert!(host.dns.iter().any(|(a, _)| *a == ll("2001:db8::53")));
+        assert!(host.search.iter().any(|(d, _)| d == "example.com"));
         assert_eq!(host.mtu, Some(1492));
         hosts.expire(now + secs(300));
         let host = hosts.host(WAN).unwrap();
         assert!(host.search.is_empty());
         assert_eq!(host.dns.len(), 1);
+    }
+
+    fn rdnss(lifetime: u32, servers: &[&str]) -> NdOption {
+        NdOption::Rdnss(Rdnss {
+            lifetime,
+            servers: servers.iter().map(|s| ll(s)).collect(),
+        })
+    }
+
+    fn dnssl(lifetime: u32, domains: &[&str]) -> NdOption {
+        NdOption::Dnssl(Dnssl {
+            lifetime,
+            domains: domains.iter().map(|d| d.to_string()).collect(),
+        })
+    }
+
+    fn link_dns(servers: &[&str], domains: &[&str]) -> LinkDns {
+        LinkDns {
+            servers: servers.iter().map(|s| IpAddr::V6(ll(s))).collect(),
+            domains: domains.iter().map(|d| d.to_string()).collect(),
+        }
+    }
+
+    /// What the host reported of name resolution since the last call,
+    /// by interface name.
+    fn reported(hosts: &mut RaHosts) -> Vec<(String, Option<LinkDns>)> {
+        hosts
+            .take_actions()
+            .into_iter()
+            .filter_map(|action| match action {
+                HostAction::Dns { ifname, dns } => Some((ifname, dns)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn wan0(dns: Option<LinkDns>) -> Vec<(String, Option<LinkDns>)> {
+        vec![("wan0".to_string(), dns)]
+    }
+
+    /// The resolver hears of every change in what RAs say of name
+    /// resolution, once: a server or a domain coming, and going by a
+    /// lifetime of zero.
+    #[test]
+    fn what_ras_say_of_name_servers_is_reported_as_it_changes() {
+        let now = t0();
+        let mut hosts = hosts_with(&[(WAN, "wan0")], now);
+        // A host that has heard of none says nothing.
+        hosts.on_ra(WAN, ll("fe80::1"), &ra(1800, vec![]), now);
+        assert_eq!(reported(&mut hosts), []);
+
+        let options = vec![rdnss(600, &["2001:db8::53"]), dnssl(600, &["example.com"])];
+        hosts.on_ra(WAN, ll("fe80::1"), &ra(1800, options.clone()), now);
+        assert_eq!(
+            reported(&mut hosts),
+            wan0(Some(link_dns(&["2001:db8::53"], &["example.com"])))
+        );
+        // The same again only moves the lifetimes.
+        hosts.on_ra(WAN, ll("fe80::1"), &ra(1800, options), now + secs(60));
+        assert_eq!(reported(&mut hosts), []);
+
+        // Another server, from another router: heard of last, used
+        // first.
+        hosts.on_ra(
+            WAN,
+            ll("fe80::2"),
+            &ra(1800, vec![rdnss(600, &["2001:db8::54"])]),
+            now + secs(61),
+        );
+        assert_eq!(
+            reported(&mut hosts),
+            wan0(Some(link_dns(
+                &["2001:db8::54", "2001:db8::53"],
+                &["example.com"]
+            )))
+        );
+
+        // A lifetime of zero takes the first away, and then the rest.
+        hosts.on_ra(
+            WAN,
+            ll("fe80::1"),
+            &ra(1800, vec![rdnss(0, &["2001:db8::53"])]),
+            now + secs(62),
+        );
+        assert_eq!(
+            reported(&mut hosts),
+            wan0(Some(link_dns(&["2001:db8::54"], &["example.com"])))
+        );
+        let options = vec![rdnss(0, &["2001:db8::54"]), dnssl(0, &["example.com"])];
+        hosts.on_ra(WAN, ll("fe80::2"), &ra(1800, options), now + secs(63));
+        assert_eq!(reported(&mut hosts), wan0(None));
+        hosts.on_ra(WAN, ll("fe80::2"), &ra(1800, vec![]), now + secs(64));
+        assert_eq!(reported(&mut hosts), []);
+    }
+
+    /// RFC 8106 §6.2 (§6.3 for domains): a server heard of for the
+    /// first time goes in first, those of one option in the option's
+    /// order, and one that is only refreshed stays where it is. Neither
+    /// is the order of the addresses.
+    #[test]
+    fn a_new_name_server_goes_first_and_an_option_keeps_its_order() {
+        let now = t0();
+        let mut hosts = hosts_with(&[(WAN, "wan0")], now);
+        let options = vec![
+            rdnss(600, &["2001:db8::99", "2001:db8::11"]),
+            dnssl(600, &["zeta.example", "alpha.example"]),
+        ];
+        hosts.on_ra(WAN, ll("fe80::1"), &ra(1800, options), now);
+        assert_eq!(
+            reported(&mut hosts),
+            wan0(Some(link_dns(
+                &["2001:db8::99", "2001:db8::11"],
+                &["zeta.example", "alpha.example"],
+            )))
+        );
+
+        // The last of each alone, again: not moved to the front, and
+        // nothing new to report.
+        let options = vec![
+            rdnss(900, &["2001:db8::11"]),
+            dnssl(900, &["alpha.example"]),
+        ];
+        hosts.on_ra(WAN, ll("fe80::1"), &ra(1800, options), now + secs(1));
+        assert_eq!(reported(&mut hosts), []);
+        let host = hosts.host(WAN).unwrap();
+        assert_eq!(host.dns[0], (ll("2001:db8::99"), Some(now + secs(600))));
+        assert_eq!(host.dns[1], (ll("2001:db8::11"), Some(now + secs(901))));
+        assert_eq!(host.search[1].0, "alpha.example");
+
+        // An option naming one that is held between two that are new:
+        // the new ones go ahead of everything held, in their own order,
+        // and the held one stays.
+        let options = vec![
+            rdnss(600, &["2001:db8::77", "2001:db8::11", "2001:db8::55"]),
+            dnssl(600, &["new.example", "alpha.example", "more.example"]),
+        ];
+        hosts.on_ra(WAN, ll("fe80::2"), &ra(1800, options), now + secs(2));
+        assert_eq!(
+            reported(&mut hosts),
+            wan0(Some(link_dns(
+                &[
+                    "2001:db8::77",
+                    "2001:db8::55",
+                    "2001:db8::99",
+                    "2001:db8::11"
+                ],
+                &[
+                    "new.example",
+                    "more.example",
+                    "zeta.example",
+                    "alpha.example"
+                ],
+            )))
+        );
+
+        // Two options in one advertisement are taken in one after the
+        // other, so what the second one brings is ahead of the first's.
+        let options = vec![rdnss(600, &["2001:db8::33"]), rdnss(600, &["2001:db8::22"])];
+        hosts.on_ra(WAN, ll("fe80::2"), &ra(1800, options), now + secs(3));
+        let servers = reported(&mut hosts).pop().unwrap().1.unwrap().servers;
+        assert_eq!(
+            servers[..3],
+            link_dns(&["2001:db8::22", "2001:db8::33", "2001:db8::77"], &[]).servers[..]
+        );
+    }
+
+    /// A lifetime that runs out is a change like any other, also when
+    /// no route changes with it.
+    #[test]
+    fn name_servers_whose_lifetime_runs_out_are_reported_gone() {
+        let now = t0();
+        let mut hosts = hosts_with(&[(WAN, "wan0")], now);
+        let options = vec![
+            rdnss(300, &["2001:db8::53"]),
+            rdnss(600, &["2001:db8::54"]),
+            dnssl(600, &["example.com"]),
+        ];
+        // No router and no prefix: nothing but the options times out.
+        hosts.on_ra(WAN, ll("fe80::1"), &ra(0, options), now);
+        reported(&mut hosts);
+        assert_eq!(hosts.next_wakeup(|_| None), Some(now + secs(300)));
+        hosts.expire(now + secs(299));
+        assert_eq!(reported(&mut hosts), []);
+        hosts.expire(now + secs(300));
+        assert_eq!(
+            reported(&mut hosts),
+            wan0(Some(link_dns(&["2001:db8::54"], &["example.com"])))
+        );
+        hosts.expire(now + secs(600));
+        assert_eq!(reported(&mut hosts), wan0(None));
+        hosts.expire(now + secs(601));
+        assert_eq!(reported(&mut hosts), []);
+    }
+
+    /// A host that stops, by its configuration or with its link, has no
+    /// name servers to give any more. One that goes down keeps them: a
+    /// link without carrier is the resolver's to leave alone.
+    #[test]
+    fn a_host_that_stops_takes_its_name_servers_back() {
+        let now = t0();
+        let mut hosts = hosts_with(&[(WAN, "wan0"), (WAN2, "wan1")], now);
+        let options = vec![rdnss(600, &["2001:db8::53"])];
+        hosts.on_ra(WAN, ll("fe80::1"), &ra(1800, options.clone()), now);
+        hosts.on_ra(WAN2, ll("fe80::1"), &ra(1800, options), now);
+        let servers = Some(link_dns(&["2001:db8::53"], &[]));
+        assert_eq!(
+            reported(&mut hosts),
+            [
+                ("wan0".to_string(), servers.clone()),
+                ("wan1".to_string(), servers)
+            ]
+        );
+
+        hosts.link_state(WAN, false, now + secs(1));
+        hosts.link_state(WAN, true, now + secs(2));
+        assert_eq!(reported(&mut hosts), []);
+
+        hosts.update_config("wan0", now + secs(3), |cfg| cfg.autoconf = false);
+        assert_eq!(reported(&mut hosts), wan0(None));
+        hosts.link_del(WAN2);
+        assert_eq!(reported(&mut hosts), [("wan1".to_string(), None)]);
+    }
+
+    /// The name is what the resolver knows an interface by: a renamed
+    /// one gives its servers under the new name and none under the old.
+    #[test]
+    fn a_renamed_interface_reports_under_its_new_name() {
+        let now = t0();
+        let mut hosts = hosts_with(&[(WAN, "wan0")], now);
+        hosts.update_config("uplink", now, |cfg| cfg.autoconf = true);
+        hosts.on_ra(
+            WAN,
+            ll("fe80::1"),
+            &ra(1800, vec![rdnss(600, &["2001:db8::53"])]),
+            now,
+        );
+        reported(&mut hosts);
+        hosts.link_add(WAN, link("uplink", true), now + secs(1));
+        assert_eq!(
+            reported(&mut hosts),
+            [
+                ("wan0".to_string(), None),
+                ("uplink".to_string(), Some(link_dns(&["2001:db8::53"], &[]))),
+            ]
+        );
+    }
+
+    /// No more than `MAX_DNS` of each are held, and so reported; one
+    /// held is still refreshed and still taken away.
+    #[test]
+    fn the_name_servers_ras_can_add_are_bounded() {
+        let now = t0();
+        let mut hosts = hosts_with(&[(WAN, "wan0")], now);
+        for n in 0..(MAX_DNS as u16 + 3) {
+            let server = Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, n + 1);
+            let options = vec![
+                NdOption::Rdnss(Rdnss {
+                    lifetime: 600,
+                    servers: vec![server],
+                }),
+                dnssl(600, &[&format!("d{n}.example")]),
+            ];
+            hosts.on_ra(WAN, ll("fe80::1"), &ra(1800, options), now);
+        }
+        let host = hosts.host(WAN).unwrap();
+        assert_eq!((host.dns.len(), host.search.len()), (MAX_DNS, MAX_DNS));
+        let last = reported(&mut hosts).pop().unwrap().1.unwrap();
+        assert_eq!((last.servers.len(), last.domains.len()), (MAX_DNS, MAX_DNS));
+
+        hosts.on_ra(
+            WAN,
+            ll("fe80::1"),
+            &ra(1800, vec![rdnss(0, &["2001:db8::1"])]),
+            now + secs(1),
+        );
+        assert_eq!(hosts.host(WAN).unwrap().dns.len(), MAX_DNS - 1);
     }
 
     #[test]

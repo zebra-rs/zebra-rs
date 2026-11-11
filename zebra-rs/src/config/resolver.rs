@@ -7,8 +7,8 @@ use super::ConfigManager;
 /// Spawn the resolver task, or find the one there is, and give the
 /// sender its sources report to. Triggered by [`commit_config`] on the
 /// first `system name-server …` line, and by whoever spawns a source
-/// (`spawn_dhcpc`): a source takes the sender at its own spawn, so the
-/// task must be there first, whichever of the two the operator
+/// (`spawn_dhcpc`, `spawn_nd`): a source takes the sender at its own
+/// spawn, so the task must be there first, whichever the operator
 /// configures first.
 ///
 /// The task opens nothing and runs nothing until an interface it is

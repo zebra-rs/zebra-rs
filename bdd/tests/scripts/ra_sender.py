@@ -3,7 +3,8 @@
 
     ra_sender.py IFACE [--source LINK-LOCAL] [--lifetime S] [--preference high|medium|low]
                        [--prefix PREFIX/LEN,FLAGS,VALID,PREFERRED]...
-                       [--rdnss ADDR,LIFETIME]... [--dnssl DOMAIN,LIFETIME]...
+                       [--rdnss ADDR[+ADDR...],LIFETIME]...
+                       [--dnssl DOMAIN[+DOMAIN...],LIFETIME]...
                        [--mtu N] [--count N] [--interval S]
 
 Each RA goes to ff02::1 out IFACE in the namespace this runs in, from
@@ -66,17 +67,21 @@ def prefix_option(spec):
 
 
 def rdnss_option(spec):
-    addr, life = spec.split(",")
-    body = struct.pack("!HI", 0, lifetime(life)) + ipaddress.IPv6Address(addr).packed
+    addrs, life = spec.split(",")
+    body = struct.pack("!HI", 0, lifetime(life)) + b"".join(
+        ipaddress.IPv6Address(addr).packed for addr in addrs.split("+")
+    )
     return option(25, body)
 
 
 def dnssl_option(spec):
-    domain, life = spec.split(",")
+    domains, life = spec.split(",")
     names = b"".join(
-        bytes([len(label)]) + label.encode() for label in domain.split(".") if label
+        b"".join(bytes([len(label)]) + label.encode() for label in domain.split(".") if label)
+        + b"\0"
+        for domain in domains.split("+")
     )
-    return option(31, struct.pack("!HI", 0, lifetime(life)) + names + b"\0")
+    return option(31, struct.pack("!HI", 0, lifetime(life)) + names)
 
 
 def main():
