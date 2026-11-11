@@ -893,10 +893,25 @@ persistence, show and the BDD features are the rest of P4.
   server withholds (NoAddrsAvail, NoPrefixAvail, or silence about it) is
   so asked for again with every Renew and Rebind, while the rest binds
   (WPD-6).
-- **One Renew for all of it** (RFC 8415 §18.2.4): T1 and T2 are the
-  earliest any identity association the Reply spoke of asks for, each
-  worked out as for an address. A Reply that only takes away gives no
-  time; the client then takes its own, from what is left.
+- **One Renew for all of it** (RFC 8415 §18.2.4), and each identity
+  association with its own T1 and T2, worked out as for an address. The
+  Renew goes out at the earliest T1, the Rebind at the earliest T2.
+- **A Reply that leaves an identity association out** extends the rest,
+  which is in use at once (RFC 8415 §18.2.10.1). The one left out keeps
+  its lifetimes and its own T1 and T2, and the Renew or Rebind goes on
+  for it at its retransmission pace, which is the rate limit the RFC
+  asks for. The exchange is over when every identity association held
+  has been answered in it, by one Reply or by several: a Rebind is for
+  any server to answer.
+  - A Renew that goes on ends at the earliest T2 of the lease as the
+    Reply left it, and a Rebind follows.
+  - A Rebind in a Confirm's place goes on to the end of the Confirm's
+    ten seconds. An answer for the address says nothing of whether the
+    prefix is right for the link.
+  - If no server extends what was left out, it runs out, the lease goes
+    on without it, and the exchange is over.
+  - This is about what is held. An identity association that holds
+    nothing and gets no answer is asked for again with the next Renew.
 - **The server that offers more is asked.** Among Advertises, the one
   that offers more of the identity associations asked for wins, then
   the higher preference, then the first to arrive; and preference 255
@@ -914,7 +929,19 @@ persistence, show and the BDD features are the rest of P4.
 - **Decline is about addresses.** An address that fails DAD is declined
   and the prefixes stay; Release names everything held.
 - **NoBinding for any identity association** asks for all of them again
-  with a Request, and what is held stays in use meanwhile.
+  with a Request (RFC 8415 §18.2.10.1). What the same Reply says of the
+  others is applied first, a valid lifetime of 0 included, so the
+  Request names the lease as it then is. What is held stays in use
+  meanwhile. Then, in the Reply to that Request:
+  - an identity association the server had no record of is what the
+    Reply makes of it. What was held of it and is not given again has
+    no server behind it, and goes;
+  - every other one is updated as a renewal updates it: what the Reply
+    does not name stays.
+
+  A Request that is refused, or never answered, ends the same way: what
+  the server had no record of goes, and the rest of the lease goes on.
+  With nothing left the client starts over.
 
 ---
 

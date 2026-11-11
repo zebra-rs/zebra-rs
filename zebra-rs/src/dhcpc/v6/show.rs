@@ -112,8 +112,13 @@ fn view(dhcpc: &Dhcpc, name: &str, iface: &Iface6, now: Instant) -> LeaseView6 {
                 valid_in: a.valid,
             })
             .collect();
-        view.renew_in = (ia.t1 != u32::MAX).then_some(ia.t1);
-        view.rebind_in = (ia.t2 != u32::MAX).then_some(ia.t2);
+    }
+    // One Renew, and one Rebind, is for everything leased: at the
+    // earliest time any of it asks for.
+    if lease.has_leases() {
+        let (t1, t2) = lease.renewal();
+        view.renew_in = (t1 != u32::MAX).then_some(t1);
+        view.rebind_in = (t2 != u32::MAX).then_some(t2);
     }
     view.dns_servers = lease.dns_servers.iter().map(ToString::to_string).collect();
     view.domain_search = lease.domain_list.clone();
