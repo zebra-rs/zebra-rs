@@ -18,8 +18,9 @@ Feature: A DHCP lease's name servers for the host (system name-server dhcp)
   namespace, and `status` prints it: `wan0 dns …`, `wan0 domain …`. Like
   resolved it holds an interface's settings, not a name's: one deleted
   and made again under the same name holds nothing. It can also be told
-  to fail (`break`), at once or after some seconds, or to do what it is
-  asked and give no answer (`stall`).
+  to fail (`break`), at once or after some seconds, to do what it is
+  asked and give no answer (`stall`), or to fail after dropping the list
+  it was to replace, as resolved does (`spoil`).
 
   Topology: s1 is the ISP side, a dnsmasq with one address to lease. Its
   lease names 198.51.100.53 as name server, example.com as domain name
@@ -102,6 +103,32 @@ Feature: A DHCP lease's name servers for the host (system name-server dhcp)
     Then command "tests/scripts/resolvectl_stub.sh status" in namespace "r1" should eventually contain "wan0 dns 198.51.100.54"
     And show command "show dhcp client leases" in namespace "r1" should contain "State:        bound"
 
+  Scenario: An error after the old name servers are gone does not leave them taken for held
+    Given the test topology exists
+    # The server names another name server, and the command that is to
+    # set it fails the way resolved does when it cannot add to a new
+    # list: the list it was replacing is dropped, and then comes the
+    # error. So the interface holds no name server, while the last
+    # command that worked set 198.51.100.54.
+    #
+    # The server goes back to naming 198.51.100.54 before any try has
+    # worked. That is what was set last, and it is not what is held: it
+    # must be set again once commands work.
+    When I execute "tests/scripts/resolvectl_stub.sh spoil" in namespace "r1"
+    And I execute "tests/scripts/dhcp_server.sh dhcp_client_dns stop" in namespace "s1"
+    And I execute "env DHCP_BDD_DNS=198.51.100.55 tests/scripts/dhcp_server.sh dhcp_client_dns start srv0 192.0.2.1/24 192.0.2.100 192.0.2.100 120" in namespace "s1"
+    Then show command "renew dhcp interface wan0" in namespace "r1" should contain "Renewing"
+    And show command "show dhcp client leases" in namespace "r1" should eventually contain "DNS servers:  198.51.100.55"
+    And daemon log in namespace "r1" should eventually contain "Failed to dns: no room for it"
+    And command "tests/scripts/resolvectl_stub.sh status" in namespace "r1" should eventually not contain "wan0 dns"
+    When I execute "tests/scripts/dhcp_server.sh dhcp_client_dns stop" in namespace "s1"
+    And I execute "env DHCP_BDD_DNS=198.51.100.54 tests/scripts/dhcp_server.sh dhcp_client_dns start srv0 192.0.2.1/24 192.0.2.100 192.0.2.100 120" in namespace "s1"
+    Then show command "renew dhcp interface wan0" in namespace "r1" should contain "Renewing"
+    And show command "show dhcp client leases" in namespace "r1" should eventually contain "DNS servers:  198.51.100.54"
+    When I execute "tests/scripts/resolvectl_stub.sh mend" in namespace "r1"
+    Then command "tests/scripts/resolvectl_stub.sh status" in namespace "r1" should eventually contain "wan0 dns 198.51.100.54"
+    And show command "show dhcp client leases" in namespace "r1" should contain "State:        bound"
+
   Scenario: Name servers set by a command that got no answer are still taken back
     Given the test topology exists
     # The stand-in does what it is asked and then says nothing, as a
@@ -129,10 +156,10 @@ Feature: A DHCP lease's name servers for the host (system name-server dhcp)
     # lease it gets is the same as before, so nothing a lease says has
     # changed.
     #
-    # The withdrawal for the old interface is refused, and only after 8
-    # seconds, when the new interface is there. That leaves the old
-    # one's entry in place, saying these very servers are held. They
-    # are not, by this interface, and it must be given them.
+    # The withdrawal for the old interface fails, and only after 8
+    # seconds, when the new interface is there, so that something is
+    # still noted for the name when the lease comes back. Whatever it
+    # is, this interface holds nothing and must be given the servers.
     When I execute "tests/scripts/resolvectl_stub.sh break 8" in namespace "r1"
     And I execute "ip link del wan0" in namespace "r1"
     # Made under its own name. The harness's step makes a link under a

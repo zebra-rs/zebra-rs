@@ -133,11 +133,17 @@ fn argv(op: &Op) -> Vec<String> {
 /// Run `program` to its end, or for `limit`. The text is for the log:
 /// how it ended, or the first line it wrote to standard error.
 ///
-/// Each command is one call to resolved, and its exit says how the call
-/// went. So a program that ran to an exit of its own, or never started,
-/// has changed nothing when it fails. One that was cut short, by the
-/// time limit or by a signal, may have made its call first: that is
-/// [`Failure::Unanswered`].
+/// Only a program that could not be started is known to have changed
+/// nothing ([`Failure::NotRun`]). Once it has run, any end but success
+/// leaves what the interface holds open ([`Failure::Uncertain`]):
+///
+/// - cut short, by the time limit or a signal, it may have made its
+///   call to resolved first;
+/// - and an error from resolved is no assurance either. Replacing a
+///   list (`SetLinkDNS`, `SetLinkDomains`), resolved 255 drops the whole
+///   list when it cannot add one of the new entries, and reports the
+///   error after that. `RevertLink` reports a failure to send its reply
+///   when the settings are already gone.
 async fn exec(program: &OsStr, argv: &[String], limit: Duration) -> Result<(), Failure> {
     let name = program.to_string_lossy();
     let child = Command::new(program)
@@ -148,26 +154,20 @@ async fn exec(program: &OsStr, argv: &[String], limit: Duration) -> Result<(), F
         // Dropped at the time limit, which ends it.
         .kill_on_drop(true)
         .spawn()
-        .map_err(|e| Failure::Failed(format!("{name}: {e}")))?;
-    match tokio::time::timeout(limit, child.wait_with_output()).await {
-        Err(_) => Err(Failure::Unanswered(format!(
-            "{name}: no answer in {} s",
-            limit.as_secs_f32()
-        ))),
-        Ok(Err(e)) => Err(Failure::Unanswered(format!("{name}: {e}"))),
-        Ok(Ok(output)) if output.status.success() => Ok(()),
-        Ok(Ok(output)) if output.status.code().is_none() => {
-            Err(Failure::Unanswered(format!("{name}: {}", output.status)))
-        }
+        .map_err(|e| Failure::NotRun(format!("{name}: {e}")))?;
+    let how = match tokio::time::timeout(limit, child.wait_with_output()).await {
+        Err(_) => format!("no answer in {} s", limit.as_secs_f32()),
+        Ok(Err(e)) => e.to_string(),
+        Ok(Ok(output)) if output.status.success() => return Ok(()),
         Ok(Ok(output)) => {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            let said = stderr.lines().find(|line| !line.trim().is_empty());
-            Err(Failure::Failed(match said {
-                Some(line) => format!("{name}: {}", line.trim()),
-                None => format!("{name}: {}", output.status),
-            }))
+            match stderr.lines().find(|line| !line.trim().is_empty()) {
+                Some(line) => line.trim().to_string(),
+                None => output.status.to_string(),
+            }
         }
-    }
+    };
+    Err(Failure::Uncertain(format!("{name}: {how}")))
 }
 
 #[cfg(test)]
@@ -319,11 +319,13 @@ mod tests {
             "--\ndomain\nwan0\nexample.com\n"
         );
 
+        // An error says what went wrong, not what the interface holds
+        // now: resolved can drop the old list before it reports one.
         let refuse = dir.script("refuse", "echo; echo 'Failed to set: no' >&2; exit 1");
         let mut backend = Resolvectl::new(Some(refuse.clone()));
         assert_eq!(
             backend.run(&Op::Revert("wan0".into())).await,
-            Err(Failure::Failed(format!(
+            Err(Failure::Uncertain(format!(
                 "{}: Failed to set: no",
                 refuse.to_string_lossy()
             )))
@@ -331,29 +333,29 @@ mod tests {
 
         // Nothing on standard error: how it ended.
         let silent = dir.script("silent", "exit 3");
-        let Err(Failure::Failed(error)) = exec(&silent, &[], TIMEOUT).await else {
-            panic!("an exit of its own is a refusal");
+        let Err(Failure::Uncertain(error)) = exec(&silent, &[], TIMEOUT).await else {
+            panic!("an error exit does not say that nothing changed");
         };
         assert!(error.ends_with("exit status: 3"), "{error}");
     }
 
     /// Cut short by a signal, it may have made its call first.
     #[tokio::test]
-    async fn a_program_that_is_killed_has_not_answered() {
+    async fn a_program_that_is_killed_leaves_it_open_what_it_did() {
         let dir = Dir::new("killed");
         let killed = dir.script("killed", "kill -KILL $$");
-        let Err(Failure::Unanswered(error)) = exec(&killed, &[], TIMEOUT).await else {
-            panic!("a signal is not an answer");
+        let Err(Failure::Uncertain(error)) = exec(&killed, &[], TIMEOUT).await else {
+            panic!("a signal does not say that nothing changed");
         };
         assert!(error.ends_with("signal: 9 (SIGKILL)"), "{error}");
     }
 
     #[tokio::test]
-    async fn a_program_that_is_not_there_is_a_failure() {
+    async fn a_program_that_cannot_be_started_has_changed_nothing() {
         let dir = Dir::new("absent");
         let absent = dir.0.join("absent").into_os_string();
-        // It never ran, so it changed nothing.
-        let Err(Failure::Failed(error)) = exec(&absent, &[], TIMEOUT).await else {
+        // The one failure that says so.
+        let Err(Failure::NotRun(error)) = exec(&absent, &[], TIMEOUT).await else {
             panic!("a program that cannot be started has done nothing");
         };
         assert!(error.contains("No such file"), "{error}");
@@ -372,7 +374,7 @@ mod tests {
         // What it did before the limit is not known.
         assert_eq!(
             backend.run(&Op::Revert("wan0".into())).await,
-            Err(Failure::Unanswered(format!(
+            Err(Failure::Uncertain(format!(
                 "{}: no answer in 0.3 s",
                 slow.to_string_lossy()
             )))
@@ -474,7 +476,7 @@ mod tests {
         drop(link);
         assert!(matches!(
             backend.run(&Op::Revert(IF.into())).await,
-            Err(Failure::Failed(_))
+            Err(Failure::Uncertain(_))
         ));
         assert_eq!(backend.ifindex(IF), None);
 

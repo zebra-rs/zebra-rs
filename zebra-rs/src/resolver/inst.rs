@@ -42,11 +42,15 @@ pub enum Op {
 pub enum Failure {
     /// The system resolver is not ours to configure, now or later.
     Refused(String),
-    /// The command said no, or could not be run: nothing was changed.
-    Failed(String),
-    /// The command gave no answer (it ran out of time, or was killed).
-    /// What it asked for may have been done all the same.
-    Unanswered(String),
+    /// The command could not be started: nothing was changed.
+    NotRun(String),
+    /// The command was started and did not report success: it said no,
+    /// gave no answer, or was cut short. None of them says what the
+    /// interface holds now. One cut short may have made its call first.
+    /// And "no" can come after the change: resolved drops the whole list
+    /// it was replacing when it cannot add an entry of the new one, and
+    /// then reports the error.
+    Uncertain(String),
 }
 
 /// What carries the commands out ([`super::resolvectl::Resolvectl`]).
@@ -66,8 +70,9 @@ struct Held {
     /// The interface the name was when the settings were given: they
     /// are that interface's, not the name's.
     ifindex: Option<u32>,
-    /// `None`: something, but not known what. A command went unanswered,
-    /// or the servers went in and their domains did not.
+    /// `None`: something, but not known what. A command that was
+    /// started did not succeed, or the servers went in and their domains
+    /// did not.
     dns: Option<LinkDns>,
 }
 
@@ -252,16 +257,16 @@ impl<B: Backend> Resolver<B> {
                 self.complained.remove(&name);
                 continue;
             }
-            // Asked again later. Until then an unanswered withdrawal
-            // may have been carried out: what the interface holds is no
-            // longer known, and wanted again in the meantime it is set
-            // again, not taken for held.
-            if let Failure::Unanswered(_) = failure
+            // Asked again later. Until then a withdrawal that was
+            // started may have been carried out: what the interface
+            // holds is no longer known, and wanted again in the meantime
+            // it is set again, not taken for held.
+            if let Failure::Uncertain(_) = failure
                 && let Some(held) = self.applied.get_mut(&name)
             {
                 held.dns = None;
             }
-            let (Failure::Failed(why) | Failure::Unanswered(why) | Failure::Refused(why)) = failure;
+            let (Failure::NotRun(why) | Failure::Uncertain(why) | Failure::Refused(why)) = failure;
             failed = true;
             self.complain(&name, "withdrawn", &why);
         }
@@ -292,7 +297,7 @@ impl<B: Backend> Resolver<B> {
                     self.refuse(&why);
                     return false;
                 }
-                Err(Failure::Failed(why) | Failure::Unanswered(why)) => {
+                Err(Failure::NotRun(why) | Failure::Uncertain(why)) => {
                     failed = true;
                     self.complain(&name, "set", &why);
                 }
@@ -305,8 +310,10 @@ impl<B: Backend> Resolver<B> {
     /// system resolver holds after each, so that it is taken back if it
     /// stops being wanted before a later try has put it right:
     ///
-    /// - the servers refused: what it held before, and that stays noted;
-    /// - the servers unanswered: perhaps the new ones, perhaps not;
+    /// - the servers' command not started: what it held before, and that
+    ///   stays noted;
+    /// - started and not successful: the new servers, the old ones or
+    ///   none at all, so "something" is noted in place of the old ones;
     /// - the servers in and the domains not: something of ours that is
     ///   not `dns`;
     /// - both in: `dns`.
@@ -321,7 +328,7 @@ impl<B: Backend> Resolver<B> {
         match self.backend.run(&servers).await {
             Ok(()) => {}
             Err(failure) => {
-                if matches!(failure, Failure::Unanswered(_)) {
+                if matches!(failure, Failure::Uncertain(_)) {
                     self.applied.insert(name.to_string(), unknown);
                 }
                 return Err(failure);
@@ -549,12 +556,14 @@ mod tests {
         vec![Op::Revert(name.to_string())]
     }
 
+    /// The command was started and did not succeed.
     fn failed() -> Result<(), Failure> {
-        Err(Failure::Failed("no".to_string()))
+        Err(Failure::Uncertain("no".to_string()))
     }
 
-    fn unanswered() -> Result<(), Failure> {
-        Err(Failure::Unanswered("no answer".to_string()))
+    /// The command could not be started.
+    fn not_run() -> Result<(), Failure> {
+        Err(Failure::NotRun("not there".to_string()))
     }
 
     impl Bench {
@@ -712,13 +721,17 @@ mod tests {
         assert_eq!(b.ran(), revert(WAN));
     }
 
+    /// A command that could not be started set nothing, so there is
+    /// nothing to take back: a host without `resolvectl` is not asked to
+    /// revert, time after time, what it never held.
     #[tokio::test]
-    async fn servers_that_never_went_in_are_not_taken_back() {
+    async fn a_command_that_could_not_be_started_leaves_nothing_to_take_back() {
         let mut b = Bench::new();
         b.commit(ConfigOp::Set, &[WAN]).await;
-        b.answer(&[failed()]);
+        b.answer(&[not_run()]);
         b.report(WAN, Some(dns(&["198.51.100.53"], &[]))).await;
-        b.ran();
+        assert_eq!(b.ran(), set(WAN, &["198.51.100.53"], &[])[..1]);
+        assert_eq!(b.resolver.retry, Some(b.now + RETRY_MIN));
         b.commit(ConfigOp::Delete, &[WAN]).await;
         assert_eq!(b.ran(), []);
         assert_eq!(b.resolver.retry, None);
@@ -804,10 +817,10 @@ mod tests {
         assert_eq!(b.ran(), []);
     }
 
-    /// The same, when the withdrawal was acted on by itself and was
-    /// refused, the interface being there again by then. The entry it
-    /// leaves, to be tried again, says the servers are held: by the old
-    /// interface, which is no reason to leave the new one unset.
+    /// The same, when the withdrawal was acted on by itself and could
+    /// not be started, the interface being there again by then. The
+    /// entry it leaves, to be tried again, says the servers are held: by
+    /// the old interface, which is no reason to leave the new one unset.
     #[tokio::test]
     async fn an_interface_made_again_during_a_withdrawal_is_given_them_too() {
         let mut b = Bench::new();
@@ -817,23 +830,23 @@ mod tests {
         b.ran();
 
         b.recreate(WAN);
-        b.answer(&[failed()]);
+        b.answer(&[not_run()]);
         b.report(WAN, None).await;
         assert_eq!(b.ran(), revert(WAN));
         b.report(WAN, Some(lease)).await;
         assert_eq!(b.ran(), set(WAN, &["198.51.100.53"], &[]));
     }
 
-    /// A command that got no answer may have been carried out. The
-    /// servers it asked for are ours to take back, should they stop
-    /// being wanted before a try has an answer.
+    /// A command that was started and did not report success may have
+    /// been carried out. The servers it asked for are ours to take back,
+    /// should they stop being wanted before a try has succeeded.
     #[tokio::test]
-    async fn servers_set_without_an_answer_are_taken_back() {
+    async fn servers_a_command_may_have_set_are_taken_back() {
         let mut b = Bench::new();
         b.commit(ConfigOp::Set, &[WAN]).await;
-        b.answer(&[unanswered()]);
+        b.answer(&[failed()]);
         b.report(WAN, Some(dns(&["198.51.100.53"], &[]))).await;
-        // No answer for the servers, so the domains were not tried.
+        // No success for the servers, so the domains were not tried.
         assert_eq!(b.ran(), set(WAN, &["198.51.100.53"], &[])[..1]);
         assert_eq!(b.resolver.retry, Some(b.now + RETRY_MIN));
         b.commit(ConfigOp::Delete, &[WAN]).await;
@@ -843,12 +856,12 @@ mod tests {
         assert_eq!(b.ran(), []);
     }
 
-    /// Still wanted, they are asked for again like any that failed.
+    /// Still wanted, they are asked for again.
     #[tokio::test]
-    async fn servers_set_without_an_answer_are_asked_for_again() {
+    async fn servers_a_command_may_have_set_are_asked_for_again() {
         let mut b = Bench::new();
         b.commit(ConfigOp::Set, &[WAN]).await;
-        b.answer(&[unanswered()]);
+        b.answer(&[failed()]);
         b.report(WAN, Some(dns(&["198.51.100.53"], &[]))).await;
         b.ran();
         b.sync().await;
@@ -856,31 +869,34 @@ mod tests {
         assert_eq!(b.resolver.retry, None);
     }
 
-    /// New servers that got no answer leave it open which the system
-    /// resolver holds, the old or the new. So the old ones, wanted
-    /// again, are not taken for held: they are set.
+    /// New servers whose command did not succeed leave it open what the
+    /// system resolver holds: the new ones, the old ones, or none at
+    /// all, for resolved drops the list it was replacing before it
+    /// reports that it could not add to the new one. So the old servers,
+    /// wanted again before a try has succeeded, are not taken for held:
+    /// they are set.
     #[tokio::test]
-    async fn an_unanswered_change_leaves_nothing_taken_for_held() {
+    async fn a_change_that_did_not_succeed_leaves_nothing_taken_for_held() {
         let mut b = Bench::new();
         b.commit(ConfigOp::Set, &[WAN]).await;
         b.report(WAN, Some(dns(&["198.51.100.53"], &[]))).await;
         b.ran();
-        b.answer(&[unanswered()]);
+        b.answer(&[failed()]);
         b.report(WAN, Some(dns(&["198.51.100.54"], &[]))).await;
         assert_eq!(b.ran(), set(WAN, &["198.51.100.54"], &[])[..1]);
         b.report(WAN, Some(dns(&["198.51.100.53"], &[]))).await;
         assert_eq!(b.ran(), set(WAN, &["198.51.100.53"], &[]));
     }
 
-    /// New servers that were refused leave the old ones in, and those,
-    /// wanted again, are held.
+    /// New servers whose command could not be started leave the old
+    /// ones in, and those, wanted again, are held.
     #[tokio::test]
-    async fn a_refused_change_leaves_the_old_servers_held() {
+    async fn a_change_that_could_not_be_started_leaves_the_old_servers_held() {
         let mut b = Bench::new();
         b.commit(ConfigOp::Set, &[WAN]).await;
         b.report(WAN, Some(dns(&["198.51.100.53"], &[]))).await;
         b.ran();
-        b.answer(&[failed()]);
+        b.answer(&[not_run()]);
         b.report(WAN, Some(dns(&["198.51.100.54"], &[]))).await;
         assert_eq!(b.ran(), set(WAN, &["198.51.100.54"], &[])[..1]);
         b.report(WAN, Some(dns(&["198.51.100.53"], &[]))).await;
@@ -890,33 +906,33 @@ mod tests {
         assert_eq!(b.ran(), revert(WAN));
     }
 
-    /// A withdrawal that got no answer may have been carried out. The
-    /// servers wanted again before a later try has an answer are not
-    /// taken for held: they are set.
+    /// A withdrawal that was started and did not report success may
+    /// have been carried out. The servers wanted again before a later
+    /// try has succeeded are not taken for held: they are set.
     #[tokio::test]
-    async fn an_unanswered_withdrawal_leaves_nothing_taken_for_held() {
+    async fn a_withdrawal_that_did_not_succeed_leaves_nothing_taken_for_held() {
         let mut b = Bench::new();
         let lease = dns(&["198.51.100.53"], &["example.com"]);
         b.commit(ConfigOp::Set, &[WAN]).await;
         b.report(WAN, Some(lease.clone())).await;
         b.ran();
-        b.answer(&[unanswered()]);
+        b.answer(&[failed()]);
         b.report(WAN, None).await;
         assert_eq!(b.ran(), revert(WAN));
         b.report(WAN, Some(lease)).await;
         assert_eq!(b.ran(), set(WAN, &["198.51.100.53"], &["example.com"]));
     }
 
-    /// One that was refused changed nothing: the servers are still in,
-    /// and wanted again they are held.
+    /// One that could not be started changed nothing: the servers are
+    /// still in, and wanted again they are held.
     #[tokio::test]
-    async fn a_refused_withdrawal_leaves_the_servers_held() {
+    async fn a_withdrawal_that_could_not_be_started_leaves_the_servers_held() {
         let mut b = Bench::new();
         let lease = dns(&["198.51.100.53"], &[]);
         b.commit(ConfigOp::Set, &[WAN]).await;
         b.report(WAN, Some(lease.clone())).await;
         b.ran();
-        b.answer(&[failed()]);
+        b.answer(&[not_run()]);
         b.report(WAN, None).await;
         assert_eq!(b.ran(), revert(WAN));
         b.report(WAN, Some(lease)).await;
@@ -934,28 +950,11 @@ mod tests {
         b.commit(ConfigOp::Set, &[WAN]).await;
         b.learn(WAN, Some(dns(&["198.51.100.53"], &[])));
         b.mock.0.lock().unwrap().takes = Duration::from_secs(10);
-        b.answer(&[unanswered()]);
+        b.answer(&[failed()]);
         let began = Instant::now();
         b.resolver.sync().await;
         assert_eq!(Instant::now(), began + Duration::from_secs(10));
         assert_eq!(b.resolver.retry, Some(Instant::now() + RETRY_MIN));
-    }
-
-    /// A withdrawal that got no answer is asked again while the
-    /// interface is there, like one that failed.
-    #[tokio::test]
-    async fn an_unanswered_withdrawal_is_tried_again() {
-        let mut b = Bench::new();
-        b.commit(ConfigOp::Set, &[WAN]).await;
-        b.report(WAN, Some(dns(&["198.51.100.53"], &[]))).await;
-        b.ran();
-        b.answer(&[unanswered()]);
-        b.report(WAN, None).await;
-        assert_eq!(b.ran(), revert(WAN));
-        assert_eq!(b.resolver.retry, Some(b.now + RETRY_MIN));
-        b.sync().await;
-        assert_eq!(b.ran(), revert(WAN));
-        assert_eq!(b.resolver.retry, None);
     }
 
     #[test]

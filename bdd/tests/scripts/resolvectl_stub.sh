@@ -18,6 +18,8 @@
 #                               that long if a time is given
 #   resolvectl_stub.sh stall    do what dns, domain and revert ask, and
 #                               then give no answer
+#   resolvectl_stub.sh spoil    fail every dns and domain after dropping
+#                               the list it was to replace
 #   resolvectl_stub.sh mend     work again
 #
 # What is held is kept per network namespace, the one this runs in, so a
@@ -28,13 +30,22 @@
 # they are given to the interface the name is then, and `status` shows
 # them only while the name is still that interface. One deleted and made
 # again under the same name holds nothing.
+#
+# `spoil` is what resolved does when it cannot add an entry of a new list
+# (SetLinkDNS and SetLinkDomains in systemd 255): the list being replaced
+# is dropped whole, and then the error is reported. An error is no word
+# that nothing changed.
 set -eu
 ns=$(ip netns identify $$)
 if [ -z "$ns" ]; then
     echo "resolvectl_stub: not in a named network namespace" >&2
     exit 1
 fi
-dir=/tmp/zebra-bdd-resolvectl/$ns
+# Under /run, where only root makes entries: this runs as root at a name
+# anybody can predict, and in /tmp another user could have put a link
+# there first (the hostname stand-in is kept there for the same reason,
+# `hostname_stub_dir` in bdd/src/netns.rs).
+dir=/run/zebra-rs-bdd/resolvectl/$ns
 
 # The index of the interface of that name, or nothing.
 index_of() {
@@ -65,6 +76,11 @@ dns | domain | revert)
         # What the name's previous interface held went with it.
         if [ "$(cat "$dir/$link.ifindex" 2>/dev/null || true)" != "$index" ]; then
             rm -f "$dir/$link.dns" "$dir/$link.domain" "$dir/$link.ifindex"
+        fi
+        if [ -e "$dir/spoiled" ] && [ "$verb" != revert ]; then
+            rm -f "$dir/$link.$verb"
+            echo "Failed to $verb: no room for it" >&2
+            exit 1
         fi
         case $verb in
         revert)
@@ -112,11 +128,15 @@ stall)
     mkdir -p "$dir"
     : >"$dir/stalled"
     ;;
+spoil)
+    mkdir -p "$dir"
+    : >"$dir/spoiled"
+    ;;
 mend)
-    rm -f "$dir/broken" "$dir/stalled"
+    rm -f "$dir/broken" "$dir/stalled" "$dir/spoiled"
     ;;
 *)
-    echo "usage: $0 [--] dns LINK [SERVER…] | domain LINK [DOMAIN…] | revert LINK | status | reset | break [SECONDS] | stall | mend" >&2
+    echo "usage: $0 [--] dns LINK [SERVER…] | domain LINK [DOMAIN…] | revert LINK | status | reset | break [SECONDS] | stall | spoil | mend" >&2
     exit 2
     ;;
 esac

@@ -1071,13 +1071,20 @@ configuration of the lease's link.
   that fails is retried while the interface exists; when the interface
   is gone, so are its settings.
 - **What resolved holds is not always known**, and whatever may be ours
-  is reverted once it is no longer wanted. A command that ran to an
-  exit of its own, or could not be started, changed nothing when it
-  failed. One cut short, by the time limit or a signal, may have made
-  its call first, whether it was setting or reverting. After that what
-  the interface holds is not known: it is set again if wanted, and
-  reverted if not. The same holds between a `dns` that worked and a
-  `domain` that did not.
+  is reverted once it is no longer wanted. Only a command that could
+  not be started is known to have changed nothing. One that ran and did
+  not report success says nothing about what the interface holds:
+  - cut short, by the time limit or a signal, it may have made its call
+    first;
+  - an error from resolved can come after the change. Replacing a list
+    (`SetLinkDNS`, `SetLinkDomains`), resolved 255 drops the whole list
+    when it cannot add one of the new entries, and reports the error
+    after that.
+
+  After such a command, setting or reverting, the interface holds
+  "something": it is set again if wanted, also with the servers that
+  were set last, and reverted if not. The same holds between a `dns`
+  that worked and a `domain` that did not.
 - **The settings are an interface's, not a name's.** What was set is
   noted with the index the name had then. A name that is another
   interface now, deleted and made again, holds nothing whatever was
@@ -1124,7 +1131,10 @@ configuration of the lease's link.
 - **A show command** for what was set and what failed. `resolvectl
   status <if>` shows what resolved holds.
 - **Hosts without resolved.** The command fails and is retried at the
-  5 min interval. A `resolvconf` backend would cover them.
+  5 min interval. Where `resolvectl` is there and resolved is not, so is
+  the revert once the servers are no longer wanted, for as long as the
+  interface exists: a command that ran may have set something. A
+  `resolvconf` backend would cover them.
 - **NTP** follows the same pattern if zebra-rs ever manages time.
 - **The RA MTU option** gets an `ra-options mtu` leaf if it is needed.
 
@@ -1191,7 +1201,7 @@ DHCPv4, IA_NA and RAs, but not PD.
 | `dhcp_client` | lease → address and `D>* 0.0.0.0/0 [210/0]`; renew; `release`; server gone → expiry withdraws everything; zebra-rs restart keeps the address and re-verifies |
 | `dhcp_client_vrf` | WAN in VRF `red`; the route is in `red`'s table only |
 | `dhcp_client_dual_wan` | two leases at 210 / 220; link down on the first → the second's default is selected |
-| `dhcp_client_dns` | against a stand-in for `resolvectl`: nothing set without `system name-server dhcp`; with it the lease's servers and domains; reverted on `release` and on deleting the entry; replaced at a renewal; retried after a failure; servers set by a command that got no answer are reverted; an interface deleted and made again is set again; set again after a restart |
+| `dhcp_client_dns` | against a stand-in for `resolvectl`: nothing set without `system name-server dhcp`; with it the lease's servers and domains; reverted on `release` and on deleting the entry; replaced at a renewal; retried after a failure; servers set last are set again after an error that came with the old list already dropped; servers set by a command that got no answer are reverted; an interface deleted and made again is set again; set again after a restart |
 | `ra_host` | RA default route `A`, SLAAC with `autoconf`, router lifetime 0 withdraws, `accept_ra` is 0 |
 | `dhcpv6_client` | IA_NA /128 with `noprefixroute`; default route and on-link prefix from the RA, and no SLAAC address unless `autoconf` is set too; renew; `release`; zebra-rs restart keeps the address and confirms it; `parameters-only`; deleted configuration releases |
 | `dhcpv6_client_pd` | PD → discard route, LAN /64 address; prefix change replaces both; with ND-PIO, a LAN host SLAACs from it |
