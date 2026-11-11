@@ -1,9 +1,10 @@
 # `system hostname` sets the real host name (with `--feature insomnia`)
 
-**Status: steps 1 and 2 (§11) are implemented; step 3 is design.** The
-decisions in §12 were all taken as recommended (2026-11-11). Where the
-code turned out different from what this document first assumed, the text
-says what was built.
+**Status: all three steps (§11) are implemented.** Steps 1 and 2 are in
+this repository; step 3 is in the insomnia repository. The decisions in
+§12 were all taken as recommended (2026-11-11). Where the code turned out
+different from what this document first assumed, the text says what was
+built.
 
 Today `set system hostname r1` is a label inside the daemon. It changes
 the vty prompt, `show hostname` and the DHCP client's option 12, and
@@ -401,16 +402,29 @@ it advertised `debian`.
 
 Debian installs carry `127.0.1.1 <name>` in `/etc/hosts`. After a rename
 that line still names the old host. Where systemd-resolved or
-`nss-myhostname` is in use (the dev box: resolved), the new name resolves
-anyway. Where neither is, `sudo` prints "unable to resolve host r1" and
-`hostname -f` fails.
+`nss-myhostname` is in use, the new name resolves anyway. Where neither
+is, `sudo` prints "unable to resolve host r1" and `hostname -f` fails.
 
-**Recommendation: do not edit `/etc/hosts` in the first step.** It is an
-operator-owned file with free-form content. Instead the package adds
-`Recommends: libnss-myhostname`, which makes the local name resolvable
-without the file. If that turns out not to be enough, a later step
-rewrites only a `127.0.1.1` line whose name is the previous host name, and
-leaves every other shape of the file alone.
+Checked in a sandbox (a private UTS namespace and an overlay on `/etc`,
+with the dev box's `hosts: files mdns4_minimal [NOTFOUND=return] dns`):
+after a rename `getent hosts <name>` fails and `sudo` prints
+`unable to resolve host <name>: Temporary failure in name resolution`;
+with `myhostname` at the end of the `hosts:` line both work.
+
+**`/etc/hosts` is not edited.** It is an operator-owned file with
+free-form content. Instead a package recommends `libnss-myhostname`,
+which resolves the local name whatever it is. Its install script appends
+`myhostname` to the `hosts:` line of `/etc/nsswitch.conf`.
+
+**As built (step 3): the insomnia package carries the `Recommends`, not
+zebra-rs's.** The insomnia package is what turns the feature on (its
+`zebra-rs.service` drop-in), so it is installed exactly where the name is
+applied. zebra-rs's own package is also installed where the feature is
+off, and there a `Recommends` would edit `nsswitch.conf` for nothing.
+
+If that turns out not to be enough, a later step rewrites only a
+`127.0.1.1` line whose name is the previous host name, and leaves every
+other shape of the file alone.
 
 ---
 
@@ -518,10 +532,9 @@ that ignores the rule renames the sandbox, and the `refuse` scenario
 fails. Mutants run against the feature: the feature check removed from
 `main.rs`, the rule ignored, and the applier never attached.
 
-insomnia's BDD has its own copy of the harness. Its node scripts start
-zebra-rs with the feature on and do not set the variable yet; the
-namespace rule alone keeps them off the real name. Setting it there is
-part of step 3.
+insomnia's BDD has its own copy of the harness, and node scripts that
+start zebra-rs with the feature on. Step 3 sets the variable in both, so
+its daemons have the same two guards.
 
 **Still by hand, in a throwaway VM**, because it needs a real systemd and
 a reboot: the three "not checked" items in §2 (journald, systemd-resolved
@@ -542,10 +555,13 @@ next boot, and `sudo` with and without `libnss-myhostname`.
 2. **Readers follow the name** (§7) — **done**: `RibRx::HostnameUpdate`
    with its replay, the IS-IS and BGP fallback order, IS-IS
    re-origination. BDD `system_hostname_protocols`.
-3. **Packaging and insomnia**: `Recommends: libnss-myhostname`; the
-   insomnia book's "Before you start" page says the drop-in now makes
-   `system hostname` real; `ZEBRA_HOSTNAME_STUB_DIR` in insomnia's BDD
-   node scripts. No insomnia daemon changes.
+3. **Packaging and insomnia** — **done, in the insomnia repository**
+   (zebra-rs/insomnia#32): `Recommends: libnss-myhostname` in the insomnia package
+   (§8); the insomnia book's "Before you start" section says that the
+   drop-in now makes `system hostname` the system's name, with the upgrade
+   note below; `ZEBRA_HOSTNAME_STUB_DIR` for every zebra-rs that
+   insomnia's BDD harness and node scripts start. No insomnia daemon
+   changes.
 
 **Upgrade note.** A router that already runs `--feature insomnia` with
 `system hostname` set gets its OS name changed at the first start after

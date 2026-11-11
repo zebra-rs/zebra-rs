@@ -148,7 +148,9 @@ then says why the name was not applied (see
 The name is applied when it is committed and when zebra-rs starts. A name
 somebody sets by hand afterwards (`hostnamectl hostname …`) stays until
 then. `/etc/hosts` is not edited: where neither systemd-resolved nor
-`libnss-myhostname` resolves the local name, add the new name to it.
+`libnss-myhostname` resolves the local name, `sudo` warns that it cannot
+resolve the host. The insomnia package recommends `libnss-myhostname` for
+this reason; without it, add the new name to `/etc/hosts`.
 
 A host name is at most 64 characters, in labels of letters, digits and
 hyphens separated by single dots. A commit refuses anything else, with or
