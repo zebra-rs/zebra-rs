@@ -283,7 +283,9 @@ would bypass the RIB.
 - One per system, generated once as a DUID-LLT from an Ethernet MAC:
   that of the first interface to run a DHCPv6 client, or else the first
   hardware address there is. The address only goes into a DUID made
-  then; one on disk stays what it is.
+  then; one on disk stays what it is, and is read without a hardware
+  address, so an interface that has none (a tunnel, a PPP link) gets its
+  client all the same. Only making a DUID waits for an address.
 - Stored in `/var/lib/zebra-rs/dhcp/duid`, next to
   `/var/lib/zebra-rs/checkpoint`. RFC 7084 W-5: the DUID "MUST NOT change
   between network-interface resets or IPv6 CE router reboots".
@@ -839,7 +841,13 @@ ones in `dhcpc`:
   while zebra-rs was down) is resumed as who took it, which claims its
   address so that it can be withdrawn, and released as that identity
   once the link can carry the Release. If the link never can, it is
-  withdrawn when its lifetime ends.
+  withdrawn when its lifetime ends. `release dhcpv6 interface` ends the
+  wait: no lease is wanted on the interface, so that one is withdrawn
+  too, and released if the link allows.
+- **Only the current client's lease is on disk.** A retiring client's
+  is on its way out: when it changes (one of its addresses goes) it is
+  not written again, or the next start would take it for a lease to
+  resume.
 - **`release` does not survive a restart**, as for DHCPv4: the lease
   file is gone, and the next start asks for a lease (open question 4).
 - **What `parameters-only` learns is not kept on disk**: it is asked for

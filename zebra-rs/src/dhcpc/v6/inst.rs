@@ -413,21 +413,35 @@ impl Dhcpc {
             return Some(duid.clone());
         }
         if self.v6.duid.is_none() {
-            // The interface's own hardware address, or else the first
-            // one there is. It only goes into a DUID made now: one on
-            // disk stays what it is.
-            let real = |mac: &[u8; 6]| mac.iter().any(|octet| *octet != 0);
-            let mac = mac
-                .filter(real)
-                .or_else(|| self.links.values().find_map(|link| link.mac.filter(real)))?;
             let store = DuidStore::new(self.store.dir());
-            let duid = store.load_or_create(mac, unix_now()).unwrap_or_else(|e| {
-                tracing::warn!(
-                    "dhcpv6 client: the system DUID cannot be kept in {}: {e}; using one that will not survive a restart",
-                    self.store.dir().display()
-                );
-                ident::duid_llt(mac, unix_now())
-            });
+            let duid = match store.load() {
+                // The one on disk is who the system is, whatever
+                // interfaces it has now: reading it takes no hardware
+                // address.
+                Ok(Some(duid)) => duid,
+                // There is none, or the file cannot be read: one is
+                // made, which does take a hardware address. The
+                // interface's own, or else the first one there is.
+                loaded => {
+                    let real = |mac: &[u8; 6]| mac.iter().any(|octet| *octet != 0);
+                    let mac = mac
+                        .filter(real)
+                        .or_else(|| self.links.values().find_map(|link| link.mac.filter(real)))?;
+                    let made = match loaded {
+                        Ok(_) => store.create(mac, unix_now()),
+                        // Not replaced: the error says nothing about
+                        // what the file holds.
+                        Err(e) => Err(e),
+                    };
+                    made.unwrap_or_else(|e| {
+                        tracing::warn!(
+                            "dhcpv6 client: the system DUID cannot be kept in {}: {e}; using one that will not survive a restart",
+                            self.store.dir().display()
+                        );
+                        ident::duid_llt(mac, unix_now())
+                    })
+                }
+            };
             tracing::info!("dhcpv6 client: system DUID {}", ident::format_duid(&duid));
             self.v6.duid = Some(duid);
         }
@@ -556,41 +570,39 @@ impl Dhcpc {
     /// goes.
     fn pump_retiring6(&mut self, name: &str, ifindex: u32, iface: &mut Iface6, now: Instant) {
         let ready = self.ready6(ifindex);
-        let Some(retiring) = iface.retiring.as_mut() else {
+        let Some(retiring) = iface.retiring.as_ref() else {
             return;
         };
         if retiring.stopped {
-            self.feed6(
-                name,
-                ifindex,
-                iface,
-                Slot::Retiring,
-                Event::Link(ready),
-                now,
-            );
+            let event = Event::Link(ready);
+            self.feed6(name, ifindex, iface, Slot::Retiring, event, now);
         } else if ready {
-            retiring.stopped = true;
-            self.feed6(name, ifindex, iface, Slot::Retiring, Event::Link(true), now);
-            self.feed6(name, ifindex, iface, Slot::Retiring, Event::Stop, now);
+            self.stop_retiring6(name, ifindex, iface, now);
         }
     }
 
-    /// Make room for another retiring client: the one there, if it has
-    /// not been stopped yet, is stopped now, which withdraws what it
-    /// holds; its Release goes out if the link allows, once.
-    fn end_retiring6(&mut self, name: &str, ifindex: u32, iface: &mut Iface6, now: Instant) {
-        if iface.retiring.as_ref().is_some_and(|r| !r.stopped) {
-            let ready = self.ready6(ifindex);
-            self.feed6(
-                name,
-                ifindex,
-                iface,
-                Slot::Retiring,
-                Event::Link(ready),
-                now,
-            );
-            self.feed6(name, ifindex, iface, Slot::Retiring, Event::Stop, now);
+    /// Stop the retiring client, if it has not been stopped yet (it
+    /// holds a saved lease and waits for the link): what it holds is
+    /// withdrawn now, and its Release goes out if the link can carry it.
+    /// It then stays until that Release is over, like any retiring
+    /// client.
+    fn stop_retiring6(&mut self, name: &str, ifindex: u32, iface: &mut Iface6, now: Instant) {
+        if !iface.retiring.as_ref().is_some_and(|r| !r.stopped) {
+            return;
         }
+        let link = Event::Link(self.ready6(ifindex));
+        self.feed6(name, ifindex, iface, Slot::Retiring, link, now);
+        self.feed6(name, ifindex, iface, Slot::Retiring, Event::Stop, now);
+        if let Some(retiring) = iface.retiring.as_mut() {
+            retiring.stopped = true;
+        }
+    }
+
+    /// Make room for another retiring client: the one there is stopped,
+    /// if it has not been, and dropped. Its Release has gone out once if
+    /// the link allowed.
+    fn end_retiring6(&mut self, name: &str, ifindex: u32, iface: &mut Iface6, now: Instant) {
+        self.stop_retiring6(name, ifindex, iface, now);
         iface.retiring = None;
     }
 
@@ -695,7 +707,14 @@ impl Dhcpc {
                         tracing::debug!("dhcpv6 client: {name}: send failed: {e}");
                     }
                 }
-                Action::Bind { lease, fresh } => self.bind6(name, ifindex, session, lease, fresh),
+                Action::Bind { lease, fresh } => {
+                    // The file is the current client's (see `Unbind`
+                    // below): a retiring one's lease is on its way out,
+                    // and written again it would come back at the next
+                    // start.
+                    let save = fresh && slot == Slot::Current;
+                    self.bind6(name, ifindex, session, lease, fresh, save);
+                }
                 Action::Unbind => {
                     if let Some(lease) = session.bound.take() {
                         for address in addresses(&lease) {
@@ -721,7 +740,8 @@ impl Dhcpc {
     }
 
     /// Put `lease` in the RIB in place of what `session` had there, and
-    /// on disk when a server has just confirmed it.
+    /// with `save` on disk. `fresh` says a server has just confirmed it;
+    /// otherwise it is one resumed from disk.
     fn bind6(
         &mut self,
         name: &str,
@@ -729,6 +749,7 @@ impl Dhcpc {
         session: &mut Session,
         lease: Lease,
         fresh: bool,
+        save: bool,
     ) {
         let old: Vec<Ipv6Addr> = session
             .bound
@@ -753,7 +774,8 @@ impl Dhcpc {
             session.obtained = Some(obtained);
             // Under the identity that took it, which is the client's.
             // What `parameters-only` learns is asked for again instead.
-            if lease.ia_na.is_some()
+            if save
+                && lease.ia_na.is_some()
                 && let Err(e) = self
                     .store
                     .save6(name, session.client.identity(), obtained, &lease)
@@ -837,7 +859,10 @@ impl Dhcpc {
         format!("Renewing the DHCPv6 lease on {name}")
     }
 
-    /// `release dhcpv6 interface <if>`.
+    /// `release dhcpv6 interface <if>`: no lease is wanted on the
+    /// interface. That is the current client's, and also one saved under
+    /// an earlier identity that still waits for the link to be given
+    /// back: left alone, its addresses would stay on the interface.
     pub(in crate::dhcpc) fn release6(&mut self, args: Args) -> String {
         let name = match self.named_iface6(args) {
             Ok(name) => name,
@@ -846,6 +871,7 @@ impl Dhcpc {
         let now = Instant::now();
         self.with_iface6(&name, |dhcpc, ifindex, iface| {
             dhcpc.feed6(&name, ifindex, iface, Slot::Current, Event::Release, now);
+            dhcpc.stop_retiring6(&name, ifindex, iface, now);
         });
         format!("Released the DHCPv6 lease on {name}")
     }
@@ -1288,6 +1314,125 @@ mod tests {
         assert_eq!(asked(&mut b), [format!("del {ADDRESS}/128")]);
         assert_eq!(retiring(&b), None);
         assert_eq!(state(&b), State::Stopped);
+    }
+
+    /// `release dhcpv6 interface` while a lease saved under another DUID
+    /// still waits for the link: that lease goes too, not only the
+    /// current client's.
+    #[tokio::test]
+    async fn an_operator_release_also_ends_a_saved_lease_that_is_waiting() {
+        let mut b = bench("release-pending");
+        save(&b, &OTHER_DUID, 0, &lease(&[ADDRESS]));
+        configure(&mut b, &DUID);
+        assert_eq!(asked(&mut b), [format!("add {ADDRESS}/128 3600/7200")]);
+        assert_eq!(retiring(&b), Some(State::Bound));
+        assert_eq!(
+            b.dhcpc.release6(verb()),
+            format!("Released the DHCPv6 lease on {IF}")
+        );
+        // Withdrawn. With no link to say a Release on, that is the end
+        // of it.
+        assert_eq!(asked(&mut b), [format!("del {ADDRESS}/128")]);
+        assert_eq!(retiring(&b), None);
+        assert_eq!(state(&b), State::Released);
+        // The link coming later brings nothing back.
+        make_ready(&mut b);
+        assert!(asked(&mut b).is_empty());
+        assert_eq!(state(&b), State::Released);
+
+        // With a link, its Release is seen through as any other.
+        let mut b = bench("release-pending-link");
+        save(&b, &OTHER_DUID, 0, &lease(&[ADDRESS]));
+        b.dhcpc.links.get_mut(&IFINDEX).unwrap().up = false;
+        configure(&mut b, &DUID);
+        let ll = kernel(LINK_LOCAL, 64, AddrFlags::default());
+        b.dhcpc
+            .v6
+            .link_locals
+            .entry(IFINDEX)
+            .or_default()
+            .insert(LINK_LOCAL, link_local_state(&ll).unwrap().1);
+        b.dhcpc.links.get_mut(&IFINDEX).unwrap().up = true;
+        // The link is there now, and nothing has told the clients yet.
+        assert_eq!(retiring(&b), Some(State::Bound));
+        asked(&mut b);
+        b.dhcpc.release6(verb());
+        assert_eq!(asked(&mut b), [format!("del {ADDRESS}/128")]);
+        assert_eq!(retiring(&b), Some(State::Releasing));
+        run_timers(&mut b, Duration::from_secs(20));
+        assert_eq!(retiring(&b), None);
+        assert_eq!(state(&b), State::Released);
+    }
+
+    /// A retiring client's lease is on its way out: when it changes (one
+    /// of its addresses goes), it is not written to disk again, where
+    /// the next start would find it and take it for a lease to resume.
+    #[tokio::test]
+    async fn a_retiring_lease_is_not_saved_again() {
+        // Waiting for the link, with the file already the next lease's.
+        let mut b = bench("retiring-save");
+        save(&b, &OTHER_DUID, 0, &lease(&[ADDRESS, ADDRESS2]));
+        configure(&mut b, &DUID);
+        assert!(saved(&b).is_none());
+        asked(&mut b);
+        b.dhcpc
+            .addr_event6(&kernel(ADDRESS, 128, AddrFlags::default()), false);
+        let asked_now = asked(&mut b);
+        assert_eq!(asked_now[0], format!("del {ADDRESS}/128"));
+        assert!(asked_now[1].starts_with(&format!("add {ADDRESS2}/128 ")));
+        assert_eq!(retiring(&b), Some(State::Bound));
+        assert!(saved(&b).is_none(), "the old identity's lease is back");
+
+        // The current client's lease is still saved when it changes, and
+        // a retiring one does not write over it.
+        let mut b = bench("retiring-save-current");
+        save(&b, &DUID, 0, &lease(&[ADDRESS, ADDRESS2]));
+        configure(&mut b, &DUID);
+        b.dhcpc
+            .addr_event6(&kernel(ADDRESS, 128, AddrFlags::default()), false);
+        let kept = saved(&b).expect("the current lease");
+        assert_eq!(kept.duid, DUID);
+        assert_eq!(addresses(&kept.lease).len(), 1);
+    }
+
+    /// The DUID on disk is read without a hardware address: an interface
+    /// that has none (a tunnel, a PPP link) still gets its client. Only
+    /// making a DUID waits for one.
+    #[tokio::test]
+    async fn a_saved_duid_needs_no_hardware_address() {
+        let stored = [0, 1, 0, 1, 1, 2, 3, 4, 2, 0, 0, 0, 0, 7];
+        let without_mac = |test: &str| {
+            let mut b = bench(test);
+            b.dhcpc.links.get_mut(&IFINDEX).unwrap().mac = None;
+            b
+        };
+        let want_address = |b: &mut Bench| {
+            let cfg = &mut b.dhcpc.v6.ifaces.entry(IF.to_string()).or_default().cfg;
+            cfg.address = true;
+            b.dhcpc.reconcile6(IF);
+        };
+        let mut b = without_mac("duid-no-mac");
+        std::fs::create_dir_all(&b.dir).unwrap();
+        std::fs::write(b.dir.join("duid"), ident::format_duid(&stored)).unwrap();
+        want_address(&mut b);
+        assert_eq!(duid_of(&b), stored);
+
+        // With none on disk, the client waits for an address to make one
+        // from, and nothing is written meanwhile.
+        let mut b = without_mac("duid-no-mac-none");
+        want_address(&mut b);
+        assert!(b.dhcpc.v6.ifaces[IF].session.is_none());
+        assert_eq!(DuidStore::new(&b.dir).load().unwrap(), None);
+        b.dhcpc.links.get_mut(&IFINDEX).unwrap().mac = Some(MAC);
+        b.dhcpc.reconcile6(IF);
+        let made = duid_of(&b);
+        assert_eq!(made[8..], MAC);
+        assert_eq!(DuidStore::new(&b.dir).load().unwrap(), Some(made));
+        // An all-zero address is no address.
+        let mut b = without_mac("duid-zero-mac");
+        b.dhcpc.links.get_mut(&IFINDEX).unwrap().mac = Some([0; 6]);
+        want_address(&mut b);
+        assert!(b.dhcpc.v6.ifaces[IF].session.is_none());
     }
 
     #[tokio::test]
