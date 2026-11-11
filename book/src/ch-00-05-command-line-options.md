@@ -122,9 +122,11 @@ works, with a warning at startup.
 ### System host name
 
 `system hostname` names the router inside zebra-rs: the vty prompt,
-`show hostname`, and the host name the DHCP client sends. With
-`--feature insomnia` zebra-rs owns the configuration of the whole system,
-and the name also becomes the system's own:
+`show hostname`, the host name the DHCP client sends, and the name IS-IS
+(TLV 137) and BGP (the FQDN capability) advertise when they have no
+hostname of their own configured. With `--feature insomnia` zebra-rs owns
+the configuration of the whole system, and the name also becomes the
+system's own:
 
 - the kernel host name, which `hostname` and `uname -n` print, changes
   when the commit ends;
@@ -146,7 +148,9 @@ then says why the name was not applied (see
 The name is applied when it is committed and when zebra-rs starts. A name
 somebody sets by hand afterwards (`hostnamectl hostname …`) stays until
 then. `/etc/hosts` is not edited: where neither systemd-resolved nor
-`libnss-myhostname` resolves the local name, add the new name to it.
+`libnss-myhostname` resolves the local name, `sudo` warns that it cannot
+resolve the host. The insomnia package recommends `libnss-myhostname` for
+this reason; without it, add the new name to `/etc/hosts`.
 
 A host name is at most 64 characters, in labels of letters, digits and
 hyphens separated by single dots. A commit refuses anything else, with or

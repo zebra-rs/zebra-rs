@@ -134,6 +134,15 @@ pub enum RibRx {
     AddrAdd(LinkAddr),
     AddrDel(LinkAddr),
     RouterIdUpdate(Ipv4Addr),
+    /// The running config's `system hostname`, `None` when it has none:
+    /// the name a protocol advertises for this router when no hostname of
+    /// its own is configured (IS-IS TLV 137, BGP's FQDN capability), ahead
+    /// of the OS host name. Sent to every subscriber, whatever its VRF,
+    /// when a commit changes it, and replayed to one that subscribes
+    /// later. Also sent again, unchanged, when `--feature insomnia`
+    /// renamed the system itself (`rib::hostname`): a subscriber left
+    /// with the OS name then looks at that name again.
+    HostnameUpdate(Option<String>),
     /// Bridge FDB entry just learned (or installed) on this host —
     /// emitted by RIB when a `FibMessage::NewNeighbor` for an
     /// AF_BRIDGE entry resolves to a known VNI. The EVPN advertise
@@ -515,6 +524,14 @@ impl Rib {
     pub fn api_router_id_update(&self, vrf_id: u32, router_id: Ipv4Addr) {
         for (_, sub) in self.client_registry.iter_vrf(vrf_id) {
             let _ = sub.rib_rx_tx.send(RibRx::RouterIdUpdate(router_id));
+        }
+    }
+
+    /// Push the system hostname ([`RibRx::HostnameUpdate`]) to every
+    /// subscriber: the name is the router's, not one VRF's.
+    pub fn api_hostname_update(&self, hostname: Option<String>) {
+        for (_, sub) in self.client_registry.iter() {
+            let _ = sub.rib_rx_tx.send(RibRx::HostnameUpdate(hostname.clone()));
         }
     }
 

@@ -546,11 +546,12 @@ fn namespace_link(path: &str) -> Option<String> {
 }
 
 /// The RIB task's hold on the system's host name, present only with
-/// `--feature insomnia`.
+/// `--feature insomnia`. It writes through a [`Store`]; a test can give it
+/// another [`Backend`] to make a write fail where no file would.
 #[derive(Debug)]
-pub struct SystemHostname {
+pub struct SystemHostname<B = Store> {
     /// The system to write to, or why this instance never does.
-    store: Result<Store, String>,
+    store: Result<B, String>,
     /// Why the last [`Self::sync`] failed, until one succeeds.
     error: Option<String>,
 }
@@ -583,8 +584,10 @@ impl SystemHostname {
         }
         Self::new(store)
     }
+}
 
-    fn new(store: Result<Store, String>) -> Self {
+impl<B: Backend> SystemHostname<B> {
+    fn new(store: Result<B, String>) -> Self {
         Self { store, error: None }
     }
 
@@ -605,11 +608,21 @@ impl SystemHostname {
     }
 
     /// Make the system's name the running config's (`wanted`), or give the
-    /// saved one back when the config has none.
-    pub fn sync(&mut self, wanted: Option<&str>) {
+    /// saved one back when the config has none. Returns whether the
+    /// system's name is another than before: whoever reads that name has
+    /// reason to read it again.
+    ///
+    /// That is asked of the system, before and after, and not taken from
+    /// whether the attempt succeeded. A restore sets the kernel name
+    /// before it removes the record, so an attempt can rename the system
+    /// and still fail; the retry that follows then finds the name in
+    /// place, and has nothing to report. The attempt that changed the name
+    /// is the one that has to say so.
+    pub fn sync(&mut self, wanted: Option<&str>) -> bool {
         let Ok(store) = &mut self.store else {
-            return;
+            return false;
         };
+        let before = store.kernel().ok();
         // A startup config may carry a name an earlier release took
         // (`config::check::startup_tolerant_check`): it stays a label, and
         // the system keeps the name it has.
@@ -620,6 +633,7 @@ impl SystemHostname {
             )),
             _ => reconcile(store, wanted),
         };
+        let renamed = store.kernel().ok() != before;
         match result {
             Ok(changed) => {
                 self.error = None;
@@ -641,6 +655,7 @@ impl SystemHostname {
                 self.error = Some(e);
             }
         }
+        renamed
     }
 
     /// Why the system's name is not the running config's (`wanted`), for
@@ -1291,6 +1306,74 @@ mod tests {
         assert_eq!(system.disk(), (Some("debian"), None));
     }
 
+    /// `sync` says whether the system's name changed, and says it at the
+    /// attempt that changed it, whether or not that attempt succeeded.
+    ///
+    /// A restore sets the kernel name and then removes the record. When
+    /// the removal fails, the attempt is a failure that renamed the
+    /// system; the retry after it finds no record and nothing to do.
+    /// Taking "renamed" from success had neither of them report it, and
+    /// IS-IS and BGP, told by the RIB only on that report, kept
+    /// advertising the name the system no longer had.
+    #[test]
+    fn a_restore_that_fails_after_renaming_still_reports_the_rename() {
+        let mut applied = Fake::new(Some("debian"), "debian");
+        reconcile(&mut applied, Some("r1")).unwrap();
+
+        // The delete's own attempt fails before anything is written.
+        let mut system = SystemHostname::new(Ok(applied.clone()));
+        system.store.as_mut().unwrap().saved_sync_fails = true;
+        assert!(!system.sync(None), "nothing was renamed");
+        assert!(system.failed());
+        assert_eq!(system.os_name().as_deref(), Some("r1"));
+
+        // The retry restores the file and the kernel name, and then the
+        // record's removal does not reach the disk.
+        let store = system.store.as_mut().unwrap();
+        store.saved_sync_fails = false;
+        store.unsynced_at = Some(store.writes + 2);
+        assert!(system.sync(None), "the system was renamed");
+        assert!(system.failed(), "and the attempt failed all the same");
+        assert_eq!(system.os_name().as_deref(), Some("debian"));
+
+        // The next retry has only the removal to put on disk.
+        let store = system.store.as_mut().unwrap();
+        *store = store.healed();
+        assert!(!system.sync(None), "the name did not change again");
+        assert!(!system.failed());
+        assert_eq!(
+            system.store.as_ref().unwrap().disk(),
+            (Some("debian"), None)
+        );
+    }
+
+    /// The other way round: an attempt that writes without renaming does
+    /// not report a rename. Taking over a system that already has the
+    /// name writes the record only, and an apply that fails at the static
+    /// name never reaches the kernel's.
+    #[test]
+    fn an_attempt_that_leaves_the_kernel_name_alone_reports_no_rename() {
+        let mut system = SystemHostname::new(Ok(Fake::new(Some("r1"), "r1")));
+        assert!(!system.sync(Some("r1")));
+        assert!(!system.failed());
+        assert!(system.store.as_ref().unwrap().saved.is_some());
+
+        let mut fake = Fake::new(Some("debian"), "debian");
+        // The record, then the static name: in view, not on disk.
+        fake.unsynced_at = Some(1);
+        let mut system = SystemHostname::new(Ok(fake));
+        assert!(!system.sync(Some("r1")));
+        assert!(system.failed());
+        assert_eq!(system.os_name().as_deref(), Some("debian"));
+
+        // And the plain cases: a rename, and the same name again.
+        let mut system = SystemHostname::new(Ok(Fake::new(Some("debian"), "debian")));
+        assert!(system.sync(Some("r1")));
+        assert!(!system.sync(Some("r1")));
+        assert!(system.sync(None));
+        assert!(!system.sync(None));
+    }
+
     /// A stand-in under a fresh temporary directory, removed on drop.
     struct Scratch(PathBuf);
 
@@ -1614,7 +1697,7 @@ mod tests {
     #[test]
     fn an_instance_outside_the_default_namespace_does_nothing() {
         let reason = "zebra-rs is not in the default network namespace";
-        let mut system = SystemHostname::new(Err(reason.to_string()));
+        let mut system = SystemHostname::<Store>::new(Err(reason.to_string()));
         assert!(!system.managed());
         system.sync(Some("r1"));
         assert!(!system.failed());

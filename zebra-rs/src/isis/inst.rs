@@ -1898,6 +1898,9 @@ impl Isis {
             RibRx::RouterIdUpdate(router_id) => {
                 self.rib_router_id_update(router_id);
             }
+            RibRx::HostnameUpdate(hostname) => {
+                self.rib_hostname_update(hostname);
+            }
             // Redistribute deliveries from RIB — initial walk (chunks
             // ending in `bulk: Eor`) plus steady-state deltas
             // (single-entry `bulk: More`). Stored in `redist_v{4,6}`
@@ -2028,6 +2031,17 @@ impl Isis {
                 let _ = self.tx.send(Message::LspOriginate(level, None));
             }
         }
+    }
+
+    /// `RibRx::HostnameUpdate` handler: `system hostname` is the name
+    /// TLV 137 carries when `router isis hostname` is not set. The RIB
+    /// also sends it, unchanged, when the system itself was renamed
+    /// (`--feature insomnia`), which matters to a router that has neither
+    /// and advertises the OS name: so the stored value is not compared,
+    /// the LSP's name is (`hostname_refresh`).
+    fn rib_hostname_update(&mut self, hostname: Option<String>) {
+        self.config.system_hostname = hostname;
+        super::config::hostname_refresh(self);
     }
 
     fn rib_router_id_update(&mut self, router_id: Ipv4Addr) {
