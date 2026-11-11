@@ -28,6 +28,9 @@ Feature: DHCPv4 client on a WAN interface (interface ipv4 address dhcp)
     aa:bb:cc:dd:ee:03`.
   - r1-no-default.yaml: the same as r1.yaml with `dhcp-options
     no-default-route`.
+  - r1-long-options.yaml: the same as r1-options.yaml with a `client-id`
+    of 253 characters, a `vendor-class-id` of 100 and a `user-class` of
+    50.
 
   Scenario: Setup the server and a router with a DHCP WAN
     Given a clean test environment
@@ -227,6 +230,22 @@ Feature: DHCPv4 client on a WAN interface (interface ipv4 address dhcp)
     When I apply config "r1-options.yaml" to namespace "r1"
     Then show command "show dhcp client leases" in namespace "r1" should eventually contain "State:        bound"
     And show command "show ip route" in namespace "r1" should eventually contain "0.0.0.0/0 [220/0] via 192.0.2.1, wan0"
+
+  Scenario: Options too long for one message field reach the server in the others
+    # The client keeps a message to 548 bytes. Beside this client-id the
+    # options field has no room for the two classes: the vendor class
+    # goes out in the `file` field and the user class in `sname` (option
+    # 52), in the DISCOVER and the REQUEST of a new acquisition, and the
+    # server reads both.
+    Given the test topology exists
+    When I apply command "delete interface wan0 ipv4 address dhcp" in namespace "r1"
+    Then show command "show interface wan0" in namespace "r1" should eventually not contain "192.0.2."
+    When I apply config "r1-long-options.yaml" to namespace "r1"
+    Then show command "show dhcp client leases" in namespace "r1" should eventually contain "State:        bound"
+    And command "cat /tmp/zebra-bdd-dhcp/dhcp_client/dnsmasq.log" in namespace "s1" should eventually contain "vendor class: vendor-vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv"
+    And command "cat /tmp/zebra-bdd-dhcp/dhcp_client/dnsmasq.log" in namespace "s1" should eventually contain "user-uuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuu"
+    And show command "show ip route" in namespace "r1" should eventually contain "0.0.0.0/0 [220/0] via 192.0.2.1, wan0"
+    And ping from "r1" to "198.51.100.1" should eventually succeed
 
   Scenario: A lease the server no longer renews expires
     Given the test topology exists

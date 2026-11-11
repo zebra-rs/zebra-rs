@@ -584,6 +584,16 @@ state machine (§12).
 - Option 55, the parameter request list: 1, 3, 6, 15, 28, 42, 119, 121,
   plus 26 when `mtu` is set.
 - Option 50 in SELECTING and INIT-REBOOT, and option 54 in REQUESTING.
+- No message is longer than 548 bytes: with the IP and UDP headers that
+  is the 576-byte datagram every host takes (RFC 791), and nothing tells
+  a client that the servers and relay agents on its link take more
+  (RFC 2131 §2 gives the client the same figure; option 57 raises it for
+  replies only). The options go in the order 53, 61, 50, 54, 55, 57, then
+  12, 60, 77. The first six always fit in the options field. One of the
+  last three that the options field has no room for goes whole into
+  `file`, then `sname`, which option 52 hands over to options (RFC 2131
+  §4.1). One that fits in none of the three is not sent, and the log
+  names it once.
 
 **Offers**
 
