@@ -50,9 +50,9 @@ zebra-rs's per-family containers. §16 lists the deviations.
 - The RA Route Information option (RFC 4191), stable-privacy interface
   identifiers (RFC 7217), and privacy addresses (RFC 8981).
 - Writing `resolv.conf`. The name servers of a DHCPv4 lease and of
-  Router Advertisements go to systemd-resolved where
-  `system name-server dhcp <if>` says so (§13); those of a DHCPv6 lease
-  are stored and shown, and follow.
+  Router Advertisements go to systemd-resolved, unless `no-name-server`
+  keeps them back (§13); those of a DHCPv6 lease are stored and shown,
+  and follow.
 - DHCPv4 over PPPoE, and IPv4 link-local (RFC 3927).
 - Starting DHCPv6 because of the RA M/O flags (D7).
 
@@ -482,6 +482,7 @@ interface <if>
       user-class <string>                # option 77
       default-route-distance <1-255>     # default 210
       no-default-route                   # empty
+      no-name-server                     # empty: name servers shown, not the host's (§13)
       reject <ipv4-address|prefix>*      # ignore offers from these servers
       mtu                                # empty: apply option 26 (P5, not in the schema yet)
   ipv6
@@ -490,6 +491,7 @@ interface <if>
     ra-options                           # zebra-rs extension (VyOS has none)
       default-route-distance <1-255>     # default 210
       no-default-route
+      no-name-server                     # RDNSS/DNSSL shown, not the host's (§13)
     dhcpv6-options
       duid <hex>                         # overrides the system DUID
       parameters-only                    # Information-Request only
@@ -697,7 +699,17 @@ the client stays released until `renew`, or until `address dhcp` or the
   that is refreshed stays where it is. Of one RA, what it withdraws (a
   lifetime of zero) is taken in before what it gives, and no more than
   64 of each are held: both as systemd-networkd has them (§16). The
-  resolver task is told of every change (§13).
+  resolver task is told of every change (§13), unless `ra-options
+  no-name-server` keeps them from the host.
+- **The leaves of one commit take effect together.** `address
+  autoconf`, `address dhcpv6` and the `ra-options` leaves are noted as
+  the commit's lines come in and applied at its end, as the DHCP client
+  applies its own. Applied one at a time, a host would run for a moment
+  under half of what was committed: the task takes in a Router
+  Advertisement between two lines if one is waiting. `address autoconf`
+  committed with `no-name-server` handed an advertised name server to
+  the system until the second leaf took it back, and with
+  `no-default-route` the router became the default route.
 - **MTU option:** shown, not applied.
 - **M/O flags:** shown, not acted on (D7).
 
@@ -1116,12 +1128,11 @@ zebra-rs/src/dhcpc/            (P1: the DHCPv4 parts)
   v6/show.rs                   `show dhcpv6 client leases`
   ident.rs                     the DUID file, DUID text form, IAID (P3)
 zebra-rs/src/nd/host.rs        RS, RA -> routes and SLAAC addresses (§7)
-zebra-rs/src/config/resolver.rs  spawn_resolver (with the first source, or
-                               the first `system name-server` line)
+zebra-rs/src/config/resolver.rs  spawn_resolver (with the first source)
 zebra-rs/src/resolver/         (§13)
-  inst.rs                      the task: /system/name-server/dhcp, what
-                               the sources report, what resolved holds;
-                               the difference as commands, retried
+  inst.rs                      the task: what the sources report, what
+                               resolved holds; the difference as
+                               commands, retried
   resolvectl.rs                the commands as `resolvectl` runs, the
                                namespace check, $ZEBRA_RESOLVECTL
 zebra-rs/src/rib/              AddrOrigin, AddrDynAdd/Del, addr_replace,
@@ -1149,26 +1160,36 @@ configuration of the lease's link.
 
 **Built: DHCPv4 leases, and Router Advertisements (RDNSS, DNSSL).**
 
-- **Explicit.** `system name-server dhcp <if>` (VyOS's
-  `system name-server <interface>`) names the interfaces whose learned
-  name servers the host itself uses. Without an entry they are only
-  shown. The two hazards below are why it is not automatic.
-- **A task of its own**, `resolver`. A source reports what it learns on
-  an interface whether or not the interface is named. The task holds
-  the configuration, merges an interface's sources, and makes resolved
-  hold the result. So a source knows nothing of the configuration, and
-  the two there are, the DHCP client and the RA host, are different
-  tasks that need nothing of each other.
+- **By default.** The name servers an interface learns are the host's
+  to use, as its leased address and its routes are: `address dhcp` is
+  all it takes for a lease's, and the RA host running (`ipv6 address
+  autoconf` or `address dhcpv6`) for the ones Router Advertisements
+  name. That is what netplan does unless told otherwise
+  (`dhcp4-overrides: use-dns`), with networkd (`UseDNS=`) as with
+  NetworkManager, and an uplink that leases an address and a default
+  route and then resolves no name is a surprise.
+  - `no-name-server` turns it off for an interface, by source:
+    `dhcp-options no-name-server` for its lease's name servers,
+    `ra-options no-name-server` for the advertised ones. They are then
+    only shown.
+  - It was explicit at first: `system name-server dhcp <if>`, after
+    VyOS's `system name-server <interface>`, named the interfaces, on
+    account of the two hazards below. That list is gone. The namespace
+    hazard is refused by the task itself, and the VRF one has the
+    leaves.
+- **A task of its own**, `resolver`. A source reports what the host is
+  to use of what it learns on an interface. The task merges an
+  interface's sources and makes resolved hold the result.
+  - It has no configuration. Whether an interface's name servers are
+    reported is its source's to say: each `no-name-server` is its
+    source's, as each `no-default-route` is.
+  - So the two sources there are, the DHCP client and the RA host, are
+    different tasks that need nothing of each other.
 - **DHCP ahead of Router Advertisements** (RFC 8106 §5.3.1), each
   source's servers in its own order, and what two sources both name
   once. The RA host's order is the RFC's (§6.2, §6.3; see §7): the
-  newly heard first. One source losing its servers leaves the interface
-  set with the other's.
-- **The entry is for the interface**, whatever taught it its name
-  servers. The `dhcp` in its name is kept from the first source and
-  stands for "learned, not configured". The RA host runs for
-  `ipv6 address autoconf` and `address dhcpv6`, and what it hears is
-  used only under an entry, like a lease's.
+  newly heard first. One source losing its servers, or keeping them
+  back, leaves the interface set with the other's.
 - **RA lifetimes** end what they gave like a lease's end does: a
   lifetime of zero at once, another when it has run out. The RA host
   wakes for that also when no route or address times out with it.
@@ -1185,8 +1206,9 @@ configuration of the lease's link.
   ends, and carrier loss needs nothing from us (D10 keeps the lease).
 - **Search domains** are the domain name (option 15, split on spaces:
   some servers put several names there) and then the search list
-  (option 119). networkd uses a lease's domains only with `UseDomains=`;
-  here the entry is the operator saying so.
+  (option 119). They go with the servers, as NetworkManager has it;
+  networkd uses a lease's domains only with `UseDomains=`.
+  `no-name-server` keeps both back.
 - **Checked before use.** An unspecified, loopback, multicast or
   broadcast address is not a name server. A search domain must be a
   plain domain name: resolved reads `~name` as "route these names to
@@ -1236,27 +1258,49 @@ configuration of the lease's link.
   stand-in (`bdd/tests/scripts/resolvectl_stub.sh`). The check is by
   PID 1, so a container with its own PID namespace passes it; there the
   command finds no resolved, unless the host's bus socket was mounted
-  into the container, which the check cannot see.
+  into the container, which the check cannot see. Name servers being
+  set without a word of configuration, such a container has to say
+  `dhcp-options no-name-server` on its DHCP interfaces.
 - **VRF.** resolved is not VRF-aware. It sends from a socket that is
   not bound to the VRF, with `IP_UNICAST_IF` naming the link. Such a
   socket gets no reply through an interface in a VRF unless
   `net.ipv4.udp_l3mdev_accept` is 1 (seen with a socket made that way,
   not with resolved itself), and TCP needs `tcp_l3mdev_accept`. The
-  servers of a VRF interface are set all the same: the entry is the
-  operator's choice.
-- **Not root.** The bus does not refuse an unauthorised caller at once.
-  It waits for a password, and `resolvectl` 255 has no switch against
-  that. Every command therefore has a time limit of 10 s.
+  servers of a VRF interface are set all the same: with those sysctls
+  they answer, and where the host is not to ask them,
+  `dhcp-options no-name-server` says so.
+- **Not root.** Configuring resolved takes root, and so does reading
+  PID 1's namespace.
+  - A zebra-rs that has file capabilities and is not root (`make run`)
+    fails the check above. It says `cannot tell whether this is the
+    host's network namespace (…; zebra-rs is not root)` once and sets
+    nothing. The lease, its address and its routes are as ever; the
+    host has no name server from it.
+  - Where the check is not made (`$ZEBRA_RESOLVECTL`), the bus does
+    not refuse an unauthorised caller at once. It waits for a
+    password, and `resolvectl` 255 has no switch against that (259 has
+    `--no-ask-password`). Every command therefore has a time limit of
+    10 s.
 
 **Not built yet.**
 
-- **DHCPv6 leases** as a source, between DHCPv4 and the RA host: the
-  client holds their servers and domains already.
-- **Leftovers.** An entry deleted, or a lease lost, while zebra-rs is
-  not running leaves the link's settings in resolved until the link
+- **DHCPv6 leases** as a source, between DHCPv4 and the RA host, with
+  a `dhcpv6-options no-name-server` of their own: the client holds
+  their servers and domains already.
+- **Leftovers.** `no-name-server` set, or a lease lost, while zebra-rs
+  is not running leaves the link's settings in resolved until the link
   goes or `resolvectl revert`. It needs a record of what was set, as
   the RIB has for routes (`routes.json`), and a time to wait for the
   sources after a start.
+- **Without root.** resolved's link calls are polkit actions
+  (`org.freedesktop.resolve1.set-dns-servers`, `.set-domains`,
+  `.revert`), which ask a caller that is not root for an
+  administrator's password. A rule that grants them to the daemon's
+  user, and a namespace check that does not read PID 1's link, would
+  let a zebra-rs with file capabilities alone set them. For the check:
+  newer kernels give the initial network namespace a fixed inode
+  number (`NET_NS_INIT_INO` in `linux/nsfs.h`, seen on 7.0), which
+  `/proc/self/ns/net` shows to anybody.
 - **A show command** for what was set and what failed. `resolvectl
   status <if>` shows what resolved holds.
 - **Hosts without resolved.** The command fails and is retried at the
@@ -1279,7 +1323,7 @@ configuration of the lease's link.
 | P3 (done) | DHCPv6 IA_NA and `parameters-only`; DUID; `show dhcpv6 client leases`, `renew/release dhcpv6` | P0, P2 |
 | P4 (state machine done) | IA_PD: discard route, LAN assignment, prefix change. Left: the schema (`dhcpv6-options pd`), the unreachable route, `AddrOrigin::Pd` and the `sla-id` arithmetic for the LAN addresses, prefixes in the lease file and in show, the BDD features | P3 |
 | ND-PIO | `nd` advertises PIOs for LAN /64s with counted-down lifetimes, deprecates removed ones (L-13), `RibRx::AddrAdd` on lifetime change | P1's RIB plumbing; parallel to P2–P4 |
-| Resolver (DHCPv4 and RA done) | `system name-server dhcp <if>`; the `resolver` task; the name servers of a DHCPv4 lease and of Router Advertisements to systemd-resolved (§13). Next: DHCPv6 as a source, leftovers across a restart | P1; P2 and P3 for their sources |
+| Resolver (DHCPv4 and RA done) | The `resolver` task; the name servers of a DHCPv4 lease and of Router Advertisements to systemd-resolved by default, `no-name-server` under `dhcp-options` and `ra-options` to keep them back (§13). Next: DHCPv6 as a source, leftovers across a restart | P1; P2 and P3 for their sources |
 | P5 | MTU options, Reconfigure, IA_TA, prefix exclude, RFC 4191 routes, stable-privacy identifiers, `redistribute dhcp` | as needed |
 
 Each phase is one PR, or a short series, with its own BDD feature.
@@ -1315,9 +1359,12 @@ Each phase is one PR, or a short series, with its own BDD feature.
 - **Config:** the `address dhcp` gate tests become positive, and deleting
   an `ipv6 address dhcpv6` value removes no static address.
 - **Resolver:** against a scripted backend, what is set and reverted for
-  every order of configuration, lease and failure; the commands'
-  arguments; the namespace check on made-up links; a program that fails,
-  is missing, or does not answer.
+  every order of report, withdrawal and failure; the commands'
+  arguments; the namespace check on made-up links, and what it says
+  when zebra-rs is not root; a program that fails, is missing, or does
+  not answer. In the DHCP client and in the RA host: what each
+  reports, and that under its `no-name-server` it reports nothing,
+  whether the leaf is set before the name servers come or after.
 
 **BDD (`bdd/`, not CI)**
 
@@ -1330,9 +1377,9 @@ DHCPv4, IA_NA and RAs, but not PD.
 | `dhcp_client` | lease → address and `D>* 0.0.0.0/0 [210/0]`; renew; `release`; server gone → expiry withdraws everything; zebra-rs restart keeps the address and re-verifies |
 | `dhcp_client_vrf` | WAN in VRF `red`; the route is in `red`'s table only |
 | `dhcp_client_dual_wan` | two leases at 210 / 220; link down on the first → the second's default is selected |
-| `dhcp_client_dns` | against a stand-in for `resolvectl`: nothing set without `system name-server dhcp`; with it the lease's servers and domains; reverted on `release` and on deleting the entry; replaced at a renewal; retried after a failure; servers set last are set again after an error that came with the old list already dropped; servers set by a command that got no answer are reverted; an interface deleted and made again is set again; set again after a restart |
+| `dhcp_client_dns` | against a stand-in for `resolvectl`: the lease's servers and domains set with nothing configured but `address dhcp`; reverted on `release` and on setting `no-name-server`, and set again when that is deleted; nothing set for a lease taken, or resumed after a restart, under `no-name-server`; replaced at a renewal; retried after a failure; servers set last are set again after an error that came with the old list already dropped; servers set by a command that got no answer are reverted; an interface deleted and made again is set again; set again after a restart |
 | `ra_host` | RA default route `A`, SLAAC with `autoconf`, router lifetime 0 withdraws, `accept_ra` is 0 |
-| `ra_host_dns` | against a stand-in for `resolvectl`: RDNSS and DNSSL set only under `system name-server dhcp`, the newly heard first and an option in its own order; a lifetime of zero and a lifetime run out take one away; a DHCPv4 lease's server goes ahead and its end leaves the advertised one; stopping the RA host reverts |
+| `ra_host_dns` | against a stand-in for `resolvectl`: RDNSS and DNSSL set with nothing configured but `address autoconf`, the newly heard first and an option in its own order; a lifetime of zero and a lifetime run out take one away; a DHCPv4 lease's server goes ahead and its end leaves the advertised ones; `ra-options no-name-server` takes the advertised ones back and leaves the lease's, what is heard under it is only shown, and deleting it sets what is held; stopping the RA host reverts |
 | `dhcpv6_client` | IA_NA /128 with `noprefixroute`; default route and on-link prefix from the RA, and no SLAAC address unless `autoconf` is set too; renew; `release`; zebra-rs restart keeps the address and confirms it; `parameters-only`; deleted configuration releases |
 | `dhcpv6_client_pd` | PD → discard route, LAN /64 address; prefix change replaces both; with ND-PIO, a LAN host SLAACs from it |
 | `dhcpv6_pd_insomnia` | a zebra-rs + insomnia router serving PD (insomnia's existing DHCPv6 server) to a zebra-rs client router: both sides of the feature in one topology |

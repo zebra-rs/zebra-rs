@@ -644,34 +644,6 @@ module config {
         ext:help "Global router identifier";
         type inet:ipv4-address;
       }
-      // The host's own resolver, as far as zebra-rs feeds it (the
-      // resolver task, docs/design/dhcp-client.md §13).
-      container name-server {
-        ext:help "System name servers";
-        list dhcp {
-          ext:help "Use the name servers an interface learns by DHCP or RA";
-          key "if-name";
-          description
-            "The interfaces whose learned name servers and search
-             domains the host itself uses (VyOS's `system name-server
-             <interface>`): those of its DHCPv4 lease, and those Router
-             Advertisements give it (RDNSS, DNSSL) where the RA host
-             runs, the lease's first. They are handed to
-             systemd-resolved as that link's DNS configuration, and
-             taken back when the lease ends, their lifetime runs out or
-             the entry is deleted; zebra-rs never writes resolv.conf.
-             Without an entry they are only shown (`show dhcp client
-             leases`, `show ipv6 nd interface`).
-
-             A keyed list and not a leaf-list, so that a command names
-             exactly one interface.";
-          leaf if-name {
-            ext:help "Interface name";
-            ext:dynamic "rib:interface";
-            type string;
-          }
-        }
-      }
       // The zebra-rs side of the cradle-rs eBPF data-plane integration:
       // while the tee is active, every route zebra-rs installs is teed to
       // cradle in addition to the kernel, and cradle's datapath MAC
@@ -5935,8 +5907,9 @@ module config {
              instead (the dhcpc task, docs/design/dhcp-client.md), and
              is then the only entry: a commit holding it beside a
              static address is refused. The lease's address, default
-             route and classless routes go through the RIB;
-             `dhcp-options` tunes the client.";
+             route and classless routes go through the RIB, and its
+             name servers to the host's resolver; `dhcp-options` tunes
+             the client.";
           leaf address {
             ext:help "IPv4 interface address, or dhcp to acquire one";
             type union {
@@ -5997,6 +5970,20 @@ module config {
             ext:help "Do not install a default route from the lease";
             type empty;
           }
+          leaf no-name-server {
+            ext:help "Do not use the lease's name servers for the host";
+            type empty;
+            description
+              "A lease's name servers and search domains are the host's
+               own: they are handed to systemd-resolved as the
+               interface's DNS configuration, and taken back when the
+               lease ends (the resolver task,
+               docs/design/dhcp-client.md §13); zebra-rs never writes
+               resolv.conf. With this leaf they are only shown (`show
+               dhcp client leases`): for an uplink whose name servers
+               the host is not to ask, one in a VRF for instance, as
+               systemd-resolved is not VRF-aware.";
+          }
           leaf-list reject {
             ext:help "Ignore offers from this server address or prefix";
             type union {
@@ -6024,7 +6011,8 @@ module config {
              `autoconf` runs the RA host on the interface (the nd task,
              docs/design/dhcp-client.md §7): it solicits Router
              Advertisements, installs the default route and on-link
-             prefixes they give through the RIB, and forms a SLAAC
+             prefixes they give through the RIB, hands the name servers
+             they name to the host's resolver, and forms a SLAAC
              address (RFC 4862) from each autonomous /64 prefix, beside
              any address configured here — unlike IPv4's `dhcp`, it
              does not exclude static entries. `ra-options` tunes it.
@@ -6068,6 +6056,19 @@ module config {
           leaf no-default-route {
             ext:help "Do not install a default route from Router Advertisements";
             type empty;
+          }
+          leaf no-name-server {
+            ext:help "Do not use the advertised name servers for the host";
+            type empty;
+            description
+              "The name servers and search domains Router Advertisements
+               name (RDNSS, DNSSL) are the host's own: they are handed
+               to systemd-resolved as the interface's DNS configuration,
+               behind a DHCPv4 lease's, and taken back when their
+               lifetime runs out (the resolver task,
+               docs/design/dhcp-client.md §13). With this leaf they are
+               only shown (`show ipv6 nd interface`). The lease's own
+               are `ipv4 dhcp-options no-name-server`'s to keep back.";
           }
         }
         container dhcpv6-options {

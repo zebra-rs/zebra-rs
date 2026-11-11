@@ -1,4 +1,4 @@
-# r1: a lease on wan0, and nothing said of its name servers.
+# r1: a lease on wan0, and nothing else: its name servers are the host's.
 interface:
 - if-name: wan0
   ipv4:

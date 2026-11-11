@@ -1,14 +1,14 @@
 @serial
 @dhcp_client_dns
-Feature: A DHCP lease's name servers for the host (system name-server dhcp)
+Feature: A DHCP lease's name servers for the host
 
   A lease names name servers and search domains. `show dhcp client
-  leases` shows them; the host itself uses them only where
-  `system name-server dhcp <if>` says so (the resolver task,
-  docs/design/dhcp-client.md §13). They are then handed to
-  systemd-resolved as that link's DNS configuration, by running
-  `resolvectl`, and taken back when the lease ends or the entry is
-  deleted.
+  leases` shows them, and the host itself uses them: nothing but
+  `address dhcp` is configured for that. They are handed to
+  systemd-resolved as the link's DNS configuration, by running
+  `resolvectl` (the resolver task, docs/design/dhcp-client.md §13), and
+  taken back when the lease ends. `dhcp-options no-name-server` keeps
+  an interface's name servers from the host: they are then only shown.
 
   No resolver is running here, and none must be reached: every daemon
   of the suite runs in a network namespace, from which `resolvectl`
@@ -32,8 +32,8 @@ Feature: A DHCP lease's name servers for the host (system name-server dhcp)
   Requires dnsmasq and nft on the host (tests/scripts/dhcp_server.sh).
 
   Config files:
-  - r1.yaml: `address dhcp` on wan0.
-  - r1-dns.yaml: the same with `system name-server dhcp wan0`.
+  - r1.yaml: `address dhcp` on wan0, and nothing else.
+  - r1-no-name-server.yaml: the same with `dhcp-options no-name-server`.
 
   Scenario: Setup the server and a router with a DHCP WAN
     Given a clean test environment
@@ -48,16 +48,9 @@ Feature: A DHCP lease's name servers for the host (system name-server dhcp)
     And show command "show dhcp client leases" in namespace "r1" should contain "DNS servers:  198.51.100.53"
     And show command "show dhcp client leases" in namespace "r1" should contain "Search:       corp.example, lab.example"
 
-  Scenario: Without the entry the lease's name servers are only shown
+  Scenario: The lease hands its name servers and domains to the host
     Given the test topology exists
-    # Time enough for a daemon that set them unasked to have done so. The
-    # next scenario has this same daemon reach the stand-in.
-    When I wait 3 seconds
-    Then command "tests/scripts/resolvectl_stub.sh status" in namespace "r1" should not contain "wan0"
-
-  Scenario: The entry hands the lease's name servers and domains to the host
-    Given the test topology exists
-    When I apply command "set system name-server dhcp wan0" in namespace "r1"
+    # Nothing was configured but `address dhcp`.
     Then command "tests/scripts/resolvectl_stub.sh status" in namespace "r1" should eventually contain "wan0 dns 198.51.100.53"
     # The domain name first, then the search list.
     And command "tests/scripts/resolvectl_stub.sh status" in namespace "r1" should eventually contain "wan0 domain example.com corp.example lab.example"
@@ -133,19 +126,19 @@ Feature: A DHCP lease's name servers for the host (system name-server dhcp)
     Given the test topology exists
     # The stand-in does what it is asked and then says nothing, as a
     # command does whose answer is lost: zebra-rs gives up on it after 10
-    # seconds without knowing whether the servers went in. They did. The
-    # entry is deleted before any later try has an answer, and they must
-    # not be left behind for that.
+    # seconds without knowing whether the servers went in. They did.
+    # `no-name-server` is set before any later try has an answer, and
+    # they must not be left behind for that.
     Then show command "release dhcp interface wan0" in namespace "r1" should contain "Released"
     And command "tests/scripts/resolvectl_stub.sh status" in namespace "r1" should eventually not contain "wan0"
     When I execute "tests/scripts/resolvectl_stub.sh stall" in namespace "r1"
     Then show command "renew dhcp interface wan0" in namespace "r1" should contain "Renewing"
     And command "tests/scripts/resolvectl_stub.sh status" in namespace "r1" should eventually contain "wan0 dns 198.51.100.54"
     And daemon log in namespace "r1" should eventually contain "no answer in 10 s"
-    When I apply command "delete system name-server dhcp wan0" in namespace "r1"
+    When I apply command "set interface wan0 ipv4 dhcp-options no-name-server" in namespace "r1"
     Then command "tests/scripts/resolvectl_stub.sh status" in namespace "r1" should eventually not contain "wan0"
     When I execute "tests/scripts/resolvectl_stub.sh mend" in namespace "r1"
-    And I apply command "set system name-server dhcp wan0" in namespace "r1"
+    And I apply command "delete interface wan0 ipv4 dhcp-options no-name-server" in namespace "r1"
     Then command "tests/scripts/resolvectl_stub.sh status" in namespace "r1" should eventually contain "wan0 dns 198.51.100.54"
     And show command "show dhcp client leases" in namespace "r1" should contain "State:        bound"
 
@@ -175,27 +168,57 @@ Feature: A DHCP lease's name servers for the host (system name-server dhcp)
     And command "tests/scripts/resolvectl_stub.sh status" in namespace "r1" should eventually contain "wan0 dns 198.51.100.54"
     And command "tests/scripts/resolvectl_stub.sh status" in namespace "r1" should eventually contain "wan0 domain example.com"
 
-  Scenario: Deleting the entry takes them back and leaves the lease
+  Scenario: no-name-server takes them back and leaves the lease
     Given the test topology exists
-    When I apply command "delete system name-server dhcp wan0" in namespace "r1"
+    When I apply command "set interface wan0 ipv4 dhcp-options no-name-server" in namespace "r1"
     Then command "tests/scripts/resolvectl_stub.sh status" in namespace "r1" should eventually not contain "wan0"
     And show command "show dhcp client leases" in namespace "r1" should contain "State:        bound"
     And show command "show dhcp client leases" in namespace "r1" should contain "DNS servers:  198.51.100.54"
     And show command "show ip route" in namespace "r1" should contain "0.0.0.0/0 [210/0] via 192.0.2.1, wan0"
 
+  Scenario: A lease taken under no-name-server is only shown
+    Given the test topology exists
+    Then show command "release dhcp interface wan0" in namespace "r1" should contain "Released"
+    And show command "renew dhcp interface wan0" in namespace "r1" should contain "Renewing"
+    And show command "show dhcp client leases" in namespace "r1" should eventually contain "State:        bound"
+    And show command "show dhcp client leases" in namespace "r1" should contain "DNS servers:  198.51.100.54"
+    # Time enough for a daemon that set them all the same to have done so.
+    When I wait 3 seconds
+    Then command "tests/scripts/resolvectl_stub.sh status" in namespace "r1" should not contain "wan0"
+
+  Scenario: Deleting no-name-server hands the held lease's name servers over
+    Given the test topology exists
+    When I apply command "delete interface wan0 ipv4 dhcp-options no-name-server" in namespace "r1"
+    Then command "tests/scripts/resolvectl_stub.sh status" in namespace "r1" should eventually contain "wan0 dns 198.51.100.54"
+    And command "tests/scripts/resolvectl_stub.sh status" in namespace "r1" should eventually contain "wan0 domain example.com"
+    And show command "show dhcp client leases" in namespace "r1" should contain "State:        bound"
+
   Scenario: A restart hands the resumed lease's name servers over again
     Given the test topology exists
-    When I apply command "set system name-server dhcp wan0" in namespace "r1"
-    Then command "tests/scripts/resolvectl_stub.sh status" in namespace "r1" should eventually contain "wan0 dns 198.51.100.54"
     # The stand-in forgets, so that what it holds afterwards is what the
     # restarted daemon told it and not what the old one did.
     When I stop zebra-rs in namespace "r1"
     And I execute "tests/scripts/resolvectl_stub.sh reset" in namespace "r1"
     And I start zebra-rs in namespace "r1"
-    And I apply config "r1-dns.yaml" to namespace "r1"
+    And I apply config "r1.yaml" to namespace "r1"
     Then show command "show dhcp client leases" in namespace "r1" should eventually contain "State:        bound"
     And command "tests/scripts/resolvectl_stub.sh status" in namespace "r1" should eventually contain "wan0 dns 198.51.100.54"
     And daemon log in namespace "r1" should eventually contain "wan0: resumed 192.0.2.100/24"
+
+  Scenario: A restart under no-name-server resumes the lease and sets nothing
+    Given the test topology exists
+    # `address dhcp` and `no-name-server` arrive in one commit, the lease
+    # is resumed from disk at once, and its name servers must not reach
+    # the host even for a moment.
+    When I stop zebra-rs in namespace "r1"
+    And I execute "tests/scripts/resolvectl_stub.sh reset" in namespace "r1"
+    And I start zebra-rs in namespace "r1"
+    And I apply config "r1-no-name-server.yaml" to namespace "r1"
+    Then show command "show dhcp client leases" in namespace "r1" should eventually contain "State:        bound"
+    And show command "show dhcp client leases" in namespace "r1" should contain "DNS servers:  198.51.100.54"
+    And daemon log in namespace "r1" should eventually contain "wan0: resumed 192.0.2.100/24"
+    When I wait 3 seconds
+    Then command "tests/scripts/resolvectl_stub.sh status" in namespace "r1" should not contain "wan0"
 
   Scenario: Teardown topology
     Given the test topology exists
