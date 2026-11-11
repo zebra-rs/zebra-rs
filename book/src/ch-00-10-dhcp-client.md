@@ -119,9 +119,12 @@ VRF's table and nothing reaches the default table.
 
 ## Name servers
 
-A lease names name servers and search domains. They are always shown
-(`show dhcp client leases`). The router itself uses them only where
-`system name-server dhcp <name>` says so:
+A DHCPv4 lease names name servers and search domains, and so do Router
+Advertisements where the RA host runs (RDNSS and DNSSL, see
+[below](#ipv6-router-advertisements-and-slaac)). They are always shown
+(`show dhcp client leases`, `show ipv6 nd interface`). The router itself
+uses them only where `system name-server dhcp <name>` says so, whichever
+of the two taught the interface:
 
 ```
 system {
@@ -131,8 +134,9 @@ system {
 }
 ```
 
-The interface's name servers (option 6) and search domains (the domain
-name, option 15, then the search list, option 119) are then given to
+The lease's name servers (option 6) and search domains (the domain
+name, option 15, then the search list, option 119), and behind them the
+ones Router Advertisements name, are then given to
 systemd-resolved as that link's DNS configuration: what
 `resolvectl dns wan0 …` and `resolvectl domain wan0 …` set, and
 `resolvectl status wan0` shows. zebra-rs does not write
@@ -158,6 +162,14 @@ Current DNS Server: 198.51.100.53
   replaced when a renewal names others, and taken back
   (`resolvectl revert`) when the lease is released or expires, when
   `address dhcp` is deleted, and when the `name-server` entry is.
+- **Advertised ones follow their lifetimes.** A name server or domain
+  from a Router Advertisement is taken back when its lifetime runs out,
+  at once when it is advertised with a lifetime of zero, and when the RA
+  host stops (`address autoconf` and `address dhcpv6` both deleted).
+- **Order.** What DHCP names goes ahead of what Router Advertisements
+  name (RFC 8106), the advertised servers in the order they were first
+  heard. A server or domain both name is given once. When the lease
+  ends, the advertised ones stay, and the other way round.
 - **Link down.** The lease is kept and so are its name servers:
   systemd-resolved itself leaves a link without carrier alone.
 - **Two uplinks.** Each entry's link gets its own servers, and
@@ -250,8 +262,11 @@ interface wan1 {
   prefix's lifetimes (RFC 4862, including the two-hour rule). `show
   interface` tags it `slaac`. An address that fails duplicate address
   detection is removed and not formed again.
-- **DNS servers and search domains** (RDNSS, DNSSL) and the MTU option
-  are kept with their lifetimes and shown, not applied.
+- **DNS servers and search domains** (RDNSS, DNSSL) are kept with their
+  lifetimes, in the order heard, and shown. The router uses them itself
+  under `system name-server dhcp <name>` ([Name
+  servers](#name-servers)).
+- **The MTU option** is shown, not applied.
 - The M and O flags are shown and not acted on: DHCPv6 is not started
   by them.
 
@@ -299,9 +314,9 @@ passed.
 ## Not done yet
 
 - The NTP servers of a lease are shown but not applied to the system.
-- The name servers a DHCPv6 lease or a Router Advertisement gives are
-  not given to the system resolver yet; a DHCPv4 lease's are ([Name
-  servers](#name-servers)).
+- The name servers a DHCPv6 lease gives are not given to the system
+  resolver yet; those of a DHCPv4 lease and of Router Advertisements
+  are ([Name servers](#name-servers)).
 - The interface MTU option (26) is not applied.
 - A classless route whose router is `0.0.0.0` (an on-link destination)
   is not installed; a log line says so.

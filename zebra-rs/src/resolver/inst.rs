@@ -957,9 +957,71 @@ mod tests {
         assert_eq!(b.resolver.retry, Some(Instant::now() + RETRY_MIN));
     }
 
+    /// What DHCP says goes ahead of what Router Advertisements say (RFC
+    /// 8106 §5.3.1), each in its own order, and what both say is said
+    /// once.
+    #[test]
+    fn dhcp_goes_ahead_of_router_advertisements() {
+        let mut sources = BTreeMap::new();
+        // Taken in the other way round: the order is the sources'.
+        sources.insert(
+            Source::Ra,
+            dns(
+                &["2001:db8::99", "2001:db8::11", "198.51.100.53"],
+                &["ra.example", "example.com"],
+            ),
+        );
+        sources.insert(
+            Source::Dhcp4,
+            dns(&["198.51.100.53", "198.51.100.54"], &["example.com"]),
+        );
+        assert_eq!(
+            merge(&sources),
+            dns(
+                &[
+                    "198.51.100.53",
+                    "198.51.100.54",
+                    "2001:db8::99",
+                    "2001:db8::11"
+                ],
+                &["example.com", "ra.example"]
+            )
+        );
+    }
+
+    /// One source going leaves the other's, and the interface is set
+    /// with what is left; the last one going takes everything back.
+    #[tokio::test]
+    async fn an_interface_keeps_what_its_other_source_says() {
+        let mut b = Bench::new();
+        b.commit(ConfigOp::Set, &[WAN]).await;
+        b.report(WAN, Some(dns(&["198.51.100.53"], &["example.com"])))
+            .await;
+        b.ran();
+        let ra = |b: &mut Bench, dns: Option<LinkDns>| {
+            b.resolver.learn(Report {
+                ifname: WAN.to_string(),
+                source: Source::Ra,
+                dns,
+            });
+        };
+        ra(&mut b, Some(dns(&["2001:db8::53"], &[])));
+        b.sync().await;
+        assert_eq!(
+            b.ran(),
+            set(WAN, &["198.51.100.53", "2001:db8::53"], &["example.com"])
+        );
+        // The lease ends; the RA's server stays.
+        b.report(WAN, None).await;
+        assert_eq!(b.ran(), set(WAN, &["2001:db8::53"], &[]));
+        ra(&mut b, None);
+        b.sync().await;
+        assert_eq!(b.ran(), revert(WAN));
+    }
+
     #[test]
     fn sources_merge_into_one_list_without_repeats() {
-        // One source today; the merge is by source all the same.
+        // The merge of one source: its own repeats go too.
         let mut sources = BTreeMap::new();
         sources.insert(
             Source::Dhcp4,

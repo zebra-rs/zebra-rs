@@ -306,8 +306,8 @@ pub struct ConfigManager {
     /// kernel rejecting a socket option, …); consumers silently skip
     /// in that case.
     pub nd_client_tx: RefCell<Option<UnboundedSender<crate::nd::inst::NdClientReq>>>,
-    /// Where the sources of name servers (the DHCP client) report what
-    /// they learn: the resolver task's inbox. Populated by
+    /// Where the sources of name servers (the DHCP client, the RA host)
+    /// report what they learn: the resolver task's inbox. Populated by
     /// [`super::resolver::spawn_resolver`], which every source's spawn
     /// calls, so a source always gets a live sender. `None` until then.
     pub resolver_tx: RefCell<Option<crate::resolver::ResolverTx>>,
@@ -1222,7 +1222,8 @@ impl ConfigManager {
             }
             // The resolver task holds `system name-server …`. It is
             // spawned with the first source of name servers too
-            // (`spawn_dhcpc`), which `spawn_resolver` allows for.
+            // (`spawn_dhcpc`, `spawn_nd`), which `spawn_resolver` allows
+            // for.
             if !resolver && op == ConfigOp::Set && line.starts_with("system name-server ") {
                 resolver = true;
                 spawn_resolver(self);

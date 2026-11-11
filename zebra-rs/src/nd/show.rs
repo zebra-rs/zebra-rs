@@ -399,11 +399,11 @@ fn render_host_text(
         )?;
     }
     if !host.dns.is_empty() {
-        let servers: Vec<String> = host.dns.keys().map(|a| a.to_string()).collect();
+        let servers: Vec<String> = host.dns.iter().map(|(a, _)| a.to_string()).collect();
         writeln!(out, "    DNS servers: {}", servers.join(" "))?;
     }
     if !host.search.is_empty() {
-        let domains: Vec<&str> = host.search.keys().map(String::as_str).collect();
+        let domains: Vec<&str> = host.search.iter().map(|(d, _)| d.as_str()).collect();
         writeln!(out, "    DNS search: {}", domains.join(" "))?;
     }
     if let Some(mtu) = host.mtu {

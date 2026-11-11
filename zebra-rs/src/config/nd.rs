@@ -2,6 +2,7 @@ use crate::nd::inst;
 use crate::nd::socket::nd_socket;
 
 use super::ConfigManager;
+use super::resolver::spawn_resolver;
 
 /// Spawn the ND instance. Triggered by [`commit_config`] in three
 /// places:
@@ -70,7 +71,10 @@ pub fn spawn_nd(config: &ConfigManager) {
     //
     // The RIB client carries the RA host's routes and SLAAC addresses.
     let (rib_client, rib_rx) = config.subscribe_to_rib_global_links("nd");
-    let nd = inst::Nd::new(socket, rib_client, rib_rx);
+    let mut nd = inst::Nd::new(socket, rib_client, rib_rx);
+    // The RA host reports the name servers it hears of (RDNSS, DNSSL) to
+    // the resolver task, which is spawned here if nothing has yet.
+    nd.set_resolver(spawn_resolver(config));
     config.subscribe("nd", nd.cm.tx.clone());
     config.subscribe_show("nd", nd.show.tx.clone());
     // Publish the ND client-request channel so other protocol modules

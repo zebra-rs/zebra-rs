@@ -49,9 +49,10 @@ zebra-rs's per-family containers. §16 lists the deviations.
   the prefix-exclude option (RFC 6603, WPD-8).
 - The RA Route Information option (RFC 4191), stable-privacy interface
   identifiers (RFC 7217), and privacy addresses (RFC 8981).
-- Writing `resolv.conf`. A DHCPv4 lease's name servers go to
-  systemd-resolved where `system name-server dhcp <if>` says so (§13);
-  those of a DHCPv6 lease or an RA are stored and shown, and follow.
+- Writing `resolv.conf`. The name servers of a DHCPv4 lease and of
+  Router Advertisements go to systemd-resolved where
+  `system name-server dhcp <if>` says so (§13); those of a DHCPv6 lease
+  are stored and shown, and follow.
 - DHCPv4 over PPPoE, and IPv4 link-local (RFC 3927).
 - Starting DHCPv6 because of the RA M/O flags (D7).
 
@@ -690,7 +691,8 @@ the client stays released until `renew`, or until `address dhcp` or the
     logged; there is no retry with a new identifier (RFC 7217) in this
     design.
 - **RDNSS (25) and DNSSL (31):** become typed options in `nd-packet`. They
-  are stored with their lifetimes and shown (§13).
+  are stored with their lifetimes, in the order heard, and shown. The
+  resolver task is told of every change (§13).
 - **MTU option:** shown, not applied.
 - **M/O flags:** shown, not acted on (D7).
 
@@ -1140,18 +1142,32 @@ On Ubuntu `resolv.conf` belongs to systemd-resolved, so zebra-rs never
 writes it. A lease's name servers go to resolved as the DNS
 configuration of the lease's link.
 
-**Built: DHCPv4 leases.**
+**Built: DHCPv4 leases, and Router Advertisements (RDNSS, DNSSL).**
 
 - **Explicit.** `system name-server dhcp <if>` (VyOS's
   `system name-server <interface>`) names the interfaces whose learned
   name servers the host itself uses. Without an entry they are only
   shown. The two hazards below are why it is not automatic.
-- **A task of its own**, `resolver`. A source (the DHCP client) reports
-  what it learns on an interface whether or not the interface is named.
-  The task holds the configuration, merges an interface's sources, and
-  makes resolved hold the result. So a source knows nothing of the
-  configuration, and the RA host, which is another task, can become a
-  source without the DHCP client in between.
+- **A task of its own**, `resolver`. A source reports what it learns on
+  an interface whether or not the interface is named. The task holds
+  the configuration, merges an interface's sources, and makes resolved
+  hold the result. So a source knows nothing of the configuration, and
+  the two there are, the DHCP client and the RA host, are different
+  tasks that need nothing of each other.
+- **DHCP ahead of Router Advertisements** (RFC 8106 §5.3.1), each
+  source's servers in its own order, and what two sources both name
+  once. The RA host keeps its servers and domains in the order they
+  were first heard, which is the order the RFC has a host use them in;
+  a refresh does not move one. One source losing its servers leaves the
+  interface set with the other's.
+- **The entry is for the interface**, whatever taught it its name
+  servers. The `dhcp` in its name is kept from the first source and
+  stands for "learned, not configured". The RA host runs for
+  `ipv6 address autoconf` and `address dhcpv6`, and what it hears is
+  used only under an entry, like a lease's.
+- **RA lifetimes** end what they gave like a lease's end does: a
+  lifetime of zero at once, another when it has run out. The RA host
+  wakes for that also when no route or address times out with it.
 - **Per link, by running `resolvectl`:** `dns <if> …`, `domain <if> …`
   and `revert <if>`. They are the bus calls `SetLinkDNS`,
   `SetLinkDomains` and `RevertLink`, which is how NetworkManager feeds
@@ -1230,8 +1246,8 @@ configuration of the lease's link.
 
 **Not built yet.**
 
-- **DHCPv6 leases and RA RDNSS/DNSSL** as sources: both hold their
-  servers and domains already.
+- **DHCPv6 leases** as a source, between DHCPv4 and the RA host: the
+  client holds their servers and domains already.
 - **Leftovers.** An entry deleted, or a lease lost, while zebra-rs is
   not running leaves the link's settings in resolved until the link
   goes or `resolvectl revert`. It needs a record of what was set, as
@@ -1259,7 +1275,7 @@ configuration of the lease's link.
 | P3 (done) | DHCPv6 IA_NA and `parameters-only`; DUID; `show dhcpv6 client leases`, `renew/release dhcpv6` | P0, P2 |
 | P4 (state machine done) | IA_PD: discard route, LAN assignment, prefix change. Left: the schema (`dhcpv6-options pd`), the unreachable route, `AddrOrigin::Pd` and the `sla-id` arithmetic for the LAN addresses, prefixes in the lease file and in show, the BDD features | P3 |
 | ND-PIO | `nd` advertises PIOs for LAN /64s with counted-down lifetimes, deprecates removed ones (L-13), `RibRx::AddrAdd` on lifetime change | P1's RIB plumbing; parallel to P2–P4 |
-| Resolver (DHCPv4 done) | `system name-server dhcp <if>`; the `resolver` task; a DHCPv4 lease's name servers to systemd-resolved (§13). Next: DHCPv6 and RA as sources, leftovers across a restart | P1; P2 and P3 for their sources |
+| Resolver (DHCPv4 and RA done) | `system name-server dhcp <if>`; the `resolver` task; the name servers of a DHCPv4 lease and of Router Advertisements to systemd-resolved (§13). Next: DHCPv6 as a source, leftovers across a restart | P1; P2 and P3 for their sources |
 | P5 | MTU options, Reconfigure, IA_TA, prefix exclude, RFC 4191 routes, stable-privacy identifiers, `redistribute dhcp` | as needed |
 
 Each phase is one PR, or a short series, with its own BDD feature.
@@ -1312,6 +1328,7 @@ DHCPv4, IA_NA and RAs, but not PD.
 | `dhcp_client_dual_wan` | two leases at 210 / 220; link down on the first → the second's default is selected |
 | `dhcp_client_dns` | against a stand-in for `resolvectl`: nothing set without `system name-server dhcp`; with it the lease's servers and domains; reverted on `release` and on deleting the entry; replaced at a renewal; retried after a failure; servers set last are set again after an error that came with the old list already dropped; servers set by a command that got no answer are reverted; an interface deleted and made again is set again; set again after a restart |
 | `ra_host` | RA default route `A`, SLAAC with `autoconf`, router lifetime 0 withdraws, `accept_ra` is 0 |
+| `ra_host_dns` | against a stand-in for `resolvectl`: RDNSS and DNSSL set only under `system name-server dhcp`, in the order heard; a lifetime of zero and a lifetime run out take one away; a DHCPv4 lease's server goes ahead and its end leaves the advertised one; stopping the RA host reverts |
 | `dhcpv6_client` | IA_NA /128 with `noprefixroute`; default route and on-link prefix from the RA, and no SLAAC address unless `autoconf` is set too; renew; `release`; zebra-rs restart keeps the address and confirms it; `parameters-only`; deleted configuration releases |
 | `dhcpv6_client_pd` | PD → discard route, LAN /64 address; prefix change replaces both; with ND-PIO, a LAN host SLAACs from it |
 | `dhcpv6_pd_insomnia` | a zebra-rs + insomnia router serving PD (insomnia's existing DHCPv6 server) to a zebra-rs client router: both sides of the feature in one topology |

@@ -649,16 +649,19 @@ module config {
       container name-server {
         ext:help "System name servers";
         list dhcp {
-          ext:help "Use the name servers an interface learns by DHCP";
+          ext:help "Use the name servers an interface learns by DHCP or RA";
           key "if-name";
           description
-            "The interfaces whose DHCP lease gives the host its name
-             servers and search domains (VyOS's `system name-server
-             <interface>`). They are handed to systemd-resolved as that
-             link's DNS configuration, and taken back when the lease
-             ends or the entry is deleted; zebra-rs never writes
-             resolv.conf. Without an entry a lease's name servers are
-             only shown (`show dhcp client leases`).
+            "The interfaces whose learned name servers and search
+             domains the host itself uses (VyOS's `system name-server
+             <interface>`): those of its DHCPv4 lease, and those Router
+             Advertisements give it (RDNSS, DNSSL) where the RA host
+             runs, the lease's first. They are handed to
+             systemd-resolved as that link's DNS configuration, and
+             taken back when the lease ends, their lifetime runs out or
+             the entry is deleted; zebra-rs never writes resolv.conf.
+             Without an entry they are only shown (`show dhcp client
+             leases`, `show ipv6 nd interface`).
 
              A keyed list and not a leaf-list, so that a command names
              exactly one interface.";
