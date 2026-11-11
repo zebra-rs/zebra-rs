@@ -58,6 +58,20 @@ changed `default-route-distance` re-installs the routes at once, a
 changed `client-id` starts a new lease, and the others apply from the
 client's next message.
 
+The client sends no message longer than 548 bytes, the size every server
+and relay agent takes (a 576-byte IP datagram). `client-id`, `host-name`,
+`vendor-class-id` and `user-class` of about 260 characters together
+always fit. Past that, the client moves `host-name`, `vendor-class-id` or
+`user-class` into the message's `file` and `sname` fields (option 52),
+and an option too long for those as well is not sent. The log then says
+which:
+
+```
+dhcp client: eth0: host-name not sent: the options together are too long for a DHCP message
+```
+
+The `client-id` is always sent.
+
 ## Two uplinks
 
 Each DHCP interface has its own `default-route-distance`:

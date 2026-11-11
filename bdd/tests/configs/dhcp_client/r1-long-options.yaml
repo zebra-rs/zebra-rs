@@ -1,0 +1,14 @@
+# r1: r1-options.yaml with a client-id, a vendor class and a user class
+# too long, together, for the options field of a DHCP message: 253, 100
+# and 50 characters.
+interface:
+- if-name: wan0
+  ipv4:
+    address:
+    - dhcp
+    dhcp-options:
+      default-route-distance: 220
+      host-name: edge1
+      client-id: id-iiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiii
+      vendor-class-id: vendor-vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv
+      user-class: user-uuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuu

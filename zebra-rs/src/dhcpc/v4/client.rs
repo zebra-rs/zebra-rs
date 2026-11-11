@@ -27,7 +27,7 @@ use std::net::Ipv4Addr;
 use std::time::{Duration, Instant};
 
 use dhcp_packet::v4::params::{INFINITE, Params};
-use dhcp_packet::v4::{BOOTREPLY, DhcpOption, Packet, msg, opt};
+use dhcp_packet::v4::{BOOTREPLY, DEFAULT_MAX_LEN, DhcpOption, Packet, msg, opt};
 use ipnet::Ipv4Net;
 use serde::{Deserialize, Serialize};
 
@@ -202,6 +202,9 @@ pub struct Client {
     /// Absolute lease timers; `None` for an infinite lease.
     timers: Option<Timers>,
     nak_backoff: u64,
+    /// The options the last message that was too long went without, so
+    /// that the log says it once and not with every message.
+    left_out: Vec<u8>,
     /// Entropy for transaction ids and retransmission jitter.
     random: Box<dyn FnMut() -> u32 + Send>,
 }
@@ -237,6 +240,7 @@ impl Client {
             lease: None,
             timers: None,
             nak_backoff: NAK_BACKOFF_FIRST,
+            left_out: Vec::new(),
             random,
         }
     }
@@ -305,6 +309,7 @@ impl Client {
     pub fn set_options(&mut self, mut options: Options) {
         options.client_id = self.options.client_id.take();
         self.options = options;
+        self.left_out.clear();
     }
 
     /// The interface MTU, sent as the maximum message size.
@@ -348,7 +353,44 @@ impl Client {
                 self.deadline = None;
             }
         }
+        self.fit(&mut out);
         out
+    }
+
+    /// Keeps every message within [`DEFAULT_MAX_LEN`], the size any server
+    /// or relay agent takes: nothing tells a client that the ones on its
+    /// link take more. Options past the options field go out in `file`
+    /// and `sname` (option 52), and those there is no room for even
+    /// there are not sent, which the log says. A message is built with
+    /// what the protocol needs first ([`Client::finish`]), and that
+    /// always fits, so the ones not sent are among those the
+    /// configuration adds.
+    fn fit(&mut self, out: &mut Vec<Action>) {
+        let mut left_out = Vec::new();
+        for action in out.iter_mut() {
+            let (Action::Broadcast(packet) | Action::Send(_, packet)) = action else {
+                continue;
+            };
+            let no_room = packet.fit(DEFAULT_MAX_LEN);
+            left_out.extend(no_room.iter().map(|option| option.code));
+        }
+        if left_out.is_empty() || left_out == self.left_out {
+            return;
+        }
+        let names: Vec<String> = left_out
+            .iter()
+            .map(|code| match *code {
+                opt::HOST_NAME => "host-name".into(),
+                opt::VENDOR_CLASS_ID => "vendor-class-id".into(),
+                opt::USER_CLASS => "user-class".into(),
+                code => format!("option {code}"),
+            })
+            .collect();
+        out.push(Action::Log(format!(
+            "{} not sent: the options together are too long for a DHCP message",
+            names.join(", ")
+        )));
+        self.left_out = left_out;
     }
 
     fn on_carrier(&mut self, up: bool, now: Instant, out: &mut Vec<Action>) {
@@ -875,19 +917,10 @@ impl Client {
         packet
     }
 
-    /// The options a DISCOVER and every REQUEST end with.
+    /// The options a DISCOVER and every REQUEST end with: what the client
+    /// asks for, then what the configuration says about it. The order is
+    /// who keeps a place when the message is too long ([`Client::fit`]).
     fn finish(&self, packet: &mut Packet) {
-        if let Some(name) = &self.options.host_name {
-            packet.push_option(DhcpOption::new(opt::HOST_NAME, name.as_bytes()));
-        }
-        if let Some(class) = &self.options.vendor_class_id {
-            packet.push_option(DhcpOption::new(opt::VENDOR_CLASS_ID, class.as_bytes()));
-        }
-        if let Some(class) = &self.options.user_class
-            && let Ok(option) = DhcpOption::user_class(&[class.as_bytes()])
-        {
-            packet.push_option(option);
-        }
         let mut wanted = vec![
             opt::SUBNET_MASK,
             opt::ROUTER,
@@ -903,6 +936,17 @@ impl Client {
         }
         packet.push_option(DhcpOption::parameter_request_list(&wanted));
         packet.push_option(DhcpOption::max_message_size(self.mtu));
+        if let Some(name) = &self.options.host_name {
+            packet.push_option(DhcpOption::new(opt::HOST_NAME, name.as_bytes()));
+        }
+        if let Some(class) = &self.options.vendor_class_id {
+            packet.push_option(DhcpOption::new(opt::VENDOR_CLASS_ID, class.as_bytes()));
+        }
+        if let Some(class) = &self.options.user_class
+            && let Ok(option) = DhcpOption::user_class(&[class.as_bytes()])
+        {
+            packet.push_option(option);
+        }
     }
 
     fn discover_message(&self, now: Instant) -> Packet {
@@ -1683,6 +1727,228 @@ mod tests {
         let actions = c.handle(Event::AddressLost, t0 + Duration::from_secs(3599));
         assert_eq!(actions[0], Action::Log("lease expired".into()));
         assert!(actions.contains(&Action::Unbind));
+    }
+
+    /// The options a receiver reads out of `packet`: those in `file` and
+    /// `sname` too.
+    fn read(packet: &Packet) -> Vec<DhcpOption> {
+        packet.merged_options().unwrap()
+    }
+
+    fn value(options: &[DhcpOption], code: u8) -> Option<&[u8]> {
+        options
+            .iter()
+            .find(|o| o.code == code)
+            .map(|o| o.data.as_slice())
+    }
+
+    /// Options of these lengths: the identifier in bytes, the others in
+    /// characters.
+    fn long_options(id: usize, host: usize, vendor: usize, user: usize) -> Options {
+        Options {
+            client_id: Some(vec![b'i'; id]),
+            host_name: Some("h".repeat(host)),
+            vendor_class_id: Some("v".repeat(vendor)),
+            user_class: Some("u".repeat(user)),
+            request_mtu: true,
+            ..Default::default()
+        }
+    }
+
+    /// Every message of an acquisition and of the lease's life after it:
+    /// DISCOVER, the REQUEST for the offer, a renewal, a rebinding, the
+    /// REQUEST after a carrier loss, and the RELEASE. With them, what the
+    /// log said on the way.
+    fn every_message(c: &mut Client, t0: Instant) -> (Vec<Packet>, Vec<String>) {
+        let mut packets = Vec::new();
+        let mut log = Vec::new();
+        let mut keep = |actions: Vec<Action>| {
+            for action in actions {
+                match action {
+                    Action::Broadcast(packet) | Action::Send(_, packet) => packets.push(packet),
+                    Action::Log(text) => log.push(text),
+                    _ => {}
+                }
+            }
+        };
+        let actions = c.handle(Event::Carrier(true), t0);
+        let discover = sent(&actions).clone();
+        keep(actions);
+        let actions = deliver(c, &reply(&discover, msg::OFFER, ADDRESS, vec![]), t0);
+        let request = sent(&actions).clone();
+        keep(actions);
+        let ack = reply(&request, msg::ACK, ADDRESS, lease_options(3600));
+        keep(deliver(c, &ack, t0));
+        keep(c.handle(Event::Timeout, t0 + PROBE_INTERVAL));
+        keep(c.handle(Event::Timeout, t0 + PROBE_INTERVAL * 2));
+        assert_eq!(c.state(), State::Bound);
+        let at = |secs: u64| t0 + Duration::from_secs(secs);
+        keep(c.handle(Event::Timeout, at(1800)));
+        assert_eq!(c.state(), State::Renewing);
+        keep(c.handle(Event::Timeout, at(3150)));
+        assert_eq!(c.state(), State::Rebinding);
+        keep(c.handle(Event::Carrier(false), at(3200)));
+        keep(c.handle(Event::Carrier(true), at(3200)));
+        assert_eq!(c.state(), State::Rebooting);
+        keep(c.handle(Event::Release, at(3201)));
+        let types: Vec<Option<u8>> = packets.iter().map(Packet::message_type).collect();
+        let request = Some(msg::REQUEST);
+        assert_eq!(
+            types,
+            [
+                Some(msg::DISCOVER),
+                request,
+                request,
+                request,
+                request,
+                Some(msg::RELEASE)
+            ]
+        );
+        (packets, log)
+    }
+
+    /// RFC 2131 §2, RFC 791: a message no server or relay agent has to
+    /// take is not sent. One with long options keeps to the 548 bytes
+    /// that go in a 576-byte datagram by putting options in `file` and
+    /// `sname`.
+    #[test]
+    fn long_options_go_in_file_and_sname() {
+        let t0 = Instant::now();
+        let options = long_options(100, 100, 100, 60);
+        let mut c = client(options.clone(), t0);
+        let (packets, log) = every_message(&mut c, t0);
+        assert!(log.iter().all(|text| !text.contains("not sent")), "{log:?}");
+        for packet in &packets[..5] {
+            let kind = packet.message_type();
+            // 692 bytes as they were built, the REQUEST for the offer.
+            assert!(packet.emit().len() <= DEFAULT_MAX_LEN, "{kind:?}");
+            // The vendor class is the one the options field has no room
+            // for: it is in `file`, whole, and `sname` is not needed.
+            assert_eq!(packet.option(opt::OVERLOAD).unwrap().data, [1]);
+            assert_eq!(packet.file[..3], [opt::VENDOR_CLASS_ID, 100, b'v']);
+            assert_eq!(packet.file[102..], [&[opt::END][..], &[0; 25]].concat());
+            assert_eq!(packet.sname, [0; 64]);
+            // A server reads every option.
+            let all = read(packet);
+            assert_eq!(value(&all, opt::CLIENT_ID), options.client_id.as_deref());
+            assert_eq!(value(&all, opt::HOST_NAME), Some(&[b'h'; 100][..]));
+            assert_eq!(value(&all, opt::VENDOR_CLASS_ID), Some(&[b'v'; 100][..]));
+            let user = [&[60][..], &[b'u'; 60]].concat();
+            assert_eq!(value(&all, opt::USER_CLASS), Some(&user[..]));
+            assert_eq!(value(&all, opt::OVERLOAD), None);
+            // What the exchange cannot do without is in the options
+            // field, where a server that does not read the other two
+            // finds it.
+            for code in [
+                opt::MESSAGE_TYPE,
+                opt::CLIENT_ID,
+                opt::PARAMETER_REQUEST_LIST,
+                opt::MAX_MESSAGE_SIZE,
+            ] {
+                assert!(packet.option(code).is_some(), "{kind:?} {code}");
+            }
+        }
+        let select = &packets[1];
+        assert!(select.option(opt::REQUESTED_ADDRESS).is_some());
+        assert!(select.option(opt::SERVER_ID).is_some());
+        // The RELEASE has none of the long options but the identifier.
+        assert!(packets[5].option(opt::OVERLOAD).is_none());
+        assert_eq!((packets[5].file, packets[5].sname), ([0; 128], [0; 64]));
+
+        // A message that fits goes out as it is built.
+        let mut c = client(long_options(20, 60, 60, 60), t0);
+        let (packets, log) = every_message(&mut c, t0);
+        assert!(log.iter().all(|text| !text.contains("not sent")), "{log:?}");
+        for packet in &packets {
+            assert!(packet.emit().len() <= DEFAULT_MAX_LEN);
+            assert!(packet.option(opt::OVERLOAD).is_none());
+            assert_eq!((packet.file, packet.sname), ([0; 128], [0; 64]));
+        }
+        let codes: Vec<u8> = packets[1].options().iter().map(|o| o.code).collect();
+        assert_eq!(codes, [53, 61, 50, 54, 55, 57, 12, 60, 77]);
+
+        // To the byte: the REQUEST for the offer is the longest message,
+        // and at 548 bytes it is as it was built. One more character and
+        // an option moves.
+        let mut c = client(long_options(100, 68, 50, 50), t0);
+        let (packets, _) = every_message(&mut c, t0);
+        assert_eq!(packets[1].unpadded_len(), 548);
+        assert!(packets.iter().all(|p| p.option(opt::OVERLOAD).is_none()));
+        let mut c = client(long_options(100, 69, 50, 50), t0);
+        let (packets, _) = every_message(&mut c, t0);
+        let overloaded: Vec<bool> = packets
+            .iter()
+            .map(|p| p.option(opt::OVERLOAD).is_some())
+            .collect();
+        assert_eq!(overloaded, [false, true, false, false, false, false]);
+        assert_eq!(packets[1].file[..3], [opt::USER_CLASS, 51, 50]);
+        assert!(packets[1].unpadded_len() < 548);
+    }
+
+    /// Options too long even for `file` and `sname` are not sent, and the
+    /// log names them, once.
+    #[test]
+    fn options_without_room_are_not_sent() {
+        let t0 = Instant::now();
+        // The host name fits nowhere beside an identifier this long; the
+        // vendor class has `file` and the user class `sname`.
+        let options = long_options(254, 200, 100, 50);
+        let mut c = client(options.clone(), t0);
+        let (packets, log) = every_message(&mut c, t0);
+        let said = "host-name not sent: the options together are too long for a DHCP message";
+        let about_size: Vec<&String> = log.iter().filter(|t| t.contains("not sent")).collect();
+        assert_eq!(about_size, [said]);
+        for packet in &packets[..5] {
+            assert!(packet.emit().len() <= DEFAULT_MAX_LEN);
+            assert_eq!(packet.option(opt::OVERLOAD).unwrap().data, [3]);
+            let all = read(packet);
+            assert_eq!(value(&all, opt::HOST_NAME), None);
+            assert_eq!(value(&all, opt::CLIENT_ID), options.client_id.as_deref());
+            assert_eq!(value(&all, opt::VENDOR_CLASS_ID), Some(&[b'v'; 100][..]));
+            assert_eq!(value(&all, opt::USER_CLASS).map(<[u8]>::len), Some(51));
+            assert!(packet.option(opt::PARAMETER_REQUEST_LIST).is_some());
+            assert!(packet.option(opt::MAX_MESSAGE_SIZE).is_some());
+        }
+
+        // The longest the configuration takes, all four: the messages
+        // carry what the exchange needs and the identifier, in the
+        // options field alone.
+        let mut c = client(long_options(254, 255, 255, 255), t0);
+        let (packets, log) = every_message(&mut c, t0);
+        let about_size: Vec<&String> = log.iter().filter(|t| t.contains("not sent")).collect();
+        assert_eq!(about_size.len(), 1, "{log:?}");
+        assert!(
+            about_size[0].starts_with("host-name, vendor-class-id, user-class not sent"),
+            "{log:?}"
+        );
+        for packet in &packets {
+            assert!(packet.emit().len() <= DEFAULT_MAX_LEN);
+            assert!(packet.option(opt::OVERLOAD).is_none());
+            assert_eq!(packet.option(opt::CLIENT_ID).unwrap().data.len(), 254);
+        }
+        let codes: Vec<u8> = packets[1].options().iter().map(|o| o.code).collect();
+        assert_eq!(codes, [53, 61, 50, 54, 55, 57]);
+        assert_eq!(
+            packets[1].unpadded_len(),
+            240 + 3 + 256 + 6 + 6 + 11 + 4 + 1
+        );
+
+        // New options are a new reason to say so, or none.
+        let mut c = client(long_options(254, 200, 100, 50), t0);
+        let first = c.handle(Event::Carrier(true), t0);
+        assert!(first.contains(&Action::Log(said.into())), "{first:?}");
+        let again = c.handle(Event::Timeout, c.deadline().unwrap());
+        assert!(matches!(&again[..], [Action::Broadcast(_)]), "{again:?}");
+        c.set_options(long_options(254, 200, 100, 50));
+        let again = c.handle(Event::Timeout, c.deadline().unwrap());
+        assert!(again.contains(&Action::Log(said.into())), "{again:?}");
+        c.set_options(long_options(254, 20, 100, 50));
+        let fits = c.handle(Event::Timeout, c.deadline().unwrap());
+        assert!(matches!(&fits[..], [Action::Broadcast(_)]), "{fits:?}");
+        assert_eq!(
+            value(&read(sent(&fits)), opt::HOST_NAME),
+            Some(&[b'h'; 20][..])
+        );
     }
 
     #[test]

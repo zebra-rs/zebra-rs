@@ -26,6 +26,9 @@ host (tests/scripts/dhcp_server.sh).
   aa:bb:cc:dd:ee:03`.
 - r1-no-default.yaml: the same as r1.yaml with `dhcp-options
   no-default-route`.
+- r1-long-options.yaml: the same as r1-options.yaml with a `client-id`
+  of 253 characters, a `vendor-class-id` of 100 and a `user-class` of
+  50.
 
 ## Test Scenarios
 
@@ -45,5 +48,6 @@ host (tests/scripts/dhcp_server.sh).
 | A restart without the default route takes the earlier run's away | |
 | dhcp-options change the route's distance and the host name sent | |
 | Deleting address dhcp releases the lease | |
+| Options too long for one message field reach the server in the others | |
 | A lease the server no longer renews expires | |
 | Teardown topology | |

@@ -40,6 +40,17 @@ pub const HEADER_LEN: usize = 236;
 /// The smallest BOOTP message (RFC 1542 §2.1); shorter output is padded.
 pub const MIN_LEN: usize = 300;
 
+/// The longest message that needs no agreement: with the IP and UDP
+/// headers it is the 576-byte datagram every host takes (RFC 791), which
+/// is also what RFC 2131 §2 has a client be ready for. A client learns
+/// nothing about what a server or a relay agent takes beyond that, so it
+/// sends no more ([`Packet::fit`]).
+pub const DEFAULT_MAX_LEN: usize = 548;
+
+/// `file` and `sname` as option 52 hands them over to options.
+const OVERLOAD_FILE: u8 = 1;
+const OVERLOAD_SNAME: u8 = 2;
+
 /// Message types: the value of option 53 (RFC 2132 §9.6).
 pub mod msg {
     pub const DISCOVER: u8 = 1;
@@ -280,16 +291,110 @@ impl Packet {
             .find(|o| o.code == opt::OVERLOAD)
             .and_then(|o| o.data.first().copied())
             .unwrap_or(0);
-        if overload & 1 != 0 {
+        if overload & OVERLOAD_FILE != 0 {
             merged.extend(&parse_options(&self.file)?);
         }
-        if overload & 2 != 0 {
+        if overload & OVERLOAD_SNAME != 0 {
             merged.extend(&parse_options(&self.sname)?);
         }
         let mut options = merged.options;
         options.retain(|o| o.code != opt::OVERLOAD);
         Ok(options)
     }
+
+    /// Makes a message with options at most `max_len` bytes long: options
+    /// the options field has no room for move to `file`, then to `sname`,
+    /// which option 52 hands over to options (RFC 2131 §4.1). Returns the
+    /// options there is no room for anywhere, taken out of the message.
+    /// Without options a message is 241 bytes, and no limit makes it
+    /// shorter.
+    ///
+    /// The earlier an option stands, the better its place: each goes to
+    /// the first of the three with room for it. An option stays whole,
+    /// and never ends up ahead of an earlier instance of its code, so the
+    /// value a receiver puts together from the instances (RFC 3396) is
+    /// the same as before; when one instance is left out, so are the
+    /// later ones. Where `file` or `sname` can be used, three bytes of the
+    /// options field are kept for option 52.
+    ///
+    /// A message that fits is not touched. `file` and `sname` are used
+    /// only when empty (all zero), and neither is when the message has an
+    /// option 52 already.
+    pub fn fit(&mut self, max_len: usize) -> Vec<DhcpOption> {
+        if self.unpadded_len() <= max_len {
+            return Vec::new();
+        }
+        let Body::Options(options) = &mut self.body else {
+            return Vec::new();
+        };
+        // What a message has before its first option, and after its last.
+        let fixed = HEADER_LEN + MAGIC_COOKIE.len() + 1;
+        // Handing a field over takes an option 52 that is not there yet,
+        // and the three bytes for it.
+        let can_overload = max_len >= fixed + 3 && !options.iter().any(|o| o.code == opt::OVERLOAD);
+        let file_free = can_overload && self.file == [0; 128];
+        let sname_free = can_overload && self.sname == [0; 64];
+        let option_52 = if file_free || sname_free { 3 } else { 0 };
+        // The bytes each field has for options: all but its end option,
+        // and in the options field the cookie and option 52.
+        let room = [
+            max_len.saturating_sub(fixed + option_52),
+            if file_free { self.file.len() - 1 } else { 0 },
+            if sname_free { self.sname.len() - 1 } else { 0 },
+        ];
+        let mut used = [0; 3];
+        let mut placed: [Vec<DhcpOption>; 3] = Default::default();
+        let mut left_out = Vec::new();
+        // The first field each code may still go to; 3 is none of them.
+        let mut earliest = [0; 256];
+        for option in std::mem::take(options) {
+            let len = option_len(&option);
+            let from = &mut earliest[usize::from(option.code)];
+            match (*from..3).find(|&field| used[field] + len <= room[field]) {
+                Some(field) => {
+                    used[field] += len;
+                    *from = field;
+                    placed[field].push(option);
+                }
+                None => {
+                    *from = 3;
+                    left_out.push(option);
+                }
+            }
+        }
+        let [mut main, file, sname] = placed;
+        let mut overload = 0;
+        if fill(&mut self.file, &file) {
+            overload |= OVERLOAD_FILE;
+        }
+        if fill(&mut self.sname, &sname) {
+            overload |= OVERLOAD_SNAME;
+        }
+        if overload != 0 {
+            main.push(DhcpOption {
+                code: opt::OVERLOAD,
+                data: vec![overload],
+            });
+        }
+        *options = main;
+        left_out
+    }
+}
+
+/// Writes `options` and an end option to the start of `field`, which is
+/// all zero and has the room; the zeros left over read as padding. Says
+/// whether there was anything to write.
+fn fill(field: &mut [u8], options: &[DhcpOption]) -> bool {
+    if options.is_empty() {
+        return false;
+    }
+    let mut wire = Vec::with_capacity(field.len());
+    for option in options {
+        emit_option(&mut wire, option);
+    }
+    wire.push(opt::END);
+    field[..wire.len()].copy_from_slice(&wire);
+    true
 }
 
 /// Options merged by code, RFC 3396 style, in one pass.
@@ -533,6 +638,317 @@ mod tests {
             .map(|o| o.data.len())
             .collect();
         assert_eq!(parts, [255, 45]);
+    }
+
+    /// A message with these options and nothing in `file` or `sname`.
+    fn with_options(options: &[(u8, usize)]) -> Packet {
+        let mut p = Packet::parse(&discover_bytes()).unwrap();
+        p.body = Body::Options(
+            options
+                .iter()
+                .map(|&(code, len)| DhcpOption {
+                    code,
+                    data: vec![code; len],
+                })
+                .collect(),
+        );
+        p
+    }
+
+    fn codes(options: &[DhcpOption]) -> Vec<u8> {
+        options.iter().map(|o| o.code).collect()
+    }
+
+    #[test]
+    fn fit_leaves_a_message_that_fits() {
+        // The 576 bytes every host takes, less an IP header without
+        // options and the UDP header.
+        assert_eq!(DEFAULT_MAX_LEN, 576 - 20 - 8);
+        // 240 + 3 + 302 + 2 + 1 is the limit to the byte: 298 bytes go
+        // out as two instances.
+        let mut p = with_options(&[(53, 1), (12, 298), (60, 0)]);
+        assert_eq!(p.unpadded_len(), DEFAULT_MAX_LEN);
+        let before = p.clone();
+        assert!(p.fit(DEFAULT_MAX_LEN).is_empty());
+        assert_eq!(p, before);
+        // BOOTP has no options to move.
+        let mut p = with_options(&[]);
+        p.body = Body::Bootp(vec![7; 400]);
+        let before = p.clone();
+        assert!(p.fit(DEFAULT_MAX_LEN).is_empty());
+        assert_eq!(p, before);
+    }
+
+    #[test]
+    fn fit_moves_options_to_file_then_sname() {
+        // The options field has 304 bytes once option 52 has its three.
+        // 53 and 61 take 243 of them, so 12 (102 bytes) goes to `file`,
+        // 60 (62) has no room there either and goes to `sname`, and 55
+        // (11) is in the options field again.
+        let original = with_options(&[(53, 1), (61, 238), (12, 100), (60, 60), (55, 9)]);
+        assert_eq!(original.unpadded_len(), 240 + 3 + 240 + 102 + 62 + 11 + 1);
+        let mut p = original.clone();
+        assert!(p.fit(DEFAULT_MAX_LEN).is_empty());
+        assert_eq!(codes(p.options()), [53, 61, 55, opt::OVERLOAD]);
+        assert_eq!(p.option(opt::OVERLOAD).unwrap().data, [3]);
+        assert_eq!(p.unpadded_len(), 240 + 3 + 240 + 11 + 3 + 1);
+        assert_eq!(p.file[..2], [12, 100]);
+        assert_eq!(p.file[102..], [&[opt::END][..], &[0; 25]].concat());
+        assert_eq!(p.sname[..2], [60, 60]);
+        assert_eq!(p.sname[62..], [opt::END, 0]);
+        // A receiver finds every option, each with its value.
+        let wire = p.emit();
+        assert_eq!(wire.len(), p.unpadded_len());
+        let back = Packet::parse(&wire).unwrap();
+        assert_eq!(back, p);
+        let merged = back.merged_options().unwrap();
+        assert_eq!(codes(&merged), [53, 61, 55, 12, 60]);
+        for option in original.options() {
+            assert!(merged.contains(option), "{}", option.code);
+        }
+
+        // Only the field in use is handed over.
+        let mut p = with_options(&[(53, 1), (61, 250), (12, 100)]);
+        assert!(p.fit(DEFAULT_MAX_LEN).is_empty());
+        assert_eq!(p.option(opt::OVERLOAD).unwrap().data, [1]);
+        assert_eq!(p.file[..2], [12, 100]);
+        assert_eq!(p.sname, [0; 64]);
+
+        // A field fills up to its last byte, which is the end option's.
+        let mut p = with_options(&[(53, 1), (61, 250), (12, 125), (60, 61)]);
+        assert!(p.fit(DEFAULT_MAX_LEN).is_empty());
+        assert_eq!(codes(p.options()), [53, 61, opt::OVERLOAD]);
+        assert_eq!(p.file[125..], [12, 12, opt::END]);
+        assert_eq!(p.sname[61..], [60, 60, opt::END]);
+        let merged = p.merged_options().unwrap();
+        assert_eq!(codes(&merged), [53, 61, 12, 60]);
+        assert_eq!(merged[2].data.len(), 125);
+        assert_eq!(merged[3].data.len(), 61);
+    }
+
+    #[test]
+    fn fit_returns_what_has_no_room() {
+        // 12 is too long for `file` and for what the options field has
+        // left; 60 after it still finds a place, and so does 77.
+        let mut p = with_options(&[(53, 1), (61, 200), (12, 126), (60, 125), (77, 80)]);
+        let left_out = p.fit(DEFAULT_MAX_LEN);
+        assert_eq!(codes(&left_out), [12]);
+        assert_eq!(left_out[0].data.len(), 126);
+        assert_eq!(codes(p.options()), [53, 61, 77, opt::OVERLOAD]);
+        assert_eq!(p.option(opt::OVERLOAD).unwrap().data, [1]);
+        assert_eq!(codes(&p.merged_options().unwrap()), [53, 61, 77, 60]);
+        assert!(p.unpadded_len() <= DEFAULT_MAX_LEN);
+
+        // Nothing moved, so no option 52, though its bytes were kept: 61
+        // would have fitted in them.
+        let mut p = with_options(&[(53, 1), (12, 150), (61, 150), (60, 150)]);
+        assert_eq!(codes(&p.fit(DEFAULT_MAX_LEN)), [61, 60]);
+        assert_eq!(codes(p.options()), [53, 12]);
+        assert_eq!((p.file, p.sname), ([0; 128], [0; 64]));
+        let mut p = with_options(&[(53, 1), (12, 147), (61, 150), (60, 150)]);
+        assert_eq!(codes(&p.fit(DEFAULT_MAX_LEN)), [60]);
+        assert_eq!(codes(p.options()), [53, 12, 61]);
+
+        // A limit with room for option 52 and nothing else in the options
+        // field, and one without even that.
+        let mut p = with_options(&[(53, 1), (12, 200)]);
+        assert_eq!(codes(&p.fit(HEADER_LEN + 4 + 3 + 1)), [12]);
+        assert_eq!(codes(p.options()), [opt::OVERLOAD]);
+        assert_eq!(p.file[..4], [53, 1, 53, opt::END]);
+        assert_eq!(p.unpadded_len(), HEADER_LEN + 4 + 3 + 1);
+        let mut p = with_options(&[(53, 1), (12, 200)]);
+        assert_eq!(codes(&p.fit(HEADER_LEN + 4 + 3)), [53, 12]);
+        assert!(p.options().is_empty());
+        assert_eq!((p.file, p.sname), ([0; 128], [0; 64]));
+        assert_eq!(p.unpadded_len(), HEADER_LEN + 4 + 1);
+    }
+
+    #[test]
+    fn fit_keeps_the_instances_of_a_code_in_order() {
+        // 121 comes in two instances (RFC 3396). The first goes to
+        // `file`; the second would fit in the options field, ahead of
+        // it, and goes to `sname` instead.
+        let mut original = with_options(&[(53, 1), (61, 250), (121, 100), (121, 40)]);
+        original.body = match original.body {
+            Body::Options(mut options) => {
+                options[3].data = vec![9; 40];
+                Body::Options(options)
+            }
+            body => body,
+        };
+        let mut p = original.clone();
+        assert!(p.fit(DEFAULT_MAX_LEN).is_empty());
+        assert_eq!(codes(p.options()), [53, 61, opt::OVERLOAD]);
+        assert_eq!(p.option(opt::OVERLOAD).unwrap().data, [3]);
+        assert_eq!(p.sname[..3], [121, 40, 9]);
+        assert_eq!(
+            p.merged_options().unwrap(),
+            original.merged_options().unwrap()
+        );
+        let whole = &p.merged_options().unwrap()[2];
+        assert_eq!(whole.data, [vec![121; 100], vec![9; 40]].concat());
+
+        // An instance with no room takes the later ones with it: half a
+        // value is not the value.
+        let mut p = with_options(&[(53, 1), (61, 250), (121, 130), (121, 20), (12, 20)]);
+        assert_eq!(codes(&p.fit(DEFAULT_MAX_LEN)), [121, 121]);
+        assert_eq!(codes(p.options()), [53, 61, 12]);
+    }
+
+    #[test]
+    fn fit_leaves_fields_in_use() {
+        // A boot file name is not options: only `sname` is free.
+        let mut p = with_options(&[(53, 1), (61, 250), (12, 100), (60, 50)]);
+        p.file[..4].copy_from_slice(b"boot");
+        let file = p.file;
+        assert_eq!(codes(&p.fit(DEFAULT_MAX_LEN)), [12]);
+        assert_eq!(p.file, file);
+        assert_eq!(codes(p.options()), [53, 61, opt::OVERLOAD]);
+        assert_eq!(p.option(opt::OVERLOAD).unwrap().data, [2]);
+        assert_eq!(p.sname[..2], [60, 50]);
+
+        // Neither is: the options field has all its 307 bytes.
+        let mut p = with_options(&[(53, 1), (61, 250), (12, 100), (60, 50)]);
+        p.file[0] = b'f';
+        p.sname[63] = b's';
+        let (file, sname) = (p.file, p.sname);
+        assert_eq!(codes(&p.fit(DEFAULT_MAX_LEN)), [12]);
+        assert_eq!((p.file, p.sname), (file, sname));
+        assert_eq!(codes(p.options()), [53, 61, 60]);
+        assert_eq!(p.unpadded_len(), DEFAULT_MAX_LEN);
+
+        // An option 52 of the message's own says what the fields hold.
+        let mut p = with_options(&[(53, 1), (opt::OVERLOAD, 1), (61, 250), (12, 100), (60, 30)]);
+        assert_eq!(codes(&p.fit(DEFAULT_MAX_LEN)), [12]);
+        assert_eq!(codes(p.options()), [53, opt::OVERLOAD, 61, 60]);
+        assert_eq!((p.file, p.sname), ([0; 128], [0; 64]));
+    }
+
+    /// Whatever the options and the limit: the result is within the
+    /// limit, and a receiver reads every option that was not returned,
+    /// with the value it had.
+    #[test]
+    fn fit_is_within_the_limit_and_keeps_values() {
+        let mut rng = Rng::new(52);
+        let value_of = |options: &[DhcpOption], code: u8| -> Vec<u8> {
+            options
+                .iter()
+                .filter(|o| o.code == code)
+                .flat_map(|o| o.data.clone())
+                .collect()
+        };
+        for round in 0..3000 {
+            let mut p = with_options(&[]);
+            // A few codes, so that some come more than once.
+            let options: Vec<DhcpOption> = (0..rng.below(14))
+                .map(|_| DhcpOption {
+                    code: 1 + rng.below(if round % 2 == 0 { 6 } else { 200 }) as u8,
+                    data: {
+                        let longest = if rng.chance(4) { 300 } else { 70 };
+                        let len = rng.below(longest);
+                        rng.bytes(len)
+                    },
+                })
+                .filter(|o| o.code != opt::OVERLOAD)
+                .collect();
+            p.body = Body::Options(options.clone());
+            if rng.chance(8) {
+                p.file[rng.below(128)] = 1 + rng.below(255) as u8;
+            }
+            if rng.chance(8) {
+                p.sname[rng.below(64)] = 1 + rng.below(255) as u8;
+            }
+            let before = p.clone();
+            let file_free = before.file == [0; 128];
+            let sname_free = before.sname == [0; 64];
+            // From a message without options up.
+            let max_len = HEADER_LEN + 5 + rng.below(500);
+            let left_out = p.fit(max_len);
+
+            assert!(p.unpadded_len() <= max_len, "round {round}");
+            // An option over 255 bytes parses as its instances, so it is
+            // the wire form that comes back the same.
+            let wire = p.emit();
+            let back = Packet::parse(&wire).unwrap();
+            assert!(back.emit() == wire, "round {round}");
+            assert!(back.merged_options() == p.merged_options(), "round {round}");
+            if before.unpadded_len() <= max_len {
+                assert_eq!(p, before, "round {round}");
+                assert!(left_out.is_empty());
+                continue;
+            }
+            // A field in use is as it was.
+            if !file_free {
+                assert_eq!(p.file, before.file, "round {round}");
+            }
+            if !sname_free {
+                assert_eq!(p.sname, before.sname, "round {round}");
+            }
+            // Every option is in the message or returned, and a code's
+            // value is whole or cut short from some instance on, never
+            // with a hole or out of order.
+            let merged = p.merged_options().unwrap();
+            for code in 1..=254 {
+                let kept = value_of(&merged, code);
+                let dropped = value_of(&left_out, code);
+                let was = value_of(&options, code);
+                assert_eq!([kept, dropped].concat(), was, "round {round} {code}");
+            }
+
+            // Nothing is left out that had a place. Room only shrinks, so
+            // what a field has left at the end, it had when the option
+            // was turned away.
+            let overload = p.option(opt::OVERLOAD).map_or(0, |option| option.data[0]);
+            let held = |field: &[u8], bit: u8| -> Vec<DhcpOption> {
+                if overload & bit == 0 {
+                    return Vec::new();
+                }
+                parse_options(field).unwrap()
+            };
+            let in_file = held(&p.file, OVERLOAD_FILE);
+            let in_sname = held(&p.sname, OVERLOAD_SNAME);
+            let taken = |held: &[DhcpOption]| held.iter().map(option_len).sum::<usize>();
+            // Option 52's bytes are kept whether it is there or not.
+            let can_overload = max_len >= HEADER_LEN + 8 && (file_free || sname_free);
+            let kept_for_52 = if can_overload && overload == 0 { 3 } else { 0 };
+            let left = [
+                (max_len - p.unpadded_len()).saturating_sub(kept_for_52),
+                if can_overload && file_free {
+                    127 - taken(&in_file)
+                } else {
+                    0
+                },
+                if can_overload && sname_free {
+                    63 - taken(&in_sname)
+                } else {
+                    0
+                },
+            ];
+            let mut seen = Vec::new();
+            for option in &left_out {
+                // The later instances of a code follow its first.
+                if seen.contains(&option.code) {
+                    continue;
+                }
+                seen.push(option.code);
+                // An earlier instance holds the code to its field and
+                // the ones after.
+                let from = if in_sname.iter().any(|o| o.code == option.code) {
+                    2
+                } else if in_file.iter().any(|o| o.code == option.code) {
+                    1
+                } else {
+                    0
+                };
+                for (field, left) in left.iter().enumerate().skip(from) {
+                    assert!(
+                        option_len(option) > *left,
+                        "round {round}: code {} had room in field {field}",
+                        option.code
+                    );
+                }
+            }
+        }
     }
 
     #[test]
