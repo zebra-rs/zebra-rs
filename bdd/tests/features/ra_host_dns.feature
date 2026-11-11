@@ -129,6 +129,27 @@ Feature: Name servers from Router Advertisements for the host
     And daemon log in namespace "r1" should eventually contain "resolver: wan0: name servers withdrawn"
     And show command "show ipv6 nd interface wan0" in namespace "r1" should not contain "DNS servers"
 
+  Scenario: address autoconf committed with no-name-server keeps the advertised name server back from the start
+    Given the test topology exists
+    # Both leaves in one commit, on the interface whose RA host the last
+    # scenario stopped. The leaves of a commit take effect together, so
+    # the host starts with the option in force: the name server an
+    # advertisement names after that is shown, and the stand-in, which
+    # has forgotten what it was told before, is never told of it.
+    When I execute "tests/scripts/resolvectl_stub.sh reset" in namespace "r1"
+    And I apply command "set interface wan0 ipv6 address autoconf\nset interface wan0 ipv6 ra-options no-name-server" in namespace "r1"
+    Then show command "show ipv6 nd interface wan0" in namespace "r1" should eventually contain "RA host: enabled (autoconf)"
+    And show command "show ipv6 nd interface wan0" in namespace "r1" should contain "no-name-server"
+    When I execute "tests/scripts/ra_sender.py srv0 --source fe80::1 --rdnss 2001:db8::53,600" in namespace "s1"
+    Then show command "show ipv6 nd interface wan0" in namespace "r1" should eventually contain "DNS servers: 2001:db8::53"
+    When I wait 2 seconds
+    Then command "tests/scripts/resolvectl_stub.sh history" in namespace "r1" should not contain "2001:db8::53"
+    # And both taken back in one commit: the host stops, and what it
+    # held is not handed over on the way out.
+    When I apply command "delete interface wan0 ipv6 ra-options no-name-server\ndelete interface wan0 ipv6 address autoconf" in namespace "r1"
+    Then show command "show ipv6 nd interface wan0" in namespace "r1" should eventually not contain "RA host: enabled"
+    And command "tests/scripts/resolvectl_stub.sh history" in namespace "r1" should not contain "2001:db8::53"
+
   Scenario: Teardown topology
     Given the test topology exists
     When I stop zebra-rs in namespace "r1"

@@ -3028,6 +3028,114 @@ mod save_config_tests {
         assert_eq!(violations(), Vec::<String>::new());
     }
 
+    /// The RA host's leaves of one commit take effect together, taken
+    /// from the lines as the manager hands them to the `nd` task and
+    /// through that task's own callbacks.
+    ///
+    /// `address autoconf` committed with `ra-options no-name-server` used
+    /// to start the host at the first line. The task takes in whatever
+    /// waits between two lines, so a Router Advertisement heard there
+    /// handed its name servers to the system until the second line took
+    /// them back. Now nothing of the commit is in force before its end,
+    /// and after it the advertised name server is kept back from the
+    /// start.
+    #[test]
+    fn ra_host_leaves_of_one_commit_take_effect_together() {
+        use crate::nd::config::{callbacks, dispatch};
+        use crate::nd::engine::NdEngine;
+        use crate::nd::host::{HostAction, HostLink};
+        use nd_packet::{NdOption, RaFlags, Rdnss, RouterAdvert};
+        use std::time::{Duration, Instant};
+
+        const WAN: u32 = 2;
+        let cm = manager_with_config(&temp_path("ra-host-commit"));
+        let callbacks = callbacks();
+        let mut engine = NdEngine::new();
+        let now = Instant::now();
+        engine.hosts_mut().link_add(
+            WAN,
+            HostLink {
+                name: "wan0".into(),
+                mac: Some([0x52, 0x54, 0, 0x12, 0x34, 0x56]),
+                up: true,
+                ..Default::default()
+            },
+            now,
+        );
+        let line = |engine: &mut NdEngine, text: &str, op: ConfigOp| {
+            let paths = cm.paths(text.to_string()).expect("the line parses");
+            dispatch(engine, &callbacks, ConfigRequest::new(paths, op), now);
+        };
+        let commit_end = |engine: &mut NdEngine| {
+            let end = ConfigRequest::new(Vec::new(), ConfigOp::CommitEnd);
+            dispatch(engine, &callbacks, end, now);
+        };
+        let advertise = |engine: &mut NdEngine, after: u64| {
+            let ra = RouterAdvert {
+                cur_hop_limit: 64,
+                flags: RaFlags::empty(),
+                router_lifetime: 1800,
+                reachable_time: 0,
+                retrans_timer: 0,
+                options: vec![NdOption::Rdnss(Rdnss {
+                    lifetime: 600,
+                    servers: vec!["2001:db8::53".parse().unwrap()],
+                })],
+            };
+            let router = "fe80::1".parse().unwrap();
+            let at = now + Duration::from_secs(after);
+            engine.hosts_mut().on_ra(WAN, router, &ra, at);
+        };
+        let handed_over = |engine: &mut NdEngine| {
+            let actions = engine.hosts_mut().take_actions();
+            let said = |action: &HostAction| {
+                matches!(
+                    action,
+                    HostAction::Dns { dns: Some(_), .. } | HostAction::Route { route: Some(_), .. }
+                )
+            };
+            actions.iter().filter(|action| said(action)).count()
+        };
+
+        // One commit: three lines, an advertisement between each two.
+        line(
+            &mut engine,
+            "interface wan0 ipv6 address autoconf",
+            ConfigOp::Set,
+        );
+        assert!(engine.hosts().host(WAN).is_none(), "no host before the end");
+        advertise(&mut engine, 0);
+        let leaf = "interface wan0 ipv6 ra-options no-name-server";
+        line(&mut engine, leaf, ConfigOp::Set);
+        advertise(&mut engine, 0);
+        let leaf = "interface wan0 ipv6 ra-options no-default-route";
+        line(&mut engine, leaf, ConfigOp::Set);
+        assert!(engine.hosts().host(WAN).is_none());
+        assert_eq!(handed_over(&mut engine), 0);
+
+        commit_end(&mut engine);
+        let cfg = engine.hosts().config("wan0");
+        assert!(cfg.autoconf && cfg.no_name_server && cfg.no_default_route);
+        assert!(engine.hosts().host(WAN).is_some(), "the host runs");
+        advertise(&mut engine, 1);
+        assert_eq!(engine.hosts().host(WAN).unwrap().dns.len(), 1);
+        assert_eq!(handed_over(&mut engine), 0, "kept back from the start");
+
+        // The next commit takes both options back: the name server and
+        // the router held are the system's at its end.
+        line(
+            &mut engine,
+            "interface wan0 ipv6 ra-options no-name-server",
+            ConfigOp::Delete,
+        );
+        assert_eq!(handed_over(&mut engine), 0);
+        let leaf = "interface wan0 ipv6 ra-options no-default-route";
+        line(&mut engine, leaf, ConfigOp::Delete);
+        assert_eq!(handed_over(&mut engine), 0);
+        commit_end(&mut engine);
+        assert_eq!(handed_over(&mut engine), 2);
+    }
+
     /// `interface <if> ipv4 dhcp-options no-name-server` reaches the
     /// tasks as the path the DHCP client listens for, with the interface
     /// as its argument, and takes no value.

@@ -43,4 +43,5 @@ Requires dnsmasq and nft on the host (tests/scripts/dhcp_server.sh).
 | Deleting no-name-server hands the held name servers over | |
 | The lease ending leaves the advertised name servers | |
 | Stopping the RA host takes what it gave back | |
+| address autoconf committed with no-name-server keeps the advertised name server back from the start | |
 | Teardown topology | |

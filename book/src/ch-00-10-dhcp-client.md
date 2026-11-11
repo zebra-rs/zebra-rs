@@ -336,6 +336,10 @@ In the kernel the routes show as `proto ra`. `show ipv6 nd interface
 | `no-default-route` | List the routers, but install no default route from them. |
 | `no-name-server` | List the advertised name servers and search domains, but do not give them to the router's own resolver ([Name servers](#name-servers)). |
 
+The options committed together with `address autoconf` or `address
+dhcpv6` are in force from the start: the host does not run without them
+first.
+
 Two interfaces with `autoconf` work like two DHCP uplinks: the lower
 `default-route-distance` carries the default, and at one distance the
 router preference decides, then ECMP. While a link is down its routes are

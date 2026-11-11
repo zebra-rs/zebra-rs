@@ -416,6 +416,9 @@ fn is_link_local(prefix: &Ipv6Net) -> bool {
 /// Every interface's RA host.
 pub struct RaHosts {
     config: BTreeMap<String, HostConfig>,
+    /// What the commit under way makes of an interface's configuration,
+    /// until the commit is whole (`stage_config`, `commit_config`).
+    staged: BTreeMap<String, HostConfig>,
     links: BTreeMap<u32, HostLink>,
     hosts: BTreeMap<u32, Host>,
     /// What the RIB was last told, per (VRF, prefix).
@@ -436,6 +439,7 @@ impl RaHosts {
     pub fn new() -> Self {
         Self {
             config: BTreeMap::new(),
+            staged: BTreeMap::new(),
             links: BTreeMap::new(),
             hosts: BTreeMap::new(),
             installed: BTreeMap::new(),
@@ -473,6 +477,30 @@ impl RaHosts {
     /// The routes handed to the RIB, per (VRF, prefix).
     pub fn installed(&self) -> &BTreeMap<(Option<String>, Ipv6Net), RaRoute> {
         &self.installed
+    }
+
+    /// Note what one leaf of the commit under way changes of interface
+    /// `name`'s configuration. Nothing comes of it until the commit is
+    /// whole ([`Self::commit_config`]).
+    ///
+    /// Applied a leaf at a time, a host would run for a moment under a
+    /// configuration nobody wrote: the task takes in whatever else is
+    /// waiting between two leaves, a Router Advertisement among it. So
+    /// `address autoconf` committed with `ra-options no-name-server`
+    /// started the host, and an advertisement taken in before the second
+    /// leaf handed its name servers to the system; with
+    /// `no-default-route`, its router became the default route.
+    pub fn stage_config(&mut self, name: &str, f: impl FnOnce(&mut HostConfig)) {
+        let applied = self.config(name);
+        f(self.staged.entry(name.to_string()).or_insert(applied));
+    }
+
+    /// The commit is whole: every interface it touched gets its new
+    /// configuration, all leaves at once.
+    pub fn commit_config(&mut self, now: Instant) {
+        for (name, staged) in std::mem::take(&mut self.staged) {
+            self.update_config(&name, now, |cfg| *cfg = staged);
+        }
     }
 
     /// Change interface `name`'s configuration, and start, stop or
@@ -1920,6 +1948,118 @@ mod tests {
         assert_eq!(reported(&mut hosts), wan0(None));
         hosts.link_del(WAN2);
         assert_eq!(reported(&mut hosts), [("wan1".to_string(), None)]);
+    }
+
+    /// The leaves of one commit take effect together. `address autoconf`
+    /// committed with `ra-options no-name-server` and `no-default-route`
+    /// never has the host running under the first alone: a Router
+    /// Advertisement the task takes in between two leaves finds no host
+    /// yet, and one that comes after the commit gives the system neither
+    /// a name server nor a default route.
+    #[test]
+    fn the_leaves_of_one_commit_take_effect_together() {
+        let now = t0();
+        let mut hosts = RaHosts::new();
+        hosts.set_rng(Box::new(Fixed));
+        hosts.link_add(WAN, link("wan0", true), now);
+        hosts.take_actions();
+        let options = vec![rdnss(600, &["2001:db8::53"])];
+
+        hosts.stage_config("wan0", |cfg| cfg.autoconf = true);
+        // Between the leaves nothing of the commit is in force.
+        assert!(hosts.host(WAN).is_none());
+        assert_eq!(hosts.config("wan0"), HostConfig::default());
+        hosts.on_ra(WAN, ll("fe80::1"), &ra(1800, options.clone()), now);
+        hosts.stage_config("wan0", |cfg| cfg.no_name_server = true);
+        hosts.stage_config("wan0", |cfg| cfg.no_default_route = true);
+        assert_eq!(hosts.take_actions(), []);
+
+        hosts.commit_config(now);
+        let cfg = hosts.config("wan0");
+        assert!(cfg.autoconf && cfg.no_name_server && cfg.no_default_route);
+        assert_eq!(
+            hosts.take_actions(),
+            [HostAction::DisableKernelRa {
+                ifname: "wan0".into()
+            }]
+        );
+        hosts.on_ra(WAN, ll("fe80::1"), &ra(1800, options), now + secs(1));
+        assert_eq!(hosts.host(WAN).unwrap().dns.len(), 1);
+        assert_eq!(hosts.take_actions(), []);
+
+        // A commit that says nothing of the host changes nothing of it.
+        hosts.commit_config(now + secs(2));
+        assert_eq!(hosts.take_actions(), []);
+    }
+
+    /// A leaf is staged on top of what is in force, and comes into
+    /// force with its commit, not before.
+    #[test]
+    fn a_staged_leaf_starts_from_the_configuration_in_force() {
+        let now = t0();
+        let mut hosts = hosts_with(&[(WAN, "wan0")], now);
+        let options = vec![rdnss(600, &["2001:db8::53"])];
+        hosts.on_ra(WAN, ll("fe80::1"), &ra(1800, options), now);
+        let servers = Some(link_dns(&["2001:db8::53"], &[]));
+        assert_eq!(reported(&mut hosts), wan0(servers.clone()));
+
+        hosts.stage_config("wan0", |cfg| cfg.no_name_server = true);
+        assert!(!hosts.config("wan0").no_name_server);
+        assert_eq!(reported(&mut hosts), []);
+        hosts.commit_config(now + secs(1));
+        let cfg = hosts.config("wan0");
+        assert!(cfg.autoconf && cfg.no_name_server);
+        assert_eq!(reported(&mut hosts), wan0(None));
+
+        // Two leaves of the next commit, one of them taking the first
+        // back.
+        hosts.stage_config("wan0", |cfg| cfg.no_name_server = false);
+        hosts.stage_config("wan0", |cfg| cfg.distance = 220);
+        hosts.commit_config(now + secs(2));
+        let cfg = hosts.config("wan0");
+        assert!(cfg.autoconf && !cfg.no_name_server);
+        assert_eq!(cfg.distance, 220);
+        assert_eq!(reported(&mut hosts), wan0(servers));
+    }
+
+    /// A leaf deleted and set again in one commit is as it was: the
+    /// host is not stopped for it, and keeps what it has learned.
+    #[test]
+    fn a_leaf_deleted_and_set_in_one_commit_leaves_the_host_alone() {
+        let now = t0();
+        let mut hosts = hosts_with(&[(WAN, "wan0")], now);
+        let options = vec![
+            pio("2001:db8:1::/64", la(), 3600, 1800),
+            rdnss(600, &["2001:db8::53"]),
+        ];
+        hosts.on_ra(WAN, ll("fe80::1"), &ra(1800, options), now);
+        hosts.take_actions();
+        hosts.stage_config("wan0", |cfg| cfg.autoconf = false);
+        hosts.stage_config("wan0", |cfg| cfg.autoconf = true);
+        hosts.commit_config(now + secs(1));
+        assert_eq!(hosts.take_actions(), []);
+        let host = hosts.host(WAN).unwrap();
+        assert_eq!(
+            (host.routers.len(), host.slaac.len(), host.dns.len()),
+            (1, 1, 1)
+        );
+    }
+
+    /// Each interface a commit touches gets its own leaves.
+    #[test]
+    fn a_commit_can_change_several_interfaces() {
+        let now = t0();
+        let mut hosts = RaHosts::new();
+        hosts.set_rng(Box::new(Fixed));
+        hosts.link_add(WAN, link("wan0", true), now);
+        hosts.link_add(WAN2, link("wan1", true), now);
+        hosts.stage_config("wan0", |cfg| cfg.autoconf = true);
+        hosts.stage_config("wan1", |cfg| cfg.dhcpv6 = true);
+        hosts.stage_config("wan1", |cfg| cfg.no_name_server = true);
+        hosts.commit_config(now);
+        assert!(hosts.config("wan0").autoconf && !hosts.config("wan0").no_name_server);
+        assert!(hosts.config("wan1").dhcpv6 && hosts.config("wan1").no_name_server);
+        assert!(hosts.host(WAN).is_some() && hosts.host(WAN2).is_some());
     }
 
     /// `ra-options no-name-server`: the host hears of the name servers

@@ -82,8 +82,8 @@ pub struct Nd {
     /// [`Self::show_build`] (in `super::show`) and consulted by
     /// [`Self::process_show_msg`].
     pub show_cb: HashMap<String, ShowCallback>,
-    /// Callback table — path → handler — populated by
-    /// [`Self::callback_build`] (in `super::config`) and consumed by
+    /// Callback table — path → handler — from
+    /// [`super::config::callbacks`], consumed by
     /// [`Self::process_cm_msg`].
     pub callbacks: HashMap<String, Callback>,
     // Hold the spawned read task so dropping `Nd` aborts it.
@@ -125,22 +125,16 @@ impl Nd {
             cm: ConfigChannel::new(),
             show: ShowChannel::new(),
             show_cb: HashMap::new(),
-            callbacks: HashMap::new(),
+            callbacks: super::config::callbacks(),
             _read_task: read_task,
         };
-        nd.callback_build();
         nd.show_build();
         nd
     }
 
-    /// Internal accessor for callbacks living in [`super::config`].
+    /// Internal accessor for the show callbacks in [`super::show`].
     pub(super) fn engine(&self) -> &NdEngine {
         &self.engine
-    }
-
-    /// Internal accessor for callbacks living in [`super::config`].
-    pub(super) fn engine_mut(&mut self) -> &mut NdEngine {
-        &mut self.engine
     }
 
     /// Report the RA host's name servers and search domains to the
@@ -242,10 +236,7 @@ impl Nd {
     }
 
     pub fn process_cm_msg(&mut self, msg: ConfigRequest) {
-        let (path, args) = path_from_command(&msg.paths);
-        if let Some(f) = self.callbacks.get(&path).copied() {
-            f(self, args, msg.op);
-        }
+        super::config::dispatch(&mut self.engine, &self.callbacks, msg, Instant::now());
     }
 
     async fn process_show_msg(&self, msg: DisplayRequest) {

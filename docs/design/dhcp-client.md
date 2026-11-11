@@ -699,6 +699,15 @@ the client stays released until `renew`, or until `address dhcp` or the
   that is refreshed stays where it is. The resolver task is told of
   every change (§13), unless `ra-options no-name-server` keeps them
   from the host.
+- **The leaves of one commit take effect together.** `address
+  autoconf`, `address dhcpv6` and the `ra-options` leaves are noted as
+  the commit's lines come in and applied at its end, as the DHCP client
+  applies its own. Applied one at a time, a host would run for a moment
+  under half of what was committed: the task takes in a Router
+  Advertisement between two lines if one is waiting. `address autoconf`
+  committed with `no-name-server` handed an advertised name server to
+  the system until the second leaf took it back, and with
+  `no-default-route` the router became the default route.
 - **MTU option:** shown, not applied.
 - **M/O flags:** shown, not acted on (D7).
 
