@@ -1016,6 +1016,7 @@ mod tests {
             server_address: SERVER,
             ia_na: Some(Ia {
                 iaid: ident::iaid(IF),
+                server_id: vec![0, 3, 0, 1, 2, 0, 0, 0, 0, 0xfe],
                 t1: 1800,
                 t2: 2880,
                 addresses: addresses

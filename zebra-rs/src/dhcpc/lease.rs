@@ -289,6 +289,7 @@ mod tests {
             server_address: "fe80::1".parse().unwrap(),
             ia_na: Some(Ia {
                 iaid: 7,
+                server_id: vec![0, 3, 0, 1, 2, 0, 0, 0, 0, 0xfe],
                 t1: 1800,
                 t2: 2880,
                 addresses: vec![Address {

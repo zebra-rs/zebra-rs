@@ -903,8 +903,8 @@ persistence, show and the BDD features are the rest of P4.
   asks for. The exchange is over when every identity association held
   has been answered in it, by one Reply or by several: a Rebind is for
   any server to answer.
-  - A Renew that goes on ends at the earliest T2 of the lease as the
-    Reply left it, and a Rebind follows.
+  - A Renew that goes on ends at the earliest T2 of the lease as it
+    then is, and a Rebind follows.
   - A Rebind in a Confirm's place goes on to the end of the Confirm's
     ten seconds. An answer for the address says nothing of whether the
     prefix is right for the link.
@@ -943,6 +943,41 @@ persistence, show and the BDD features are the rest of P4.
   the server had no record of goes, and the rest of the lease goes on.
   With nothing left the client starts over.
 
+  When such a round leaves something of that server's still to renew, a
+  Renew for it goes out again, and the server may say NoBinding again.
+  It is then not sent another Request for a while, which doubles from
+  one second to 64: until then its NoBinding is a Reply that leaves
+  that identity association out. Otherwise a server that says NoBinding
+  and then gives nothing would be asked in a tight loop.
+- **Each identity association has its server.** A lease is one
+  server's when it is taken. A Rebind is for any server to answer, and
+  one may answer for a part of the lease only, so each identity
+  association records the server that last gave something of it:
+  - a Reply that only takes away (a valid lifetime of 0, which any
+    server may say of what is not right for the link) changes no
+    server;
+  - a Renew is for one server (RFC 8415 §18.2.4). It speaks of what is
+    leased from that server and of what nobody has filled, never of
+    another server's, and its Reply has no say there either. The Request
+    after NoBinding likewise;
+  - each server has a Renew of its own. It begins when an identity
+    association leased from that server reaches its T1, is sent again
+    at its own pace, and is over when the server has answered for all
+    that is leased from it. So a server that does not answer holds up
+    nobody else's renewal, and every T1 a server names is kept (RFC
+    8415 §21.4). `renew` by hand asks every server at once. At the
+    earliest T2 of the lease any server is asked, about all of it;
+  - the Request after NoBinding is one more such exchange, with the
+    server that said it. The Renews with the other servers go on beside
+    it and their Replies are taken. The state shows `requesting` while
+    one is out, and T2 waits for its answer;
+  - a Release goes to each server for its own, one after another, and a
+    Decline to the server of the addresses. A Decline is exchanged
+    alone: the Renews under way begin again when it is over, which is
+    15 s at most;
+  - the other configuration (DNS, NTP) is that of the server the
+    addresses are leased from, or without an address the first prefix.
+
 ---
 
 ## 9. Identity and persistence
@@ -951,7 +986,7 @@ persistence, show and the BDD features are the rest of P4.
 |---|---|---|
 | `/var/lib/zebra-rs/dhcp/duid` | the system DUID (D8), as `xx:xx:…` text | created once; rewritten only when it holds no DUID |
 | `/var/lib/zebra-rs/dhcp/<if>.v4.json` | the lease, when it began, and the identity that took it (hardware address, client identifier) | written at bind and renew, deleted on release, expiry or deleted configuration |
-| `/var/lib/zebra-rs/dhcp/<if>.v6.json` | the lease (server DUID and address, the IA_NA's addresses with their lifetimes, DNS and NTP), when the server last confirmed it, and the identity that took it (DUID, IAID). Prefixes and LAN assignments come with P4 | same |
+| `/var/lib/zebra-rs/dhcp/<if>.v6.json` | the lease (server DUID and address, the IA_NA's addresses with their lifetimes and the DUID of the server they are leased from, DNS and NTP), when the server last confirmed it, and the identity that took it (DUID, IAID). Prefixes and LAN assignments come with P4 | same |
 
 - `ZEBRA_DHCP_STATE_DIR` overrides the directory, as
   `ZEBRA_OSPF_CHECKPOINT_DIR` does for checkpoints: for tests, and for
