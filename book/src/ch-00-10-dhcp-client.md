@@ -51,10 +51,12 @@ In the kernel the route shows as `proto dhcp`.
 | `user-class` | Option 77. |
 | `default-route-distance` | Distance of the lease's routes, 1..255. Default 210. |
 | `no-default-route` | Do not install a default route from the lease. |
+| `no-name-server` | Do not give the lease's name servers and search domains to the router's own resolver ([Name servers](#name-servers)). |
 | `reject` | A server address or prefix whose offers are ignored. Repeatable. |
 
 The options take effect without `address dhcp` being re-entered. A
-changed `default-route-distance` re-installs the routes at once, a
+changed `default-route-distance` re-installs the routes at once,
+`no-name-server` takes the name servers back or gives them at once, a
 changed `client-id` starts a new lease, and the others apply from the
 client's next message.
 
@@ -121,26 +123,42 @@ VRF's table and nothing reaches the default table.
 
 A DHCPv4 lease names name servers and search domains, and so do Router
 Advertisements where the RA host runs (RDNSS and DNSSL, see
-[below](#ipv6-router-advertisements-and-slaac)). They are always shown
-(`show dhcp client leases`, `show ipv6 nd interface`). The router itself
-uses them only where `system name-server dhcp <name>` says so, whichever
-of the two taught the interface:
-
-```
-system {
-  name-server {
-    dhcp wan0;
-  }
-}
-```
+[below](#ipv6-router-advertisements-and-slaac)). The router itself uses
+them: `address dhcp` is all it takes for a lease's, and `address
+autoconf` or `address dhcpv6` for the advertised ones.
 
 The lease's name servers (option 6) and search domains (the domain
 name, option 15, then the search list, option 119), and behind them the
-ones Router Advertisements name, are then given to
-systemd-resolved as that link's DNS configuration: what
-`resolvectl dns wan0 …` and `resolvectl domain wan0 …` set, and
-`resolvectl status wan0` shows. zebra-rs does not write
-`/etc/resolv.conf`.
+ones Router Advertisements name, are given to systemd-resolved as that
+link's DNS configuration: what `resolvectl dns wan0 …` and
+`resolvectl domain wan0 …` set, and `resolvectl status wan0` shows.
+zebra-rs does not write `/etc/resolv.conf`.
+
+`/etc/resolv.conf` is systemd-resolved's own file and names its local
+listener (`nameserver 127.0.0.53`) whatever it has been given: it does
+not show an interface's name servers. `resolvectl status` does.
+
+`no-name-server` keeps an interface's name servers from the router, by
+where they come from: under `dhcp-options` the lease's, under
+`ra-options` the advertised ones. They are then only shown
+(`show dhcp client leases`, `show ipv6 nd interface`):
+
+```
+interface wan1 {
+  ipv4 {
+    address dhcp;
+    dhcp-options {
+      no-name-server;
+    }
+  }
+  ipv6 {
+    address autoconf;
+    ra-options {
+      no-name-server;
+    }
+  }
+}
+```
 
 ```
 router> show dhcp client leases
@@ -161,21 +179,27 @@ Current DNS Server: 198.51.100.53
 - **They follow the lease.** They are set when the lease is bound,
   replaced when a renewal names others, and taken back
   (`resolvectl revert`) when the lease is released or expires, when
-  `address dhcp` is deleted, and when the `name-server` entry is.
+  `address dhcp` is deleted, and when `dhcp-options no-name-server` is
+  set. Deleting that gives the held lease's name servers to the router
+  at once.
 - **Advertised ones follow their lifetimes.** A name server or domain
   from a Router Advertisement is taken back when its lifetime runs out,
-  at once when it is advertised with a lifetime of zero, and when the RA
-  host stops (`address autoconf` and `address dhcpv6` both deleted).
+  at once when it is advertised with a lifetime of zero, when the RA
+  host stops (`address autoconf` and `address dhcpv6` both deleted),
+  and when `ra-options no-name-server` is set. Deleting that gives the
+  ones still held to the router at once.
 - **Order.** What DHCP names goes ahead of what Router Advertisements
   name. Among the advertised ones, a server or domain heard of for the
   first time goes ahead of those already held, and the entries of one
   RDNSS or DNSSL option keep the option's order (RFC 8106). A server or
   domain both DHCP and an advertisement name is given once. When the
-  lease ends, the advertised ones stay, and the other way round.
+  lease ends, or its name servers are kept back, the advertised ones
+  stay, and the other way round.
 - **Link down.** The lease is kept and so are its name servers:
   systemd-resolved itself leaves a link without carrier alone.
-- **Two uplinks.** Each entry's link gets its own servers, and
-  systemd-resolved asks those of every link that is up.
+- **Two uplinks.** Each link gets its own servers, and systemd-resolved
+  asks those of every link that is up. `no-name-server` on one of them
+  leaves the router with the other's.
 - **Addresses and names are checked.** A loopback, unspecified,
   multicast or broadcast address is not used as a name server, and a
   search domain that is not a plain domain name is dropped.
@@ -187,7 +211,11 @@ Current DNS Server: 198.51.100.53
 What it needs:
 
 - systemd-resolved, and `resolvectl` on the path.
-- zebra-rs running as root, which the packaged service does.
+- zebra-rs running as root, which the packaged service does. Started
+  with file capabilities alone (`make run`), it leases the address and
+  the routes as ever, logs `cannot tell whether this is the host's
+  network namespace (…; zebra-rs is not root): the system resolver is
+  left alone` and sets no name server.
 - zebra-rs in the host's network namespace. `resolvectl` identifies an
   interface to systemd-resolved by its index, and the indexes of another
   namespace are those of other interfaces on the host. Run in another
@@ -198,11 +226,14 @@ What it needs:
 **VRF.** systemd-resolved does not know about VRFs. The name servers of
 an interface in a VRF are set all the same, but its queries to them are
 answered only with `net.ipv4.udp_l3mdev_accept` and
-`net.ipv4.tcp_l3mdev_accept` set to 1.
+`net.ipv4.tcp_l3mdev_accept` set to 1. Without them, `no-name-server`
+on that interface keeps the router from asking servers that will not
+answer it.
 
 **Restart.** A restart of zebra-rs leaves what was set in place and sets
-it again from the resumed lease. An entry deleted while zebra-rs is not
-running is not taken back: `resolvectl revert <name>` does it by hand.
+it again from the resumed lease. `no-name-server` set while zebra-rs is
+not running takes nothing back: `resolvectl revert <name>` does it by
+hand.
 
 ## Commands
 
@@ -266,7 +297,7 @@ interface wan1 {
   detection is removed and not formed again.
 - **DNS servers and search domains** (RDNSS, DNSSL) are kept with their
   lifetimes and shown, the most recently learned first. The router uses
-  them itself under `system name-server dhcp <name>` ([Name
+  them itself, unless `ra-options no-name-server` says not to ([Name
   servers](#name-servers)).
 - **The MTU option** is shown, not applied.
 - The M and O flags are shown and not acted on: DHCPv6 is not started
@@ -303,6 +334,11 @@ In the kernel the routes show as `proto ra`. `show ipv6 nd interface
 |---|---|
 | `default-route-distance` | Distance of the RA's routes, 1..255. Default 210. |
 | `no-default-route` | List the routers, but install no default route from them. |
+| `no-name-server` | List the advertised name servers and search domains, but do not give them to the router's own resolver ([Name servers](#name-servers)). |
+
+The options committed together with `address autoconf` or `address
+dhcpv6` are in force from the start: the host does not run without them
+first.
 
 Two interfaces with `autoconf` work like two DHCP uplinks: the lower
 `default-route-distance` carries the default, and at one distance the

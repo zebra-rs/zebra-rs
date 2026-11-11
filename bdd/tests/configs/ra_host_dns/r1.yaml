@@ -1,4 +1,5 @@
-# r1: the RA host on wan0, and nothing said of its name servers.
+# r1: the RA host on wan0, and nothing else: the name servers it hears
+# of are the host's.
 interface:
 - if-name: wan0
   ipv6:

@@ -1,14 +1,15 @@
 //! The host's own resolver, as far as zebra-rs feeds it
 //! (docs/design/dhcp-client.md §13).
 //!
-//! `system name-server dhcp <if>` names the interfaces whose learned name
-//! servers the host itself is to use. Whoever learns name servers on an
-//! interface (the DHCP client, the RA host) reports them here, whether
-//! or not the interface is named. One task, [`inst::Resolver`], holds the
-//! configuration and hands the named interfaces' servers and search
-//! domains to systemd-resolved as that link's DNS configuration
-//! ([`resolvectl`]), and takes them back when the source loses them or
-//! the entry is deleted. zebra-rs never writes resolv.conf.
+//! The name servers an interface learns are the host's to use, as its
+//! leased address and its routes are. Whoever learns them (the DHCP
+//! client, the RA host) reports them here, unless its own configuration
+//! keeps them back (`interface <if> ipv4 dhcp-options no-name-server`,
+//! `interface <if> ipv6 ra-options no-name-server`). One task,
+//! [`inst::Resolver`], hands each interface's servers and search domains
+//! to systemd-resolved as that link's DNS configuration
+//! ([`resolvectl`]), and takes them back when the sources lose them.
+//! zebra-rs never writes resolv.conf.
 
 pub mod inst;
 pub mod resolvectl;
@@ -34,8 +35,8 @@ pub enum Source {
     Ra,
 }
 
-/// What `source` now knows of `ifname`: `None` when that is nothing (any
-/// more).
+/// What `source` now has on `ifname` for the host to use: `None` when
+/// that is nothing (any more).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Report {
     pub ifname: String,

@@ -4,51 +4,75 @@
 //! `interface X ipv6 ra-options …`).
 //!
 //! Modelled on `bfd::config` — each leaf gets a free-standing callback
-//! that mutates `Nd` state directly. Registration happens once at
-//! [`super::inst::Nd::new`] time via [`Nd::callback_build`]. The
-//! dispatcher in [`super::inst::Nd::process_cm_msg`] routes
-//! `ConfigRequest`s to the right callback by path.
+//! that mutates the engine's state directly. The RA host's leaves are
+//! the exception: a callback only notes them, and they take effect
+//! together at the end of the commit ([`RaHosts::stage_config`]), so
+//! that a host never runs under half of what a commit says of it.
+//!
+//! [`callbacks`] is the table, built once at [`super::inst::Nd::new`]
+//! time, and [`dispatch`] routes a `ConfigRequest` to its callback by
+//! path. Both work on the engine and not on the task, which owns a raw
+//! socket and cannot be built in a test.
+//!
+//! [`RaHosts::stage_config`]: super::host::RaHosts::stage_config
 
+use std::collections::HashMap;
 use std::time::Instant;
 
-use crate::config::{Args, ConfigOp};
+use crate::config::{Args, ConfigOp, ConfigRequest, path_from_command};
 
+use super::engine::NdEngine;
 use super::host::DEFAULT_DISTANCE;
-use super::inst::Nd;
 use super::send::RaSendConfig;
 
-pub type Callback = fn(&mut Nd, Args, ConfigOp) -> Option<()>;
+pub type Callback = fn(&mut NdEngine, Args, ConfigOp) -> Option<()>;
 
-impl Nd {
-    /// All paths registered by [`Self::callback_build`] are prefixed
-    /// with this. Keeping it as a constant matches the OSPF / BFD
-    /// pattern in this repo and makes additions easier to spot.
-    const ND_IF: &str = "/interface/ipv6/router-advertisements";
+/// The RA sender's leaves are under this. Keeping it as a constant
+/// matches the OSPF / BFD pattern in this repo and makes additions easier
+/// to spot.
+const ND_IF: &str = "/interface/ipv6/router-advertisements";
 
-    /// The RA host's options.
-    const RA_OPTIONS: &str = "/interface/ipv6/ra-options";
+/// The RA host's options.
+const RA_OPTIONS: &str = "/interface/ipv6/ra-options";
 
-    pub fn callback_build(&mut self) {
-        self.config_add("/send-advertisements", config_send_advertisements);
-        self.callbacks
-            .insert("/interface/ipv6/address".to_string(), config_address);
-        let options: [(&str, Callback); 2] = [
-            ("/default-route-distance", config_distance),
-            ("/no-default-route", config_no_default_route),
-        ];
-        for (leaf, callback) in options {
-            self.callbacks
-                .insert(format!("{}{leaf}", Self::RA_OPTIONS), callback);
-        }
+/// Every path the `nd` task takes configuration from, and its callback.
+pub fn callbacks() -> HashMap<String, Callback> {
+    let mut callbacks: HashMap<String, Callback> = HashMap::new();
+    callbacks.insert(
+        format!("{ND_IF}/send-advertisements"),
+        config_send_advertisements,
+    );
+    callbacks.insert("/interface/ipv6/address".to_string(), config_address);
+    let options: [(&str, Callback); 3] = [
+        ("/default-route-distance", config_distance),
+        ("/no-default-route", config_no_default_route),
+        ("/no-name-server", config_no_name_server),
+    ];
+    for (leaf, callback) in options {
+        callbacks.insert(format!("{RA_OPTIONS}{leaf}"), callback);
     }
+    callbacks
+}
 
-    fn config_add(&mut self, path: &str, cb: Callback) {
-        self.callbacks
-            .insert(format!("{}{}", Self::ND_IF, path), cb);
+/// One message of a commit: a leaf goes to its callback, and the end of
+/// the commit puts the RA host's leaves into force, all at once.
+pub fn dispatch(
+    engine: &mut NdEngine,
+    callbacks: &HashMap<String, Callback>,
+    msg: ConfigRequest,
+    now: Instant,
+) {
+    if msg.op == ConfigOp::CommitEnd {
+        engine.hosts_mut().commit_config(now);
+        return;
+    }
+    let (path, args) = path_from_command(&msg.paths);
+    if let Some(f) = callbacks.get(&path) {
+        f(engine, args, msg.op);
     }
 }
 
-fn config_send_advertisements(nd: &mut Nd, mut args: Args, op: ConfigOp) -> Option<()> {
+fn config_send_advertisements(engine: &mut NdEngine, mut args: Args, op: ConfigOp) -> Option<()> {
     let name = args.string()?;
     // A delete may arrive without the leaf value — default to false
     // so it still lands in the unset branch.
@@ -59,10 +83,9 @@ fn config_send_advertisements(nd: &mut Nd, mut args: Args, op: ConfigOp) -> Opti
     // separate channel and may not have populated the name → ifindex
     // map yet) and applies when the link appears.
     if op.is_set() && enable {
-        nd.engine_mut()
-            .set_ra_config(name, RaSendConfig::default(), Instant::now());
+        engine.set_ra_config(name, RaSendConfig::default(), Instant::now());
     } else {
-        nd.engine_mut().unset_ra_config(&name);
+        engine.unset_ra_config(&name);
     }
     Some(())
 }
@@ -71,7 +94,7 @@ fn config_send_advertisements(nd: &mut Nd, mut args: Args, op: ConfigOp) -> Opti
 /// are ours, each of them running the RA host; the RIB handles the
 /// prefixes, and the DHCP client the lease `dhcpv6` asks for. A delete
 /// with no value removes every address, these two included.
-fn config_address(nd: &mut Nd, mut args: Args, op: ConfigOp) -> Option<()> {
+fn config_address(engine: &mut NdEngine, mut args: Args, op: ConfigOp) -> Option<()> {
     let name = args.string()?;
     let mut values = Vec::new();
     while let Some(value) = args.string() {
@@ -88,38 +111,42 @@ fn config_address(nd: &mut Nd, mut args: Args, op: ConfigOp) -> Option<()> {
     if !autoconf && !dhcpv6 {
         return Some(());
     }
-    nd.engine_mut()
-        .hosts_mut()
-        .update_config(&name, Instant::now(), |cfg| {
-            if autoconf {
-                cfg.autoconf = enabled;
-            }
-            if dhcpv6 {
-                cfg.dhcpv6 = enabled;
-            }
-        });
+    engine.hosts_mut().stage_config(&name, |cfg| {
+        if autoconf {
+            cfg.autoconf = enabled;
+        }
+        if dhcpv6 {
+            cfg.dhcpv6 = enabled;
+        }
+    });
     Some(())
 }
 
-fn config_distance(nd: &mut Nd, mut args: Args, op: ConfigOp) -> Option<()> {
+fn config_distance(engine: &mut NdEngine, mut args: Args, op: ConfigOp) -> Option<()> {
     let name = args.string()?;
     let distance = if op.is_set() {
         args.u8()?
     } else {
         DEFAULT_DISTANCE
     };
-    nd.engine_mut()
+    engine
         .hosts_mut()
-        .update_config(&name, Instant::now(), |cfg| cfg.distance = distance);
+        .stage_config(&name, |cfg| cfg.distance = distance);
     Some(())
 }
 
-fn config_no_default_route(nd: &mut Nd, mut args: Args, op: ConfigOp) -> Option<()> {
+fn config_no_default_route(engine: &mut NdEngine, mut args: Args, op: ConfigOp) -> Option<()> {
     let name = args.string()?;
-    nd.engine_mut()
+    engine
         .hosts_mut()
-        .update_config(&name, Instant::now(), |cfg| {
-            cfg.no_default_route = op.is_set()
-        });
+        .stage_config(&name, |cfg| cfg.no_default_route = op.is_set());
+    Some(())
+}
+
+fn config_no_name_server(engine: &mut NdEngine, mut args: Args, op: ConfigOp) -> Option<()> {
+    let name = args.string()?;
+    engine
+        .hosts_mut()
+        .stage_config(&name, |cfg| cfg.no_name_server = op.is_set());
     Some(())
 }

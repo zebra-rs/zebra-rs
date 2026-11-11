@@ -90,19 +90,32 @@ impl Backend for Resolvectl {
 /// process is where the host's resolved is. Reading PID 1's takes root,
 /// and so does configuring resolved.
 fn host_netns(ours: &Path, init: &Path) -> Result<(), String> {
-    let read = |path: &Path| {
-        std::fs::read_link(path).map_err(|e| {
-            format!(
-                "cannot tell whether this is the host's network namespace ({}: {e})",
-                path.display()
-            )
-        })
-    };
+    let root = nix::unistd::geteuid().is_root();
+    let read = |path: &Path| std::fs::read_link(path).map_err(|e| unreadable(path, &e, root));
     if read(ours)? == read(init)? {
         Ok(())
     } else {
         Err("this is not the host's network namespace".to_string())
     }
+}
+
+/// Why a namespace could not be looked at.
+///
+/// A lease's name servers are the host's without a word of
+/// configuration, so this is the one line that tells a zebra-rs that is
+/// not root (started with file capabilities alone, as `make run` does)
+/// why they were not set. It names the cause and not only the error.
+fn unreadable(path: &Path, error: &std::io::Error, root: bool) -> String {
+    let not_root = !root && error.kind() == std::io::ErrorKind::PermissionDenied;
+    format!(
+        "cannot tell whether this is the host's network namespace ({}: {error}{})",
+        path.display(),
+        if not_root {
+            "; zebra-rs is not root"
+        } else {
+            ""
+        }
+    )
 }
 
 /// `resolvectl`'s arguments for `op`, after a `--` that keeps an
@@ -265,6 +278,32 @@ mod tests {
         assert!(
             unreadable.starts_with("cannot tell whether this is the host's network namespace"),
             "{unreadable}"
+        );
+    }
+
+    /// PID 1's namespace is not readable without root. Not being root
+    /// is then named as the cause, and only then.
+    #[test]
+    fn a_namespace_that_takes_root_to_read_says_so() {
+        let init = Path::new("/proc/1/ns/net");
+        let denied = std::io::Error::from_raw_os_error(libc::EACCES);
+        assert_eq!(
+            unreadable(init, &denied, false),
+            "cannot tell whether this is the host's network namespace \
+             (/proc/1/ns/net: Permission denied (os error 13); zebra-rs is not root)"
+        );
+        // Root and refused all the same (a user namespace): not that.
+        assert_eq!(
+            unreadable(init, &denied, true),
+            "cannot tell whether this is the host's network namespace \
+             (/proc/1/ns/net: Permission denied (os error 13))"
+        );
+        // Nor when it is not there to read.
+        let absent = std::io::Error::from_raw_os_error(libc::ENOENT);
+        assert!(
+            unreadable(init, &absent, false).ends_with("(os error 2))"),
+            "{}",
+            unreadable(init, &absent, false)
         );
     }
 

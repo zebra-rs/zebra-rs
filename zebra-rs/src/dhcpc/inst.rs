@@ -59,6 +59,9 @@ pub struct IfConfig {
     pub reject: Vec<Ipv4Net>,
     pub distance: Option<u8>,
     pub no_default_route: bool,
+    /// `no-name-server`: the lease's name servers and search domains are
+    /// shown and not the host's to use.
+    pub no_name_server: bool,
 }
 
 impl IfConfig {
@@ -162,8 +165,9 @@ pub struct Dhcpc {
     release_poll: Option<Instant>,
     /// The DHCPv6 clients ([`super::v6::inst`]).
     pub(super) v6: V6,
-    /// Where the leases' name servers are reported ([`crate::resolver`]),
-    /// and what has been, by interface (`sync_dns`).
+    /// Where the leases' name servers go for the host to use
+    /// ([`crate::resolver`]), and what has been said there, by interface
+    /// (`sync_dns`).
     resolver: Option<ResolverTx>,
     reported_dns: BTreeMap<String, LinkDns>,
 }
@@ -218,7 +222,7 @@ impl Dhcpc {
     }
 
     /// Report the leases' name servers and search domains to the resolver
-    /// task, which decides what the host does with them.
+    /// task, which gives the system resolver what it is told of.
     pub fn set_resolver(&mut self, resolver: ResolverTx) {
         self.resolver = Some(resolver);
     }
@@ -1011,9 +1015,12 @@ impl Dhcpc {
         }
     }
 
-    /// Tell the resolver task what the leases held now say of name
-    /// servers: every change, once. Whether the host uses them is its
-    /// configuration (`system name-server dhcp <if>`), not ours.
+    /// Tell the resolver task which name servers the leases held now
+    /// give the host: every change, once. What is said there is the
+    /// host's to use, as the lease's address and routes are, so nothing
+    /// is said of an interface with `dhcp-options no-name-server`: set
+    /// while its lease is held, that takes the servers back, and
+    /// deleted, it gives them again.
     ///
     /// A lease says it for as long as it is held, link up or down: the
     /// system resolver itself leaves a link without carrier alone. A
@@ -1025,7 +1032,7 @@ impl Dhcpc {
         };
         let mut now = BTreeMap::new();
         for (name, iface) in &self.ifaces {
-            if iface.releasing.is_some() {
+            if iface.releasing.is_some() || iface.cfg.no_name_server {
                 continue;
             }
             if let Some(dns) = iface.bound.as_ref().and_then(lease_dns) {
@@ -1551,6 +1558,58 @@ mod tests {
         let mut dns = its_dns();
         dns.servers.truncate(1);
         assert_eq!(reported(&mut rx), [Some(dns)]);
+    }
+
+    /// One `dhcp-options` leaf of `IF` set or deleted, as the
+    /// configuration delivers it, and the end of its commit.
+    fn commit_option(b: &mut Bench, leaf: &str, op: ConfigOp) {
+        let callback = b.dhcpc.callbacks[&format!("/interface/ipv4/dhcp-options/{leaf}")];
+        callback(&mut b.dhcpc, verb(IF), op);
+        b.dhcpc
+            .process_cm_msg(ConfigRequest::new(Vec::new(), ConfigOp::CommitEnd));
+    }
+
+    /// `dhcp-options no-name-server`: the lease is held like any other,
+    /// and nothing is said of its name servers, which only what is said
+    /// gives to the host.
+    #[tokio::test]
+    async fn no_name_server_keeps_a_lease_s_name_servers_from_the_host() {
+        let mut b = bench("dns-off", true);
+        let mut rx = resolver(&mut b);
+        commit_option(&mut b, "no-name-server", ConfigOp::Set);
+        assert!(b.dhcpc.ifaces[IF].cfg.no_name_server);
+        with_resumed_lease(&mut b, &lease_with_dns());
+        assert_eq!(reported(&mut rx), []);
+        // Nor of the others a renewal names.
+        let mut other = lease_with_dns();
+        other.dns_servers.truncate(1);
+        b.dhcpc.ifaces.get_mut(IF).unwrap().bound = Some(other);
+        b.dhcpc.publish();
+        assert_eq!(reported(&mut rx), []);
+        // And there is nothing to take back when the lease ends.
+        b.dhcpc.release(verb(IF));
+        assert_eq!(reported(&mut rx), []);
+    }
+
+    /// Set while a lease is held, `no-name-server` takes its name servers
+    /// back from the host; deleted, it gives them again. The lease stays
+    /// as it is through both: no address and no route moves.
+    #[tokio::test]
+    async fn no_name_server_set_and_deleted_under_a_held_lease() {
+        let mut b = bench("dns-toggle", true);
+        let mut rx = resolver(&mut b);
+        with_resumed_lease(&mut b, &lease_with_dns());
+        assert_eq!(reported(&mut rx), [Some(its_dns())]);
+        asked(&mut b);
+
+        commit_option(&mut b, "no-name-server", ConfigOp::Set);
+        assert_eq!(reported(&mut rx), [None]);
+        commit_option(&mut b, "no-name-server", ConfigOp::Delete);
+        assert!(!b.dhcpc.ifaces[IF].cfg.no_name_server);
+        assert_eq!(reported(&mut rx), [Some(its_dns())]);
+
+        assert!(b.dhcpc.ifaces[IF].bound.is_some());
+        assert!(asked(&mut b).is_empty());
     }
 
     /// A saved lease resumed only to be released as who took it is on its

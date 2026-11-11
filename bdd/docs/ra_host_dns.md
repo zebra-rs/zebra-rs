@@ -1,16 +1,18 @@
-# Name servers from Router Advertisements for the host (system name-server dhcp)
+# Name servers from Router Advertisements for the host
 
 ## Overview
 
 Router Advertisements name name servers (RDNSS) and search domains
-(DNSSL, RFC 8106). The RA host holds them with their lifetimes and
-`show ipv6 nd interface` shows them; the host itself uses them only
-where `system name-server dhcp <if>` says so (the resolver task,
-docs/design/dhcp-client.md §13). They are then handed to
-systemd-resolved as that link's DNS configuration: the ones heard of
-last first, those of one option in the option's order (RFC 8106
-§6.2), all behind those of a DHCP lease on the same interface. They
-are taken back as their lifetimes end or the RA host stops.
+(DNSSL, RFC 8106). The RA host holds them with their lifetimes,
+`show ipv6 nd interface` shows them, and the host itself uses them:
+nothing but the RA host is configured for that (the resolver task,
+docs/design/dhcp-client.md §13). They are handed to systemd-resolved
+as the link's DNS configuration: the ones heard of last first, those
+of one option in the option's order (RFC 8106 §6.2), all behind those
+of a DHCP lease on the same interface. They are taken back as their
+lifetimes end or the RA host stops. `ra-options no-name-server` keeps
+an interface's advertised name servers from the host: they are then
+only shown, and a lease's are none the worse for it.
 
 No resolver is running here: the harness names a stand-in for
 `resolvectl` to each daemon (tests/scripts/resolvectl_stub.sh), whose
@@ -24,19 +26,22 @@ Requires dnsmasq and nft on the host (tests/scripts/dhcp_server.sh).
 
 ## Config Files
 
-- r1.yaml: `ipv6 address autoconf` on wan0.
+- r1.yaml: `ipv6 address autoconf` on wan0, and nothing else.
 
 ## Test Scenarios
 
 | Scenario | Result |
 |----------|--------|
 | Setup a router that advertises a name server and an RA host | |
-| Without the entry what the advertisements name is only shown | |
-| The entry hands the advertised name server and domain to the host | |
+| The advertised name server and domain are handed to the host | |
 | Newly advertised name servers go first, and an option keeps its order | |
 | A lifetime of zero takes a name server away at once | |
 | A name server whose lifetime runs out is taken away | |
 | A DHCP lease's name server goes ahead of the advertised one | |
-| The lease ending leaves the advertised name server | |
+| ra-options no-name-server keeps the advertised ones back and leaves the lease's | |
+| What is advertised under no-name-server is only shown | |
+| Deleting no-name-server hands the held name servers over | |
+| The lease ending leaves the advertised name servers | |
 | Stopping the RA host takes what it gave back | |
+| address autoconf committed with no-name-server keeps the advertised name server back from the start | |
 | Teardown topology | |

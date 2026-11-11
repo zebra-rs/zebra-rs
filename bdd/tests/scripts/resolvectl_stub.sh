@@ -12,6 +12,8 @@
 #   resolvectl_stub.sh [--] domain LINK [DOMAIN…]    as resolvectl
 #   resolvectl_stub.sh [--] revert LINK              as resolvectl
 #   resolvectl_stub.sh status   what is held: `LINK dns …`, `LINK domain …`
+#   resolvectl_stub.sh history  every dns, domain and revert it was asked
+#                               for since the last reset, one a line
 #   resolvectl_stub.sh reset    hold nothing, and work
 #   resolvectl_stub.sh break [SECONDS]
 #                               fail every dns, domain and revert, after
@@ -70,6 +72,8 @@ dns | domain | revert)
     fi
     link=$1
     shift
+    mkdir -p "$dir"
+    echo "$verb $link $*" >>"$dir/history"
     index=$(index_of "$link")
     if [ -n "$index" ]; then
         mkdir -p "$dir"
@@ -107,6 +111,10 @@ dns | domain | revert)
         exit 1
     fi
     ;;
+history)
+    cat "$dir/history" 2>/dev/null || true
+    echo "history: end"
+    ;;
 status)
     for file in "$dir"/*.dns "$dir"/*.domain; do
         [ -e "$file" ] || continue
@@ -136,7 +144,7 @@ mend)
     rm -f "$dir/broken" "$dir/stalled" "$dir/spoiled"
     ;;
 *)
-    echo "usage: $0 [--] dns LINK [SERVER…] | domain LINK [DOMAIN…] | revert LINK | status | reset | break [SECONDS] | stall | spoil | mend" >&2
+    echo "usage: $0 [--] dns LINK [SERVER…] | domain LINK [DOMAIN…] | revert LINK | status | history | reset | break [SECONDS] | stall | spoil | mend" >&2
     exit 2
     ;;
 esac

@@ -18,8 +18,8 @@ use super::resolver::spawn_resolver;
 /// line reaches the task only if committed after the spawn, so the
 /// running value is handed over here.
 ///
-/// The leases' name servers go to the resolver task, which is spawned
-/// here if `system name-server …` has not spawned it yet.
+/// The leases' name servers go to the resolver task, which gives them to
+/// the host's resolver and is spawned here, with its first source.
 ///
 /// [`commit_config`]: crate::config::ConfigManager::commit_config
 pub fn spawn_dhcpc(config: &ConfigManager) {
