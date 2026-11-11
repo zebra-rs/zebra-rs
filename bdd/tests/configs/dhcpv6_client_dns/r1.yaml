@@ -1,0 +1,7 @@
+# r1: a DHCPv6 lease on wan0, and nothing else: the name servers the
+# lease names are the host's, and so are the ones the router advertises.
+interface:
+- if-name: wan0
+  ipv6:
+    address:
+    - dhcpv6

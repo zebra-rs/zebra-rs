@@ -168,7 +168,7 @@ pub struct Dhcpc {
     /// Where the leases' name servers go for the host to use
     /// ([`crate::resolver`]), and what has been said there, by interface
     /// (`sync_dns`).
-    resolver: Option<ResolverTx>,
+    pub(super) resolver: Option<ResolverTx>,
     reported_dns: BTreeMap<String, LinkDns>,
 }
 
@@ -1039,25 +1039,7 @@ impl Dhcpc {
                 now.insert(name.clone(), dns);
             }
         }
-        for name in self.reported_dns.keys() {
-            if !now.contains_key(name) {
-                let _ = resolver.send(Report {
-                    ifname: name.clone(),
-                    source: Source::Dhcp4,
-                    dns: None,
-                });
-            }
-        }
-        for (name, dns) in &now {
-            if self.reported_dns.get(name) != Some(dns) {
-                let _ = resolver.send(Report {
-                    ifname: name.clone(),
-                    source: Source::Dhcp4,
-                    dns: Some(dns.clone()),
-                });
-            }
-        }
-        self.reported_dns = now;
+        report_dns(resolver, Source::Dhcp4, &mut self.reported_dns, now);
     }
 
     fn named_iface(&self, mut args: Args) -> Result<String, String> {
@@ -1121,6 +1103,36 @@ impl Dhcpc {
         self.ifaces.insert(name.to_string(), iface);
         self.reconcile(name);
     }
+}
+
+/// Tell the resolver task how what `source` knows of name servers has
+/// changed: `now` by interface, against what it `reported` last. Every
+/// change once, and an interface that has nothing any more as that.
+pub(super) fn report_dns(
+    resolver: &ResolverTx,
+    source: Source,
+    reported: &mut BTreeMap<String, LinkDns>,
+    now: BTreeMap<String, LinkDns>,
+) {
+    for name in reported.keys() {
+        if !now.contains_key(name) {
+            let _ = resolver.send(Report {
+                ifname: name.clone(),
+                source,
+                dns: None,
+            });
+        }
+    }
+    for (name, dns) in &now {
+        if reported.get(name) != Some(dns) {
+            let _ = resolver.send(Report {
+                ifname: name.clone(),
+                source,
+                dns: Some(dns.clone()),
+            });
+        }
+    }
+    *reported = now;
 }
 
 /// What a lease says of name servers, if anything: the servers (option

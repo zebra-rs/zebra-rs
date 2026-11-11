@@ -121,15 +121,18 @@ VRF's table and nothing reaches the default table.
 
 ## Name servers
 
-A DHCPv4 lease names name servers and search domains, and so do Router
-Advertisements where the RA host runs (RDNSS and DNSSL, see
+A DHCPv4 lease names name servers and search domains, and so do a
+DHCPv6 server ([below](#ipv6-dhcpv6)) and Router Advertisements where
+the RA host runs (RDNSS and DNSSL, see
 [below](#ipv6-router-advertisements-and-slaac)). The router itself uses
-them: `address dhcp` is all it takes for a lease's, and `address
-autoconf` or `address dhcpv6` for the advertised ones.
+them: `address dhcp` is all it takes for a DHCPv4 lease's, `address
+dhcpv6` or `dhcpv6-options parameters-only` for a DHCPv6 server's, and
+`address autoconf` or `address dhcpv6` for the advertised ones.
 
-The lease's name servers (option 6) and search domains (the domain
-name, option 15, then the search list, option 119), and behind them the
-ones Router Advertisements name, are given to systemd-resolved as that
+The DHCPv4 lease's name servers (option 6) and search domains (the
+domain name, option 15, then the search list, option 119), behind them
+the DHCPv6 server's (options 23 and 24), and behind those the ones
+Router Advertisements name, are given to systemd-resolved as that
 link's DNS configuration: what `resolvectl dns wan0 …` and
 `resolvectl domain wan0 …` set, and `resolvectl status wan0` shows.
 zebra-rs does not write `/etc/resolv.conf`.
@@ -139,9 +142,10 @@ listener (`nameserver 127.0.0.53`) whatever it has been given: it does
 not show an interface's name servers. `resolvectl status` does.
 
 `no-name-server` keeps an interface's name servers from the router, by
-where they come from: under `dhcp-options` the lease's, under
-`ra-options` the advertised ones. They are then only shown
-(`show dhcp client leases`, `show ipv6 nd interface`):
+where they come from: under `dhcp-options` the DHCPv4 lease's, under
+`dhcpv6-options` the DHCPv6 server's, under `ra-options` the advertised
+ones. They are then only shown (`show dhcp client leases`, `show dhcpv6
+client leases`, `show ipv6 nd interface`):
 
 ```
 interface wan1 {
@@ -152,7 +156,10 @@ interface wan1 {
     }
   }
   ipv6 {
-    address autoconf;
+    address dhcpv6;
+    dhcpv6-options {
+      no-name-server;
+    }
     ra-options {
       no-name-server;
     }
@@ -181,7 +188,9 @@ Current DNS Server: 198.51.100.53
   (`resolvectl revert`) when the lease is released or expires, when
   `address dhcp` is deleted, and when `dhcp-options no-name-server` is
   set. Deleting that gives the held lease's name servers to the router
-  at once.
+  at once. A DHCPv6 lease's follow it the same way, with `release
+  dhcpv6`, `address dhcpv6` and `dhcpv6-options no-name-server`; the
+  ones `parameters-only` was given are taken back when it is deleted.
 - **Advertised ones follow their lifetimes.** A name server or domain
   from a Router Advertisement is taken back when its lifetime runs out,
   at once when it is advertised with a lifetime of zero, when the RA
@@ -189,12 +198,13 @@ Current DNS Server: 198.51.100.53
   and when `ra-options no-name-server` is set. Deleting that gives the
   ones still held to the router at once.
 - **Order.** What DHCP names goes ahead of what Router Advertisements
-  name. Among the advertised ones, a server or domain heard of for the
-  first time goes ahead of those already held, and the entries of one
-  RDNSS or DNSSL option keep the option's order (RFC 8106). A server or
-  domain both DHCP and an advertisement name is given once. When the
-  lease ends, or its name servers are kept back, the advertised ones
-  stay, and the other way round.
+  name, and a DHCPv4 lease's ahead of a DHCPv6 server's. Among the
+  advertised ones, a server or domain heard of for the first time goes
+  ahead of those already held, and the entries of one RDNSS or DNSSL
+  option keep the option's order (RFC 8106). A server or domain several
+  of them name is given once, where the first names it. When one of
+  them ends, or its name servers are kept back, those of the others
+  stay.
 - **Link down.** The lease is kept and so are its name servers:
   systemd-resolved itself leaves a link without carrier alone.
 - **Two uplinks.** Each link gets its own servers, and systemd-resolved
@@ -349,15 +359,73 @@ the routes left in the kernel are taken over as the first RAs arrive, and
 those no RA gives any more are removed once `--leftover-sweep-time` has
 passed.
 
+## IPv6: DHCPv6
+
+`interface <name> ipv6 address dhcpv6` starts zebra-rs's own DHCPv6
+client on the interface. It leases an address and puts it on the
+interface as a /128, which brings no connected route: which prefixes are
+on-link, and the default route, are for Router Advertisements to say.
+So `address dhcpv6` runs the RA host too
+([above](#ipv6-router-advertisements-and-slaac)), without forming a
+SLAAC address unless `address autoconf` is set as well.
+
+```
+interface wan1 {
+  ipv6 {
+    address dhcpv6;
+  }
+}
+```
+
+`dhcpv6-options parameters-only` asks the server for the other
+configuration alone (name servers, the search list, NTP servers) and
+for no address. It does not go together with `address dhcpv6` on one
+interface, and it does not run the RA host.
+
+| YANG leaf (under `/interface/<name>/ipv6/dhcpv6-options`) | Notes |
+|---|---|
+| `duid` | The DUID this interface's client presents, as colon-separated hex octets. Unset, the system's DUID is used, made once and kept across restarts. Changing it gives the lease back and asks again as another client. |
+| `parameters-only` | Ask for the configuration parameters only, and no address. |
+| `rapid-commit` | Accept the two-message exchange (Rapid Commit) from a server that offers it. |
+| `no-release` | Do not release the lease when the client stops. |
+| `no-name-server` | Show the server's name servers and search domains, but do not give them to the router's own resolver ([Name servers](#name-servers)). |
+
+```
+show dhcpv6 client leases [interface <name>]
+renew dhcpv6 interface <name>
+release dhcpv6 interface <name>
+```
+
+```
+router> show dhcpv6 client leases
+Interface: wan1
+  VRF:          default
+  State:        bound
+  DUID:         00:01:00:01:32:85:1b:00:52:54:00:12:34:56
+  IAID:         1194042915
+  Server:       fe80::1
+  Server DUID:  00:03:00:01:02:00:00:00:00:fe
+  Address:      2001:db8:1::100/128 preferred 3000s valid 6600s
+  Renew in:     1200s
+  Rebind in:    2400s
+  DNS servers:  2001:db8:53::53
+  Search:       example.com
+
+router> show interface wan1
+  inet6 2001:db8:1::100/128 noprefixroute dhcpv6 valid-lft 6600 preferred-lft 3000
+```
+
+`renew` and `release` work as they do for DHCPv4. After a restart of
+zebra-rs the client takes the lease from disk, uses it at once and asks
+the server whether it is still right for the link. With
+`parameters-only` the state is `informed` and no address is shown.
+
 ## Not done yet
 
 - The NTP servers of a lease are shown but not applied to the system.
-- The name servers a DHCPv6 lease gives are not given to the system
-  resolver yet; those of a DHCPv4 lease and of Router Advertisements
-  are ([Name servers](#name-servers)).
 - The interface MTU option (26) is not applied.
 - A classless route whose router is `0.0.0.0` (an on-link destination)
   is not installed; a log line says so.
-- DHCPv6 (stateful addresses and prefix delegation).
+- DHCPv6 prefix delegation.
 - The RA host does not advertise the prefixes it learns on other
   interfaces, and does not use stable-privacy or temporary addresses.
