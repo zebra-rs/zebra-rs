@@ -1,9 +1,8 @@
 # Native DHCP client (DHCPv4, DHCPv6, RA host)
 
-**Status: P0 (the codec), P1 (the RIB plumbing and the DHCPv4 client)
-and P2 (the RA host) are implemented. Of P3, the protocol half is
-implemented: the DHCPv6 state machine, the DUID and the IAIDs. The task
-does not run it yet. The rest of P3 and what follows is design.** Where a
+**Status: P0 (the codec), P1 (the RIB plumbing and the DHCPv4 client),
+P2 (the RA host) and P3 (the DHCPv6 client for an address and for
+`parameters-only`) are implemented. P4 onwards is design.** Where a
 phase found the code to be different from what this document assumed, the
 text below says what was built and why.
 
@@ -281,8 +280,10 @@ would bypass the RIB.
 
 **DUID**
 
-- One per system, generated once as a DUID-LLT from the first Ethernet
-  MAC.
+- One per system, generated once as a DUID-LLT from an Ethernet MAC:
+  that of the first interface to run a DHCPv6 client, or else the first
+  hardware address there is. The address only goes into a DUID made
+  then; one on disk stays what it is.
 - Stored in `/var/lib/zebra-rs/dhcp/duid`, next to
   `/var/lib/zebra-rs/checkpoint`. RFC 7084 W-5: the DUID "MUST NOT change
   between network-interface resets or IPv6 CE router reboots".
@@ -487,7 +488,7 @@ interface <if>
       parameters-only                    # Information-Request only
       rapid-commit
       no-release
-      pd <0-4294967295>                  # IAID of this IA_PD
+      pd <0-4294967295>                  # IAID of this IA_PD (P4, not in the schema yet)
         length <32-64>                   # hint; default 64
         interface <lan-if>
           sla-id <0-4294967295>
@@ -499,13 +500,24 @@ interface <if>
 of them needs the RA default route. SLAAC addresses are made only with
 `autoconf`.
 
+- Built for `autoconf` (P2) and `address dhcpv6` (P3); `pd` comes with
+  P4. `parameters-only` alone does not start it: it asks for no address,
+  and goes with `autoconf` where routes are wanted.
+- A host that goes on running for `address dhcpv6` follows `autoconf`
+  coming and going: its SLAAC addresses are given up when `autoconf` is
+  deleted, and the routers are solicited again when it is set, since
+  the prefixes an address is formed from come with their answer.
+- `show ipv6 nd interface` says what asked for the host:
+  `RA host: enabled (autoconf, dhcpv6)`.
+
 **Commit-time checks**
 
 | Condition | Severity | Effect |
 |---|---|---|
 | `address dhcp` beside static addresses | error | an interface is addressed by DHCP or statically: the `must` on the `address` list, enforced by `config::check::address_dhcp_exclusive` (a startup config only warns, and the lease is then one more address) |
 | `dhcp-options` / `dhcpv6-options` / `ra-options` without the address value that uses them | warning | stored, unused |
-| `parameters-only` with `address dhcpv6` or `pd` | error | an Information-Request carries no IAs |
+| `parameters-only` with `address dhcpv6` or `pd` | error | an Information-Request carries no IAs. Built for `address dhcpv6` (`config::check::dhcpv6_parameters_only_exclusive`); a startup config only warns, and the client then asks for the address |
+| `dhcpv6-options duid` that is not 3 to 130 hex octets | error | the schema's pattern says what an octet is and that there are three; the count is checked at commit (`config::check`) |
 | `pd … interface X` where X is the WAN interface itself | error | |
 | one LAN interface under two `pd` ids, or two `sla-id`s per interface | error | |
 | `sla-id` that cannot fit the hint `length` | warning | checked again against the actual delegation at bind time (WPD-3) |
@@ -744,10 +756,8 @@ the client stays released until `renew`, or until `address dhcp` or the
 **Reconfigure:** no Reconfigure Accept is sent, so servers will not
 reconfigure the client (§16).
 
-**What P3 has built so far** (`zebra-rs/src/dhcpc/v6/client.rs`,
-`dhcpc/ident.rs`): the state machine for IA_NA and `parameters-only`,
-without I/O, and the identity. The socket, the RIB, the configuration,
-show and persistence are the rest of P3. Beyond the above:
+**What P3 built** (`zebra-rs/src/dhcpc/v6/`, `dhcpc/ident.rs`). First
+the state machine (`v6/client.rs`), beyond the above:
 
 - **Refusals back off.** When a Request is refused (NoAddrsAvail,
   NotOnLink, no usable address), when a renewal takes the last address
@@ -805,6 +815,36 @@ show and persistence are the rest of P3. Beyond the above:
 - **Not used:** the Server Unicast option (every message goes to
   `ff02::1:2`), and Reconfigure.
 
+Then the task (`v6/inst.rs`), which runs the clients beside the DHCPv4
+ones in `dhcpc`:
+
+- **A leased address is a /128 with `noprefixroute`**, claimed in the
+  RIB as `AddrOrigin::Dhcp6` and installed with the lease's preferred
+  and valid lifetimes. The client installs no route: the default route
+  and the on-link prefixes are the RA host's.
+- **The client talks when the link is up and has a link-local address
+  past DAD** (the RIB's address events carry `tentative` and
+  `dadfailed`). The socket is one UDP socket per interface on port 546,
+  bound to the device; the kernel picks the link-local source for
+  `ff02::1:2`.
+- **A leased address that fails DAD** (`dadfailed`) is withdrawn and
+  declined; one the kernel drops is taken out of the lease.
+- **Retiring.** When the configuration gives an interface another DUID
+  or the other mode, or is deleted, its client is stopped: the address
+  is withdrawn at once and the Release goes out as who took the lease.
+  That client stays, beside its successor and on the same socket, until
+  the server has answered or the Release has been sent as often as it is
+  to be.
+- **A lease saved under another identity** (the DUID or the mode changed
+  while zebra-rs was down) is resumed as who took it, which claims its
+  address so that it can be withdrawn, and released as that identity
+  once the link can carry the Release. If the link never can, it is
+  withdrawn when its lifetime ends.
+- **`release` does not survive a restart**, as for DHCPv4: the lease
+  file is gone, and the next start asks for a lease (open question 4).
+- **What `parameters-only` learns is not kept on disk**: it is asked for
+  again at start.
+
 ---
 
 ## 9. Identity and persistence
@@ -813,7 +853,7 @@ show and persistence are the rest of P3. Beyond the above:
 |---|---|---|
 | `/var/lib/zebra-rs/dhcp/duid` | the system DUID (D8), as `xx:xx:…` text | created once; rewritten only when it holds no DUID |
 | `/var/lib/zebra-rs/dhcp/<if>.v4.json` | the lease, when it began, and the identity that took it (hardware address, client identifier) | written at bind and renew, deleted on release, expiry or deleted configuration |
-| `/var/lib/zebra-rs/dhcp/<if>.v6.json` | server DUID, IAs with addresses and prefixes, LAN assignments | same |
+| `/var/lib/zebra-rs/dhcp/<if>.v6.json` | the lease (server DUID and address, the IA_NA's addresses with their lifetimes, DNS and NTP), when the server last confirmed it, and the identity that took it (DUID, IAID). Prefixes and LAN assignments come with P4 | same |
 
 - `ZEBRA_DHCP_STATE_DIR` overrides the directory, as
   `ZEBRA_OSPF_CHECKPOINT_DIR` does for checkpoints: for tests, and for
@@ -864,6 +904,12 @@ release dhcpv6 interface <if>
 - for each prefix, its LAN assignments;
 - DNS and NTP.
 
+As built in P3, one block per interface: VRF, state, DUID, IAID (not
+with `parameters-only`), the server's address and DUID, each address as
+`<address>/128 preferred <n>s valid <n>s`, `Renew in` / `Rebind in`
+(`never` when the server said so), DNS servers, search list and NTP
+servers. It lists no routes: the lease gives none.
+
 **`show ipv6 nd interface <if>`** adds default routers (preference,
 lifetime), prefixes (L/A flags, lifetimes), SLAAC addresses and
 RDNSS/DNSSL.
@@ -912,8 +958,11 @@ zebra-rs/src/dhcpc/            (P1: the DHCPv4 parts)
   lease.rs                     persistence (§9)
   show.rs                      §11 view; the verbs are in inst.rs
   v6/client.rs                 sans-I/O, as v4/client.rs: IA_NA and
-                               parameters-only (P3; the task does not run
-                               it yet). IA_PD is P4
+                               parameters-only (P3). IA_PD is P4
+  v6/inst.rs                   the DHCPv6 clients in the task: link
+                               readiness, RIB addresses, retiring, DUID
+  v6/socket.rs                 per-interface UDP socket on port 546 (D11)
+  v6/show.rs                   `show dhcpv6 client leases`
   ident.rs                     the DUID file, DUID text form, IAID (P3)
 zebra-rs/src/nd/host.rs        RS, RA -> routes and SLAAC addresses (§7)
 zebra-rs/src/rib/              AddrOrigin, AddrDynAdd/Del, addr_replace,
@@ -955,7 +1004,7 @@ belongs to systemd-resolved.
 | P0 (done) | Codec move + typed options + property tests; insomnia switches to the vendored copy (relay goldens unchanged) | – |
 | P1 (done) | RIB plumbing (D5, D6); `dhcpc` task; DHCPv4 state machine, sockets, ACD, persistence; `show dhcp client leases`, `renew/release dhcp`; ungate `address dhcp` | P0 |
 | P2 (done) | RA host in `nd`: RS, default route, on-link prefixes, `ipv6 address autoconf`, `ra-options`, `accept_ra=0`; show section | P1's RIB plumbing |
-| P3 (state machine and identity done) | DHCPv6 IA_NA and `parameters-only`; DUID; `show dhcpv6 client leases`, `renew/release dhcpv6`. Left: the socket, `AddrOrigin::Dhcp6`, the schema, the RA host started by `address dhcpv6`, show and exec, persistence, the BDD feature | P0, P2 |
+| P3 (done) | DHCPv6 IA_NA and `parameters-only`; DUID; `show dhcpv6 client leases`, `renew/release dhcpv6` | P0, P2 |
 | P4 | IA_PD: discard route, LAN assignment, prefix change | P3 |
 | ND-PIO | `nd` advertises PIOs for LAN /64s with counted-down lifetimes, deprecates removed ones (L-13), `RibRx::AddrAdd` on lifetime change | P1's RIB plumbing; parallel to P2–P4 |
 | P5 | Resolver integration, MTU options, Reconfigure, IA_TA, prefix exclude, RFC 4191 routes, stable-privacy identifiers, `redistribute dhcp` | as needed |
@@ -1005,7 +1054,7 @@ DHCPv4, IA_NA and RAs, but not PD.
 | `dhcp_client_vrf` | WAN in VRF `red`; the route is in `red`'s table only |
 | `dhcp_client_dual_wan` | two leases at 210 / 220; link down on the first → the second's default is selected |
 | `ra_host` | RA default route `A`, SLAAC with `autoconf`, router lifetime 0 withdraws, `accept_ra` is 0 |
-| `dhcpv6_client` | IA_NA /128, on-link prefix from the RA, `parameters-only` |
+| `dhcpv6_client` | IA_NA /128 with `noprefixroute`; default route and on-link prefix from the RA, and no SLAAC address unless `autoconf` is set too; renew; `release`; zebra-rs restart keeps the address and confirms it; `parameters-only`; deleted configuration releases |
 | `dhcpv6_client_pd` | PD → discard route, LAN /64 address; prefix change replaces both; with ND-PIO, a LAN host SLAACs from it |
 | `dhcpv6_pd_insomnia` | a zebra-rs + insomnia router serving PD (insomnia's existing DHCPv6 server) to a zebra-rs client router: both sides of the feature in one topology |
 

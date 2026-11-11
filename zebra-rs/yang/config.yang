@@ -5987,13 +5987,22 @@ module config {
              prefixes they give through the RIB, and forms a SLAAC
              address (RFC 4862) from each autonomous /64 prefix, beside
              any address configured here — unlike IPv4's `dhcp`, it
-             does not exclude static entries. `ra-options` tunes it.";
+             does not exclude static entries. `ra-options` tunes it.
+
+             `dhcpv6` leases an address from a DHCPv6 server (the dhcpc
+             task, docs/design/dhcp-client.md §8): a /128 that brings no
+             connected route, since only a Router Advertisement says
+             which prefixes are on-link. It runs the RA host too, for
+             the default route and the on-link prefixes, but forms no
+             SLAAC address unless `autoconf` is set as well. Static
+             entries may stand beside it. `dhcpv6-options` tunes it.";
           leaf address {
-            ext:help "IPv6 interface address, or autoconf for SLAAC";
+            ext:help "IPv6 interface address, autoconf for SLAAC, or dhcpv6 to lease one";
             type union {
               type inet:ipv6-prefix;
               type enumeration {
                 enum autoconf;
+                enum dhcpv6;
               }
             }
           }
@@ -6018,6 +6027,48 @@ module config {
           }
           leaf no-default-route {
             ext:help "Do not install a default route from Router Advertisements";
+            type empty;
+          }
+        }
+        container dhcpv6-options {
+          ext:help "DHCPv6 client options";
+          description
+            "Options of the DHCPv6 client (VyOS's `dhcpv6-options`
+             leaves). `address dhcpv6` starts it to lease an address;
+             `parameters-only` starts it to ask for the other
+             configuration alone. Without either they are stored and
+             unused.";
+          leaf duid {
+            ext:help "DHCP unique identifier of this client: xx:xx:...";
+            // Three octets at least, said by the pattern itself; that
+            // there are no more than 130 is checked at commit
+            // (config::check), since the pattern cannot count.
+            type string {
+              length "8..389";
+              pattern '[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f](:[0-9A-Fa-f][0-9A-Fa-f])+';
+            }
+            description
+              "The DUID this interface's client presents, as
+               colon-separated hex octets (3 to 130 of them). Unset,
+               the system's DUID is used: a DUID-LLT made once and kept
+               across restarts. A server knows a client by its DUID:
+               changing it gives the lease back and asks again as
+               another client.";
+          }
+          leaf parameters-only {
+            ext:help "Ask for configuration parameters only, no address";
+            type empty;
+            description
+              "Stateless DHCPv6 (Information-request): DNS servers, the
+               search list and NTP servers, and no address. Not
+               together with `address dhcpv6`.";
+          }
+          leaf rapid-commit {
+            ext:help "Accept a two-message exchange (Rapid Commit)";
+            type empty;
+          }
+          leaf no-release {
+            ext:help "Do not release the lease when the client stops";
             type empty;
           }
         }

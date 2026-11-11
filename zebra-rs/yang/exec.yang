@@ -558,13 +558,32 @@ module exec {
       }
     }
     container dhcpv6 {
-      if-feature feat:insomnia;
       ext:help "DHCPv6 information";
+      // As under `dhcp`: the client is zebra-rs's own, the server and
+      // relay views are insomnia's and keep its gate.
+      container client {
+        ext:help "DHCPv6 client information";
+        container leases {
+          ext:help "Leases held by the DHCPv6 client";
+          presence "Leases on every interface";
+          list interface {
+            ext:help "Lease on one interface";
+            key "if-name";
+            leaf if-name {
+              ext:help "Interface name";
+              ext:dynamic "rib:interface";
+              type string;
+            }
+          }
+        }
+      }
       container server {
+        if-feature feat:insomnia;
         ext:help "DHCPv6 server information";
         uses dhcp-server-show;
       }
       container relay {
+        if-feature feat:insomnia;
         ext:help "DHCPv6 relay agent information";
         uses dhcp-relay-show;
       }
@@ -1717,13 +1736,27 @@ module exec {
   // orders to the insomnia provider "process"; insomnia-gated. `stop`
   // is an operator hold that lasts until `start` or a reboot; the
   // configuration's `disable` leaves are the persistent switch.
-  // `renew|release dhcp interface <name>`: DHCP client actions, answered
-  // by the dhcpc task the way show orders are (docs/design/dhcp-client.md
-  // §11). `release` gives the lease back and leaves the client idle until
-  // `renew`, or until `address dhcp` or the client-id is configured anew.
+  // `renew|release dhcp[v6] interface <name>`: DHCP client actions,
+  // answered by the dhcpc task the way show orders are
+  // (docs/design/dhcp-client.md §11). `release` gives the lease back and
+  // leaves the client idle until `renew`, or until `address dhcp` or the
+  // client-id (for DHCPv6: `address dhcpv6`, `parameters-only` or the
+  // DUID) is configured anew.
   grouping dhcp-client-action {
     container dhcp {
       ext:help "DHCP client lease";
+      list interface {
+        ext:help "Interface holding the lease";
+        key "if-name";
+        leaf if-name {
+          ext:help "Interface name";
+          ext:dynamic "rib:interface";
+          type string;
+        }
+      }
+    }
+    container dhcpv6 {
+      ext:help "DHCPv6 client lease";
       list interface {
         ext:help "Interface holding the lease";
         key "if-name";

@@ -111,14 +111,82 @@ pub fn address_dhcp_exclusive(entries: &[(String, Vec<String>)]) -> Vec<String> 
         .collect()
 }
 
+/// The callback paths [`dhcpv6_parameters_only_exclusive`] reads.
+pub const IPV6_ADDRESS_PATH: &str = "/interface/ipv6/address";
+pub const DHCPV6_PARAMETERS_ONLY_PATH: &str = "/interface/ipv6/dhcpv6-options/parameters-only";
+
+/// Whether a config line can carry an entry
+/// [`dhcpv6_parameters_only_exclusive`] reads.
+pub fn dhcpv6_mode_line(line: &str) -> bool {
+    line.starts_with("interface ")
+        && (line.contains(" ipv6 address dhcpv6")
+            || line.contains(" ipv6 dhcpv6-options parameters-only"))
+}
+
+/// `interface <name> ipv6 dhcpv6-options parameters-only` asks a DHCPv6
+/// server for configuration and no address (an Information-request
+/// carries no identity association), so it excludes `ipv6 address
+/// dhcpv6` on the same interface: the two are different exchanges, and
+/// one client speaks one of them. `entries` are a whole config's
+/// [`dhcpv6_mode_line`]s as (callback path, arguments); the result is
+/// one error per interface that has both, in the order the interfaces
+/// first appear.
+pub fn dhcpv6_parameters_only_exclusive(entries: &[(String, Vec<String>)]) -> Vec<String> {
+    // Interface name, whether it has `address dhcpv6`, and whether it
+    // has `parameters-only`.
+    let mut interfaces: Vec<(&str, bool, bool)> = Vec::new();
+    for (path, args) in entries {
+        let (name, address) = match (path.as_str(), args.as_slice()) {
+            (IPV6_ADDRESS_PATH, [name, address]) if address == "dhcpv6" => (name, true),
+            (DHCPV6_PARAMETERS_ONLY_PATH, [name]) => (name, false),
+            _ => continue,
+        };
+        let index = match interfaces.iter().position(|(n, ..)| n == name) {
+            Some(index) => index,
+            None => {
+                interfaces.push((name, false, false));
+                interfaces.len() - 1
+            }
+        };
+        if address {
+            interfaces[index].1 = true;
+        } else {
+            interfaces[index].2 = true;
+        }
+    }
+    interfaces
+        .into_iter()
+        .filter(|(_, address, parameters_only)| *address && *parameters_only)
+        .map(|(name, ..)| {
+            format!(
+                "interface {name} ipv6: dhcpv6-options parameters-only asks for no address \
+                 and cannot be combined with address dhcpv6; delete one or the other"
+            )
+        })
+        .collect()
+}
+
 /// A leaf value check: `Err` holds the reason, shown after the line.
 pub type ValueCheck = fn(&str) -> Result<(), String>;
+
+/// `interface <name> ipv6 dhcpv6-options duid`: 3 to 130 octets (RFC 8415
+/// §11.1). The schema's pattern says what an octet looks like and that
+/// there are three; it cannot count to 130.
+fn check_duid(value: &str) -> Result<(), String> {
+    match crate::dhcpc::ident::parse_duid(value) {
+        Some(_) => Ok(()),
+        None => Err("a DUID is 3 to 130 colon-separated hex octets".to_string()),
+    }
+}
 
 /// The check for the leaf at `path`, the callback path with keys
 /// removed (`/router/isis/interface/te-metric/…`), if it has one.
 pub fn value_check(path: &str) -> Option<ValueCheck> {
     if path == "/router/isis/flex-algo/exclude-max-link-loss" {
         return Some(|v| check_max_link_loss(v).map(drop));
+    }
+    if path == "/interface/ipv6/dhcpv6-options/duid" {
+        return Some(check_duid);
     }
     // `te-metric measurement loss`, in IS-IS, OSPFv2 and OSPFv3 alike.
     let (_, leaf) = path
@@ -293,6 +361,82 @@ mod tests {
     }
 
     /// `address dhcp` and a static address exclude each other on one
+    /// A DUID is checked at commit for what the schema's pattern cannot
+    /// say: how many octets it may have.
+    #[test]
+    fn a_duid_is_three_to_130_octets() {
+        let check = value_check("/interface/ipv6/dhcpv6-options/duid").expect("a check");
+        assert!(check("00:03:01").is_ok());
+        assert!(check(&vec!["ab"; 130].join(":")).is_ok());
+        for bad in ["00:03", &vec!["ab"; 131].join(":"), "00:03:0g", "000301"] {
+            assert_eq!(
+                check(bad),
+                Err("a DUID is 3 to 130 colon-separated hex octets".to_string()),
+                "{bad}"
+            );
+        }
+        assert!(value_check("/interface/ipv6/dhcpv6-options/rapid-commit").is_none());
+    }
+
+    /// `parameters-only` and `address dhcpv6` exclude each other on one
+    /// interface, and only there; other addresses and other options are
+    /// not counted.
+    #[test]
+    fn dhcpv6_parameters_only_excludes_an_address() {
+        let address = |name: &str, value: &str| leaf(IPV6_ADDRESS_PATH, &[name, value]);
+        let only = |name: &str| leaf(DHCPV6_PARAMETERS_ONLY_PATH, &[name]);
+        let check = dhcpv6_parameters_only_exclusive;
+
+        // Either alone, and beside what is not the other.
+        assert!(check(&[address("eth0", "dhcpv6")]).is_empty());
+        assert!(check(&[only("eth0")]).is_empty());
+        assert!(check(&[only("eth0"), address("eth0", "autoconf")]).is_empty());
+        assert!(check(&[only("eth0"), address("eth0", "2001:db8::1/64")]).is_empty());
+        assert!(check(&[only("eth0"), address("eth1", "dhcpv6")]).is_empty());
+        assert!(
+            check(&[
+                address("eth0", "dhcpv6"),
+                leaf("/interface/ipv6/dhcpv6-options/rapid-commit", &["eth0"]),
+            ])
+            .is_empty()
+        );
+
+        // Both on one interface, in either order; one error per
+        // interface, the clean one left out.
+        let refused = |name: &str| {
+            format!(
+                "interface {name} ipv6: dhcpv6-options parameters-only asks for no address \
+                 and cannot be combined with address dhcpv6; delete one or the other"
+            )
+        };
+        assert_eq!(
+            check(&[address("eth0", "dhcpv6"), only("eth0")]),
+            [refused("eth0")]
+        );
+        assert_eq!(
+            check(&[
+                only("eth2"),
+                address("eth1", "dhcpv6"),
+                only("eth0"),
+                address("eth2", "dhcpv6"),
+                address("eth0", "dhcpv6"),
+            ]),
+            [refused("eth2"), refused("eth0")]
+        );
+        // The lines it reads, and no others.
+        assert!(dhcpv6_mode_line("interface eth0 ipv6 address dhcpv6"));
+        assert!(dhcpv6_mode_line(
+            "interface eth0 ipv6 dhcpv6-options parameters-only"
+        ));
+        assert!(!dhcpv6_mode_line("interface eth0 ipv6 address autoconf"));
+        assert!(!dhcpv6_mode_line(
+            "interface eth0 ipv6 dhcpv6-options rapid-commit"
+        ));
+        assert!(!dhcpv6_mode_line(
+            "service dhcpv6-server interface eth0 ipv6 address dhcpv6"
+        ));
+    }
+
     /// interface, and only there: other interfaces, and the IPv6 list,
     /// are not counted.
     #[test]

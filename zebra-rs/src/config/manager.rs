@@ -851,6 +851,13 @@ impl ConfigManager {
         self.checked_lines(text, check::ipv4_address_line)
     }
 
+    /// The DHCPv6 client's mode among config `text`'s lines
+    /// (`check::dhcpv6_parameters_only_exclusive`), as callback paths and
+    /// arguments.
+    fn dhcpv6_mode_entries(&self, text: &str) -> Vec<(String, Vec<String>)> {
+        self.checked_lines(text, check::dhcpv6_mode_line)
+    }
+
     /// Commit the candidate. Refuses it, dispatching nothing, when it
     /// fails validation: mandatory nodes, the leaf value checks, or a label
     /// check it would newly break.
@@ -925,6 +932,20 @@ impl ConfigManager {
                 return Err(anyhow::anyhow!(addresses.join("\n")));
             }
             for error in &addresses {
+                tracing::warn!("startup config: {error}");
+            }
+        }
+
+        // `ipv6 dhcpv6-options parameters-only` asks for no address, so
+        // it excludes `ipv6 address dhcpv6` on the same interface. A
+        // startup config is only warned about, as above; the client then
+        // asks for the address.
+        let modes = check::dhcpv6_parameters_only_exclusive(&self.dhcpv6_mode_entries(&candidate));
+        if !modes.is_empty() {
+            if !startup {
+                return Err(anyhow::anyhow!(modes.join("\n")));
+            }
+            for error in &modes {
                 tracing::warn!("startup config: {error}");
             }
         }
@@ -1149,22 +1170,31 @@ impl ConfigManager {
             // autoconf`, `interface X ipv6 ra-options …`). The options
             // count, as for the DHCP client below: committed ahead of
             // `autoconf`, they would never reach a task spawned later.
+            // `address dhcpv6` runs the RA host as well, for the default
+            // route and the on-link prefixes its lease needs.
             if !nd
                 && op == ConfigOp::Set
                 && line.starts_with("interface ")
-                && (line.contains(" ipv6 address autoconf") || line.contains(" ipv6 ra-options "))
+                && (line.contains(" ipv6 address autoconf")
+                    || line.contains(" ipv6 address dhcpv6")
+                    || line.contains(" ipv6 ra-options "))
             {
                 nd = true;
                 spawn_nd(self);
             }
             // The DHCP client is configured per interface too (`interface
-            // X ipv4 address dhcp`, `interface X ipv4 dhcp-options …`):
-            // spawn on the first line of either, so options committed
-            // ahead of `address dhcp` are not lost on a task spawned later.
+            // X ipv4 address dhcp`, `interface X ipv4 dhcp-options …`, and
+            // for DHCPv6 `interface X ipv6 address dhcpv6`, `interface X
+            // ipv6 dhcpv6-options …`): spawn on the first line of any, so
+            // options committed ahead of the address line are not lost on
+            // a task spawned later.
             if !dhcpc
                 && op == ConfigOp::Set
                 && line.starts_with("interface ")
-                && (line.contains(" ipv4 address dhcp") || line.contains(" ipv4 dhcp-options "))
+                && (line.contains(" ipv4 address dhcp")
+                    || line.contains(" ipv4 dhcp-options ")
+                    || line.contains(" ipv6 address dhcpv6")
+                    || line.contains(" ipv6 dhcpv6-options "))
             {
                 dhcpc = true;
                 spawn_dhcpc(self);
@@ -2100,20 +2130,22 @@ fn is_vrrp(paths: &[CommandPath]) -> bool {
     paths.iter().any(|x| x.name == "vrrp")
 }
 
-/// `show dhcp client …` and `renew|release dhcp interface <name>` — the
-/// DHCP client task in this process (`dhcpc`). Checked before
-/// [`is_dhcp`], which hands every other `show dhcp …` to insomnia.
+/// `show dhcp[v6] client …` and `renew|release dhcp[v6] interface
+/// <name>` — the DHCP client task in this process (`dhcpc`). Checked
+/// before [`is_dhcp`], which hands every other `show dhcp[v6] …` to
+/// insomnia.
 fn is_dhcp_client(paths: &[CommandPath]) -> bool {
     let name = |i: usize| paths.get(i).map(|p| p.name.as_str());
+    let family = matches!(name(1), Some("dhcp" | "dhcpv6"));
     match name(0) {
-        Some("show") => name(1) == Some("dhcp") && name(2) == Some("client"),
-        Some("renew" | "release") => name(1) == Some("dhcp"),
+        Some("show") => family && name(2) == Some("client"),
+        Some("renew" | "release") => family,
         _ => false,
     }
 }
 
-/// `show dhcp server|relay …` and `show dhcpv6 …` — served by the
-/// external insomnia daemon, which registers the `"dhcp"` show provider
+/// `show dhcp server|relay …` and `show dhcpv6 server|relay …` — served
+/// by the external insomnia daemon, which registers the `"dhcp"` show provider
 /// (zebra.show.v1); insomnia-gated exec grammar. With no provider
 /// connected the not-running fallback answers.
 fn is_dhcp(paths: &[CommandPath]) -> bool {
@@ -2977,6 +3009,39 @@ mod save_config_tests {
         // addresses, and beside `dhcp`.
         edit("set interface eth2 ipv6 address autoconf");
         edit("set interface eth2 ipv6 address 2001:db8::1/64");
+        assert_eq!(violations(), Vec::<String>::new());
+    }
+
+    /// `parameters-only` beside `address dhcpv6` on one interface is
+    /// refused at commit (`check::dhcpv6_parameters_only_exclusive`).
+    /// Checked on the candidate, without committing: a commit with
+    /// either line spawns the DHCP client.
+    #[test]
+    fn dhcpv6_parameters_only_beside_an_address_is_a_violation() {
+        let cm = manager_with_config(&temp_path("dhcpv6-mode"));
+        let mode = cm.modes.get("configure").expect("configure mode");
+        let edit = |line: &str| {
+            let (code, output, _) = cm.execute(mode, line);
+            assert_eq!(code, ExecCode::Show, "`{line}` rejected: {output:?}");
+        };
+        let violations = || {
+            let mut candidate = String::new();
+            cm.store.candidate.borrow().list(&mut candidate);
+            check::dhcpv6_parameters_only_exclusive(&cm.dhcpv6_mode_entries(&candidate))
+        };
+        let refused = "interface eth0 ipv6: dhcpv6-options parameters-only asks for no address \
+                       and cannot be combined with address dhcpv6; delete one or the other";
+
+        edit("set interface eth0 ipv6 address dhcpv6");
+        edit("set interface eth0 ipv6 dhcpv6-options rapid-commit");
+        edit("set interface eth1 ipv6 dhcpv6-options parameters-only");
+        edit("set interface eth1 ipv6 address autoconf");
+        assert_eq!(violations(), Vec::<String>::new());
+        edit("set interface eth0 ipv6 dhcpv6-options parameters-only");
+        assert_eq!(violations(), [refused]);
+        let err = cm.commit_config().expect_err("both on one interface");
+        assert_eq!(err.to_string(), refused);
+        edit("delete interface eth0 ipv6 address dhcpv6");
         assert_eq!(violations(), Vec::<String>::new());
     }
 
@@ -7446,9 +7511,55 @@ module test-insomnia-gated {
             assert_eq!(code, ExecCode::Success, "`{line}` must parse");
         }
         for line in [
-            "set interface eth0 ipv6 address dhcp",
+            "set interface eth0 ipv6 address slaac",
             "set interface eth0 ipv6 ra-options default-route-distance 0",
             "set interface eth0 ipv6 ra-options default-route-distance 256",
+        ] {
+            let (code, _, _) = parse(line, entry.clone(), None, State::new());
+            assert_ne!(code, ExecCode::Success, "`{line}` must be refused");
+        }
+    }
+
+    /// End-to-end CLI grammar of the DHCPv6 client's configuration:
+    /// `address dhcpv6` and every `dhcpv6-options` leaf parse on a stock
+    /// start, and a DUID that is not colon-separated hex octets, or too
+    /// few of them, is refused by the schema.
+    #[test]
+    fn address_dhcpv6_and_dhcpv6_options_parse_on_a_stock_start() {
+        use crate::config::ExecCode;
+        use crate::config::parse::{State, parse};
+
+        let entry = shipped_tree(&[]);
+        for line in [
+            "set interface eth0 ipv6 address dhcpv6",
+            "set interface eth0 ipv6 dhcpv6-options duid 00:03:00:01:02:00:00:00:00:01",
+            "set interface eth0 ipv6 dhcpv6-options duid 00:04:AB",
+            "set interface eth0 ipv6 dhcpv6-options parameters-only",
+            "set interface eth0 ipv6 dhcpv6-options rapid-commit",
+            "set interface eth0 ipv6 dhcpv6-options no-release",
+        ] {
+            let (code, _, _) = parse(line, entry.clone(), None, State::new());
+            assert_eq!(code, ExecCode::Success, "`{line}` must parse");
+        }
+        // An abbreviated keyword reaches the callbacks spelled out, as
+        // everywhere in the CLI. That makes IPv4's `dhcp` an abbreviation
+        // of `dhcpv6` here.
+        for typed in ["dhcpv6", "dhcp", "d"] {
+            let line = format!("set interface eth0 ipv6 address {typed}");
+            let (code, _, state) = parse(&line, entry.clone(), None, State::new());
+            assert_eq!(code, ExecCode::Success, "`{line}` must parse");
+            let (path, args) = crate::config::path_from_command(&state.paths);
+            assert_eq!(path, "/set/interface/ipv6/address");
+            assert_eq!(args.0, ["eth0", "dhcpv6"], "`{line}`");
+        }
+        for line in [
+            "set interface eth0 ipv6 address dhcp6",
+            "set interface eth0 ipv6 dhcpv6-options duid 00:03",
+            "set interface eth0 ipv6 dhcpv6-options duid 0003000102",
+            "set interface eth0 ipv6 dhcpv6-options duid 00:03:0:01",
+            "set interface eth0 ipv6 dhcpv6-options duid 00:03:zz:01",
+            "set interface eth0 ipv6 dhcpv6-options duid 00:03:00:",
+            "set interface eth0 ipv6 dhcpv6-options temporary",
         ] {
             let (code, _, _) = parse(line, entry.clone(), None, State::new());
             assert_ne!(code, ExecCode::Success, "`{line}` must be refused");
@@ -7465,7 +7576,27 @@ module test-insomnia-gated {
 
         for features in [&[][..], &["insomnia"]] {
             let entry = shipped_tree_mode("exec", features);
-            let cases: [(&str, &str, &[&str]); 4] = [
+            let cases: [(&str, &str, &[&str]); 8] = [
+                (
+                    "show dhcpv6 client leases",
+                    "/show/dhcpv6/client/leases",
+                    &[],
+                ),
+                (
+                    "show dhcpv6 client leases interface eth0",
+                    "/show/dhcpv6/client/leases/interface",
+                    &["eth0"],
+                ),
+                (
+                    "renew dhcpv6 interface eth0",
+                    "/renew/dhcpv6/interface",
+                    &["eth0"],
+                ),
+                (
+                    "release dhcpv6 interface eth0",
+                    "/release/dhcpv6/interface",
+                    &["eth0"],
+                ),
                 ("show dhcp client leases", "/show/dhcp/client/leases", &[]),
                 (
                     "show dhcp client leases interface eth0",
@@ -7499,13 +7630,16 @@ module test-insomnia-gated {
             }
         }
         // insomnia's views stay gated, and stay insomnia's.
-        let stock = shipped_tree_mode("exec", &[]);
-        let (code, _, _) = parse("show dhcp server leases", stock, None, State::new());
-        assert_ne!(code, ExecCode::Success, "server view is insomnia-gated");
-        let gated = shipped_tree_mode("exec", &["insomnia"]);
-        let (code, _, state) = parse("show dhcp server leases", gated, None, State::new());
-        assert_eq!(code, ExecCode::Success);
-        assert_eq!(show_proto(&state.paths), "dhcp");
+        for family in ["dhcp", "dhcpv6"] {
+            let cmd = format!("show {family} server leases");
+            let stock = shipped_tree_mode("exec", &[]);
+            let (code, _, _) = parse(&cmd, stock, None, State::new());
+            assert_ne!(code, ExecCode::Success, "`{cmd}` is insomnia-gated");
+            let gated = shipped_tree_mode("exec", &["insomnia"]);
+            let (code, _, state) = parse(&cmd, gated, None, State::new());
+            assert_eq!(code, ExecCode::Success, "`{cmd}`");
+            assert_eq!(show_proto(&state.paths), "dhcp", "`{cmd}`");
+        }
     }
 
     /// `interface <name> {ipv4|ipv6} address` is a keyed list, so one
@@ -7532,7 +7666,10 @@ module test-insomnia-gated {
         );
         assert_eq!(
             complete("set interface enp0s8 ipv6 address "),
-            (ExecCode::Incomplete, names(&["<X:X::X:X/M>", "autoconf"]))
+            (
+                ExecCode::Incomplete,
+                names(&["<X:X::X:X/M>", "autoconf", "dhcpv6"])
+            )
         );
 
         // After one value: `<cr>` and nothing else.

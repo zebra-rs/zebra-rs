@@ -264,6 +264,8 @@ pub enum AddrOrigin {
     /// A SLAAC address (RFC 4862) the `nd` task's RA host formed from a
     /// received prefix.
     Slaac,
+    /// An address of a DHCPv6 lease (an IA_NA), held by the `dhcpc` task.
+    Dhcp6,
 }
 
 impl fmt::Display for AddrOrigin {
@@ -271,6 +273,7 @@ impl fmt::Display for AddrOrigin {
         f.write_str(match self {
             AddrOrigin::Dhcp4 => "dhcp",
             AddrOrigin::Slaac => "slaac",
+            AddrOrigin::Dhcp6 => "dhcpv6",
         })
     }
 }
@@ -2132,13 +2135,16 @@ pub async fn link_config_exec(
         // value independently, so a bundled delivery would not silently
         // drop trailing values.
         //
-        // `autoconf` is the enum arm the RA host (the `nd` task) acts on.
-        // The RIB takes no kernel action for it; its SLAAC addresses come
-        // back as dynamic addresses (`Message::AddrDynAdd`).
+        // `autoconf` is the enum arm the RA host (the `nd` task) acts on,
+        // `dhcpv6` the one the DHCP client (the `dhcpc` task) does. The
+        // RIB takes no kernel action for either; their addresses come
+        // back as dynamic addresses (`Message::AddrDynAdd`). They are
+        // read here all the same: left unread, a delete of one would be
+        // taken for "remove every address".
         let mut autoconf = false;
         let mut v6addrs = Vec::new();
         while let Some(value) = args.string() {
-            if value == "autoconf" {
+            if value == "autoconf" || value == "dhcpv6" {
                 autoconf = true;
             } else if let Ok(v6addr) = value.parse::<Ipv6Net>() {
                 v6addrs.push(v6addr);

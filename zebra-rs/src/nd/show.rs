@@ -12,8 +12,9 @@
 //! Every command also accepts a trailing `json` keyword (surfaced as
 //! the `json` flag) for machine-readable output.
 //!
-//! An interface running the RA host (`ipv6 address autoconf`) gets an
-//! `RA host` section: its routers, prefixes, SLAAC addresses and DNS
+//! An interface running the RA host (`ipv6 address autoconf`, or
+//! `ipv6 address dhcpv6` for its lease's routes) gets an `RA host`
+//! section: its routers, prefixes, SLAAC addresses and DNS
 //! information, and JSON `ra_host`.
 
 use std::collections::BTreeSet;
@@ -230,10 +231,14 @@ struct JsonTimed {
     expires_in_secs: Option<u64>,
 }
 
-/// The RA host on an interface (`ipv6 address autoconf`).
+/// The RA host on an interface (`ipv6 address autoconf`, `ipv6 address
+/// dhcpv6`).
 #[derive(Serialize)]
 struct JsonRaHost {
+    /// `ipv6 address autoconf`: SLAAC addresses are formed.
     autoconf: bool,
+    /// `ipv6 address dhcpv6`: the host runs for the DHCPv6 lease.
+    dhcpv6: bool,
     vrf: Option<String>,
     default_route_distance: u8,
     no_default_route: bool,
@@ -329,7 +334,12 @@ fn render_host_text(
         return Ok(());
     };
     let cfg = nd.hosts().config(ifname);
-    writeln!(out, "  RA host: enabled (autoconf)")?;
+    // What asked for it.
+    let why: Vec<&str> = [(cfg.autoconf, "autoconf"), (cfg.dhcpv6, "dhcpv6")]
+        .into_iter()
+        .filter_map(|(set, name)| set.then_some(name))
+        .collect();
+    writeln!(out, "  RA host: enabled ({})", why.join(", "))?;
     writeln!(
         out,
         "    default route distance {}{}{}",
@@ -420,6 +430,7 @@ fn build_host_json(
     };
     Some(JsonRaHost {
         autoconf: cfg.autoconf,
+        dhcpv6: cfg.dhcpv6,
         vrf: host.vrf.clone(),
         default_route_distance: cfg.distance,
         no_default_route: cfg.no_default_route,
@@ -1316,6 +1327,7 @@ Icmp6InUnrelated                    \t99
             serde_json::from_str(&serde_json::to_string(&json).unwrap()).unwrap();
         let host = &json["ra_host"];
         assert_eq!(host["autoconf"], serde_json::json!(true));
+        assert_eq!(host["dhcpv6"], serde_json::json!(false));
         assert_eq!(host["routers"][0]["address"], serde_json::json!("fe80::1"));
         assert_eq!(host["routers"][0]["installed"], serde_json::json!(true));
         assert_eq!(
@@ -1332,5 +1344,22 @@ Icmp6InUnrelated                    \t99
         let other: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&other).unwrap()).unwrap();
         assert!(other.get("ra_host").is_none());
+
+        // The host says what asked for it: `address dhcpv6` beside
+        // `autoconf`, and alone.
+        for (autoconf, want) in [(true, "(autoconf, dhcpv6)"), (false, "(dhcpv6)")] {
+            eng.hosts_mut().update_config("wan0", start, |cfg| {
+                cfg.autoconf = autoconf;
+                cfg.dhcpv6 = true;
+            });
+            let mut out = String::new();
+            render_interface_text(&mut out, &eng, 2, start).unwrap();
+            assert!(out.contains(&format!("  RA host: enabled {want}")), "{out}");
+            let json = build_interface_json(&eng, 2, start);
+            let json: serde_json::Value =
+                serde_json::from_str(&serde_json::to_string(&json).unwrap()).unwrap();
+            assert_eq!(json["ra_host"]["autoconf"], serde_json::json!(autoconf));
+            assert_eq!(json["ra_host"]["dhcpv6"], serde_json::json!(true));
+        }
     }
 }

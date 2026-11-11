@@ -31,6 +31,7 @@ use super::lease::Store;
 use super::routes::{Leg, Routes, Wanted, lease_routes};
 use super::v4::client::{Action, Client, Event, Lease, Options};
 use super::v4::socket::{self, ArpReader, Input, PacketReader, UdpReader};
+use super::v6::inst::V6;
 
 /// `default-route-distance` when not configured: above every routing
 /// protocol, so a routed default always wins over a leased one (VyOS's
@@ -138,7 +139,7 @@ impl Iface {
 }
 
 pub struct Dhcpc {
-    rib: RibClient,
+    pub(super) rib: RibClient,
     rib_rx: UnboundedReceiver<RibRx>,
     pub cm: ConfigChannel,
     pub show: ShowChannel,
@@ -150,7 +151,7 @@ pub struct Dhcpc {
     /// By interface name: configuration can precede the link.
     pub ifaces: BTreeMap<String, Iface>,
     routes: Routes,
-    store: Store,
+    pub(super) store: Store,
     /// `system hostname`, sent as option 12 unless an interface sets its
     /// own.
     pub hostname: Option<String>,
@@ -158,9 +159,11 @@ pub struct Dhcpc {
     pub(super) touched: Vec<String>,
     /// When to look at the pending releases next (`next_wakeup`).
     release_poll: Option<Instant>,
+    /// The DHCPv6 clients ([`super::v6::inst`]).
+    pub(super) v6: V6,
 }
 
-fn unix_now() -> u64 {
+pub(super) fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -177,7 +180,7 @@ impl Dhcpc {
         Dhcpc::with_store(rib, rib_rx, hostname, store)
     }
 
-    fn with_store(
+    pub(super) fn with_store(
         rib: RibClient,
         rib_rx: UnboundedReceiver<RibRx>,
         hostname: Option<String>,
@@ -200,6 +203,7 @@ impl Dhcpc {
             hostname,
             touched: Vec::new(),
             release_poll: None,
+            v6: V6::new(),
         };
         dhcpc.callback_build();
         dhcpc.show_build();
@@ -219,6 +223,7 @@ impl Dhcpc {
             let wakeup = self.next_wakeup(Instant::now());
             tokio::select! {
                 Some(input) = self.input_rx.recv() => self.process_input(input),
+                Some(input) = self.v6.input_rx.recv() => self.process_input6(input),
                 Some(msg) = self.rib_rx.recv() => self.process_rib_msg(msg),
                 Some(msg) = self.cm.rx.recv() => self.process_cm_msg(msg),
                 Some(msg) = self.show.rx.recv() => self.process_show_msg(msg).await,
@@ -247,11 +252,13 @@ impl Dhcpc {
             .filter(|iface| iface.releasing.is_none())
             .filter_map(|iface| iface.client.as_ref()?.deadline())
             .chain(self.release_poll)
+            .chain(self.next_deadline6())
             .min()
     }
 
     fn on_wakeup(&mut self, now: Instant) {
         self.process_timeouts();
+        self.process_timeouts6(now);
         if self.release_poll.is_some_and(|at| at <= now) {
             self.release_poll = None;
             self.pump_releases(now);
@@ -327,10 +334,12 @@ impl Dhcpc {
                 let name = link.name.clone();
                 self.links.insert(link.index, LinkInfo::from(&link));
                 self.reconcile(&name);
+                self.link_added6(&link);
             }
             RibRx::LinkDel(ifindex) => {
                 if let Some(link) = self.links.remove(&ifindex) {
                     self.detach(&link.name);
+                    self.link_deleted6(ifindex, &link.name);
                 }
             }
             RibRx::LinkUp(ifindex) | RibRx::LinkDown(ifindex) => {
@@ -340,6 +349,7 @@ impl Dhcpc {
                 };
                 link.up = up;
                 let name = link.name.clone();
+                self.sync_link6(&name);
                 if self.is_releasing(&name) {
                     // The old identity's client only has a RELEASE left
                     // to send, which the link coming up may now allow.
@@ -361,9 +371,12 @@ impl Dhcpc {
                     link.mac = Some(mac.octets());
                     let name = link.name.clone();
                     self.reconcile(&name);
+                    // The system DUID may have been waiting for one.
+                    self.reconcile6(&name);
                 }
             }
             RibRx::AddrAdd(addr) => {
+                self.addr_event6(&addr, true);
                 if let Some(name) = self.iface_name(addr.ifindex)
                     && self.is_releasing(&name)
                 {
@@ -393,6 +406,7 @@ impl Dhcpc {
                 }
             }
             RibRx::AddrDel(addr) => {
+                self.addr_event6(&addr, false);
                 // The kernel dropped an address: ours, if a lease holds
                 // it (our own withdrawal clears `bound` first).
                 let Some(name) = self.iface_name(addr.ifindex) else {
@@ -430,6 +444,12 @@ impl Dhcpc {
             for name in touched {
                 self.reconcile(&name);
             }
+            let mut touched = std::mem::take(&mut self.v6.touched);
+            touched.sort();
+            touched.dedup();
+            for name in touched {
+                self.reconcile6(&name);
+            }
             return;
         }
         let (path, args) = path_from_command(&msg.paths);
@@ -443,6 +463,8 @@ impl Dhcpc {
         let output = match path.as_str() {
             "/renew/dhcp/interface" => self.renew(args),
             "/release/dhcp/interface" => self.release(args),
+            "/renew/dhcpv6/interface" => self.renew6(args),
+            "/release/dhcpv6/interface" => self.release6(args),
             _ => match self.show_cb.get(&path) {
                 Some(f) => f(self, args, msg.json)
                     .unwrap_or_else(|e| format!("Error formatting output: {e}")),
