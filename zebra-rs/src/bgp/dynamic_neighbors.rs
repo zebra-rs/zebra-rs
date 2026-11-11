@@ -404,6 +404,31 @@ fn ao_prefix_del(bgp: &Bgp, prefix: &IpNet, send_id: u8, recv_id: u8) -> bool {
     }
 }
 
+/// Remove for good peers the caller has checked are dynamic, live sessions
+/// included, freeing their `listen-limit` slots. Returns whether any was
+/// removed.
+pub(super) fn remove_dynamic_peers(bgp: &mut Bgp, addrs: impl IntoIterator<Item = IpAddr>) -> bool {
+    let mut removed = false;
+    for addr in addrs {
+        debug_assert!(
+            bgp.peers.get(&addr).is_none_or(|peer| matches!(
+                peer.origin,
+                super::peer_key::PeerOrigin::Dynamic { .. }
+            ))
+        );
+        if super::config::remove_peer_full(bgp, addr).is_some() {
+            bgp.dynamic_peer_count = bgp.dynamic_peer_count.saturating_sub(1);
+            removed = true;
+        }
+    }
+    if removed {
+        // They may have been the last next-hop-self holders for a VPNv4 /
+        // Labeled-Unicast family.
+        bgp.reconcile_transit_labels(false);
+    }
+    removed
+}
+
 /// Tear down and remove every `PeerOrigin::Dynamic` peer materialized
 /// from `prefix`, freeing their `listen-limit` slots. Deleting a
 /// listen-range (or unbinding its neighbor-group) revokes the

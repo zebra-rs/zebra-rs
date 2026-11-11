@@ -348,6 +348,19 @@ fn config_srv6_ipv6_unicast(bgp: &mut Bgp, _args: Args, op: ConfigOp) -> Option<
 fn config_peer(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let addr = args.addr()?;
     if op == ConfigOp::Set {
+        if bgp
+            .peers
+            .get(&addr)
+            .is_some_and(|peer| matches!(peer.origin, super::peer_key::PeerOrigin::Dynamic { .. }))
+        {
+            // A configured neighbor starts a new peer. Replaced in place, the
+            // dynamic one would hand it its ident, and with it the routes of
+            // the old session, the events still queued for it and the
+            // listen-limit slot, which nothing would release.
+            if !super::dynamic_neighbors::remove_dynamic_peers(bgp, [addr]) {
+                return None;
+            }
+        }
         let mut peer = Peer::new(
             0, // PeerMap will assign the stable index
             bgp.asn,
@@ -385,11 +398,10 @@ fn config_peer(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
 /// The full peer-removal ritual: listener auth cleanup, Loc-RIB route
 /// withdrawal, update-group detach, map removal, and the listener-wide
 /// TCP-MSS / IP_TRANSPARENT reconciliations. Shared by the static
-/// `delete router bgp neighbor <addr>` path above and the
-/// dynamic-neighbors range sweep
-/// (`super::dynamic_neighbors::sweep_range_peers`); the sweep owns the
-/// `dynamic_peer_count` decrement, since only it knows the peer was
-/// slot-counted.
+/// `delete router bgp neighbor <addr>` path above and the removal of
+/// dynamic peers (`super::dynamic_neighbors::sweep_range_peers` and
+/// `remove_dynamic_peers`); those own the `dynamic_peer_count` decrement,
+/// since only they know the peer was slot-counted.
 pub(super) fn remove_peer_full(bgp: &mut Bgp, addr: IpAddr) -> Option<()> {
     let peer_idx = {
         let peer = bgp.peers.get(&addr)?;
@@ -9644,6 +9656,71 @@ mod neighbor_group_wiring_tests {
         assert_eq!(key.remote, source);
         assert_eq!(bgp.peers.get(&source).unwrap().bfd_session_key, Some(key));
         assert!(bfd_rx.try_recv().is_err(), "one Subscribe");
+    }
+
+    /// A neighbor configured on a dynamic peer's address replaces the dynamic
+    /// peer instead of taking over its ident.
+    #[tokio::test]
+    async fn a_neighbor_on_a_dynamic_address_replaces_the_dynamic_peer() {
+        use super::super::dynamic_neighbors::{
+            config_listen_range, config_listen_range_neighbor_group,
+        };
+        use super::super::peer::{State, try_dynamic_accept};
+        use super::super::peer_key::PeerOrigin;
+        use super::super::route::{BgpRib, BgpRibType};
+
+        let (mut bgp, _bfd_rx) = fresh_bgp_with_bfd();
+        config_neighbor_group_remote_as(&mut bgp, arg_words(&["G", "65002"]), ConfigOp::Set)
+            .unwrap();
+        config_listen_range(&mut bgp, arg_words(&["10.1.0.0/24"]), ConfigOp::Set).unwrap();
+        config_listen_range_neighbor_group(
+            &mut bgp,
+            arg_words(&["10.1.0.0/24", "G"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let _client = tokio::net::TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (server, _) = listener.accept().await.unwrap();
+        let source: IpAddr = "10.1.0.7".parse().unwrap();
+        assert!(try_dynamic_accept(&mut bgp, source, server).is_none());
+        assert_eq!(bgp.dynamic_peer_count, 1);
+        let old = bgp.peers.get(&source).unwrap().ident;
+        bgp.peers.get_mut(&source).unwrap().state = State::Established;
+        let prefix = "198.18.0.0/24".parse().unwrap();
+        let row = BgpRib::new_arc(
+            old,
+            "10.1.0.7".parse().unwrap(),
+            BgpRibType::EBGP,
+            0,
+            0,
+            std::sync::Arc::new(Default::default()),
+            None,
+            None,
+            false,
+        );
+        bgp.shard.adj_in_mut(old).add(None, prefix, row.clone());
+        bgp.shard.update(None, prefix, row);
+
+        config_peer(&mut bgp, arg_words(&["10.1.0.7"]), ConfigOp::Set).unwrap();
+        let peer = bgp.peers.get(&source).unwrap();
+        assert_eq!(peer.origin, PeerOrigin::Static);
+        assert_ne!(
+            peer.ident, old,
+            "events queued for the old peer must miss this one"
+        );
+        assert!(bgp.peers.get_by_idx(old).is_none());
+        assert_eq!(
+            bgp.dynamic_peer_count, 0,
+            "the listen-limit slot is released"
+        );
+        assert_eq!(bgp.shard.adj_in_count(old, Afi::Ip, Safi::Unicast), 0);
+        assert!(
+            bgp.shard.select_best_path(prefix).is_empty(),
+            "the old session's route is withdrawn"
+        );
     }
 
     /// The dynamic-neighbor reaper releases what the peer held: the BFD
