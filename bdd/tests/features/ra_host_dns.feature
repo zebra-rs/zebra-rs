@@ -84,6 +84,21 @@ Feature: Name servers from Router Advertisements for the host (system name-serve
     And command "tests/scripts/resolvectl_stub.sh status" in namespace "r1" should eventually contain "wan0 dns 2001:db8::53"
     And show command "show ipv6 nd interface wan0" in namespace "r1" should contain "DNS servers: 2001:db8::53"
 
+  Scenario: An advertisement that withdraws a name server and names it too leaves it in
+    Given the test topology exists
+    # Two options in one advertisement: the first names the server held
+    # and a new one, the second withdraws the one held. What an
+    # advertisement takes away is taken in first and what it gives after,
+    # whatever the order of its options, as systemd-networkd has it. So
+    # the server held goes out and comes in again with the new one, both
+    # as newly heard and in their option's order. Taken in option by
+    # option it would be gone, and the new one alone.
+    When I execute "tests/scripts/ra_sender.py srv0 --source fe80::1 --rdnss 2001:db8::53+2001:db8::77,600 --rdnss 2001:db8::53,0" in namespace "s1"
+    Then command "tests/scripts/resolvectl_stub.sh status" in namespace "r1" should eventually contain "wan0 dns 2001:db8::53 2001:db8::77"
+    When I execute "tests/scripts/ra_sender.py srv0 --source fe80::1 --rdnss 2001:db8::77,0" in namespace "s1"
+    Then command "tests/scripts/resolvectl_stub.sh status" in namespace "r1" should eventually not contain "2001:db8::77"
+    And show command "show ipv6 nd interface wan0" in namespace "r1" should contain "DNS servers: 2001:db8::53"
+
   Scenario: A DHCP lease's name server goes ahead of the advertised one
     Given the test topology exists
     # The same interface leases an IPv4 address, in another task. What
