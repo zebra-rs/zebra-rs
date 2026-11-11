@@ -1,7 +1,7 @@
 //! Configuration callbacks: `interface <if> ipv4 address dhcp`,
 //! `interface <if> ipv4 dhcp-options …` and `system hostname`; for
 //! DHCPv6, `interface <if> ipv6 address dhcpv6` and
-//! `interface <if> ipv6 dhcpv6-options …`.
+//! `interface <if> ipv6 dhcpv6-options …`, `pd <id>` among them.
 //!
 //! A callback only records the leaf and marks the interface as touched;
 //! [`Dhcpc::process_cm_msg`] applies everything at the end of the commit,
@@ -44,11 +44,13 @@ impl Dhcpc {
         }
         self.callbacks
             .insert("/interface/ipv6/address".to_string(), config_address6);
-        let options6: [(&str, Callback); 4] = [
+        let options6: [(&str, Callback); 6] = [
             ("/duid", config_duid),
             ("/parameters-only", config_parameters_only),
             ("/rapid-commit", config_rapid_commit),
             ("/no-release", config_no_release),
+            ("/pd", config_pd),
+            ("/pd/length", config_pd_length),
         ];
         for (leaf, callback) in options6 {
             self.callbacks.insert(format!("{OPTIONS6}{leaf}"), callback);
@@ -146,6 +148,31 @@ fn config_rapid_commit(dhcpc: &mut Dhcpc, mut args: Args, op: ConfigOp) -> Optio
 fn config_no_release(dhcpc: &mut Dhcpc, mut args: Args, op: ConfigOp) -> Option<()> {
     let cfg = dhcpc.touch6(&mut args)?;
     cfg.no_release = op.is_set();
+    Some(())
+}
+
+/// `dhcpv6-options pd <id>`: one delegation to ask for.
+fn config_pd(dhcpc: &mut Dhcpc, mut args: Args, op: ConfigOp) -> Option<()> {
+    let cfg = dhcpc.touch6(&mut args)?;
+    let id = args.u32()?;
+    if op.is_set() {
+        cfg.pd.entry(id).or_default();
+    } else {
+        cfg.pd.remove(&id);
+    }
+    Some(())
+}
+
+/// `dhcpv6-options pd <id> length <n>`. A delete that comes after the
+/// delegation itself went must not bring it back.
+fn config_pd_length(dhcpc: &mut Dhcpc, mut args: Args, op: ConfigOp) -> Option<()> {
+    let cfg = dhcpc.touch6(&mut args)?;
+    let id = args.u32()?;
+    if op.is_set() {
+        cfg.pd.entry(id).or_default().length = Some(args.u8()?);
+    } else if let Some(pd) = cfg.pd.get_mut(&id) {
+        pd.length = None;
+    }
     Some(())
 }
 

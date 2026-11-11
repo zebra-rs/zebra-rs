@@ -1,22 +1,28 @@
 //! The DHCPv6 side of the DHCP client task: one [`Client`] state machine
-//! per interface configured with `ipv6 address dhcpv6` or
-//! `ipv6 dhcpv6-options parameters-only`, driven by the socket, the
-//! clock, the RIB's link and address events and the configuration.
+//! per interface configured with `ipv6 address dhcpv6`,
+//! `ipv6 dhcpv6-options pd` or `ipv6 dhcpv6-options parameters-only`,
+//! driven by the socket, the clock, the RIB's link and address events
+//! and the configuration.
 //!
 //! It shares the task ([`Dhcpc`]) and its event loop with DHCPv4 and
 //! keeps its own state beside it ([`V6`]). Everything a lease gives goes
-//! through the RIB: each address as a dynamic /128 that brings no
-//! connected route (`AddrOrigin::Dhcp6`). The default route and the
-//! on-link prefixes are the RA host's to install (`nd`), not this
-//! client's.
+//! through the RIB:
 //!
-//! A client is one identity (DUID, IAID) and one of the two protocols
-//! (an address, or parameters only). When the configuration changes
-//! either, or is deleted, the client is *retired*: it releases its lease
-//! as who took it, and lives on beside its successor until the server
-//! has answered the Release or it has been sent as often as it is to be.
+//! - each address as a dynamic /128 that brings no connected route
+//!   (`AddrOrigin::Dhcp6`);
+//! - each delegated prefix as a discard route in the interface's VRF
+//!   ([`Dhcpc::sync_pd_routes`]).
+//!
+//! The default route and the on-link prefixes are the RA host's to
+//! install (`nd`), not this client's.
+//!
+//! A client is one identity: its DUID and what it asks for (an address,
+//! prefixes, or parameters only). When the configuration changes either,
+//! or is deleted, the client is *retired*: it releases its lease as who
+//! took it, and lives on beside its successor until the server has
+//! answered the Release or it has been sent as often as it is to be.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::Ipv6Addr;
 use std::time::Instant;
 
@@ -26,13 +32,14 @@ use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 use crate::config::Args;
 use crate::dhcpc::ident::{self, DuidStore};
-use crate::dhcpc::inst::{Dhcpc, lifetime, unix_now};
+use crate::dhcpc::inst::{DEFAULT_DISTANCE, Dhcpc, lifetime, unix_now};
 use crate::dhcpc::lease::Kept6;
 use crate::fib::AddrOpts;
-use crate::rib::Message;
+use crate::rib::entry::RibEntry;
 use crate::rib::link::{AddrOrigin, LinkAddr};
+use crate::rib::{Message, Nexthop, RibType};
 
-use super::client::{Action, Address, Asks, Client, Event, Lease, Options, State};
+use super::client::{Action, Address, Asks, Client, Event, Lease, Options, PdAsk, Prefix, State};
 use super::socket::{self, Input6, Socket6};
 
 /// `interface <if> ipv6 address dhcpv6` and `… ipv6 dhcpv6-options …`.
@@ -45,12 +52,25 @@ pub struct IfConfig6 {
     pub parameters_only: bool,
     pub rapid_commit: bool,
     pub no_release: bool,
+    /// `dhcpv6-options pd <id>`: the delegations to ask for, by IAID.
+    pub pd: BTreeMap<u32, PdConfig>,
 }
+
+/// `dhcpv6-options pd <id> …`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PdConfig {
+    /// `length`: the prefix length to hint at.
+    pub length: Option<u8>,
+}
+
+/// The length hinted at when `pd <id> length` is not set (VyOS's
+/// default).
+const PD_LENGTH: u8 = 64;
 
 impl IfConfig6 {
     /// Whether a client runs at all.
     pub fn wanted(&self) -> bool {
-        self.address || self.parameters_only
+        self.address || self.parameters_only || !self.pd.is_empty()
     }
 
     fn options(&self) -> Options {
@@ -61,15 +81,19 @@ impl IfConfig6 {
     }
 
     /// What the client of interface `name` asks for: an address with
-    /// `address dhcpv6`, and nothing but the other configuration with
-    /// `parameters-only` alone. An address is asked for whenever
-    /// `address dhcpv6` is there: a commit holding `parameters-only`
-    /// beside it is refused (`config::check`), and a startup config that
-    /// does is taken this way.
+    /// `address dhcpv6`, a prefix for each `pd`, and nothing but the
+    /// other configuration with `parameters-only` alone. What is to be
+    /// leased is asked for whenever it is configured: a commit holding
+    /// `parameters-only` beside it is refused (`config::check`), and a
+    /// startup config that does is taken this way.
     fn asks(&self, name: &str) -> Asks {
+        let ia_pd = self.pd.iter().map(|(&iaid, pd)| PdAsk {
+            iaid,
+            length: pd.length.unwrap_or(PD_LENGTH),
+        });
         Asks {
             ia_na: self.address.then(|| ident::iaid(name)),
-            ia_pd: Vec::new(),
+            ia_pd: ia_pd.collect(),
         }
     }
 }
@@ -77,7 +101,7 @@ impl IfConfig6 {
 /// A client and what it has put in the RIB.
 pub struct Session {
     pub client: Client,
-    /// The lease whose addresses are in the RIB.
+    /// The lease whose addresses and prefixes are in the RIB.
     pub bound: Option<Lease>,
     /// UNIX time the server last confirmed `bound`.
     pub obtained: Option<u64>,
@@ -150,6 +174,9 @@ pub struct V6 {
     duid: Option<Vec<u8>>,
     /// Interfaces whose configuration changed in the commit under way.
     pub(in crate::dhcpc) touched: Vec<String>,
+    /// The discard routes the RIB was last told of: each delegated
+    /// prefix, in a VRF's table (`None`: the default one).
+    pd_routes: BTreeSet<(Option<String>, Ipv6Net)>,
 }
 
 impl V6 {
@@ -162,6 +189,7 @@ impl V6 {
             link_locals: BTreeMap::new(),
             duid: None,
             touched: Vec::new(),
+            pd_routes: BTreeSet::new(),
         }
     }
 }
@@ -173,13 +201,27 @@ fn addresses(lease: &Lease) -> &[Address] {
         .map_or(&[], |ia| ia.addresses.as_slice())
 }
 
-/// The addresses of a lease as the log names them.
+/// The delegated prefixes of a lease, whichever delegation each is of.
+fn prefixes(lease: &Lease) -> impl Iterator<Item = &Prefix> {
+    lease.ia_pd.iter().flat_map(|ia| ia.prefixes.iter())
+}
+
+/// What a lease holds as the log names it: its addresses, then its
+/// prefixes.
 fn address_list(lease: &Lease) -> String {
-    let list: Vec<String> = addresses(lease)
-        .iter()
-        .map(|a| a.address.to_string())
-        .collect();
+    let addresses = addresses(lease).iter().map(|a| a.address.to_string());
+    let prefixes = prefixes(lease).map(|p| p.prefix.to_string());
+    let list: Vec<String> = addresses.chain(prefixes).collect();
     list.join(", ")
+}
+
+/// The route that holds a delegated prefix: what of it is in use has
+/// more specific routes, and the rest goes nowhere.
+fn discard() -> RibEntry {
+    let mut entry = RibEntry::new(RibType::DhcpClient);
+    entry.distance = DEFAULT_DISTANCE;
+    entry.nexthop = Nexthop::Blackhole(0);
+    entry
 }
 
 /// A leased address as the RIB holds it: a host address.
@@ -262,6 +304,9 @@ impl Dhcpc {
         self.reconcile6(name);
         self.sync_link6(name);
         self.start_waiting6();
+        // The link may be a VRF that a client's interface is in, known
+        // only now: the routes go to its table.
+        self.sync_pd_routes();
     }
 
     /// A link's hardware address changed, or it has one now.
@@ -299,6 +344,8 @@ impl Dhcpc {
     pub(in crate::dhcpc) fn link_deleted6(&mut self, ifindex: u32, name: &str) {
         self.v6.link_locals.remove(&ifindex);
         let Some(mut iface) = self.v6.ifaces.remove(name) else {
+            // A VRF a client's interface was in, perhaps.
+            self.sync_pd_routes();
             return;
         };
         for slot in SLOTS {
@@ -511,9 +558,9 @@ impl Dhcpc {
         let unix = unix_now();
         let mut resume = None;
         if let Some(kept) = self.store.load6(name, unix) {
-            // The file holds an address lease, under the IAID of its
-            // IA_NA.
-            if kept.duid == duid && asks.ia_na == Some(kept.iaid) {
+            // Ours when it was taken as who the interface is now: the
+            // same DUID, asking for the same.
+            if kept.duid == duid && kept.asks == asks {
                 resume = Some(kept);
             } else {
                 self.retire_saved6(name, ifindex, iface, kept, now);
@@ -586,11 +633,7 @@ impl Dhcpc {
             no_release: iface.cfg.no_release,
             ..Options::default()
         };
-        let asks = Asks {
-            ia_na: Some(kept.iaid),
-            ia_pd: Vec::new(),
-        };
-        let mut client = Client::new(kept.duid, asks, options, Box::new(rand::random::<u32>));
+        let mut client = Client::new(kept.duid, kept.asks, options, Box::new(rand::random::<u32>));
         let actions = client.handle(
             Event::Resume {
                 lease: kept.lease,
@@ -696,6 +739,49 @@ impl Dhcpc {
         {
             self.v6.ifaces.insert(name.to_string(), iface);
         }
+        self.sync_pd_routes();
+    }
+
+    /// Hand the RIB a discard route for each delegated prefix held, in
+    /// the table of the VRF the interface is in, and take back those of
+    /// prefixes no longer held. After every event that may have changed
+    /// a lease or its interface.
+    ///
+    /// RFC 7084 WPD-5: a packet for a part of the prefix that is not in
+    /// use must not follow the default route back to the router that
+    /// delegated it, which would send it here again. The route stays
+    /// while the lease is held, link up or down: the prefix is still
+    /// this router's.
+    pub(in crate::dhcpc) fn sync_pd_routes(&mut self) {
+        let mut wanted = BTreeSet::new();
+        for iface in self.v6.ifaces.values() {
+            let Some(ifindex) = iface.ifindex else {
+                continue;
+            };
+            let vrf = self.vrf_of(ifindex);
+            let sessions = SLOTS.iter().filter_map(|slot| iface.slot(*slot));
+            let leases = sessions.filter_map(|session| session.bound.as_ref());
+            for prefix in leases.flat_map(prefixes) {
+                wanted.insert((vrf.clone(), prefix.prefix));
+            }
+        }
+        for (vrf, prefix) in self.v6.pd_routes.difference(&wanted) {
+            let rib = RibEntry::new(RibType::DhcpClient);
+            let prefix = *prefix;
+            let _ = self.rib.send(match vrf.clone() {
+                Some(vrf) => Message::Ipv6DelVrf { vrf, prefix, rib },
+                None => Message::Ipv6Del { prefix, rib },
+            });
+        }
+        for (vrf, prefix) in wanted.difference(&self.v6.pd_routes) {
+            let rib = discard();
+            let prefix = *prefix;
+            let _ = self.rib.send(match vrf.clone() {
+                Some(vrf) => Message::Ipv6AddVrf { vrf, prefix, rib },
+                None => Message::Ipv6Add { prefix, rib },
+            });
+        }
+        self.v6.pd_routes = wanted;
     }
 
     /// Feed `event` to `slot`'s client and carry out what it asks for.
@@ -774,7 +860,7 @@ impl Dhcpc {
                         for address in addresses(&lease) {
                             self.withdraw6(ifindex, address.address);
                         }
-                        if lease.ia_na.is_some() {
+                        if lease.has_leases() {
                             tracing::info!(
                                 "dhcpv6 client: {name}: {} withdrawn",
                                 address_list(&lease)
@@ -823,29 +909,38 @@ impl Dhcpc {
         for address in new {
             self.install6(ifindex, address);
         }
+        // A delegated prefix is a route, which follows what is bound
+        // (`sync_pd_routes`); here it is only said.
+        let delegated = |lease: &Lease| prefixes(lease).map(|p| p.prefix).collect();
+        let old_prefixes: BTreeSet<Ipv6Net> =
+            session.bound.as_ref().map(delegated).unwrap_or_default();
+        let new_prefixes: BTreeSet<Ipv6Net> = delegated(&lease);
+        for prefix in old_prefixes.difference(&new_prefixes) {
+            tracing::info!("dhcpv6 client: {name}: {prefix} withdrawn");
+        }
         if fresh {
             let obtained = unix_now();
             session.obtained = Some(obtained);
             // Under the identity that took it, which is the client's.
             // What `parameters-only` learns is asked for again instead.
             if save
-                && let Some(ia) = &lease.ia_na
-                && let Err(e) = self.store.save6(
-                    name,
-                    (session.client.identity().0, ia.iaid),
-                    obtained,
-                    &lease,
-                )
+                && lease.has_leases()
+                && let Err(e) = self
+                    .store
+                    .save6(name, session.client.identity(), obtained, &lease)
             {
                 tracing::warn!("dhcpv6 client: {name}: lease not saved: {e}");
             }
         }
         let changed = session.bound.is_none()
             || !gone.is_empty()
-            || new.iter().any(|a| !old.contains(&a.address));
-        match (&lease.ia_na, changed || !fresh) {
-            (Some(ia), true) => {
-                let longest = ia.addresses.iter().map(|a| a.valid).max().unwrap_or(0);
+            || new.iter().any(|a| !old.contains(&a.address))
+            || old_prefixes != new_prefixes;
+        match (lease.has_leases(), changed || !fresh) {
+            (true, true) => {
+                let valid = new.iter().map(|a| a.valid);
+                let longest = valid.chain(prefixes(&lease).map(|p| p.valid)).max();
+                let longest = longest.unwrap_or(0);
                 tracing::info!(
                     "dhcpv6 client: {name}: {} {} from {}, valid {}",
                     if fresh { "bound" } else { "resumed" },
@@ -854,14 +949,14 @@ impl Dhcpc {
                     lifetime(longest),
                 );
             }
-            (Some(_), false) => {
+            (true, false) => {
                 tracing::debug!("dhcpv6 client: {name}: renewed {}", address_list(&lease));
             }
-            (None, true) => tracing::info!(
+            (false, true) => tracing::info!(
                 "dhcpv6 client: {name}: configuration parameters from {}",
                 lease.server_address
             ),
-            (None, false) => tracing::debug!(
+            (false, false) => tracing::debug!(
                 "dhcpv6 client: {name}: configuration parameters refreshed from {}",
                 lease.server_address
             ),
@@ -958,9 +1053,11 @@ mod tests {
     use tokio::sync::mpsc::UnboundedReceiver;
 
     use super::*;
-    use crate::dhcpc::inst::LinkInfo;
+    use crate::config::{ConfigOp, ConfigRequest};
+    use crate::dhcpc::inst::{LinkInfo, clock};
     use crate::dhcpc::lease::Store;
-    use crate::dhcpc::v6::client::Ia;
+    use crate::dhcpc::v6::client::{Ia, IaPd};
+    use crate::dhcpc::v6::show::show_leases6;
     use crate::rib::client::{ProtoId, RibClient, RibInbound};
     use crate::rib::link::AddrFlags;
 
@@ -975,6 +1072,10 @@ mod tests {
     const LINK_LOCAL: Ipv6Addr = Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 0x10);
     const ADDRESS: Ipv6Addr = Ipv6Addr::new(0x2001, 0xdb8, 1, 0, 0, 0, 0, 0x100);
     const ADDRESS2: Ipv6Addr = Ipv6Addr::new(0x2001, 0xdb8, 1, 0, 0, 0, 0, 0x200);
+    const PREFIX: &str = "2001:db8:100::/56";
+    const PREFIX2: &str = "2001:db8:200::/56";
+    const VRF: &str = "red";
+    const VRF_IFINDEX: u32 = 0x7fff_ffe1;
 
     struct Bench {
         dhcpc: Dhcpc,
@@ -984,12 +1085,16 @@ mod tests {
 
     impl Drop for Bench {
         fn drop(&mut self) {
+            clock::hold(None);
             let _ = std::fs::remove_dir_all(&self.dir);
         }
     }
 
     /// A task that knows one link, up, with no address yet.
     fn bench(test: &str) -> Bench {
+        // A lease saved and read back within a test is of the age the
+        // test gave it.
+        clock::hold(Some(1_800_000_000));
         let dir = std::env::temp_dir().join(format!("zebra-dhcpc6-{}-{test}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let (tx, rib) = mpsc::unbounded_channel();
@@ -1035,6 +1140,66 @@ mod tests {
         }
     }
 
+    /// `lease` with a prefix delegated under each of the `pd` ids too.
+    fn delegated(mut lease: Lease, pd: &[(u32, &str)]) -> Lease {
+        for &(iaid, prefix) in pd {
+            lease.ia_pd.push(IaPd {
+                iaid,
+                server_id: lease.server_id.clone(),
+                t1: 1800,
+                t2: 2880,
+                prefixes: vec![Prefix {
+                    prefix: prefix.parse().unwrap(),
+                    preferred: 3600,
+                    valid: 7200,
+                }],
+            });
+        }
+        lease
+    }
+
+    /// A lease of prefixes and no address.
+    fn prefixes_only(pd: &[(u32, &str)]) -> Lease {
+        let mut lease = lease(&[]);
+        lease.ia_na = None;
+        delegated(lease, pd)
+    }
+
+    /// `dhcpv6-options pd <id>` for each of `ids`, with `address dhcpv6`
+    /// or without.
+    fn pd_config(address: bool, ids: &[u32]) -> IfConfig6 {
+        IfConfig6 {
+            address,
+            duid: Some(DUID.to_vec()),
+            pd: ids.iter().map(|id| (*id, PdConfig::default())).collect(),
+            ..IfConfig6::default()
+        }
+    }
+
+    /// `cfg` committed.
+    fn commit(b: &mut Bench, cfg: IfConfig6) {
+        b.dhcpc.v6.ifaces.entry(IF.to_string()).or_default().cfg = cfg;
+        b.dhcpc.reconcile6(IF);
+    }
+
+    /// The link is in VRF `red`, which the task knows of or not yet.
+    fn enslave(b: &mut Bench, vrf_known: bool) {
+        b.dhcpc.links.get_mut(&IFINDEX).unwrap().master = Some(VRF_IFINDEX);
+        if vrf_known {
+            b.dhcpc.links.insert(
+                VRF_IFINDEX,
+                LinkInfo {
+                    name: VRF.to_string(),
+                    mac: None,
+                    mtu: 65575,
+                    up: true,
+                    master: None,
+                    is_vrf: true,
+                },
+            );
+        }
+    }
+
     /// `address dhcpv6` with `dhcpv6-options duid`, committed.
     fn configure(b: &mut Bench, duid: &[u8]) {
         let cfg = &mut b.dhcpc.v6.ifaces.entry(IF.to_string()).or_default().cfg;
@@ -1044,8 +1209,17 @@ mod tests {
     }
 
     /// A lease on disk taken as `duid`, `age` seconds ago.
+    /// A lease on disk, taken `age` seconds ago as `duid` asking for an
+    /// address.
     fn save(b: &Bench, duid: &[u8], age: u64, lease: &Lease) {
-        let identity = (duid, ident::iaid(IF));
+        let asks = Asks {
+            ia_na: Some(ident::iaid(IF)),
+            ia_pd: Vec::new(),
+        };
+        save_as(b, (duid, &asks), age, lease);
+    }
+
+    fn save_as(b: &Bench, identity: (&[u8], &Asks), age: u64, lease: &Lease) {
         b.dhcpc
             .store
             .save6(IF, identity, unix_now() - age, lease)
@@ -1113,10 +1287,32 @@ mod tests {
                     assert_eq!((ifindex, origin), (IFINDEX, AddrOrigin::Dhcp6));
                     format!("del {addr}")
                 }
+                Message::Ipv6Add { prefix, rib } => format!("route {prefix} {}", route(&rib)),
+                Message::Ipv6AddVrf { vrf, prefix, rib } => {
+                    format!("route {prefix} vrf {vrf} {}", route(&rib))
+                }
+                Message::Ipv6Del { prefix, rib } => {
+                    assert_eq!(rib.rtype, RibType::DhcpClient);
+                    format!("no route {prefix}")
+                }
+                Message::Ipv6DelVrf { vrf, prefix, rib } => {
+                    assert_eq!(rib.rtype, RibType::DhcpClient);
+                    format!("no route {prefix} vrf {vrf}")
+                }
                 _ => "other".to_string(),
             });
         }
         out
+    }
+
+    /// A route as the task hands it to the RIB.
+    fn route(rib: &RibEntry) -> String {
+        assert_eq!(rib.rtype, RibType::DhcpClient);
+        let to = match &rib.nexthop {
+            Nexthop::Blackhole(0) => "discard",
+            _ => "elsewhere",
+        };
+        format!("{to} distance {}", rib.distance)
     }
 
     fn verb() -> Args {
@@ -1643,6 +1839,290 @@ mod tests {
         let iface = &b.dhcpc.v6.ifaces[IF];
         assert!(iface.session.is_none() && iface.ifindex.is_none());
         assert_eq!(b.dhcpc.next_deadline6(), None);
+    }
+
+    #[tokio::test]
+    async fn a_delegated_prefix_is_held_by_a_discard_route() {
+        let mut b = bench("pd-route");
+        let cfg = pd_config(false, &[1]);
+        let asks = cfg.asks(IF);
+        assert_eq!(asks.ia_na, None);
+        assert_eq!(
+            asks.ia_pd,
+            [PdAsk {
+                iaid: 1,
+                length: 64
+            }]
+        );
+        save_as(&b, (&DUID, &asks), 600, &prefixes_only(&[(1, PREFIX)]));
+        commit(&mut b, cfg);
+        // No address to put on the interface: the route is all of it.
+        assert_eq!(
+            asked(&mut b),
+            [format!("route {PREFIX} discard distance 210")]
+        );
+        assert_eq!(state(&b), State::Bound);
+        let kept = saved(&b).expect("a lease of prefixes is a lease");
+        assert_eq!(kept.asks, asks);
+        // Shown with what is left of its times, under its delegation.
+        let shown = show_leases6(&b.dhcpc, Args(VecDeque::new()), false).unwrap();
+        let line = format!("  Prefix:       {PREFIX} preferred 3000s valid 6600s (pd 1)\n");
+        assert!(shown.contains(&line), "{shown}");
+        assert!(shown.contains("  Renew in:     1200s\n"), "{shown}");
+        assert!(
+            !shown.contains("IAID:") && !shown.contains("Address:"),
+            "{shown}"
+        );
+        let json = show_leases6(&b.dhcpc, Args(VecDeque::new()), true).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            json[0]["pd"],
+            serde_json::json!([{
+                "id": 1,
+                "prefixes": [{"prefix": PREFIX, "preferred_in": 3000, "valid_in": 6600}],
+                "server_duid": "00:03:00:01:02:00:00:00:00:fe",
+                "renew_in": 1200,
+                "rebind_in": 2280,
+            }])
+        );
+        // The prefix is this router's while the lease is held, whatever
+        // the link does.
+        make_ready(&mut b);
+        b.dhcpc.links.get_mut(&IFINDEX).unwrap().up = false;
+        b.dhcpc.sync_link6(IF);
+        b.dhcpc.links.get_mut(&IFINDEX).unwrap().up = true;
+        b.dhcpc.sync_link6(IF);
+        assert!(asked(&mut b).is_empty());
+        // Deleted configuration takes it back.
+        commit(&mut b, IfConfig6::default());
+        assert_eq!(asked(&mut b), [format!("no route {PREFIX}")]);
+        assert!(saved(&b).is_none());
+        assert_eq!(retiring(&b), Some(State::Releasing));
+    }
+
+    /// One configuration line as the configuration manager hands it
+    /// over, and the end of its commit.
+    fn config_line(b: &mut Bench, leaf: &str, values: &[&str], op: ConfigOp) {
+        let callback = b.dhcpc.callbacks[&format!("/interface/ipv6/dhcpv6-options/{leaf}")];
+        let mut args = vec![IF.to_string()];
+        args.extend(values.iter().map(|value| value.to_string()));
+        callback(&mut b.dhcpc, Args(VecDeque::from(args)), op);
+        b.dhcpc
+            .process_cm_msg(ConfigRequest::new(Vec::new(), ConfigOp::CommitEnd));
+    }
+
+    #[tokio::test]
+    async fn pd_is_configured_by_its_id() {
+        let mut b = bench("pd-config");
+        let pd = |b: &Bench| b.dhcpc.v6.ifaces.get(IF).map(|iface| iface.cfg.pd.clone());
+        let hint = |length| PdConfig { length };
+        config_line(&mut b, "pd", &["7"], ConfigOp::Set);
+        assert_eq!(pd(&b), Some(BTreeMap::from([(7, hint(None))])));
+        // The delegation alone starts a client, which asks for it.
+        make_ready(&mut b);
+        assert_eq!(state(&b), State::Soliciting);
+        let session = b.dhcpc.v6.ifaces[IF].session.as_ref().unwrap();
+        assert_eq!(
+            session.client.identity().1.ia_pd,
+            [PdAsk {
+                iaid: 7,
+                length: 64
+            }]
+        );
+        // The hint is a leaf of it, and comes with its entry or after.
+        config_line(&mut b, "pd/length", &["7", "48"], ConfigOp::Set);
+        config_line(&mut b, "pd/length", &["9", "56"], ConfigOp::Set);
+        assert_eq!(
+            pd(&b),
+            Some(BTreeMap::from([(7, hint(Some(48))), (9, hint(Some(56)))]))
+        );
+        config_line(&mut b, "pd/length", &["7"], ConfigOp::Delete);
+        assert_eq!(
+            pd(&b),
+            Some(BTreeMap::from([(7, hint(None)), (9, hint(Some(56)))]))
+        );
+        // A deleted entry is gone whichever of its lines comes last: the
+        // leaf's delete does not bring it back.
+        config_line(&mut b, "pd", &["9"], ConfigOp::Delete);
+        config_line(&mut b, "pd/length", &["9"], ConfigOp::Delete);
+        assert_eq!(pd(&b), Some(BTreeMap::from([(7, hint(None))])));
+        config_line(&mut b, "pd", &["7"], ConfigOp::Delete);
+        config_line(&mut b, "pd/length", &["7"], ConfigOp::Delete);
+        // Nothing configured, and no client: the interface is forgotten.
+        assert_eq!(pd(&b), None);
+    }
+
+    #[tokio::test]
+    async fn a_lost_address_leaves_the_prefix_and_its_route() {
+        let mut b = bench("pd-address-lost");
+        let cfg = pd_config(true, &[1, 2]);
+        let held = delegated(lease(&[ADDRESS]), &[(1, PREFIX)]);
+        save_as(&b, (&DUID, &cfg.asks(IF)), 0, &held);
+        commit(&mut b, cfg);
+        assert_eq!(
+            asked(&mut b),
+            [
+                format!("add {ADDRESS}/128 3600/7200"),
+                format!("route {PREFIX} discard distance 210"),
+            ]
+        );
+        // A delegation asked for and not held is shown as that.
+        let shown = show_leases6(&b.dhcpc, Args(VecDeque::new()), false).unwrap();
+        assert!(shown.contains(&format!("{PREFIX} preferred")), "{shown}");
+        assert!(shown.contains("                none (pd 2)\n"), "{shown}");
+        // The kernel drops the address: the lease goes on as the prefix
+        // alone, on disk too, and the route is not touched.
+        b.dhcpc
+            .addr_event6(&kernel(ADDRESS, 128, AddrFlags::default()), false);
+        assert_eq!(asked(&mut b), [format!("del {ADDRESS}/128")]);
+        let kept = saved(&b).expect("the prefix is still leased");
+        assert!(addresses(&kept.lease).is_empty());
+        assert_eq!(prefixes(&kept.lease).count(), 1);
+        let bound = b.dhcpc.v6.ifaces[IF]
+            .session
+            .as_ref()
+            .unwrap()
+            .bound
+            .as_ref();
+        assert_eq!(bound.map(|lease| prefixes(lease).count()), Some(1));
+    }
+
+    #[tokio::test]
+    async fn a_prefix_that_runs_out_loses_its_route() {
+        let mut b = bench("pd-expiry");
+        let cfg = pd_config(true, &[1, 2]);
+        let held = delegated(lease(&[ADDRESS]), &[(1, PREFIX), (2, PREFIX2)]);
+        save_as(&b, (&DUID, &cfg.asks(IF)), 7190, &held);
+        commit(&mut b, cfg);
+        assert_eq!(
+            asked(&mut b),
+            [
+                format!("add {ADDRESS}/128 0/10"),
+                format!("route {PREFIX} discard distance 210"),
+                format!("route {PREFIX2} discard distance 210"),
+            ]
+        );
+        // No link to renew on: at the end of its lifetime all of it goes.
+        run_timers(&mut b, Duration::from_secs(20));
+        assert_eq!(
+            asked(&mut b),
+            [
+                format!("del {ADDRESS}/128"),
+                format!("no route {PREFIX}"),
+                format!("no route {PREFIX2}"),
+            ]
+        );
+        assert!(saved(&b).is_none());
+    }
+
+    #[tokio::test]
+    async fn another_delegation_asked_for_is_another_client() {
+        let mut b = bench("pd-identity");
+        let cfg = pd_config(true, &[1]);
+        let held = delegated(lease(&[ADDRESS]), &[(1, PREFIX)]);
+        save_as(&b, (&DUID, &cfg.asks(IF)), 0, &held);
+        commit(&mut b, cfg);
+        make_ready(&mut b);
+        asked(&mut b);
+        // A hint is part of what is asked for, like the delegation.
+        let mut hinted = pd_config(true, &[1]);
+        hinted.pd.get_mut(&1).unwrap().length = Some(56);
+        assert_eq!(
+            hinted.asks(IF).ia_pd,
+            [PdAsk {
+                iaid: 1,
+                length: 56
+            }]
+        );
+        commit(&mut b, hinted);
+        assert_eq!(
+            asked(&mut b),
+            [format!("del {ADDRESS}/128"), format!("no route {PREFIX}")]
+        );
+        assert_eq!(state(&b), State::Soliciting);
+        assert_eq!(retiring(&b), Some(State::Releasing));
+
+        // A lease on disk that was taken asking for something else is
+        // not this client's to go on with: it is given back.
+        let mut b = bench("pd-saved-identity");
+        let asks = pd_config(true, &[1]).asks(IF);
+        save_as(&b, (&DUID, &asks), 600, &held);
+        commit(&mut b, pd_config(true, &[2]));
+        assert_eq!(
+            asked(&mut b),
+            [
+                format!("add {ADDRESS}/128 3000/6600"),
+                format!("route {PREFIX} discard distance 210"),
+            ]
+        );
+        assert!(saved(&b).is_none());
+        assert_eq!(retiring(&b), Some(State::Bound));
+        make_ready(&mut b);
+        assert_eq!(
+            asked(&mut b),
+            [format!("del {ADDRESS}/128"), format!("no route {PREFIX}")]
+        );
+        assert_eq!(retiring(&b), Some(State::Releasing));
+        assert_eq!(state(&b), State::Soliciting);
+    }
+
+    #[tokio::test]
+    async fn the_discard_route_is_in_the_vrf_of_the_interface() {
+        let mut b = bench("pd-vrf");
+        enslave(&mut b, true);
+        let cfg = pd_config(false, &[1]);
+        save_as(
+            &b,
+            (&DUID, &cfg.asks(IF)),
+            0,
+            &prefixes_only(&[(1, PREFIX)]),
+        );
+        commit(&mut b, cfg);
+        assert_eq!(
+            asked(&mut b),
+            [format!("route {PREFIX} vrf {VRF} discard distance 210")]
+        );
+        // The link goes (a move to another VRF is that, and a new link):
+        // the route goes from the table it was put in.
+        b.dhcpc.links.remove(&IFINDEX);
+        b.dhcpc.link_deleted6(IFINDEX, IF);
+        assert_eq!(asked(&mut b), [format!("no route {PREFIX} vrf {VRF}")]);
+
+        // A VRF the task hears of after its member: the route moves to
+        // its table.
+        let mut b = bench("pd-vrf-late");
+        enslave(&mut b, false);
+        let cfg = pd_config(false, &[1]);
+        save_as(
+            &b,
+            (&DUID, &cfg.asks(IF)),
+            0,
+            &prefixes_only(&[(1, PREFIX)]),
+        );
+        commit(&mut b, cfg);
+        assert_eq!(
+            asked(&mut b),
+            [format!("route {PREFIX} discard distance 210")]
+        );
+        enslave(&mut b, true);
+        b.dhcpc.link_added6(VRF_IFINDEX, VRF, &[]);
+        assert_eq!(
+            asked(&mut b),
+            [
+                format!("no route {PREFIX}"),
+                format!("route {PREFIX} vrf {VRF} discard distance 210"),
+            ]
+        );
+        // And back when the VRF goes.
+        b.dhcpc.links.remove(&VRF_IFINDEX);
+        b.dhcpc.link_deleted6(VRF_IFINDEX, VRF);
+        assert_eq!(
+            asked(&mut b),
+            [
+                format!("no route {PREFIX} vrf {VRF}"),
+                format!("route {PREFIX} discard distance 210"),
+            ]
+        );
     }
 
     #[tokio::test]

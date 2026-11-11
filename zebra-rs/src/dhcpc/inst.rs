@@ -173,10 +173,36 @@ pub struct Dhcpc {
 }
 
 pub(super) fn unix_now() -> u64 {
+    #[cfg(test)]
+    if let Some(now) = clock::held() {
+        return now;
+    }
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+/// The wall clock held still for a test. A lease file's age is counted
+/// in whole seconds between a `unix_now` when it is written and another
+/// when it is read: a test that expects that age must not see a second
+/// tick over in between.
+#[cfg(test)]
+pub(super) mod clock {
+    use std::cell::Cell;
+
+    thread_local! {
+        static HELD: Cell<Option<u64>> = const { Cell::new(None) };
+    }
+
+    pub fn held() -> Option<u64> {
+        HELD.with(Cell::get)
+    }
+
+    /// Hold the clock of this thread's tests at `now`, or let it go.
+    pub fn hold(now: Option<u64>) {
+        HELD.with(|held| held.set(now));
+    }
 }
 
 impl Dhcpc {
@@ -1208,11 +1234,15 @@ mod tests {
 
     impl Drop for Bench {
         fn drop(&mut self) {
+            clock::hold(None);
             let _ = std::fs::remove_dir_all(&self.dir);
         }
     }
 
     fn bench(test: &str, link_up: bool) -> Bench {
+        // A lease saved and read back within a test is of the age the
+        // test gave it.
+        clock::hold(Some(1_800_000_000));
         let dir = std::env::temp_dir().join(format!("zebra-dhcpc-{}-{test}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let (tx, rib) = mpsc::unbounded_channel();

@@ -2,11 +2,12 @@
 
 **Status: P0 (the codec), P1 (the RIB plumbing and the DHCPv4 client),
 P2 (the RA host) and P3 (the DHCPv6 client for an address and for
-`parameters-only`) are implemented. Of P4, the protocol half is
-implemented: the DHCPv6 state machine asks for delegated prefixes and
-holds them. The task asks for none yet. The rest of P4 and what follows
-is design.** Where a phase found the code to be different from what this
-document assumed, the text below says what was built and why.
+`parameters-only`) are implemented. Of P4, prefix delegation on the WAN
+is implemented: `dhcpv6-options pd <id>` asks for a delegated prefix,
+which is held, saved, shown and given a discard route. Handing it out
+to LAN interfaces (the rest of P4) and what follows is design.** Where a
+phase found the code to be different from what this document assumed,
+the text below says what was built and why.
 
 zebra-rs gets its own DHCP client: a `dhcpc` task that leases IPv4
 addresses, and IPv6 addresses and delegated prefixes, on WAN interfaces. It
@@ -497,9 +498,9 @@ interface <if>
       parameters-only                    # Information-Request only
       rapid-commit
       no-release
-      pd <0-4294967295>                  # IAID of this IA_PD (P4, not in the schema yet)
+      pd <0-4294967295>                  # IAID of this IA_PD
         length <32-64>                   # hint; default 64
-        interface <lan-if>
+        interface <lan-if>               # the LAN half of P4, not in the schema yet
           sla-id <0-4294967295>
           address <1-18446744073709551615>   # host part; absent: EUI-64
 ```
@@ -509,15 +510,15 @@ interface <if>
 of them needs the RA default route. SLAAC addresses are made only with
 `autoconf`.
 
-- Built for `autoconf` (P2) and `address dhcpv6` (P3); `pd` comes with
-  P4. `parameters-only` alone does not start it: it asks for no address,
+- Built for `autoconf` (P2), `address dhcpv6` (P3) and `pd` (P4).
+  `parameters-only` alone does not start it: it asks for no address,
   and goes with `autoconf` where routes are wanted.
 - A host that goes on running for `address dhcpv6` follows `autoconf`
   coming and going: its SLAAC addresses are given up when `autoconf` is
   deleted, and the routers are solicited again when it is set, since
   the prefixes an address is formed from come with their answer.
 - `show ipv6 nd interface` says what asked for the host:
-  `RA host: enabled (autoconf, dhcpv6)`.
+  `RA host: enabled (autoconf, dhcpv6, pd)`.
 
 **Commit-time checks**
 
@@ -525,7 +526,7 @@ of them needs the RA default route. SLAAC addresses are made only with
 |---|---|---|
 | `address dhcp` beside static addresses | error | an interface is addressed by DHCP or statically: the `must` on the `address` list, enforced by `config::check::address_dhcp_exclusive` (a startup config only warns, and the lease is then one more address) |
 | `dhcp-options` / `dhcpv6-options` / `ra-options` without the address value that uses them | warning | stored, unused |
-| `parameters-only` with `address dhcpv6` or `pd` | error | an Information-Request carries no IAs. Built for `address dhcpv6` (`config::check::dhcpv6_parameters_only_exclusive`); a startup config only warns, and the client then asks for the address |
+| `parameters-only` with `address dhcpv6` or `pd` | error | an Information-Request carries no IAs (`config::check::dhcpv6_parameters_only_exclusive`: one error for each of the two the interface has); a startup config only warns, and the client then asks for what is to be leased |
 | `dhcpv6-options duid` that is not 3 to 130 hex octets | error | the schema's pattern says what an octet is and that there are three; the count is checked at commit (`config::check`) |
 | `pd … interface X` where X is the WAN interface itself | error | |
 | one LAN interface under two `pd` ids, or two `sla-id`s per interface | error | |
@@ -563,7 +564,7 @@ A config-migration tool only has to move paths. No values change.
 | RA default route | `Ra`, `ra-options default-route-distance`, via the router's link-local | `proto ra` |
 | RA on-link prefix (L=1) | `Ra`, lives as long as the PIO's valid lifetime. Built (P2) as a nexthop with no gateway pinned to the interface, not `Nexthop::Link`, which the RIB does not install for a protocol route; the FIB installs it as `dev <if>` with no nexthop object | `proto ra` |
 | IA_NA address | `AddrDynAdd(Dhcp6)`, /128, `noprefixroute` | IA lifetimes |
-| Delegated prefix | `DhcpClient` unreachable route (WPD-5); `Nexthop` gains an unreachable form if it lacks one, because WPD-5(a) wants ICMPv6 Destination Unreachable and a blackhole sends nothing | |
+| Delegated prefix | `DhcpClient` discard route at distance 210, in the WAN interface's VRF (WPD-5). Built as `Nexthop::Blackhole`: the RIB has no unreachable form, so the packet is dropped without the ICMPv6 Destination Unreachable that WPD-5(a) asks for (§16). An unreachable form of `Nexthop` is what would send it | `blackhole <prefix> proto dhcp` |
 | LAN /64 from a delegation | `AddrDynAdd(Pd)` on the LAN interface, prefix route kept (connected) | delegated lifetimes |
 
 **Withdrawal** happens on expiry, NAK, Release, a deleted configuration, a
@@ -783,7 +784,8 @@ the client stays released until `renew`, or until `address dhcp` or the
 
 **Delegated prefixes**
 
-- Each delegated prefix gets the unreachable route (§5).
+- Each delegated prefix gets the discard route (§5), for as long as the
+  lease holds it.
 - Each `interface <lan> sla-id N` gets the /64 made of the prefix with N in
   the bits from the delegated length up to 64.
   - The LAN address is that /64 plus `address` (else the EUI-64 of the LAN
@@ -901,10 +903,12 @@ ones in `dhcpc`:
 - **What `parameters-only` learns is not kept on disk**: it is asked for
   again at start.
 
-**What P4 has built so far** (`v6/client.rs`): the state machine asks
-for delegated prefixes and holds them, alone or with the address. The
-schema (`dhcpv6-options pd`), the discard route, the LAN addresses,
-persistence, show and the BDD features are the rest of P4.
+**What P4 has built so far**: the state machine (`v6/client.rs`) asks
+for delegated prefixes and holds them, alone or with the address, and
+the task (`v6/inst.rs`) asks for what `dhcpv6-options pd` configures,
+keeps the lease on disk, shows it and gives each prefix its discard
+route. The LAN addresses (`pd <id> interface <lan>`) are the rest of
+P4. The state machine first, then the task.
 
 - **What a client asks for is part of who it is.** The IA_NA and each
   IA_PD (its IAID and the length hinted at) are fixed for a client's
@@ -1044,6 +1048,41 @@ persistence, show and the BDD features are the rest of P4.
   - the other configuration (DNS, NTP) is that of the server the
     addresses are leased from, or without an address the first prefix.
 
+The task's part (`v6/inst.rs`):
+
+- **`pd <id>` is the IAID of an IA_PD**, and `length` its hint, 64 when
+  it is not set (VyOS's default). An interface asks for its address,
+  for prefixes, or for both, and a client runs for any of them.
+- **The discard route follows what is bound** (`sync_pd_routes`). After
+  every event, the prefixes the clients hold are compared with the
+  routes the RIB was last told of, and the difference is sent. That
+  covers a bind, a renewal that brings another prefix, a prefix that
+  runs out, a release, deleted configuration and a deleted link without
+  a place of its own for each.
+  - The route is in the table of the VRF the WAN interface is in. A VRF
+    the task hears of after its member moves the route there.
+  - A client on its way out counts while it still holds its lease (one
+    read back from disk under another identity, until the link can
+    carry its Release).
+- **The route stays while the link is down.** A DHCPv4 default route is
+  taken back on link down, so that a backup uplink takes over. A
+  delegated prefix is still this router's then: the LAN goes on using
+  it, and a packet for an unused part of it has nowhere better to go.
+- **A lease of prefixes alone is a lease**: saved, resumed after a
+  restart and verified by a Rebind, with no address on the interface.
+  An address the kernel drops leaves the prefixes leased, and the file
+  is written again without it.
+- **The lease file names what was asked for**, with the DUID: the
+  IA_NA's IAID and each `pd` with its hint. A file taken as another
+  identity, which now includes another set of delegations or another
+  hint, is not resumed as the interface's own: it is given back as who
+  took it. A file written before delegations has no `pd` and is read as
+  asking for the address alone.
+- **Across a restart** the route is still in the kernel. A lease that
+  is resumed installs it again over the one that is there; without a
+  lease the RIB's record of its own DHCP routes (`rib/route_record.rs`)
+  has it swept after the restart, like a DHCPv4 lease's routes.
+
 ---
 
 ## 9. Identity and persistence
@@ -1052,7 +1091,7 @@ persistence, show and the BDD features are the rest of P4.
 |---|---|---|
 | `/var/lib/zebra-rs/dhcp/duid` | the system DUID (D8), as `xx:xx:…` text | created once; rewritten only when it holds no DUID |
 | `/var/lib/zebra-rs/dhcp/<if>.v4.json` | the lease, when it began, and the identity that took it (hardware address, client identifier) | written at bind and renew, deleted on release, expiry or deleted configuration |
-| `/var/lib/zebra-rs/dhcp/<if>.v6.json` | the lease (server DUID and address, the IA_NA's addresses with their lifetimes and the DUID of the server they are leased from, DNS and NTP), when the server last confirmed it, and the identity that took it (DUID, IAID). Prefixes and LAN assignments come with P4 | same |
+| `/var/lib/zebra-rs/dhcp/<if>.v6.json` | the lease (server DUID and address, the IA_NA's addresses and each IA_PD's prefixes with their lifetimes and the DUID of the server they are leased from, DNS and NTP), when the server last confirmed it, and the identity that took it (DUID, the IA_NA's IAID, each `pd` with its hint). LAN assignments come with the rest of P4 | same |
 
 - `ZEBRA_DHCP_STATE_DIR` overrides the directory, as
   `ZEBRA_OSPF_CHECKPOINT_DIR` does for checkpoints: for tests, and for
@@ -1108,6 +1147,14 @@ with `parameters-only`), the server's address and DUID, each address as
 `<address>/128 preferred <n>s valid <n>s`, `Renew in` / `Rebind in`
 (`never` when the server said so), DNS servers, search list and NTP
 servers. It lists no routes: the lease gives none.
+
+As built in P4, each delegation asked for follows the addresses:
+`Prefix: <prefix> preferred <n>s valid <n>s (pd <id>)` for each prefix
+it holds, or `none (pd <id>)`. `Renew in` and `Rebind in` are those of
+whatever is due first. In JSON, `pd` is a list of `id`, `prefixes`
+(empty while nothing is delegated) and, of a delegation that holds
+something, its own `server_duid`, `renew_in` and `rebind_in`. The
+discard routes are in `show ipv6 route`, like any route.
 
 **`show ipv6 nd interface <if>`** adds default routers (preference,
 lifetime), prefixes (L/A flags, lifetimes), SLAAC addresses and
@@ -1357,7 +1404,7 @@ configuration of the lease's link.
 | P1 (done) | RIB plumbing (D5, D6); `dhcpc` task; DHCPv4 state machine, sockets, ACD, persistence; `show dhcp client leases`, `renew/release dhcp`; ungate `address dhcp` | P0 |
 | P2 (done) | RA host in `nd`: RS, default route, on-link prefixes, `ipv6 address autoconf`, `ra-options`, `accept_ra=0`; show section | P1's RIB plumbing |
 | P3 (done) | DHCPv6 IA_NA and `parameters-only`; DUID; `show dhcpv6 client leases`, `renew/release dhcpv6` | P0, P2 |
-| P4 (state machine done) | IA_PD: discard route, LAN assignment, prefix change. Left: the schema (`dhcpv6-options pd`), the unreachable route, `AddrOrigin::Pd` and the `sla-id` arithmetic for the LAN addresses, prefixes in the lease file and in show, the BDD features | P3 |
+| P4 (the WAN half done) | IA_PD: discard route, LAN assignment, prefix change. Done: the state machine, `dhcpv6-options pd <id> [length]`, the discard route, prefixes in the lease file and in show, `dhcpv6_client_pd`. Left: `pd <id> interface <lan>` with `AddrOrigin::Pd` and the `sla-id` arithmetic for the LAN addresses, an unreachable form of the route (§16), `dhcpv6_pd_insomnia` | P3 |
 | ND-PIO | `nd` advertises PIOs for LAN /64s with counted-down lifetimes, deprecates removed ones (L-13), `RibRx::AddrAdd` on lifetime change | P1's RIB plumbing; parallel to P2–P4 |
 | Resolver (DHCPv4 and RA done) | The `resolver` task; the name servers of a DHCPv4 lease and of Router Advertisements to systemd-resolved by default, `no-name-server` under `dhcp-options` and `ra-options` to keep them back (§13). Next: DHCPv6 as a source, leftovers across a restart | P1; P2 and P3 for their sources |
 | P5 | MTU options, Reconfigure, IA_TA, prefix exclude, RFC 4191 routes, stable-privacy identifiers, `redistribute dhcp` | as needed |
@@ -1408,6 +1455,12 @@ Test servers: Kea through insomnia's `kea_server.sh` shape covers DHCPv4,
 IA_NA and PD. dnsmasq (present on Ubuntu as `dnsmasq-base`) covers
 DHCPv4, IA_NA and RAs, but not PD.
 
+As built, PD is served by `tests/scripts/dhcpv6_server.py`: a delegating
+router in the Python standard library, which the development hosts have
+where they have no Kea. It gives each IA_PD the prefix configured for
+its IAID, tells any other NoPrefixAvail, routes what it delegates to the
+client, and logs each message, which is what a scenario reads.
+
 | Feature | Checks |
 |---|---|
 | `dhcp_client` | lease → address and `D>* 0.0.0.0/0 [210/0]`; renew; `release`; server gone → expiry withdraws everything; zebra-rs restart keeps the address and re-verifies |
@@ -1417,7 +1470,7 @@ DHCPv4, IA_NA and RAs, but not PD.
 | `ra_host` | RA default route `A`, SLAAC with `autoconf`, router lifetime 0 withdraws, `accept_ra` is 0 |
 | `ra_host_dns` | against a stand-in for `resolvectl`: RDNSS and DNSSL set with nothing configured but `address autoconf`, the newly heard first and an option in its own order; a lifetime of zero and a lifetime run out take one away; a DHCPv4 lease's server goes ahead and its end leaves the advertised ones; `ra-options no-name-server` takes the advertised ones back and leaves the lease's, what is heard under it is only shown, and deleting it sets what is held; stopping the RA host reverts |
 | `dhcpv6_client` | IA_NA /128 with `noprefixroute`; default route and on-link prefix from the RA, and no SLAAC address unless `autoconf` is set too; renew; `release`; zebra-rs restart keeps the address and confirms it; `parameters-only`; deleted configuration releases |
-| `dhcpv6_client_pd` | PD → discard route, LAN /64 address; prefix change replaces both; with ND-PIO, a LAN host SLAACs from it |
+| `dhcpv6_client_pd` | As built: the address and the prefix in one exchange, with the hint on the wire; the discard route in the RIB and in the kernel, and that it ends a packet which a routed prefix without one sends round between the two routers; renew; a restart resumes the prefix and its route and verifies them by a Rebind; a second `pd`, and one the server has nothing for; a prefix without an address; `parameters-only` refused beside `pd`; deleted configuration releases and withdraws. With the LAN half: LAN /64 address; prefix change replaces both; with ND-PIO, a LAN host SLAACs from it |
 | `dhcpv6_pd_insomnia` | a zebra-rs + insomnia router serving PD (insomnia's existing DHCPv6 server) to a zebra-rs client router: both sides of the feature in one topology |
 
 ---
@@ -1434,6 +1487,7 @@ DHCPv4, IA_NA and RAs, but not PD.
 | DHCPv4 client identifier | RFC 4361: DUID-based (SHOULD) | none unless configured; the server keys on `chaddr` | dhclient's and VyOS's behaviour, which ISP servers are provisioned for |
 | `temporary` (IA_TA) | VyOS `dhcpv6-options temporary` | not supported | not needed on a router WAN |
 | Prefix exclude | RFC 7084 WPD-8 (SHOULD) | not supported | P5 |
+| Route for a delegated prefix | RFC 7084 WPD-5: discard, and (a) SHOULD answer with ICMPv6 Destination Unreachable | a blackhole route: the packet is dropped and nothing is sent | the RIB has no unreachable nexthop; the loop WPD-5 is there to prevent is prevented either way |
 | Internal address from PD | RFC 7084 WAA-7 | explicit `pd … interface lo` | no implicit interfaces |
 | IPv6-only preferred (option 108) | RFC 8925 | not requested | a dual-stack WAN wants its IPv4 lease |
 | ACD | RFC 5227: 3 probes, 1–2 s apart | 2 probes, 1 s apart | bounded bind delay |

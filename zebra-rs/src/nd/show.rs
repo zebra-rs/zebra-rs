@@ -239,6 +239,8 @@ struct JsonRaHost {
     autoconf: bool,
     /// `ipv6 address dhcpv6`: the host runs for the DHCPv6 lease.
     dhcpv6: bool,
+    /// `ipv6 dhcpv6-options pd`: the host runs for a delegated prefix.
+    pd: bool,
     vrf: Option<String>,
     default_route_distance: u8,
     no_default_route: bool,
@@ -338,10 +340,15 @@ fn render_host_text(
     };
     let cfg = nd.hosts().config(ifname);
     // What asked for it.
-    let why: Vec<&str> = [(cfg.autoconf, "autoconf"), (cfg.dhcpv6, "dhcpv6")]
-        .into_iter()
-        .filter_map(|(set, name)| set.then_some(name))
-        .collect();
+    let pd = !cfg.pd.is_empty();
+    let why: Vec<&str> = [
+        (cfg.autoconf, "autoconf"),
+        (cfg.dhcpv6, "dhcpv6"),
+        (pd, "pd"),
+    ]
+    .into_iter()
+    .filter_map(|(set, name)| set.then_some(name))
+    .collect();
     writeln!(out, "  RA host: enabled ({})", why.join(", "))?;
     writeln!(
         out,
@@ -441,6 +448,7 @@ fn build_host_json(
     Some(JsonRaHost {
         autoconf: cfg.autoconf,
         dhcpv6: cfg.dhcpv6,
+        pd: !cfg.pd.is_empty(),
         vrf: host.vrf.clone(),
         default_route_distance: cfg.distance,
         no_default_route: cfg.no_default_route,
@@ -1381,11 +1389,17 @@ Icmp6InUnrelated                    \t99
         assert!(other.get("ra_host").is_none());
 
         // The host says what asked for it: `address dhcpv6` beside
-        // `autoconf`, and alone.
-        for (autoconf, want) in [(true, "(autoconf, dhcpv6)"), (false, "(dhcpv6)")] {
+        // `autoconf`, and alone; a delegation beside it, and alone.
+        for (autoconf, dhcpv6, pd, want) in [
+            (true, true, false, "(autoconf, dhcpv6)"),
+            (false, true, false, "(dhcpv6)"),
+            (false, true, true, "(dhcpv6, pd)"),
+            (false, false, true, "(pd)"),
+        ] {
             eng.hosts_mut().update_config("wan0", start, |cfg| {
                 cfg.autoconf = autoconf;
-                cfg.dhcpv6 = true;
+                cfg.dhcpv6 = dhcpv6;
+                cfg.pd = if pd { [7].into() } else { [].into() };
             });
             let mut out = String::new();
             render_interface_text(&mut out, &eng, 2, start).unwrap();
@@ -1394,7 +1408,8 @@ Icmp6InUnrelated                    \t99
             let json: serde_json::Value =
                 serde_json::from_str(&serde_json::to_string(&json).unwrap()).unwrap();
             assert_eq!(json["ra_host"]["autoconf"], serde_json::json!(autoconf));
-            assert_eq!(json["ra_host"]["dhcpv6"], serde_json::json!(true));
+            assert_eq!(json["ra_host"]["dhcpv6"], serde_json::json!(dhcpv6));
+            assert_eq!(json["ra_host"]["pd"], serde_json::json!(pd));
         }
     }
 }

@@ -43,6 +43,7 @@ pub fn callbacks() -> HashMap<String, Callback> {
         config_send_advertisements,
     );
     callbacks.insert("/interface/ipv6/address".to_string(), config_address);
+    callbacks.insert("/interface/ipv6/dhcpv6-options/pd".to_string(), config_pd);
     let options: [(&str, Callback); 3] = [
         ("/default-route-distance", config_distance),
         ("/no-default-route", config_no_default_route),
@@ -122,6 +123,27 @@ fn config_address(engine: &mut NdEngine, mut args: Args, op: ConfigOp) -> Option
     Some(())
 }
 
+/// `interface <if> ipv6 dhcpv6-options pd <id>`: the DHCP client asks for
+/// a delegated prefix, and the RA host runs for the default route its
+/// traffic leaves by.
+fn config_pd(engine: &mut NdEngine, mut args: Args, op: ConfigOp) -> Option<()> {
+    let name = args.string()?;
+    let id = args.u32()?;
+    let set = match op {
+        ConfigOp::Set => true,
+        ConfigOp::Delete => false,
+        _ => return Some(()),
+    };
+    engine.hosts_mut().stage_config(&name, |cfg| {
+        if set {
+            cfg.pd.insert(id);
+        } else {
+            cfg.pd.remove(&id);
+        }
+    });
+    Some(())
+}
+
 fn config_distance(engine: &mut NdEngine, mut args: Args, op: ConfigOp) -> Option<()> {
     let name = args.string()?;
     let distance = if op.is_set() {
@@ -149,4 +171,36 @@ fn config_no_name_server(engine: &mut NdEngine, mut args: Args, op: ConfigOp) ->
         .hosts_mut()
         .stage_config(&name, |cfg| cfg.no_name_server = op.is_set());
     Some(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::{BTreeSet, VecDeque};
+
+    use super::*;
+
+    /// `dhcpv6-options pd <id>` is one more thing that asks for the RA
+    /// host, counted by its id: the host is wanted until the last
+    /// delegation of the interface is deleted.
+    #[test]
+    fn a_delegation_asks_for_the_ra_host() {
+        let mut engine = NdEngine::new();
+        let callback = callbacks()["/interface/ipv6/dhcpv6-options/pd"];
+        let line = |engine: &mut NdEngine, id: &str, op: ConfigOp| {
+            let args = Args(VecDeque::from(["wan0".to_string(), id.to_string()]));
+            callback(engine, args, op);
+            engine.hosts_mut().commit_config(Instant::now());
+        };
+        line(&mut engine, "1", ConfigOp::Set);
+        line(&mut engine, "7", ConfigOp::Set);
+        assert_eq!(engine.hosts().config("wan0").pd, BTreeSet::from([1, 7]));
+        assert!(engine.hosts().config("wan0").enabled());
+        line(&mut engine, "1", ConfigOp::Delete);
+        assert_eq!(engine.hosts().config("wan0").pd, BTreeSet::from([7]));
+        assert!(engine.hosts().config("wan0").enabled());
+        // Another interface's delegation is not this one's.
+        assert!(!engine.hosts().config("wan1").enabled());
+        line(&mut engine, "7", ConfigOp::Delete);
+        assert!(!engine.hosts().config("wan0").enabled());
+    }
 }

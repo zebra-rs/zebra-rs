@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use super::v4::client::Lease;
-use super::v6::client::Lease as Lease6;
+use super::v6::client::{Asks, Lease as Lease6, PdAsk};
 
 /// Where leases are kept, like the checkpoint directory next to it.
 /// `ZEBRA_DHCP_STATE_DIR` overrides it, for tests and for several
@@ -58,9 +58,16 @@ pub struct Kept {
 #[derive(Debug, Serialize, Deserialize)]
 struct Stored6 {
     interface: String,
-    /// The DUID and the IAID the lease was taken under.
+    /// Who took the lease, and what it asked for: the DUID, the IAID of
+    /// the IA_NA when an address was asked for, and each delegation
+    /// asked for as the IAID of its IA_PD and the length hinted at. A
+    /// file written before prefixes were asked for has an `iaid` and no
+    /// `pd`.
     duid: Vec<u8>,
-    iaid: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    iaid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pd: Vec<(u32, u8)>,
     /// UNIX time the lease's times count from: when the server's last
     /// Reply about it arrived.
     obtained: u64,
@@ -72,7 +79,7 @@ struct Stored6 {
 pub struct Kept6 {
     /// The identity it was taken under (see `v6::client::Client::identity`).
     pub duid: Vec<u8>,
-    pub iaid: u32,
+    pub asks: Asks,
     pub lease: Lease6,
     /// How many seconds its times are behind.
     pub elapsed: u32,
@@ -174,19 +181,21 @@ impl Store {
         let _ = fs::remove_file(self.path(ifname));
     }
 
-    /// As [`Store::save`], for a DHCPv6 lease taken as `identity` (DUID,
-    /// IAID), whose times count from `obtained`.
+    /// As [`Store::save`], for a DHCPv6 lease taken as `identity` (the
+    /// DUID, and what was asked for), whose times count from `obtained`.
     pub fn save6(
         &self,
         ifname: &str,
-        identity: (&[u8], u32),
+        identity: (&[u8], &Asks),
         obtained: u64,
         lease: &Lease6,
     ) -> io::Result<()> {
+        let (duid, asks) = identity;
         let stored = Stored6 {
             interface: ifname.to_string(),
-            duid: identity.0.to_vec(),
-            iaid: identity.1,
+            duid: duid.to_vec(),
+            iaid: asks.ia_na,
+            pd: asks.ia_pd.iter().map(|pd| (pd.iaid, pd.length)).collect(),
             obtained,
             lease: lease.clone(),
         };
@@ -197,9 +206,13 @@ impl Store {
     pub fn load6(&self, ifname: &str, now: u64) -> Option<Kept6> {
         let stored: Stored6 = self.read(&self.path6(ifname), ifname, |s: &Stored6| &s.interface)?;
         let elapsed = now.checked_sub(stored.obtained)?;
+        let ia_pd = stored.pd.into_iter();
         Some(Kept6 {
             duid: stored.duid,
-            iaid: stored.iaid,
+            asks: Asks {
+                ia_na: stored.iaid,
+                ia_pd: ia_pd.map(|(iaid, length)| PdAsk { iaid, length }).collect(),
+            },
             lease: stored.lease,
             elapsed: u32::try_from(elapsed).unwrap_or(u32::MAX),
         })
@@ -304,17 +317,46 @@ mod tests {
             ntp_servers: vec![],
         };
         let duid = [0, 3, 0, 1, 2, 0, 0, 0, 0, 1];
+        let asks = Asks {
+            ia_na: Some(7),
+            ia_pd: vec![],
+        };
         assert_eq!(store.load6("wan0", 5000), None);
-        store.save6("wan0", (&duid, 7), 4000, &lease6).unwrap();
+        store.save6("wan0", (&duid, &asks), 4000, &lease6).unwrap();
         assert_eq!(
             store.load6("wan0", 5000),
             Some(Kept6 {
                 duid: duid.to_vec(),
-                iaid: 7,
+                asks: asks.clone(),
                 lease: lease6.clone(),
                 elapsed: 1000,
             })
         );
+        // As it was written before prefixes were asked for: the IAID of
+        // the address, and no word of delegations.
+        let file = dir.join("wan0.v6.json");
+        let json: serde_json::Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+        assert_eq!(json["iaid"], serde_json::json!(7));
+        assert!(json.get("pd").is_none());
+        // Prefixes alone, and with an address: who asked is kept whole.
+        for ia_na in [None, Some(7)] {
+            let asks = Asks {
+                ia_na,
+                ia_pd: vec![
+                    PdAsk {
+                        iaid: 0,
+                        length: 56,
+                    },
+                    PdAsk {
+                        iaid: 9,
+                        length: 64,
+                    },
+                ],
+            };
+            store.save6("wan0", (&duid, &asks), 4000, &lease6).unwrap();
+            assert_eq!(store.load6("wan0", 5000).map(|kept| kept.asks), Some(asks));
+        }
+        store.save6("wan0", (&duid, &asks), 4000, &lease6).unwrap();
         // Another interface; a clock behind the lease.
         assert_eq!(store.load6("wan1", 5000), None);
         assert_eq!(store.load6("wan0", 3999), None);

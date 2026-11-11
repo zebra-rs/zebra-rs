@@ -1187,12 +1187,14 @@ impl ConfigManager {
             // count, as for the DHCP client below: committed ahead of
             // `autoconf`, they would never reach a task spawned later.
             // `address dhcpv6` runs the RA host as well, for the default
-            // route and the on-link prefixes its lease needs.
+            // route and the on-link prefixes its lease needs, and so does
+            // `dhcpv6-options pd`, for the default route.
             if !nd
                 && op == ConfigOp::Set
                 && line.starts_with("interface ")
                 && (line.contains(" ipv6 address autoconf")
                     || line.contains(" ipv6 address dhcpv6")
+                    || line.contains(" ipv6 dhcpv6-options pd ")
                     || line.contains(" ipv6 ra-options "))
             {
                 nd = true;
@@ -3179,8 +3181,9 @@ mod save_config_tests {
         assert!(first.same_channel(&spawn_resolver(&cm)));
     }
 
-    /// `parameters-only` beside `address dhcpv6` on one interface is
-    /// refused at commit (`check::dhcpv6_parameters_only_exclusive`).
+    /// `parameters-only` beside `address dhcpv6` or `dhcpv6-options pd`
+    /// on one interface is refused at commit
+    /// (`check::dhcpv6_parameters_only_exclusive`).
     /// Checked on the candidate, without committing: a commit with
     /// either line spawns the DHCP client.
     #[test]
@@ -3209,6 +3212,23 @@ mod save_config_tests {
         let err = cm.commit_config().expect_err("both on one interface");
         assert_eq!(err.to_string(), refused);
         edit("delete interface eth0 ipv6 address dhcpv6");
+        assert_eq!(violations(), Vec::<String>::new());
+
+        // Nor beside a delegation, which is something to lease too:
+        // named alone, or with its hint.
+        let refused = "interface eth1 ipv6: dhcpv6-options parameters-only asks for no prefix \
+                       and cannot be combined with dhcpv6-options pd; delete one or the other";
+        edit("delete interface eth0 ipv6 dhcpv6-options parameters-only");
+        edit("set interface eth0 ipv6 dhcpv6-options pd 1 length 56");
+        assert_eq!(violations(), Vec::<String>::new());
+        edit("set interface eth1 ipv6 dhcpv6-options pd 7");
+        assert_eq!(violations(), [refused]);
+        let err = cm.commit_config().expect_err("both on one interface");
+        assert_eq!(err.to_string(), refused);
+        edit("delete interface eth1 ipv6 dhcpv6-options pd 7");
+        edit("set interface eth1 ipv6 dhcpv6-options pd 7 length 48");
+        assert_eq!(violations(), [refused]);
+        edit("delete interface eth1 ipv6 dhcpv6-options pd 7");
         assert_eq!(violations(), Vec::<String>::new());
     }
 
@@ -7762,7 +7782,8 @@ module test-insomnia-gated {
     /// End-to-end CLI grammar of the DHCPv6 client's configuration:
     /// `address dhcpv6` and every `dhcpv6-options` leaf parse on a stock
     /// start, and a DUID that is not colon-separated hex octets, or too
-    /// few of them, is refused by the schema.
+    /// few of them, is refused by the schema, as is a delegation whose
+    /// id or hint is out of range.
     #[test]
     fn address_dhcpv6_and_dhcpv6_options_parse_on_a_stock_start() {
         use crate::config::ExecCode;
@@ -7776,9 +7797,33 @@ module test-insomnia-gated {
             "set interface eth0 ipv6 dhcpv6-options parameters-only",
             "set interface eth0 ipv6 dhcpv6-options rapid-commit",
             "set interface eth0 ipv6 dhcpv6-options no-release",
+            "set interface eth0 ipv6 dhcpv6-options pd 0",
+            "set interface eth0 ipv6 dhcpv6-options pd 4294967295 length 32",
+            "set interface eth0 ipv6 dhcpv6-options pd 1 length 64",
         ] {
             let (code, _, _) = parse(line, entry.clone(), None, State::new());
             assert_eq!(code, ExecCode::Success, "`{line}` must parse");
+        }
+        // A delegation reaches its callbacks under the interface and its
+        // id: the entry, and the hint as a leaf of it.
+        for (typed, path, args) in [
+            (
+                "pd 7",
+                "/set/interface/ipv6/dhcpv6-options/pd",
+                vec!["eth0", "7"],
+            ),
+            (
+                "pd 7 length 56",
+                "/set/interface/ipv6/dhcpv6-options/pd/length",
+                vec!["eth0", "7", "56"],
+            ),
+        ] {
+            let line = format!("set interface eth0 ipv6 dhcpv6-options {typed}");
+            let (code, _, state) = parse(&line, entry.clone(), None, State::new());
+            assert_eq!(code, ExecCode::Success, "`{line}` must parse");
+            let (at, given) = crate::config::path_from_command(&state.paths);
+            assert_eq!(at, path, "`{line}`");
+            assert_eq!(given.0, args, "`{line}`");
         }
         // An abbreviated keyword reaches the callbacks spelled out, as
         // everywhere in the CLI. That makes IPv4's `dhcp` an abbreviation
@@ -7799,6 +7844,10 @@ module test-insomnia-gated {
             "set interface eth0 ipv6 dhcpv6-options duid 00:03:zz:01",
             "set interface eth0 ipv6 dhcpv6-options duid 00:03:00:",
             "set interface eth0 ipv6 dhcpv6-options temporary",
+            "set interface eth0 ipv6 dhcpv6-options pd 4294967296",
+            "set interface eth0 ipv6 dhcpv6-options pd one",
+            "set interface eth0 ipv6 dhcpv6-options pd 1 length 31",
+            "set interface eth0 ipv6 dhcpv6-options pd 1 length 65",
         ] {
             let (code, _, _) = parse(line, entry.clone(), None, State::new());
             assert_ne!(code, ExecCode::Success, "`{line}` must be refused");
