@@ -71,6 +71,10 @@ passwords are `{ mode, key_id, send_only }` and the locator is
 The dynamic-hostname mappings (TLV 137) learned per level. `*` marks this
 router's own entry.
 
+The name a router advertises is its `router isis hostname`; without one,
+its `system hostname`; without that, the operating system's host name. A
+change of any of the three regenerates the router's LSP at once.
+
 ```
 r1> show isis hostname
 Level  System ID      Hostname

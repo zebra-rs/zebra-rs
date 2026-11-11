@@ -1,6 +1,6 @@
 # `system hostname` sets the real host name (with `--feature insomnia`)
 
-**Status: step 1 (§11) is implemented; steps 2 and 3 are design.** The
+**Status: steps 1 and 2 (§11) are implemented; step 3 is design.** The
 decisions in §12 were all taken as recommended (2026-11-11). Where the
 code turned out different from what this document first assumed, the text
 says what was built.
@@ -54,9 +54,9 @@ network namespace, nothing changes.
 pattern `[A-Za-z0-9][A-Za-z0-9.-]*`. It is not gated on any feature, and
 it has no length limit.
 
-**Who reads it**
+**Who reads it** (before this work; §7 has what steps 1 and 2 changed)
 
-| Consumer | Source today |
+| Consumer | Source |
 |---|---|
 | vty prompt | `system hostname`, else `$(hostname)` (`ExecReply.hostname`) |
 | `show hostname` | `system hostname`, else the OS name (`rib/show.rs`) |
@@ -348,30 +348,52 @@ restore it either. Turning the feature back on resumes where it stopped.
 
 ## 7. Readers inside zebra-rs (second step)
 
-With the first step alone, IS-IS and BGP follow the new name only because
-they read the OS name, and nothing tells them it changed:
+With the first step alone, IS-IS and BGP followed the new name only
+because they read the OS name, and nothing told them it changed:
 
-- IS-IS re-reads it at the next LSP origination. After a rename the old
-  name stays in TLV 137 until something else regenerates the LSP or the
-  refresh timer fires.
+- IS-IS re-read it at the next LSP origination. After a rename the old
+  name stayed in TLV 137 until something else regenerated the LSP or the
+  refresh timer fired, 15 minutes later.
 - BGP sends the FQDN capability in OPEN, so a session keeps the old name
-  until it is re-established. This is already how `router bgp hostname`
-  behaves and is not changed.
-- At the very first application there is a race between the RIB applying
-  the name and IS-IS building its first LSP. `/etc/hostname` makes the
-  name right from boot afterwards, so the race exists once per rename.
+  until it is re-established. This is how `router bgp global hostname`
+  behaves too, and is not changed.
+- Neither looked at `system hostname` at all. Without the feature a
+  router named `r1` in the config advertised the machine's name.
 
-The second step closes this. The RIB pushes the effective system hostname
-to protocol subscribers, with the subscribe-time replay
-`RibRx::RouterIdUpdate` already has. IS-IS and BGP resolve the name as
-*protocol hostname → `system hostname` → OS name*, and IS-IS re-originates
-when the result changes.
+**As built.** `system hostname` is now the name a protocol advertises
+when it has none of its own: *protocol hostname → `system hostname` → OS
+name*, with or without the feature.
 
-This also changes behaviour without the feature: a router with
-`system hostname r1` on a machine called `debian` would start advertising
-`r1` instead of `debian`. I think that is the correct meaning of the leaf
-(FRR's `hostname` behaves this way), but it is a visible change and is
-listed in §12.
+- **The RIB tells the protocols** with `RibRx::HostnameUpdate(Option<String>)`,
+  the pattern of `RouterIdUpdate`. It goes to every subscriber, whatever
+  its VRF, at the end of a commit that changed the name. Not at the `set`
+  line: a commit replacing the name would pass through "no name", and
+  IS-IS would regenerate its LSP with the OS name and again with the new
+  one. A protocol that subscribes later is told the committed name then.
+- **The system is renamed first** (step 1 runs before the message is
+  sent), so a protocol reading the OS name on being told reads the new
+  one.
+- **The message is sent again, unchanged, when only the system's name
+  moved.** That happens when a failed apply is retried at a later commit.
+  A router with neither a protocol hostname nor a system hostname
+  advertises the OS name, and has to learn that it changed.
+- **IS-IS** keeps the value in `IsisConfig::system_hostname` and
+  regenerates the self LSP at each level whose LSP carries another name.
+  It compares with the name the LSP was built with, not the stored value
+  with the new one: the OS name is read when asked for, so a renamed
+  system resolves to the new name before and after.
+  `router isis hostname` goes through the same check.
+- **BGP** keeps it in `Bgp::system_hostname` and refreshes every
+  neighbor's snapshot (`Peer::local_hostname`), which is what the next
+  OPEN advertises.
+
+Not changed: per-VRF BGP sessions send no FQDN capability at all
+(`bgp/vrf/spawn.rs` creates their peers without a hostname). That was so
+before and is a separate matter. OSPF has no hostname to advertise.
+
+**The change every router sees:** one with `system hostname r1` on a
+machine called `debian`, and no protocol hostname, advertises `r1` where
+it advertised `debian`.
 
 ---
 
@@ -517,8 +539,9 @@ next boot, and `sudo` with and without `libnss-myhostname`.
    `ch-00-05-command-line-options.md`, `show hostname` in
    `ch-06-03-show-commands.md`. The CHANGELOG entry, with the upgrade
    note below, is written at the release cut like every other.
-2. **Readers follow the name** (§7): `RibRx` notification, IS-IS and BGP
-   fallback order, IS-IS re-origination.
+2. **Readers follow the name** (§7) — **done**: `RibRx::HostnameUpdate`
+   with its replay, the IS-IS and BGP fallback order, IS-IS
+   re-origination. BDD `system_hostname_protocols`.
 3. **Packaging and insomnia**: `Recommends: libnss-myhostname`; the
    insomnia book's "Before you start" page says the drop-in now makes
    `system hostname` real; `ZEBRA_HOSTNAME_STUB_DIR` in insomnia's BDD

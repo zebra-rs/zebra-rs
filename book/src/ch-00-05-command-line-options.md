@@ -122,9 +122,11 @@ works, with a warning at startup.
 ### System host name
 
 `system hostname` names the router inside zebra-rs: the vty prompt,
-`show hostname`, and the host name the DHCP client sends. With
-`--feature insomnia` zebra-rs owns the configuration of the whole system,
-and the name also becomes the system's own:
+`show hostname`, the host name the DHCP client sends, and the name IS-IS
+(TLV 137) and BGP (the FQDN capability) advertise when they have no
+hostname of their own configured. With `--feature insomnia` zebra-rs owns
+the configuration of the whole system, and the name also becomes the
+system's own:
 
 - the kernel host name, which `hostname` and `uname -n` print, changes
   when the commit ends;

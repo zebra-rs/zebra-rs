@@ -605,10 +605,12 @@ impl SystemHostname {
     }
 
     /// Make the system's name the running config's (`wanted`), or give the
-    /// saved one back when the config has none.
-    pub fn sync(&mut self, wanted: Option<&str>) {
+    /// saved one back when the config has none. Returns whether anything
+    /// was written, the system's name among it: whoever reads that name
+    /// has reason to read it again.
+    pub fn sync(&mut self, wanted: Option<&str>) -> bool {
         let Ok(store) = &mut self.store else {
-            return;
+            return false;
         };
         // A startup config may carry a name an earlier release took
         // (`config::check::startup_tolerant_check`): it stays a label, and
@@ -632,6 +634,7 @@ impl SystemHostname {
                     }
                     _ => {}
                 }
+                changed
             }
             Err(e) => {
                 // A commit retries while this stands; say it once.
@@ -639,6 +642,7 @@ impl SystemHostname {
                     tracing::error!("system hostname: not applied to the system: {e}");
                 }
                 self.error = Some(e);
+                false
             }
         }
     }

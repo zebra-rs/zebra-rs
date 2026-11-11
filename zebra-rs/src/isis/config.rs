@@ -530,6 +530,10 @@ impl Default for IsisDistribute {
 pub struct IsisConfig {
     pub net: Nsap,
     pub hostname: Option<String>,
+    /// `system hostname`, as the RIB reports it
+    /// (`RibRx::HostnameUpdate`): what [`Self::hostname`] falls back to
+    /// when `router isis hostname` is not set, ahead of the OS host name.
+    pub system_hostname: Option<String>,
     pub is_type: Option<IsLevel>,
 
     /// Set when /router/isis/area-proxy is committed (the presence
@@ -897,6 +901,7 @@ impl Default for IsisConfig {
             bfd: Default::default(),
             net: Default::default(),
             hostname: Default::default(),
+            system_hostname: Default::default(),
             is_type: Default::default(),
             area_proxy: false,
             area_proxy_sys_id: Default::default(),
@@ -1000,12 +1005,14 @@ impl IsisConfig {
             .with_shards(self.ti_lfa_compute_shards)
     }
 
-    /// Resolve the hostname to advertise in TLV 137. Configured hostname
-    /// wins; otherwise we fall back to the OS hostname. If neither is
-    /// available we return None and the caller should skip emitting the
-    /// hostname TLV (RFC 5301 leaves the TLV optional).
+    /// Resolve the hostname to advertise in TLV 137. `router isis
+    /// hostname` wins, then `system hostname`, the router's name for
+    /// everything that has none of its own; otherwise we fall back to
+    /// the OS hostname. If none is available we return None and the
+    /// caller should skip emitting the hostname TLV (RFC 5301 leaves the
+    /// TLV optional).
     pub fn hostname(&self) -> Option<String> {
-        if let Some(name) = &self.hostname {
+        if let Some(name) = self.hostname.as_ref().or(self.system_hostname.as_ref()) {
             return Some(name.clone());
         }
         hostname::get()
@@ -1194,30 +1201,43 @@ fn config_is_type(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
 fn config_hostname(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
     let hostname = args.string()?;
 
-    let prev = isis.config.hostname();
     if op == ConfigOp::Set {
         isis.config.hostname = Some(hostname);
     } else {
         isis.config.hostname = None;
     }
-    let curr = isis.config.hostname();
+    hostname_refresh(isis);
 
-    if prev == curr {
-        return Some(());
-    }
+    Some(())
+}
 
-    // Re-originate self LSP at any level that has one so the new
-    // hostname (or its absence) propagates without waiting for the
-    // refresh timer. Levels with no self LSP yet are still pre-NET —
-    // origination will pick the new value naturally on first emission.
-    let key = IsisLspId::new(isis.config.net.sys_id(), 0, 0);
+/// The hostname to advertise may have changed: `router isis hostname`,
+/// `system hostname`, or the OS name under both. Re-originate the self LSP
+/// at each level whose LSP carries another name (or none), so that the new
+/// one propagates without waiting for the refresh timer. Levels with no
+/// self LSP yet are still pre-NET — origination will pick the new value
+/// naturally on first emission.
+///
+/// The comparison is with what the LSP was built with, not with what the
+/// config resolved to a moment ago: the OS name is read when it is asked
+/// for, so a renamed system resolves to the new name before and after.
+pub(super) fn hostname_refresh(isis: &mut Isis) {
+    let wanted = isis.config.hostname();
+    let sys_id = isis.config.net.sys_id();
+    let key = IsisLspId::new(sys_id, 0, 0);
     for level in [Level::L1, Level::L2] {
-        if isis.lsdb.get(&level).get(&key).is_some() {
+        if isis.lsdb.get(&level).get(&key).is_none() {
+            continue;
+        }
+        let advertised = isis
+            .hostname
+            .get(&level)
+            .get(&sys_id)
+            .map(|(name, _)| name.as_str());
+        if advertised != wanted.as_deref() {
             let _ = isis.tx.send(Message::LspOriginate(level, None));
         }
     }
-
-    Some(())
 }
 
 /// Shared tail of the three area-proxy callbacks: recompute the
@@ -2369,5 +2389,148 @@ mod tests {
         assert_eq!(IsisAuthType::HmacSha384.digest_len(), 48);
         assert_eq!(IsisAuthType::HmacSha512.digest_len(), 64);
         assert_eq!(IsisAuthType::Md5.digest_len(), 16);
+    }
+}
+
+#[cfg(test)]
+mod system_hostname_tests {
+    //! `system hostname` as the name IS-IS advertises when it has none of
+    //! its own (docs/design/system-hostname.md §7).
+    use super::*;
+    use crate::isis::inst::commit_and_microloop_gate_tests::fresh_isis;
+    use crate::isis::lsdb::Lsa;
+    use crate::rib::api::RibRx;
+    use isis_packet::IsisLsp;
+    use std::collections::VecDeque;
+
+    fn os_name() -> Option<String> {
+        hostname::get()
+            .ok()
+            .and_then(|s| s.into_string().ok())
+            .filter(|s| !s.is_empty())
+    }
+
+    /// The levels whose self LSP was asked to be regenerated since the
+    /// last call.
+    fn regenerated(isis: &mut Isis) -> Vec<Level> {
+        std::iter::from_fn(|| isis.rx.try_recv().ok())
+            .filter_map(|msg| match msg {
+                Message::LspOriginate(level, _) => Some(level),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Give `isis` a self LSP at `level` built with `hostname`, as an
+    /// origination leaves it.
+    fn originated(isis: &mut Isis, level: Level, hostname: Option<&str>) {
+        let sys_id = isis.config.net.sys_id();
+        let lsp = IsisLsp {
+            lsp_id: IsisLspId::new(sys_id, 0, 0),
+            hold_time: 1200,
+            ..Default::default()
+        };
+        let mut lsa = Lsa::new(lsp);
+        lsa.originated = true;
+        isis.lsdb.get_mut(&level).map.insert(lsa.lsp.lsp_id, lsa);
+        match hostname {
+            Some(name) => {
+                isis.hostname
+                    .get_mut(&level)
+                    .insert_originate(sys_id, name.to_string());
+            }
+            None => {
+                isis.hostname.get_mut(&level).remove(&sys_id);
+            }
+        }
+    }
+
+    fn told(isis: &mut Isis, hostname: Option<&str>) {
+        isis.process_rib_msg(RibRx::HostnameUpdate(hostname.map(str::to_string)));
+    }
+
+    #[test]
+    fn router_isis_hostname_wins_then_system_hostname_then_the_os_name() {
+        let mut config = IsisConfig::default();
+        assert_eq!(config.hostname(), os_name());
+        config.system_hostname = Some("r1".to_string());
+        assert_eq!(config.hostname().as_deref(), Some("r1"));
+        config.hostname = Some("isis-r1".to_string());
+        assert_eq!(config.hostname().as_deref(), Some("isis-r1"));
+        config.system_hostname = None;
+        assert_eq!(config.hostname().as_deref(), Some("isis-r1"));
+    }
+
+    /// `system hostname` set, changed and deleted: each time the self LSP
+    /// is regenerated at the levels that have one, and only while it
+    /// carries another name.
+    #[tokio::test]
+    async fn a_system_hostname_regenerates_the_lsp_that_carries_another_name() {
+        let mut isis = fresh_isis();
+        // A level-2 LSP built before any name was configured: with the OS
+        // name. No level-1 LSP.
+        originated(&mut isis, Level::L2, os_name().as_deref());
+        regenerated(&mut isis);
+
+        told(&mut isis, Some("r1"));
+        assert_eq!(isis.config.hostname().as_deref(), Some("r1"));
+        assert_eq!(regenerated(&mut isis), [Level::L2]);
+
+        // The LSP is rebuilt; told the same name again, nothing to do.
+        originated(&mut isis, Level::L2, Some("r1"));
+        told(&mut isis, Some("r1"));
+        assert_eq!(regenerated(&mut isis), []);
+
+        told(&mut isis, Some("r2"));
+        assert_eq!(regenerated(&mut isis), [Level::L2]);
+        originated(&mut isis, Level::L2, Some("r2"));
+
+        // Deleted: back to the OS name.
+        told(&mut isis, None);
+        assert_eq!(isis.config.hostname(), os_name());
+        assert_eq!(regenerated(&mut isis), [Level::L2]);
+    }
+
+    /// `router isis hostname` is IS-IS's own: the system hostname comes
+    /// and goes under it without touching the LSP, and takes over when it
+    /// is deleted.
+    #[tokio::test]
+    async fn router_isis_hostname_is_not_replaced_by_the_system_hostname() {
+        let mut isis = fresh_isis();
+        isis.config.hostname = Some("isis-r1".to_string());
+        originated(&mut isis, Level::L1, Some("isis-r1"));
+        originated(&mut isis, Level::L2, Some("isis-r1"));
+        regenerated(&mut isis);
+
+        told(&mut isis, Some("r1"));
+        told(&mut isis, None);
+        told(&mut isis, Some("r1"));
+        assert_eq!(regenerated(&mut isis), []);
+
+        let args = Args(VecDeque::from(["isis-r1".to_string()]));
+        config_hostname(&mut isis, args, ConfigOp::Delete).unwrap();
+        assert_eq!(isis.config.hostname().as_deref(), Some("r1"));
+        assert_eq!(regenerated(&mut isis), [Level::L1, Level::L2]);
+    }
+
+    /// With neither name configured the LSP carries the OS name. When the
+    /// system is renamed (`--feature insomnia`), the RIB says so by
+    /// sending the system hostname again, unchanged: the LSP is compared
+    /// with the name to advertise now, not the stored value with the new
+    /// one, and regenerated.
+    #[tokio::test]
+    async fn a_renamed_system_regenerates_an_lsp_that_carries_the_os_name() {
+        let mut isis = fresh_isis();
+        // What the system was called when the LSP was built.
+        originated(&mut isis, Level::L2, Some("the-name-before"));
+        regenerated(&mut isis);
+
+        told(&mut isis, None);
+        assert_eq!(regenerated(&mut isis), [Level::L2]);
+
+        // Nothing to regenerate when the LSP has today's name.
+        originated(&mut isis, Level::L2, os_name().as_deref());
+        told(&mut isis, None);
+        assert_eq!(regenerated(&mut isis), []);
     }
 }

@@ -1,0 +1,38 @@
+# No `router isis hostname` and no `router bgp global hostname`: the
+# name both advertise is the system hostname.
+system:
+  hostname: bdd-sys-one
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.0.1/32
+- if-name: i2
+  ipv4:
+    address: 10.0.12.1/30
+router:
+  isis:
+    net: 49.0000.0000.0000.0001.00
+    is-type: level-2-only
+    interface:
+    - if-name: lo
+      ipv4:
+        enabled: true
+    - if-name: i2
+      network-type: point-to-point
+      metric: 10
+      hello:
+        interval: 1
+        multiplier: 5
+      ipv4:
+        enabled: true
+  bgp:
+    global:
+      as: 65000
+      router-id: 10.0.0.1
+    neighbor:
+    - remote-address: 10.0.12.2
+      remote-as: 65000
+      enabled: true
+      afi-safi:
+      - name: ipv4
+        enabled: true

@@ -315,8 +315,11 @@ Neighbor        V         AS   MsgRcvd   MsgSent   TblVer  InQ OutQ  Up/Down Sta
 
 `PfxRcd/Snt` reads `N/A` until the session is Established and `NoNeg`
 when the family was not negotiated with the peer. `Hostname` is the
-peer's FQDN capability, or `N/A`. `TblVer`, `InQ` and `OutQ` are not
-tracked and always read `0`.
+peer's FQDN capability, or `N/A`. A zebra-rs peer sends its `router bgp
+global hostname`; without one, its `system hostname`; without that, the
+operating system's host name. The name is the one the session's OPEN
+carried: a change shows after the session is next established. `TblVer`,
+`InQ` and `OutQ` are not tracked and always read `0`.
 
 JSON: `{ router_id, local_as, afi_safis: [ { afi_safi, peers: [ … ] } ] }`.
 
