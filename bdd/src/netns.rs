@@ -383,8 +383,13 @@ pub async fn delete_veth(veth_host: &str) -> Result<()> {
 /// `saved.json` for the name found at the first takeover. Stable per
 /// namespace, so a restarted daemon finds what the last one left — and so
 /// does the next run: a feature that asserts on it empties it first.
+///
+/// Under `/run`, not `/tmp` like the directories above: the daemon writes
+/// here as root at a name anybody can predict, and in a world-writable
+/// directory another user could put a symbolic link there first. Only
+/// root creates entries in `/run`. The daemon makes the directory itself.
 pub fn hostname_stub_dir(netns: &str) -> String {
-    format!("/tmp/zebra-rs-hostname/{netns}")
+    format!("/run/zebra-rs-bdd/hostname/{netns}")
 }
 
 /// Spawn a process in a network namespace (non-blocking)

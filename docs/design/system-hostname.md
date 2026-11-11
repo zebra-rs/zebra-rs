@@ -255,6 +255,13 @@ one is `localhost`, and it has no static name. Unit tests use the same
 backend on a temporary directory. The two backends share the file code;
 only the kernel name differs (a syscall or a file).
 
+The daemon writes there as root, so the directory must be one nobody else
+can rearrange. The BDD harness uses `/run/zebra-rs-bdd/hostname/<ns>`, not
+a predictable name under world-writable `/tmp`, where another user could
+put a symbolic link first. zebra-rs also turns away a stand-in that is a
+symbolic link or belongs to another user, creates its temporary files
+with `O_EXCL`, and never follows a link when it writes.
+
 **Reconcile**, with `wanted` = the running config's name:
 
 | `wanted` | Record | Action |

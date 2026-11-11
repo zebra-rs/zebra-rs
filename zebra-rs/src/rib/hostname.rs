@@ -27,7 +27,7 @@
 
 use std::fs;
 use std::io::{self, Write};
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -43,6 +43,12 @@ const SAVED_PATH: &str = "/var/lib/zebra-rs/system/hostname.json";
 /// the record. With it set nothing here calls `sethostname(2)` or opens
 /// `/etc/hostname`, so it is safe in any namespace; the BDD harness sets it
 /// for every daemon it starts.
+///
+/// A daemon that is root writes there, so the directory has to be one
+/// nobody else can rearrange: not a predictable name under `/tmp`, where
+/// another user can put a symbolic link first. [`stand_in_refusal`] turns
+/// away what it can tell is not this user's own; choosing the place is up
+/// to whoever sets the variable (the BDD harness uses `/run`).
 const STUB_ENV: &str = "ZEBRA_HOSTNAME_STUB_DIR";
 
 /// The stand-in's kernel name before anything set one.
@@ -420,9 +426,31 @@ fn temporary(path: &Path) -> PathBuf {
     path.with_file_name(name)
 }
 
-/// Write `bytes` to `tmp` and rename it over `path`.
+/// Create the temporary file `tmp`, never open one: `O_EXCL` does not
+/// follow a symbolic link, and does not write into a file somebody else
+/// put under that name. When the name is taken, by an interrupted run or
+/// by anybody else, what is there is removed (the link itself, if it is
+/// one) and the file created again.
+fn create_temporary(tmp: &Path) -> io::Result<fs::File> {
+    let create = || {
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(tmp)
+    };
+    match create() {
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+            fs::remove_file(tmp)?;
+            create()
+        }
+        file => file,
+    }
+}
+
+/// Write `bytes` to `tmp` and rename it over `path`. The rename replaces
+/// `path` whatever it is, without following it.
 fn write_and_rename(tmp: &Path, path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let mut file = fs::File::create(tmp)?;
+    let mut file = create_temporary(tmp)?;
     // World-readable whatever the daemon's umask is, as `/etc/hostname` is
     // expected to be.
     file.set_permissions(fs::Permissions::from_mode(0o644))?;
@@ -457,13 +485,37 @@ fn write_atomic(
     sync(path)
 }
 
+/// Rewrite the file at `path`, which exists: a mount point does. It is a
+/// file and not a symbolic link, and a link is not followed.
 fn write_in_place(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let mut file = fs::OpenOptions::new()
         .write(true)
         .truncate(true)
+        .custom_flags(libc::O_NOFOLLOW)
         .open(path)?;
     file.write_all(bytes)?;
     file.sync_all()
+}
+
+/// Why the stand-in directory `dir` is not used, if it is not: it exists
+/// and is not a directory of this user's own. A symbolic link is not
+/// followed to wherever its maker pointed it, and a directory that belongs
+/// to somebody else is theirs to fill with links. One that does not exist
+/// yet is created by the first write, as this user's.
+///
+/// This looks at the directory, not at the path leading to it: it cannot
+/// make a badly chosen place safe (see [`STUB_ENV`]).
+fn stand_in_refusal(dir: &Path) -> Option<String> {
+    let meta = match fs::symlink_metadata(dir) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return None,
+        Err(e) => return Some(format!("{STUB_ENV}: {}: {e}", dir.display())),
+    };
+    if !meta.is_dir() {
+        return Some(format!("{STUB_ENV}: {} is not a directory", dir.display()));
+    }
+    (meta.uid() != nix::unistd::geteuid().as_raw())
+        .then(|| format!("{STUB_ENV}: {} belongs to another user", dir.display()))
 }
 
 /// Where this process's network namespace stands against PID 1's.
@@ -509,7 +561,10 @@ impl SystemHostname {
     /// namespace.
     pub fn from_env() -> Self {
         let store = match std::env::var_os(STUB_ENV).filter(|dir| !dir.is_empty()) {
-            Some(dir) => Ok(Store::stub(Path::new(&dir))),
+            Some(dir) => match stand_in_refusal(Path::new(&dir)) {
+                Some(reason) => Err(reason),
+                None => Ok(Store::stub(Path::new(&dir))),
+            },
             None => match netns(
                 namespace_link("/proc/self/ns/net").as_deref(),
                 namespace_link("/proc/1/ns/net").as_deref(),
@@ -1474,6 +1529,71 @@ mod tests {
         let mut store = Store::stub(&file);
         assert!(store.sync_static().is_err());
         assert!(store.sync_saved().is_err());
+    }
+
+    /// The temporary file is created, not opened. A symbolic link put
+    /// under its name beforehand would otherwise have this process, which
+    /// is root in a daemon, write into whatever file the link names.
+    #[test]
+    fn a_link_under_the_temporary_name_is_not_written_through() {
+        let scratch = Scratch::new("tmp-link");
+        fs::create_dir_all(&scratch.0).unwrap();
+        let path = scratch.0.join("hostname");
+        let victim = scratch.0.join("victim");
+        fs::write(&victim, "not yours\n").unwrap();
+        std::os::unix::fs::symlink(&victim, temporary(&path)).unwrap();
+
+        replace(&path, b"r1\n").unwrap();
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "not yours\n");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "r1\n");
+        assert!(fs::symlink_metadata(&path).unwrap().is_file());
+        assert!(fs::symlink_metadata(temporary(&path)).is_err());
+
+        // A file an interrupted run left under the name is no obstacle.
+        fs::write(temporary(&path), "half").unwrap();
+        replace(&path, b"r2\n").unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "r2\n");
+
+        // The destination being a link is replaced, not followed.
+        fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink(&victim, &path).unwrap();
+        replace(&path, b"r3\n").unwrap();
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "not yours\n");
+        assert!(fs::symlink_metadata(&path).unwrap().is_file());
+
+        // And the write in place, for a mount point, refuses one.
+        fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink(&victim, &path).unwrap();
+        assert!(write_in_place(&path, b"r4\n").is_err());
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "not yours\n");
+    }
+
+    /// The stand-in is where a root daemon writes: a directory that is a
+    /// link to somewhere else, or that somebody else owns, is turned away.
+    #[test]
+    fn a_stand_in_directory_must_be_this_users_own() {
+        let scratch = Scratch::new("stand-in-owner");
+        // Not there yet: the first write creates it.
+        assert_eq!(stand_in_refusal(&scratch.0), None);
+        fs::create_dir_all(&scratch.0).unwrap();
+        assert_eq!(stand_in_refusal(&scratch.0), None);
+
+        let file = scratch.0.join("file");
+        fs::write(&file, "").unwrap();
+        let reason = stand_in_refusal(&file).expect("a file");
+        assert!(reason.ends_with("is not a directory"), "{reason}");
+
+        // A link to a directory of our own is still not the directory.
+        let link = scratch.0.join("link");
+        std::os::unix::fs::symlink(&scratch.0, &link).unwrap();
+        let reason = stand_in_refusal(&link).expect("a link");
+        assert!(reason.ends_with("is not a directory"), "{reason}");
+
+        // Root's directory, unless this test runs as root.
+        if !nix::unistd::geteuid().is_root() {
+            let reason = stand_in_refusal(Path::new("/")).expect("root's");
+            assert!(reason.ends_with("belongs to another user"), "{reason}");
+        }
     }
 
     #[test]
