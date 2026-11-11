@@ -12,6 +12,7 @@ use crate::config::{Args, Builder};
 
 use super::inst::{Dhcpc, Iface, ShowCallback, lifetime};
 use super::routes::lease_routes;
+use super::v6::show::show_leases6;
 
 impl Dhcpc {
     pub fn show_build(&mut self) {
@@ -20,6 +21,10 @@ impl Dhcpc {
             .set(show_leases)
             .path("/show/dhcp/client/leases/interface")
             .set(show_leases)
+            .path("/show/dhcpv6/client/leases")
+            .set(show_leases6)
+            .path("/show/dhcpv6/client/leases/interface")
+            .set(show_leases6)
             .map();
     }
 }

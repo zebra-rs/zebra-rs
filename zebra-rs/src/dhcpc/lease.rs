@@ -1,16 +1,18 @@
 //! Leases on disk, so a restart of zebra-rs keeps the address
 //! (docs/design/dhcp-client.md D9).
 //!
-//! One file per interface, `<dir>/<ifname>.v4.json`, written when a server
-//! confirms the lease and removed when the lease ends. At start a lease
+//! One file per interface and family, `<dir>/<ifname>.v4.json` and
+//! `<dir>/<ifname>.v6.json`, written when a server confirms the lease and
+//! removed when the lease ends. At start a lease
 //! that has not run out is applied at once and then verified with the
 //! server. A file that cannot be read is ignored: the client simply asks
 //! again.
 //!
 //! The file records who took the lease: the hardware address and the
-//! client identifier. A lease is only resumed by the same identity; one
-//! taken under another (the configuration or the hardware changed while
-//! zebra-rs was down) is given back as who took it.
+//! client identifier for DHCPv4, the DUID and the IAID for DHCPv6. A
+//! lease is only resumed by the same identity; one taken under another
+//! (the configuration or the hardware changed while zebra-rs was down)
+//! is given back as who took it.
 
 use std::fs;
 use std::io::{self, Write};
@@ -19,6 +21,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use super::v4::client::Lease;
+use super::v6::client::Lease as Lease6;
 
 /// Where leases are kept, like the checkpoint directory next to it.
 /// `ZEBRA_DHCP_STATE_DIR` overrides it, for tests and for several
@@ -52,6 +55,29 @@ pub struct Kept {
     pub elapsed: u32,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct Stored6 {
+    interface: String,
+    /// The DUID and the IAID the lease was taken under.
+    duid: Vec<u8>,
+    iaid: u32,
+    /// UNIX time the lease's times count from: when the server's last
+    /// Reply about it arrived.
+    obtained: u64,
+    lease: Lease6,
+}
+
+/// A DHCPv6 lease read back from disk.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Kept6 {
+    /// The identity it was taken under (see `v6::client::Client::identity`).
+    pub duid: Vec<u8>,
+    pub iaid: u32,
+    pub lease: Lease6,
+    /// How many seconds its times are behind.
+    pub elapsed: u32,
+}
+
 pub struct Store {
     dir: PathBuf,
 }
@@ -61,8 +87,53 @@ impl Store {
         Store { dir: dir.into() }
     }
 
+    /// The directory, which the system DUID's file shares
+    /// (`ident::DuidStore`).
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
     fn path(&self, ifname: &str) -> PathBuf {
         self.dir.join(format!("{ifname}.v4.json"))
+    }
+
+    fn path6(&self, ifname: &str) -> PathBuf {
+        self.dir.join(format!("{ifname}.v6.json"))
+    }
+
+    /// Replace the file at `path` in one step, so a crash leaves either
+    /// the old lease or the new one.
+    fn write(&self, path: &Path, stored: &impl Serialize) -> io::Result<()> {
+        fs::create_dir_all(&self.dir)?;
+        let json = serde_json::to_vec_pretty(stored).map_err(io::Error::other)?;
+        let tmp = path.with_extension("json.tmp");
+        write_synced(&tmp, &json)?;
+        fs::rename(&tmp, path)
+    }
+
+    /// The contents of the lease file at `path` when it is one for
+    /// `ifname`. A file that cannot be read is ignored and said so.
+    fn read<T: serde::de::DeserializeOwned>(
+        &self,
+        path: &Path,
+        ifname: &str,
+        interface_of: fn(&T) -> &str,
+    ) -> Option<T> {
+        let bytes = fs::read(path).ok()?;
+        let stored: T = match serde_json::from_slice(&bytes) {
+            Ok(stored) => stored,
+            Err(e) => {
+                tracing::warn!("dhcp client: lease file for {ifname} ignored: {e}");
+                return None;
+            }
+        };
+        if interface_of(&stored) != ifname {
+            tracing::info!(
+                "dhcp client: lease file for {ifname} is for another interface; ignored"
+            );
+            return None;
+        }
+        Some(stored)
     }
 
     /// Write the lease, replacing the file in one step so a crash leaves
@@ -74,7 +145,6 @@ impl Store {
         obtained: u64,
         lease: &Lease,
     ) -> io::Result<()> {
-        fs::create_dir_all(&self.dir)?;
         let stored = Stored {
             interface: ifname.to_string(),
             mac: identity.0,
@@ -82,31 +152,14 @@ impl Store {
             obtained,
             lease: lease.clone(),
         };
-        let json = serde_json::to_vec_pretty(&stored).map_err(io::Error::other)?;
-        let path = self.path(ifname);
-        let tmp = path.with_extension("json.tmp");
-        write_synced(&tmp, &json)?;
-        fs::rename(&tmp, &path)
+        self.write(&self.path(ifname), &stored)
     }
 
     /// The lease kept for `ifname`, with its age at `now` (UNIX time) and
     /// the identity it was taken under, which the caller compares with
     /// its own. `None` when there is no usable file.
     pub fn load(&self, ifname: &str, now: u64) -> Option<Kept> {
-        let bytes = fs::read(self.path(ifname)).ok()?;
-        let stored: Stored = match serde_json::from_slice(&bytes) {
-            Ok(stored) => stored,
-            Err(e) => {
-                tracing::warn!("dhcp client: lease file for {ifname} ignored: {e}");
-                return None;
-            }
-        };
-        if stored.interface != ifname {
-            tracing::info!(
-                "dhcp client: lease file for {ifname} is for another interface; ignored"
-            );
-            return None;
-        }
+        let stored: Stored = self.read(&self.path(ifname), ifname, |s: &Stored| &s.interface)?;
         // A clock that went backwards says nothing about the lease's age.
         let elapsed = now.checked_sub(stored.obtained)?;
         Some(Kept {
@@ -119,6 +172,41 @@ impl Store {
 
     pub fn remove(&self, ifname: &str) {
         let _ = fs::remove_file(self.path(ifname));
+    }
+
+    /// As [`Store::save`], for a DHCPv6 lease taken as `identity` (DUID,
+    /// IAID), whose times count from `obtained`.
+    pub fn save6(
+        &self,
+        ifname: &str,
+        identity: (&[u8], u32),
+        obtained: u64,
+        lease: &Lease6,
+    ) -> io::Result<()> {
+        let stored = Stored6 {
+            interface: ifname.to_string(),
+            duid: identity.0.to_vec(),
+            iaid: identity.1,
+            obtained,
+            lease: lease.clone(),
+        };
+        self.write(&self.path6(ifname), &stored)
+    }
+
+    /// As [`Store::load`], for the DHCPv6 lease.
+    pub fn load6(&self, ifname: &str, now: u64) -> Option<Kept6> {
+        let stored: Stored6 = self.read(&self.path6(ifname), ifname, |s: &Stored6| &s.interface)?;
+        let elapsed = now.checked_sub(stored.obtained)?;
+        Some(Kept6 {
+            duid: stored.duid,
+            iaid: stored.iaid,
+            lease: stored.lease,
+            elapsed: u32::try_from(elapsed).unwrap_or(u32::MAX),
+        })
+    }
+
+    pub fn remove6(&self, ifname: &str) {
+        let _ = fs::remove_file(self.path6(ifname));
     }
 }
 
@@ -187,6 +275,57 @@ mod tests {
         assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
         store.remove("wan0");
         assert_eq!(store.load("wan0", 5000), None);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_dhcpv6_lease_has_a_file_of_its_own() {
+        use crate::dhcpc::v6::client::{Address, Ia};
+
+        let dir = scratch("v6");
+        let store = Store::new(&dir);
+        let lease6 = Lease6 {
+            server_id: vec![0, 3, 0, 1, 2, 0, 0, 0, 0, 0xfe],
+            server_address: "fe80::1".parse().unwrap(),
+            ia_na: Some(Ia {
+                iaid: 7,
+                t1: 1800,
+                t2: 2880,
+                addresses: vec![Address {
+                    address: "2001:db8:1::100".parse().unwrap(),
+                    preferred: 3600,
+                    valid: 7200,
+                }],
+            }),
+            dns_servers: vec!["2001:db8::53".parse().unwrap()],
+            domain_list: vec!["example.com".into()],
+            ntp_servers: vec![],
+        };
+        let duid = [0, 3, 0, 1, 2, 0, 0, 0, 0, 1];
+        assert_eq!(store.load6("wan0", 5000), None);
+        store.save6("wan0", (&duid, 7), 4000, &lease6).unwrap();
+        assert_eq!(
+            store.load6("wan0", 5000),
+            Some(Kept6 {
+                duid: duid.to_vec(),
+                iaid: 7,
+                lease: lease6.clone(),
+                elapsed: 1000,
+            })
+        );
+        // Another interface; a clock behind the lease.
+        assert_eq!(store.load6("wan1", 5000), None);
+        assert_eq!(store.load6("wan0", 3999), None);
+        // The two families do not see each other's file.
+        assert_eq!(store.load("wan0", 5000), None);
+        let mac = [2, 0, 0, 0, 0, 1];
+        store.save("wan0", (mac, None), 4000, &lease()).unwrap();
+        store.remove6("wan0");
+        assert_eq!(store.load6("wan0", 5000), None);
+        assert!(store.load("wan0", 5000).is_some());
+        // A damaged file is ignored.
+        fs::write(dir.join("wan0.v6.json"), b"{ not json").unwrap();
+        assert_eq!(store.load6("wan0", 5000), None);
         let _ = fs::remove_dir_all(&dir);
     }
 

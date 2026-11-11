@@ -73,6 +73,10 @@ pub const MAX_DNS: usize = 8;
 pub struct HostConfig {
     /// `ipv6 address autoconf`: run the RA host, and form SLAAC addresses.
     pub autoconf: bool,
+    /// `ipv6 address dhcpv6`: run the RA host for the default route and
+    /// the on-link prefixes a leased address needs. No SLAAC address
+    /// comes of it.
+    pub dhcpv6: bool,
     /// `ra-options default-route-distance`.
     pub distance: u8,
     /// `ra-options no-default-route`: routers are listed, not installed.
@@ -83,6 +87,7 @@ impl Default for HostConfig {
     fn default() -> Self {
         Self {
             autoconf: false,
+            dhcpv6: false,
             distance: DEFAULT_DISTANCE,
             no_default_route: false,
         }
@@ -90,10 +95,10 @@ impl Default for HostConfig {
 }
 
 impl HostConfig {
-    /// Whether the RA host runs. Only `autoconf` asks for it today; the
-    /// DHCPv6 client's `address dhcpv6` and `pd` will too (§4).
+    /// Whether the RA host runs: for `autoconf`, and for the DHCPv6
+    /// client's `address dhcpv6` (`pd` will ask for it too, §4).
     pub fn enabled(&self) -> bool {
-        self.autoconf
+        self.autoconf || self.dhcpv6
     }
 }
 
@@ -407,7 +412,9 @@ impl RaHosts {
     /// re-route its host to match.
     pub fn update_config(&mut self, name: &str, now: Instant, f: impl FnOnce(&mut HostConfig)) {
         let mut cfg = self.config(name);
+        let was_autoconf = cfg.autoconf;
         f(&mut cfg);
+        let autoconf = cfg.autoconf;
         if cfg == HostConfig::default() {
             self.config.remove(name);
         } else {
@@ -419,9 +426,39 @@ impl RaHosts {
             .find(|(_, link)| link.name == name)
             .map(|(&ifindex, _)| ifindex);
         if let Some(ifindex) = ifindex {
+            let ran = self.hosts.contains_key(&ifindex);
             self.reconcile(ifindex, now);
+            if ran {
+                self.follow_autoconf(ifindex, was_autoconf, autoconf, now);
+            }
         }
         self.sync_routes();
+    }
+
+    /// `autoconf` came or went on a host that was running and may go on
+    /// running, for `address dhcpv6`. (A host that started or stopped
+    /// with the change has seen to its addresses already.)
+    fn follow_autoconf(&mut self, ifindex: u32, was: bool, is: bool, now: Instant) {
+        let up = self.links.get(&ifindex).is_some_and(|link| link.up);
+        let Some(host) = self.hosts.get_mut(&ifindex) else {
+            return;
+        };
+        match (was, is) {
+            // Its addresses are given up. The routers and the on-link
+            // prefixes are still the host's to use.
+            (true, false) => {
+                for slaac in std::mem::take(&mut host.slaac).into_values() {
+                    self.actions.push(HostAction::AddrDel {
+                        ifindex,
+                        addr: Ipv6Net::new(slaac.addr, 64).expect("a /64"),
+                    });
+                }
+            }
+            // The prefixes an address is formed from come with a Router
+            // Advertisement: ask for one, not wait for the next.
+            (false, true) if up => Self::restart_solicit(host, self.rng.as_mut(), now),
+            _ => {}
+        }
     }
 
     /// A link the RIB announced, or announced again with new attributes:
@@ -1272,6 +1309,78 @@ mod tests {
         );
         // Without `autoconf` there is no address either.
         hosts.update_config("wan0", now, |cfg| cfg.autoconf = false);
+        assert!(hosts.host(WAN).is_none());
+    }
+
+    /// `address dhcpv6` runs the RA host for the default route and the
+    /// on-link prefixes, and forms no SLAAC address: the lease is the
+    /// address. `autoconf` beside it adds the SLAAC address.
+    #[test]
+    fn dhcpv6_runs_the_host_without_forming_addresses() {
+        let now = t0();
+        let mut hosts = hosts_with(&[(WAN, "wan0")], now);
+        hosts.update_config("wan0", now, |cfg| {
+            cfg.autoconf = false;
+            cfg.dhcpv6 = true;
+        });
+        assert!(hosts.host(WAN).is_some());
+        hosts.take_actions();
+        let prefix = pio("2001:db8:2::/64", la(), 3600, 1800);
+        hosts.on_ra(WAN, ll("fe80::1"), &ra(1800, vec![prefix.clone()]), now);
+        let actions = hosts.take_actions();
+        assert!(
+            !actions
+                .iter()
+                .any(|a| matches!(a, HostAction::AddrAdd { .. })),
+            "{actions:?}"
+        );
+        // The default route and the on-link prefix are there all the same.
+        let installed: Vec<_> = hosts.installed().keys().cloned().collect();
+        assert_eq!(
+            installed,
+            vec![(None, net("::/0")), (None, net("2001:db8:2::/64"))]
+        );
+        assert!(hosts.host(WAN).unwrap().slaac.is_empty());
+
+        // With `autoconf` as well, the routers are asked again, and the
+        // RA that answers forms the address.
+        assert_eq!(hosts.host(WAN).unwrap().rs_next, None);
+        hosts.update_config("wan0", now, |cfg| cfg.autoconf = true);
+        assert!(hosts.host(WAN).unwrap().rs_next.is_some());
+        hosts.take_actions();
+        hosts.on_ra(WAN, ll("fe80::1"), &ra(1800, vec![prefix]), now);
+        let actions = hosts.take_actions();
+        let formed: Vec<Ipv6Net> = actions
+            .iter()
+            .filter_map(|a| match a {
+                HostAction::AddrAdd { addr, .. } => Some(*addr),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(formed.len(), 1, "{actions:?}");
+        // `autoconf` gone again: its address is given up, and the host
+        // stays for the lease with its routes.
+        hosts.update_config("wan0", now, |cfg| cfg.autoconf = false);
+        assert_eq!(
+            hosts.take_actions(),
+            vec![HostAction::AddrDel {
+                ifindex: WAN,
+                addr: formed[0]
+            }]
+        );
+        let host = hosts.host(WAN).expect("the host stays");
+        assert!(host.slaac.is_empty());
+        assert_eq!(hosts.installed().len(), 2);
+        // An option that is not `autoconf` gives up nothing.
+        hosts.update_config("wan0", now, |cfg| cfg.distance = 220);
+        assert!(
+            !hosts
+                .take_actions()
+                .iter()
+                .any(|a| matches!(a, HostAction::AddrDel { .. }))
+        );
+        // With neither, there is no host.
+        hosts.update_config("wan0", now, |cfg| cfg.dhcpv6 = false);
         assert!(hosts.host(WAN).is_none());
     }
 

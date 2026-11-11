@@ -488,6 +488,10 @@ impl Client {
         (&self.duid, self.iaid)
     }
 
+    pub fn options(&self) -> &Options {
+        &self.options
+    }
+
     /// New options take effect at the next message. `parameters_only` is
     /// not one of them: it decides which of two protocols the client
     /// speaks, and the task starts a new client when it changes.

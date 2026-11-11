@@ -1,5 +1,7 @@
 //! Configuration callbacks: `interface <if> ipv4 address dhcp`,
-//! `interface <if> ipv4 dhcp-options …` and `system hostname`.
+//! `interface <if> ipv4 dhcp-options …` and `system hostname`; for
+//! DHCPv6, `interface <if> ipv6 address dhcpv6` and
+//! `interface <if> ipv6 dhcpv6-options …`.
 //!
 //! A callback only records the leaf and marks the interface as touched;
 //! [`Dhcpc::process_cm_msg`] applies everything at the end of the commit,
@@ -12,11 +14,14 @@ use ipnet::Ipv4Net;
 
 use crate::config::{Args, ConfigOp};
 
+use super::ident::parse_duid;
 use super::inst::{Dhcpc, IfConfig};
+use super::v6::inst::IfConfig6;
 
 pub type Callback = fn(&mut Dhcpc, Args, ConfigOp) -> Option<()>;
 
 const OPTIONS: &str = "/interface/ipv4/dhcp-options";
+const OPTIONS6: &str = "/interface/ipv6/dhcpv6-options";
 
 impl Dhcpc {
     pub fn callback_build(&mut self) {
@@ -36,6 +41,24 @@ impl Dhcpc {
         for (leaf, callback) in options {
             self.callbacks.insert(format!("{OPTIONS}{leaf}"), callback);
         }
+        self.callbacks
+            .insert("/interface/ipv6/address".to_string(), config_address6);
+        let options6: [(&str, Callback); 4] = [
+            ("/duid", config_duid),
+            ("/parameters-only", config_parameters_only),
+            ("/rapid-commit", config_rapid_commit),
+            ("/no-release", config_no_release),
+        ];
+        for (leaf, callback) in options6 {
+            self.callbacks.insert(format!("{OPTIONS6}{leaf}"), callback);
+        }
+    }
+
+    /// As [`Dhcpc::touch`], for the DHCPv6 configuration.
+    fn touch6(&mut self, args: &mut Args) -> Option<&mut IfConfig6> {
+        let name = args.string()?;
+        self.v6.touched.push(name.clone());
+        Some(&mut self.v6.ifaces.entry(name).or_default().cfg)
     }
 
     /// The configuration of the interface the callback names, created on
@@ -68,6 +91,60 @@ fn config_address(dhcpc: &mut Dhcpc, mut args: Args, op: ConfigOp) -> Option<()>
     }
     dhcpc.touched.push(name.clone());
     dhcpc.ifaces.entry(name).or_default().cfg.enabled = enabled;
+    Some(())
+}
+
+/// `interface <if> ipv6 address …`: only the `dhcpv6` value is ours; the
+/// RIB handles the prefixes and the RA host `autoconf`. A delete with no
+/// value removes every address, `dhcpv6` included.
+fn config_address6(dhcpc: &mut Dhcpc, mut args: Args, op: ConfigOp) -> Option<()> {
+    let name = args.string()?;
+    let mut values = Vec::new();
+    while let Some(value) = args.string() {
+        values.push(value);
+    }
+    let dhcpv6 = values.iter().any(|v| v == "dhcpv6");
+    let enabled = match op {
+        ConfigOp::Set if dhcpv6 => true,
+        ConfigOp::Delete if dhcpv6 || values.is_empty() => false,
+        _ => return Some(()),
+    };
+    // A delete for an interface never configured for DHCPv6 is not ours.
+    if !enabled && !dhcpc.v6.ifaces.contains_key(&name) {
+        return Some(());
+    }
+    dhcpc.v6.touched.push(name.clone());
+    dhcpc.v6.ifaces.entry(name).or_default().cfg.address = enabled;
+    Some(())
+}
+
+fn config_duid(dhcpc: &mut Dhcpc, mut args: Args, op: ConfigOp) -> Option<()> {
+    let cfg = dhcpc.touch6(&mut args)?;
+    // The schema has checked its form; one that does not parse all the
+    // same leaves the system's DUID in use.
+    cfg.duid = if op.is_set() {
+        parse_duid(&args.string()?)
+    } else {
+        None
+    };
+    Some(())
+}
+
+fn config_parameters_only(dhcpc: &mut Dhcpc, mut args: Args, op: ConfigOp) -> Option<()> {
+    let cfg = dhcpc.touch6(&mut args)?;
+    cfg.parameters_only = op.is_set();
+    Some(())
+}
+
+fn config_rapid_commit(dhcpc: &mut Dhcpc, mut args: Args, op: ConfigOp) -> Option<()> {
+    let cfg = dhcpc.touch6(&mut args)?;
+    cfg.rapid_commit = op.is_set();
+    Some(())
+}
+
+fn config_no_release(dhcpc: &mut Dhcpc, mut args: Args, op: ConfigOp) -> Option<()> {
+    let cfg = dhcpc.touch6(&mut args)?;
+    cfg.no_release = op.is_set();
     Some(())
 }
 

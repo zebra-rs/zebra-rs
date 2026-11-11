@@ -98,14 +98,14 @@ impl DuidStore {
         Ok(duid)
     }
 
-    /// The system DUID: the one on disk, or else a new DUID-LLT, written
-    /// before it is returned so that every later start finds the same
-    /// one. An error means there is no DUID that would last; the caller
-    /// decides whether to go on with one that will not ([`duid_llt`]).
-    pub fn load_or_create(&self, mac: [u8; 6], unix_now: u64) -> io::Result<Vec<u8>> {
-        if let Some(duid) = self.load()? {
-            return Ok(duid);
-        }
+    /// Make the system DUID, a DUID-LLT from `mac` and the time, and
+    /// write it before it is returned, so that every later start finds
+    /// the same one. For when [`DuidStore::load`] found none: only
+    /// making one takes a hardware address, and one that is on disk is
+    /// read without. An error means there is no DUID that would last;
+    /// the caller decides whether to go on with one that will not
+    /// ([`duid_llt`]).
+    pub fn create(&self, mac: [u8; 6], unix_now: u64) -> io::Result<Vec<u8>> {
         let duid = duid_llt(mac, unix_now);
         if let Some(dir) = self.path.parent() {
             fs::create_dir_all(dir)?;
@@ -125,6 +125,14 @@ mod tests {
     const MAC: [u8; 6] = [0x52, 0x54, 0, 0x12, 0x34, 0x56];
     /// 2026-11-10 00:00:00 UTC.
     const NOW: u64 = 1_794_268_800;
+
+    /// What the task does: the DUID on disk, or else a new one.
+    fn load_or_create(store: &DuidStore, mac: [u8; 6], unix_now: u64) -> io::Result<Vec<u8>> {
+        match store.load()? {
+            Some(duid) => Ok(duid),
+            None => store.create(mac, unix_now),
+        }
+    }
 
     fn scratch(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("zebra-duid-{}-{name}", std::process::id()));
@@ -183,7 +191,7 @@ mod tests {
         let dir = scratch("once");
         let store = DuidStore::new(&dir);
         assert_eq!(store.load().unwrap(), None);
-        let duid = store.load_or_create(MAC, NOW).unwrap();
+        let duid = load_or_create(&store, MAC, NOW).unwrap();
         assert_eq!(duid, duid_llt(MAC, NOW));
         assert_eq!(
             fs::read_to_string(dir.join("duid")).unwrap(),
@@ -192,9 +200,7 @@ mod tests {
         // Another address, another day, another process: the same DUID.
         let later = DuidStore::new(&dir);
         assert_eq!(
-            later
-                .load_or_create([2, 0, 0, 0, 0, 9], NOW + 86400)
-                .unwrap(),
+            load_or_create(&later, [2, 0, 0, 0, 0, 9], NOW + 86400).unwrap(),
             duid
         );
         assert_eq!(later.load().unwrap(), Some(duid));
@@ -211,13 +217,16 @@ mod tests {
         for damaged in [&b"not a duid\n"[..], &[0xff, 0xfe, 0x00][..], b""] {
             fs::write(dir.join("duid"), damaged).unwrap();
             assert_eq!(store.load().unwrap(), None);
-            assert_eq!(store.load_or_create(MAC, NOW).unwrap(), duid_llt(MAC, NOW));
+            assert_eq!(
+                load_or_create(&store, MAC, NOW).unwrap(),
+                duid_llt(MAC, NOW)
+            );
             assert_eq!(store.load().unwrap(), Some(duid_llt(MAC, NOW)));
         }
         // One an operator wrote by hand, with no newline, is taken.
         fs::write(dir.join("duid"), "00:03:00:01:02:00:00:00:00:01").unwrap();
         assert_eq!(
-            store.load_or_create(MAC, NOW).unwrap(),
+            load_or_create(&store, MAC, NOW).unwrap(),
             [0, 3, 0, 1, 2, 0, 0, 0, 0, 1]
         );
         let _ = fs::remove_dir_all(&dir);
@@ -231,7 +240,7 @@ mod tests {
         fs::create_dir_all(dir.join("duid")).unwrap();
         let store = DuidStore::new(&dir);
         assert!(store.load().is_err());
-        assert!(store.load_or_create(MAC, NOW).is_err());
+        assert!(load_or_create(&store, MAC, NOW).is_err());
         assert!(dir.join("duid").is_dir());
         let _ = fs::remove_dir_all(&dir);
     }

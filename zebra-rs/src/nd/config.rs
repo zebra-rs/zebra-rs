@@ -67,24 +67,37 @@ fn config_send_advertisements(nd: &mut Nd, mut args: Args, op: ConfigOp) -> Opti
     Some(())
 }
 
-/// `interface <if> ipv6 address …`: only the `autoconf` value is ours; the
-/// RIB handles the prefixes. A delete with no value removes every
-/// address, `autoconf` included.
+/// `interface <if> ipv6 address …`: the `autoconf` and `dhcpv6` values
+/// are ours, each of them running the RA host; the RIB handles the
+/// prefixes, and the DHCP client the lease `dhcpv6` asks for. A delete
+/// with no value removes every address, these two included.
 fn config_address(nd: &mut Nd, mut args: Args, op: ConfigOp) -> Option<()> {
     let name = args.string()?;
     let mut values = Vec::new();
     while let Some(value) = args.string() {
         values.push(value);
     }
-    let autoconf = values.iter().any(|v| v == "autoconf");
     let enabled = match op {
-        ConfigOp::Set if autoconf => true,
-        ConfigOp::Delete if autoconf || values.is_empty() => false,
+        ConfigOp::Set => true,
+        ConfigOp::Delete => false,
         _ => return Some(()),
     };
+    let all = !enabled && values.is_empty();
+    let autoconf = all || values.iter().any(|v| v == "autoconf");
+    let dhcpv6 = all || values.iter().any(|v| v == "dhcpv6");
+    if !autoconf && !dhcpv6 {
+        return Some(());
+    }
     nd.engine_mut()
         .hosts_mut()
-        .update_config(&name, Instant::now(), |cfg| cfg.autoconf = enabled);
+        .update_config(&name, Instant::now(), |cfg| {
+            if autoconf {
+                cfg.autoconf = enabled;
+            }
+            if dhcpv6 {
+                cfg.dhcpv6 = enabled;
+            }
+        });
     Some(())
 }
 
