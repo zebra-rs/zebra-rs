@@ -1,8 +1,10 @@
 # Native DHCP client (DHCPv4, DHCPv6, RA host)
 
 **Status: P0 (the codec), P1 (the RIB plumbing and the DHCPv4 client)
-and P2 (the RA host) are implemented. P3 onwards is design.** Where P1 or
-P2 found the code to be different from what this document assumed, the
+and P2 (the RA host) are implemented. Of P3, the protocol half is
+implemented: the DHCPv6 state machine, the DUID and the IAIDs. The task
+does not run it yet. The rest of P3 and what follows is design.** Where a
+phase found the code to be different from what this document assumed, the
 text below says what was built and why.
 
 zebra-rs gets its own DHCP client: a `dhcpc` task that leases IPv4
@@ -284,12 +286,18 @@ would bypass the RIB.
 - Stored in `/var/lib/zebra-rs/dhcp/duid`, next to
   `/var/lib/zebra-rs/checkpoint`. RFC 7084 W-5: the DUID "MUST NOT change
   between network-interface resets or IPv6 CE router reboots".
+  - The file is one line of text, `xx:xx:…`, the form the configuration
+    takes, so an operator can read it or put a chosen DUID there.
+  - A file that holds no DUID is replaced, with a warning. A file that
+    cannot be read is left alone: the error says nothing about what is
+    in it.
 - `dhcpv6-options duid` overrides it per interface (VyOS).
 
 **IAIDs**
 
-- IA_NA: a stable 32-bit hash of the interface name. The ifindex is not
-  stable across reboots.
+- IA_NA: a stable 32-bit hash of the interface name (FNV-1a, written
+  out in `dhcpc/ident.rs` so that no compiler or library version can
+  change it). The ifindex is not stable across reboots.
 - IA_PD: the `pd <id>` number, as VyOS uses it.
 
 **DHCPv4 client identifier**
@@ -695,8 +703,10 @@ the client stays released until `renew`, or until `address dhcp` or the
 **What it sends**
 
 - Client ID (D8), Elapsed Time, and Rapid Commit with `rapid-commit`.
-- An ORO asking for 23 (DNS), 24 (domain list), 56 (NTP), 82 (SOL_MAX_RT),
-  83 (INF_MAX_RT) and 32 (information refresh time).
+- An ORO asking for 23 (DNS), 24 (domain list), 56 (NTP), 82 (SOL_MAX_RT)
+  and 83 (INF_MAX_RT). An Information-request also asks for 32
+  (information refresh time), and no other message does (RFC 8415
+  §21.23). Confirm, Release and Decline carry no ORO.
 - IA_NA. IA_PD with an IAPREFIX hint of `::/<length>`.
 
 **Choosing a server**
@@ -712,6 +722,8 @@ the client stays released until `renew`, or until `address dhcp` or the
   SOL_MAX_RT (WAA-8).
 - T1/T2 come from each IA. When the server sets them to 0, the client uses
   0.5 / 0.8 of the shortest preferred lifetime in the IA.
+- Lifetimes, T1 and T2 count from when the Reply arrived, not from when
+  its request was sent as in DHCPv4.
 
 **Status codes**
 
@@ -719,8 +731,8 @@ the client stays released until `renew`, or until `address dhcp` or the
 |---|---|
 | NoAddrsAvail / NoPrefixAvail | that IA is retried at the next Renew; the others bind |
 | NoBinding on a Renew or Rebind | Request |
-| NotOnLink on a Confirm | Solicit |
-| UseMulticast | resend multicast |
+| NotOnLink on a Confirm | Solicit, when the Confirm exchange ends and no server has said Success |
+| UseMulticast, UnspecFail | the message goes out again when its retransmission is due (every message is multicast already) |
 
 **Delegated prefixes**
 
@@ -746,13 +758,74 @@ the client stays released until `renew`, or until `address dhcp` or the
 **Reconfigure:** no Reconfigure Accept is sent, so servers will not
 reconfigure the client (§16).
 
+**What P3 has built so far** (`zebra-rs/src/dhcpc/v6/client.rs`,
+`dhcpc/ident.rs`): the state machine for IA_NA and `parameters-only`,
+without I/O, and the identity. The socket, the RIB, the configuration,
+show and persistence are the rest of P3. Beyond the above:
+
+- **Refusals back off.** When a Request is refused (NoAddrsAvail,
+  NotOnLink, no usable address), when a renewal takes the last address
+  away, and after a Decline, the client waits 1, 2, 4 … up to 64 s before
+  it solicits again. RFC 8415 leaves that pace to the client; the wait
+  keeps a server that offers and then refuses from being asked in a
+  tight loop, as the NAK backoff does for DHCPv4.
+- **A renewal that gives nothing leaves the lease as it is.** On
+  NoAddrsAvail, or a Reply without the IA, the Renew or Rebind goes on at
+  its retransmission pace (10 s doubling to 600 s), which is the rate
+  limit RFC 8415 §18.2.10.1 asks for.
+- **NoBinding keeps the address in use** while the Request for the
+  binding is out. If that Request is refused or goes unanswered, the
+  lease is withdrawn and the client solicits.
+- **T1 and T2.** A time the server sets is used as it is (RFC 8415
+  §21.4, a MUST), "never" included (§7.7), and also when it comes after
+  the addresses have run out: the lease then ends unrenewed, as the
+  server chose.
+  - A time left 0 is the client's: 0.5 / 0.8 of the shortest preferred
+    lifetime among the addresses still preferred, at least one second
+    (§14.2: not at once).
+  - When the server sets only one of the two, the other is chosen to go
+    with it: T1 no later than 5/8 of the server's T2 (the proportion of
+    0.5 to 0.8, so the lease's own server is asked before any other),
+    T2 no earlier than 8/5 of the server's T1.
+- **A Confirm is decided when its exchange ends, unless a server says
+  Success first** (RFC 8415 §18.2.10.3). One Success, from any server,
+  keeps the lease at once. NotOnLink is noted and the Confirm goes on
+  being sent, because the server that would say Success may have missed
+  it on a link that has only just come up. When the ten seconds are
+  over, a lease that only NotOnLink was said about is withdrawn and the
+  client solicits; one that nothing was said about is kept.
+- **Addresses expire one by one.** An IA_NA can hold several; each
+  leaves the lease at the end of its valid lifetime, and the last takes
+  the lease with it. A Reply to a Renew adds, updates and (valid
+  lifetime 0) removes addresses; what it does not name keeps its
+  lifetimes.
+- **Release and Decline are exchanges.** Each is sent up to four times,
+  a second apart and doubling, until the server replies. The address is
+  out of use before the Release is first sent. After a deleted
+  configuration the client is finished only when that exchange is over
+  (`Client::finished`); the task keeps it and its socket until then.
+  `renew` during a `release` cuts the exchange short and starts over.
+- **A lease resumed past T2 is rebound, not confirmed**: any server is
+  asked about it anyway.
+- **The link.** The client is told when the interface can carry DHCPv6:
+  the link is up and has a link-local address past DAD. Without it a
+  held lease stays and only its lifetimes run; nothing is sent. With
+  `parameters-only`, a link that comes back is asked again, since it may
+  be another link (RFC 8415 §18.2.6).
+- **`parameters-only` is fixed for a client**, like the DUID and the
+  IAID: it decides which of two protocols is spoken. When any of the
+  three changes, the task stops the client, which releases as who it
+  was, and starts another.
+- **Not used:** the Server Unicast option (every message goes to
+  `ff02::1:2`), and Reconfigure.
+
 ---
 
 ## 9. Identity and persistence
 
 | File | Contents | Lifetime |
 |---|---|---|
-| `/var/lib/zebra-rs/dhcp/duid` | the system DUID (D8) | created once, never rewritten |
+| `/var/lib/zebra-rs/dhcp/duid` | the system DUID (D8), as `xx:xx:…` text | created once; rewritten only when it holds no DUID |
 | `/var/lib/zebra-rs/dhcp/<if>.v4.json` | the lease, when it began, and the identity that took it (hardware address, client identifier) | written at bind and renew, deleted on release, expiry or deleted configuration |
 | `/var/lib/zebra-rs/dhcp/<if>.v6.json` | server DUID, IAs with addresses and prefixes, LAN assignments | same |
 
@@ -852,7 +925,10 @@ zebra-rs/src/dhcpc/            (P1: the DHCPv4 parts)
   routes.rs                    lease routes -> RIB entries (D6)
   lease.rs                     persistence (§9)
   show.rs                      §11 view; the verbs are in inst.rs
-  v6/…, ident.rs               P3, P4: DHCPv6, DUID and IAIDs, PD
+  v6/client.rs                 sans-I/O, as v4/client.rs: IA_NA and
+                               parameters-only (P3; the task does not run
+                               it yet). IA_PD is P4
+  ident.rs                     the DUID file, DUID text form, IAID (P3)
 zebra-rs/src/nd/host.rs        RS, RA -> routes and SLAAC addresses (§7)
 zebra-rs/src/rib/              AddrOrigin, AddrDynAdd/Del, addr_replace,
                                RibType::Ra, origin-keyed is_protocol,
@@ -893,7 +969,7 @@ belongs to systemd-resolved.
 | P0 (done) | Codec move + typed options + property tests; insomnia switches to the vendored copy (relay goldens unchanged) | – |
 | P1 (done) | RIB plumbing (D5, D6); `dhcpc` task; DHCPv4 state machine, sockets, ACD, persistence; `show dhcp client leases`, `renew/release dhcp`; ungate `address dhcp` | P0 |
 | P2 (done) | RA host in `nd`: RS, default route, on-link prefixes, `ipv6 address autoconf`, `ra-options`, `accept_ra=0`; show section | P1's RIB plumbing |
-| P3 | DHCPv6 IA_NA and `parameters-only`; DUID; `show dhcpv6 client leases`, `renew/release dhcpv6` | P0, P2 |
+| P3 (state machine and identity done) | DHCPv6 IA_NA and `parameters-only`; DUID; `show dhcpv6 client leases`, `renew/release dhcpv6`. Left: the socket, `AddrOrigin::Dhcp6`, the schema, the RA host started by `address dhcpv6`, show and exec, persistence, the BDD feature | P0, P2 |
 | P4 | IA_PD: discard route, LAN assignment, prefix change | P3 |
 | ND-PIO | `nd` advertises PIOs for LAN /64s with counted-down lifetimes, deprecates removed ones (L-13), `RibRx::AddrAdd` on lifetime change | P1's RIB plumbing; parallel to P2–P4 |
 | P5 | Resolver integration, MTU options, Reconfigure, IA_TA, prefix exclude, RFC 4191 routes, stable-privacy identifiers, `redistribute dhcp` | as needed |
@@ -973,9 +1049,10 @@ DHCPv4, IA_NA and RAs, but not PD.
    shown `A` (D6).
 2. ~~Equal distances on two WANs.~~ Settled in P1: ECMP, as VyOS has it
    (D6).
-3. **DUID type.** DUID-LLT (proposed) survives an image reinstall only
-   through `/var/lib`. DUID-UUID from `/etc/machine-id` survives a NIC swap
-   but not a reinstall. ISPs that bind PD to the DUID care about both.
+3. ~~DUID type.~~ Settled for P3: DUID-LLT (D8). It survives an image
+   reinstall only through `/var/lib`; `dhcpv6-options duid`, or a DUID
+   written into the file by hand, covers the operator whose ISP binds a
+   delegation to a particular one.
 4. **Should `release` survive a zebra-rs restart** (a marker in the lease
    file), or does a restart renew?
 5. **Feeding LAN /64s to insomnia's DHCPv6 server.** Kea's subnets are
