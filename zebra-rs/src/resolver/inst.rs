@@ -1,12 +1,15 @@
-//! The resolver task: which interfaces' name servers the host uses
-//! (`system name-server dhcp <if>`), what the sources have learned on
-//! each, and what the system resolver has been given.
+//! The resolver task: what the sources have learned on each interface
+//! for the host to use, and what the system resolver has been given.
 //!
-//! Every change, of the configuration or of what a source knows, ends in
-//! [`Resolver::sync`]: it works out what the system resolver should hold
-//! and has the [`Backend`] make up the difference, one command at a
-//! time. A command that fails is tried again later, so a resolver that
-//! starts after zebra-rs still gets its servers.
+//! The task has no configuration of its own. What a source reports is
+//! used; a source that is to keep an interface's name servers from the
+//! host (`dhcp-options no-name-server`) does not report them.
+//!
+//! Every change in what a source knows ends in [`Resolver::sync`]: it
+//! works out what the system resolver should hold and has the
+//! [`Backend`] make up the difference, one command at a time. A command
+//! that fails is tried again later, so a resolver that starts after
+//! zebra-rs still gets its servers.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
@@ -16,7 +19,6 @@ use std::time::Duration;
 use tokio::sync::mpsc::{self, UnboundedReceiver};
 use tokio::time::{Instant, sleep_until};
 
-use crate::config::{ConfigChannel, ConfigOp, ConfigRequest, path_from_command};
 use crate::context::Task;
 
 use super::{LinkDns, Report, ResolverTx, Source};
@@ -77,13 +79,10 @@ struct Held {
 }
 
 pub struct Resolver<B> {
-    pub cm: ConfigChannel,
     tx: ResolverTx,
     rx: UnboundedReceiver<Report>,
     backend: B,
-    /// `system name-server dhcp <if>`.
-    enabled: BTreeSet<String>,
-    /// What each source knows, by interface.
+    /// What each source has for the host to use, by interface.
     learned: BTreeMap<String, BTreeMap<Source, LinkDns>>,
     /// What the system resolver holds from us, by interface name.
     applied: BTreeMap<String, Held>,
@@ -101,11 +100,9 @@ impl<B: Backend> Resolver<B> {
     pub fn new(backend: B) -> Resolver<B> {
         let (tx, rx) = mpsc::unbounded_channel();
         Resolver {
-            cm: ConfigChannel::new(),
             tx,
             rx,
             backend,
-            enabled: BTreeSet::new(),
             learned: BTreeMap::new(),
             applied: BTreeMap::new(),
             complained: BTreeSet::new(),
@@ -123,16 +120,11 @@ impl<B: Backend> Resolver<B> {
     async fn event_loop(&mut self) {
         loop {
             tokio::select! {
-                Some(msg) = self.cm.rx.recv() => {
-                    // Once the whole commit is known.
-                    if self.process_cm_msg(msg) {
-                        self.sync().await;
-                    }
-                }
                 Some(report) = self.rx.recv() => {
                     self.learn(report);
-                    // Several at once (a lease replaced by another) are
-                    // one change.
+                    // Several at once (a lease replaced by another, a
+                    // commit that touched several interfaces) are one
+                    // change.
                     while let Ok(report) = self.rx.try_recv() {
                         self.learn(report);
                     }
@@ -141,28 +133,6 @@ impl<B: Backend> Resolver<B> {
                 _ = sleep_until_opt(self.retry) => self.sync().await,
             }
         }
-    }
-
-    /// Take a configuration line. True at the end of a commit.
-    fn process_cm_msg(&mut self, msg: ConfigRequest) -> bool {
-        if msg.op == ConfigOp::CommitEnd {
-            return true;
-        }
-        let (path, mut args) = path_from_command(&msg.paths);
-        if path != "/system/name-server/dhcp" {
-            return false;
-        }
-        match (msg.op, args.string()) {
-            (ConfigOp::Set, Some(name)) => {
-                self.enabled.insert(name);
-            }
-            (ConfigOp::Delete, Some(name)) => {
-                self.enabled.remove(&name);
-            }
-            (ConfigOp::Delete, None) => self.enabled.clear(),
-            _ => {}
-        }
-        false
     }
 
     fn learn(&mut self, report: Report) {
@@ -184,13 +154,13 @@ impl<B: Backend> Resolver<B> {
         }
     }
 
-    /// What the system resolver should hold: for every configured
-    /// interface something usable has been learned on, that.
+    /// What the system resolver should hold: for every interface
+    /// something usable has been learned on, that.
     fn wanted(&self) -> BTreeMap<String, LinkDns> {
-        self.enabled
+        self.learned
             .iter()
-            .filter_map(|name| {
-                let dns = merge(self.learned.get(name)?);
+            .filter_map(|(name, sources)| {
+                let dns = merge(sources);
                 // Search domains alone resolve nothing.
                 (!dns.servers.is_empty()).then(|| (name.clone(), dns))
             })
@@ -436,7 +406,6 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
-    use crate::config::CommandPath;
 
     const WAN: &str = "wan0";
 
@@ -491,26 +460,8 @@ mod tests {
             }
         }
 
-        /// One configuration line, then the end of its commit.
-        async fn commit(&mut self, op: ConfigOp, names: &[&str]) {
-            // As the manager delivers it (ymatch: 0 Dir, 2 Key, 3
-            // KeyMatched): the list's key is an argument, not a part of
-            // the path.
-            let cp = |name: &str, ymatch: i32| CommandPath {
-                name: name.to_string(),
-                ymatch,
-                ..Default::default()
-            };
-            let mut paths = vec![cp("system", 0), cp("name-server", 0), cp("dhcp", 2)];
-            paths.extend(names.iter().map(|name| cp(name, 3)));
-            assert!(!self.resolver.process_cm_msg(ConfigRequest::new(paths, op)));
-            assert!(
-                self.resolver
-                    .process_cm_msg(ConfigRequest::new(Vec::new(), ConfigOp::CommitEnd))
-            );
-            self.sync().await;
-        }
-
+        /// A source's report, and the look at what is wanted that
+        /// follows it.
         async fn report(&mut self, ifname: &str, dns: Option<LinkDns>) {
             self.resolver.learn(Report {
                 ifname: ifname.to_string(),
@@ -586,28 +537,18 @@ mod tests {
         }
     }
 
+    /// No configuration names the interface: that a source reports its
+    /// name servers is the word that the host is to use them.
     #[tokio::test]
-    async fn nothing_is_set_for_an_interface_that_is_not_configured() {
+    async fn what_an_interface_learns_is_set_once() {
         let mut b = Bench::new();
-        b.report(WAN, Some(dns(&["198.51.100.53"], &["example.com"])))
-            .await;
-        assert_eq!(b.ran(), []);
-        // Configured afterwards, it gets what was learned before.
-        b.commit(ConfigOp::Set, &[WAN]).await;
-        assert_eq!(b.ran(), set(WAN, &["198.51.100.53"], &["example.com"]));
-    }
-
-    #[tokio::test]
-    async fn what_a_configured_interface_learns_is_set_once() {
-        let mut b = Bench::new();
-        b.commit(ConfigOp::Set, &[WAN]).await;
-        assert_eq!(b.ran(), []);
         b.report(WAN, Some(dns(&["198.51.100.53"], &[]))).await;
         // No domains is said too: it clears the ones set before.
         assert_eq!(b.ran(), set(WAN, &["198.51.100.53"], &[]));
-        // The same again (a renewal), and a commit about something else.
+        // The same again (a renewal), and word of another interface
+        // that brings nothing to set.
         b.report(WAN, Some(dns(&["198.51.100.53"], &[]))).await;
-        b.commit(ConfigOp::Set, &["wan1"]).await;
+        b.report("wan1", Some(dns(&[], &["example.org"]))).await;
         assert_eq!(b.ran(), []);
         // Other servers.
         b.report(WAN, Some(dns(&["198.51.100.54"], &["example.net"])))
@@ -615,44 +556,52 @@ mod tests {
         assert_eq!(b.ran(), set(WAN, &["198.51.100.54"], &["example.net"]));
     }
 
+    /// A lease that ends, or an interface told to keep its name servers
+    /// from the host: the source says it has nothing, either way.
     #[tokio::test]
-    async fn a_lost_lease_and_a_deleted_entry_take_it_back() {
+    async fn what_a_source_no_longer_has_is_taken_back() {
         let mut b = Bench::new();
-        b.commit(ConfigOp::Set, &[WAN]).await;
         b.report(WAN, Some(dns(&["198.51.100.53"], &[]))).await;
         b.ran();
         b.report(WAN, None).await;
         assert_eq!(b.ran(), revert(WAN));
         // Nothing is held any more, so nothing more is taken back.
-        b.commit(ConfigOp::Delete, &[WAN]).await;
+        b.report(WAN, None).await;
         assert_eq!(b.ran(), []);
-
-        b.commit(ConfigOp::Set, &[WAN]).await;
+        // Learned again, it is set again.
         b.report(WAN, Some(dns(&["198.51.100.53"], &[]))).await;
-        b.ran();
-        b.commit(ConfigOp::Delete, &[WAN]).await;
-        assert_eq!(b.ran(), revert(WAN));
-        // The lease is still there: configured again, it is set again.
-        b.commit(ConfigOp::Set, &[WAN]).await;
         assert_eq!(b.ran(), set(WAN, &["198.51.100.53"], &[]));
     }
 
     #[tokio::test]
-    async fn a_delete_without_a_name_clears_every_entry() {
+    async fn every_interface_is_set_and_taken_back_by_itself() {
         let mut b = Bench::new();
-        b.commit(ConfigOp::Set, &[WAN]).await;
-        b.commit(ConfigOp::Set, &["wan1"]).await;
         b.report(WAN, Some(dns(&["198.51.100.53"], &[]))).await;
-        b.report("wan1", Some(dns(&["203.0.113.53"], &[]))).await;
-        b.ran();
-        b.commit(ConfigOp::Delete, &[]).await;
-        assert_eq!(b.ran(), [revert(WAN), revert("wan1")].concat());
+        b.report("wan1", Some(dns(&["203.0.113.53"], &["example.net"])))
+            .await;
+        assert_eq!(
+            b.ran(),
+            [
+                set(WAN, &["198.51.100.53"], &[]),
+                set("wan1", &["203.0.113.53"], &["example.net"])
+            ]
+            .concat()
+        );
+        b.report(WAN, None).await;
+        assert_eq!(b.ran(), revert(WAN));
+        // Both at once, as when the task's inbox holds several reports.
+        b.learn(WAN, Some(dns(&["198.51.100.53"], &[])));
+        b.learn("wan1", None);
+        b.sync().await;
+        assert_eq!(
+            b.ran(),
+            [revert("wan1"), set(WAN, &["198.51.100.53"], &[])].concat()
+        );
     }
 
     #[tokio::test]
     async fn a_lease_with_no_usable_server_sets_nothing() {
         let mut b = Bench::new();
-        b.commit(ConfigOp::Set, &[WAN]).await;
         b.report(WAN, Some(dns(&[], &["example.com"]))).await;
         b.report(WAN, Some(dns(&["0.0.0.0", "127.0.0.53"], &[])))
             .await;
@@ -667,7 +616,6 @@ mod tests {
     #[tokio::test]
     async fn a_failed_command_is_tried_again_later() {
         let mut b = Bench::new();
-        b.commit(ConfigOp::Set, &[WAN]).await;
         b.answer(&[failed()]);
         b.report(WAN, Some(dns(&["198.51.100.53"], &[]))).await;
         // The servers failed, so the domains were not tried.
@@ -694,12 +642,7 @@ mod tests {
     #[tokio::test]
     async fn the_wait_between_tries_stops_growing() {
         let mut b = Bench::new();
-        b.commit(ConfigOp::Set, &[WAN]).await;
-        b.resolver.learn(Report {
-            ifname: WAN.to_string(),
-            source: Source::Dhcp4,
-            dns: Some(dns(&["198.51.100.53"], &[])),
-        });
+        b.learn(WAN, Some(dns(&["198.51.100.53"], &[])));
         for _ in 0..12 {
             b.answer(&[failed()]);
             b.sync().await;
@@ -710,14 +653,13 @@ mod tests {
     #[tokio::test]
     async fn servers_set_without_their_domains_are_still_taken_back() {
         let mut b = Bench::new();
-        b.commit(ConfigOp::Set, &[WAN]).await;
         // The servers go in, the domains fail.
         b.answer(&[Ok(()), failed()]);
         b.report(WAN, Some(dns(&["198.51.100.53"], &["example.com"])))
             .await;
         assert_eq!(b.ran(), set(WAN, &["198.51.100.53"], &["example.com"]));
         // Not wanted any more before a try has worked.
-        b.commit(ConfigOp::Delete, &[WAN]).await;
+        b.report(WAN, None).await;
         assert_eq!(b.ran(), revert(WAN));
     }
 
@@ -727,12 +669,11 @@ mod tests {
     #[tokio::test]
     async fn a_command_that_could_not_be_started_leaves_nothing_to_take_back() {
         let mut b = Bench::new();
-        b.commit(ConfigOp::Set, &[WAN]).await;
         b.answer(&[not_run()]);
         b.report(WAN, Some(dns(&["198.51.100.53"], &[]))).await;
         assert_eq!(b.ran(), set(WAN, &["198.51.100.53"], &[])[..1]);
         assert_eq!(b.resolver.retry, Some(b.now + RETRY_MIN));
-        b.commit(ConfigOp::Delete, &[WAN]).await;
+        b.report(WAN, None).await;
         assert_eq!(b.ran(), []);
         assert_eq!(b.resolver.retry, None);
     }
@@ -740,7 +681,6 @@ mod tests {
     #[tokio::test]
     async fn a_failed_withdrawal_is_tried_again_while_the_interface_is_there() {
         let mut b = Bench::new();
-        b.commit(ConfigOp::Set, &[WAN]).await;
         b.report(WAN, Some(dns(&["198.51.100.53"], &[]))).await;
         b.ran();
         b.answer(&[failed()]);
@@ -755,7 +695,6 @@ mod tests {
     #[tokio::test]
     async fn a_failed_withdrawal_on_a_deleted_interface_is_the_end_of_it() {
         let mut b = Bench::new();
-        b.commit(ConfigOp::Set, &[WAN]).await;
         b.report(WAN, Some(dns(&["198.51.100.53"], &[]))).await;
         b.ran();
         b.mock.0.lock().unwrap().missing.push(WAN.to_string());
@@ -770,20 +709,14 @@ mod tests {
     #[tokio::test]
     async fn a_refusal_ends_every_further_command() {
         let mut b = Bench::new();
-        b.commit(ConfigOp::Set, &[WAN]).await;
-        b.commit(ConfigOp::Set, &["wan1"]).await;
         b.answer(&[Err(Failure::Refused("not here".to_string()))]);
-        b.resolver.learn(Report {
-            ifname: "wan1".to_string(),
-            source: Source::Dhcp4,
-            dns: Some(dns(&["203.0.113.53"], &[])),
-        });
+        b.learn("wan1", Some(dns(&["203.0.113.53"], &[])));
         b.report(WAN, Some(dns(&["198.51.100.53"], &[]))).await;
         // The first command was refused; the other interface is not tried.
         assert_eq!(b.ran().len(), 1);
         assert_eq!(b.resolver.retry, None);
         b.report(WAN, Some(dns(&["198.51.100.54"], &[]))).await;
-        b.commit(ConfigOp::Delete, &[WAN]).await;
+        b.report(WAN, None).await;
         assert_eq!(b.ran(), []);
     }
 
@@ -796,7 +729,6 @@ mod tests {
     async fn an_interface_made_again_is_given_its_name_servers_again() {
         let mut b = Bench::new();
         let lease = dns(&["198.51.100.53"], &["example.com"]);
-        b.commit(ConfigOp::Set, &[WAN]).await;
         b.report(WAN, Some(lease.clone())).await;
         b.ran();
 
@@ -825,7 +757,6 @@ mod tests {
     async fn an_interface_made_again_during_a_withdrawal_is_given_them_too() {
         let mut b = Bench::new();
         let lease = dns(&["198.51.100.53"], &[]);
-        b.commit(ConfigOp::Set, &[WAN]).await;
         b.report(WAN, Some(lease.clone())).await;
         b.ran();
 
@@ -843,13 +774,12 @@ mod tests {
     #[tokio::test]
     async fn servers_a_command_may_have_set_are_taken_back() {
         let mut b = Bench::new();
-        b.commit(ConfigOp::Set, &[WAN]).await;
         b.answer(&[failed()]);
         b.report(WAN, Some(dns(&["198.51.100.53"], &[]))).await;
         // No success for the servers, so the domains were not tried.
         assert_eq!(b.ran(), set(WAN, &["198.51.100.53"], &[])[..1]);
         assert_eq!(b.resolver.retry, Some(b.now + RETRY_MIN));
-        b.commit(ConfigOp::Delete, &[WAN]).await;
+        b.report(WAN, None).await;
         assert_eq!(b.ran(), revert(WAN));
         assert_eq!(b.resolver.retry, None);
         b.sync().await;
@@ -860,7 +790,6 @@ mod tests {
     #[tokio::test]
     async fn servers_a_command_may_have_set_are_asked_for_again() {
         let mut b = Bench::new();
-        b.commit(ConfigOp::Set, &[WAN]).await;
         b.answer(&[failed()]);
         b.report(WAN, Some(dns(&["198.51.100.53"], &[]))).await;
         b.ran();
@@ -878,7 +807,6 @@ mod tests {
     #[tokio::test]
     async fn a_change_that_did_not_succeed_leaves_nothing_taken_for_held() {
         let mut b = Bench::new();
-        b.commit(ConfigOp::Set, &[WAN]).await;
         b.report(WAN, Some(dns(&["198.51.100.53"], &[]))).await;
         b.ran();
         b.answer(&[failed()]);
@@ -893,7 +821,6 @@ mod tests {
     #[tokio::test]
     async fn a_change_that_could_not_be_started_leaves_the_old_servers_held() {
         let mut b = Bench::new();
-        b.commit(ConfigOp::Set, &[WAN]).await;
         b.report(WAN, Some(dns(&["198.51.100.53"], &[]))).await;
         b.ran();
         b.answer(&[not_run()]);
@@ -902,7 +829,7 @@ mod tests {
         b.report(WAN, Some(dns(&["198.51.100.53"], &[]))).await;
         assert_eq!(b.ran(), []);
         // And they are still ours to take back.
-        b.commit(ConfigOp::Delete, &[WAN]).await;
+        b.report(WAN, None).await;
         assert_eq!(b.ran(), revert(WAN));
     }
 
@@ -913,7 +840,6 @@ mod tests {
     async fn a_withdrawal_that_did_not_succeed_leaves_nothing_taken_for_held() {
         let mut b = Bench::new();
         let lease = dns(&["198.51.100.53"], &["example.com"]);
-        b.commit(ConfigOp::Set, &[WAN]).await;
         b.report(WAN, Some(lease.clone())).await;
         b.ran();
         b.answer(&[failed()]);
@@ -929,7 +855,6 @@ mod tests {
     async fn a_withdrawal_that_could_not_be_started_leaves_the_servers_held() {
         let mut b = Bench::new();
         let lease = dns(&["198.51.100.53"], &[]);
-        b.commit(ConfigOp::Set, &[WAN]).await;
         b.report(WAN, Some(lease.clone())).await;
         b.ran();
         b.answer(&[not_run()]);
@@ -947,7 +872,6 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn the_wait_before_a_retry_starts_when_the_commands_are_over() {
         let mut b = Bench::new();
-        b.commit(ConfigOp::Set, &[WAN]).await;
         b.learn(WAN, Some(dns(&["198.51.100.53"], &[])));
         b.mock.0.lock().unwrap().takes = Duration::from_secs(10);
         b.answer(&[failed()]);
@@ -994,7 +918,6 @@ mod tests {
     #[tokio::test]
     async fn an_interface_keeps_what_its_other_source_says() {
         let mut b = Bench::new();
-        b.commit(ConfigOp::Set, &[WAN]).await;
         b.report(WAN, Some(dns(&["198.51.100.53"], &["example.com"])))
             .await;
         b.ran();

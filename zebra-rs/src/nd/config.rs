@@ -32,9 +32,10 @@ impl Nd {
         self.config_add("/send-advertisements", config_send_advertisements);
         self.callbacks
             .insert("/interface/ipv6/address".to_string(), config_address);
-        let options: [(&str, Callback); 2] = [
+        let options: [(&str, Callback); 3] = [
             ("/default-route-distance", config_distance),
             ("/no-default-route", config_no_default_route),
+            ("/no-name-server", config_no_name_server),
         ];
         for (leaf, callback) in options {
             self.callbacks
@@ -120,6 +121,16 @@ fn config_no_default_route(nd: &mut Nd, mut args: Args, op: ConfigOp) -> Option<
         .hosts_mut()
         .update_config(&name, Instant::now(), |cfg| {
             cfg.no_default_route = op.is_set()
+        });
+    Some(())
+}
+
+fn config_no_name_server(nd: &mut Nd, mut args: Args, op: ConfigOp) -> Option<()> {
+    let name = args.string()?;
+    nd.engine_mut()
+        .hosts_mut()
+        .update_config(&name, Instant::now(), |cfg| {
+            cfg.no_name_server = op.is_set()
         });
     Some(())
 }

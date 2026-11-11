@@ -242,6 +242,9 @@ struct JsonRaHost {
     vrf: Option<String>,
     default_route_distance: u8,
     no_default_route: bool,
+    /// `ra-options no-name-server`: `dns_servers` and `dns_search` are
+    /// shown, and not given to the system resolver.
+    no_name_server: bool,
     solicitations_sent: u64,
     /// When the next Router Solicitation is due; `null` once the burst
     /// is over or a router has answered.
@@ -342,10 +345,17 @@ fn render_host_text(
     writeln!(out, "  RA host: enabled ({})", why.join(", "))?;
     writeln!(
         out,
-        "    default route distance {}{}{}",
+        "    default route distance {}{}{}{}",
         cfg.distance,
         if cfg.no_default_route {
             ", no-default-route"
+        } else {
+            ""
+        },
+        // The name servers listed below are then the host's to show
+        // and not to ask.
+        if cfg.no_name_server {
+            ", no-name-server"
         } else {
             ""
         },
@@ -434,6 +444,7 @@ fn build_host_json(
         vrf: host.vrf.clone(),
         default_route_distance: cfg.distance,
         no_default_route: cfg.no_default_route,
+        no_name_server: cfg.no_name_server,
         solicitations_sent: host.rs_total,
         next_solicitation_in_secs: secs_until(now, host.rs_next),
         routers: host
@@ -1338,6 +1349,30 @@ Icmp6InUnrelated                    \t99
             host["dns_servers"][0]["value"],
             serde_json::json!("2001:db8::53")
         );
+        assert_eq!(host["no_name_server"], serde_json::json!(false));
+
+        // `no-name-server` is said beside the name servers it keeps
+        // back, which are shown all the same.
+        eng.hosts_mut()
+            .update_config("wan0", start, |cfg| cfg.no_name_server = true);
+        let mut out = String::new();
+        render_interface_text(&mut out, &eng, 2, start).unwrap();
+        for line in [
+            "    default route distance 210, no-name-server",
+            "    DNS servers: 2001:db8::53",
+        ] {
+            assert!(out.contains(line), "missing `{line}` in:\n{out}");
+        }
+        let json = build_interface_json(&eng, 2, start);
+        let json: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&json).unwrap()).unwrap();
+        assert_eq!(json["ra_host"]["no_name_server"], serde_json::json!(true));
+        assert_eq!(
+            json["ra_host"]["dns_servers"][0]["value"],
+            serde_json::json!("2001:db8::53")
+        );
+        eng.hosts_mut()
+            .update_config("wan0", start, |cfg| cfg.no_name_server = false);
 
         // An interface without the host has no `ra_host` key at all.
         let other = build_interface_json(&eng, 3, start);

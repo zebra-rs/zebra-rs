@@ -144,7 +144,8 @@ impl Nd {
     }
 
     /// Report the RA host's name servers and search domains to the
-    /// resolver task, which decides what the host does with them.
+    /// resolver task, which gives the system resolver what it is told
+    /// of.
     pub fn set_resolver(&mut self, resolver: ResolverTx) {
         self.resolver = Some(resolver);
     }

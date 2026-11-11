@@ -1,16 +1,18 @@
 @serial
 @ra_host_dns
-Feature: Name servers from Router Advertisements for the host (system name-server dhcp)
+Feature: Name servers from Router Advertisements for the host
 
   Router Advertisements name name servers (RDNSS) and search domains
-  (DNSSL, RFC 8106). The RA host holds them with their lifetimes and
-  `show ipv6 nd interface` shows them; the host itself uses them only
-  where `system name-server dhcp <if>` says so (the resolver task,
-  docs/design/dhcp-client.md §13). They are then handed to
-  systemd-resolved as that link's DNS configuration: the ones heard of
-  last first, those of one option in the option's order (RFC 8106
-  §6.2), all behind those of a DHCP lease on the same interface. They
-  are taken back as their lifetimes end or the RA host stops.
+  (DNSSL, RFC 8106). The RA host holds them with their lifetimes,
+  `show ipv6 nd interface` shows them, and the host itself uses them:
+  nothing but the RA host is configured for that (the resolver task,
+  docs/design/dhcp-client.md §13). They are handed to systemd-resolved
+  as the link's DNS configuration: the ones heard of last first, those
+  of one option in the option's order (RFC 8106 §6.2), all behind those
+  of a DHCP lease on the same interface. They are taken back as their
+  lifetimes end or the RA host stops. `ra-options no-name-server` keeps
+  an interface's advertised name servers from the host: they are then
+  only shown, and a lease's are none the worse for it.
 
   No resolver is running here: the harness names a stand-in for
   `resolvectl` to each daemon (tests/scripts/resolvectl_stub.sh), whose
@@ -25,7 +27,7 @@ Feature: Name servers from Router Advertisements for the host (system name-serve
   Requires dnsmasq and nft on the host (tests/scripts/dhcp_server.sh).
 
   Config files:
-  - r1.yaml: `ipv6 address autoconf` on wan0.
+  - r1.yaml: `ipv6 address autoconf` on wan0, and nothing else.
 
   Scenario: Setup a router that advertises a name server and an RA host
     Given a clean test environment
@@ -41,16 +43,9 @@ Feature: Name servers from Router Advertisements for the host (system name-serve
     Then show command "show ipv6 nd interface wan0" in namespace "r1" should eventually contain "DNS servers: 2001:db8::53"
     And show command "show ipv6 nd interface wan0" in namespace "r1" should contain "DNS search: example.com"
 
-  Scenario: Without the entry what the advertisements name is only shown
+  Scenario: The advertised name server and domain are handed to the host
     Given the test topology exists
-    # Time enough for a daemon that set them unasked to have done so. The
-    # next scenario has this same daemon reach the stand-in.
-    When I wait 3 seconds
-    Then command "tests/scripts/resolvectl_stub.sh status" in namespace "r1" should not contain "wan0"
-
-  Scenario: The entry hands the advertised name server and domain to the host
-    Given the test topology exists
-    When I apply command "set system name-server dhcp wan0" in namespace "r1"
+    # Nothing was configured but `address autoconf`.
     Then command "tests/scripts/resolvectl_stub.sh status" in namespace "r1" should eventually contain "wan0 dns 2001:db8::53"
     And command "tests/scripts/resolvectl_stub.sh status" in namespace "r1" should eventually contain "wan0 domain example.com"
     And daemon log in namespace "r1" should eventually contain "resolver: wan0: name servers 2001:db8::53, search example.com"
@@ -96,10 +91,35 @@ Feature: Name servers from Router Advertisements for the host (system name-serve
     And command "tests/scripts/resolvectl_stub.sh status" in namespace "r1" should eventually contain "wan0 domain example.com"
     And command "tests/scripts/resolvectl_stub.sh status" in namespace "r1" should not contain "example.com example.com"
 
-  Scenario: The lease ending leaves the advertised name server
+  Scenario: ra-options no-name-server keeps the advertised ones back and leaves the lease's
+    Given the test topology exists
+    # Each source has its own leaf: the lease's name server stays the
+    # host's, and what the advertisements named is shown and no more.
+    When I apply command "set interface wan0 ipv6 ra-options no-name-server" in namespace "r1"
+    Then command "tests/scripts/resolvectl_stub.sh status" in namespace "r1" should eventually not contain "2001:db8::53"
+    And command "tests/scripts/resolvectl_stub.sh status" in namespace "r1" should eventually contain "wan0 dns 198.51.100.53"
+    And show command "show ipv6 nd interface wan0" in namespace "r1" should contain "DNS servers: 2001:db8::53"
+    And show command "show ipv6 nd interface wan0" in namespace "r1" should contain "default route distance 210, no-name-server"
+
+  Scenario: What is advertised under no-name-server is only shown
+    Given the test topology exists
+    When I execute "tests/scripts/ra_sender.py srv0 --source fe80::1 --rdnss 2001:db8::77,600" in namespace "s1"
+    Then show command "show ipv6 nd interface wan0" in namespace "r1" should eventually contain "DNS servers: 2001:db8::77 2001:db8::53"
+    # Time enough for a daemon that set them all the same to have done so.
+    When I wait 3 seconds
+    Then command "tests/scripts/resolvectl_stub.sh status" in namespace "r1" should not contain "2001:db8::"
+    And command "tests/scripts/resolvectl_stub.sh status" in namespace "r1" should eventually contain "wan0 dns 198.51.100.53"
+
+  Scenario: Deleting no-name-server hands the held name servers over
+    Given the test topology exists
+    When I apply command "delete interface wan0 ipv6 ra-options no-name-server" in namespace "r1"
+    Then command "tests/scripts/resolvectl_stub.sh status" in namespace "r1" should eventually contain "wan0 dns 198.51.100.53 2001:db8::77 2001:db8::53"
+    And show command "show ipv6 nd interface wan0" in namespace "r1" should not contain "no-name-server"
+
+  Scenario: The lease ending leaves the advertised name servers
     Given the test topology exists
     Then show command "release dhcp interface wan0" in namespace "r1" should contain "Released the DHCP lease on wan0"
-    And command "tests/scripts/resolvectl_stub.sh status" in namespace "r1" should eventually contain "wan0 dns 2001:db8::53"
+    And command "tests/scripts/resolvectl_stub.sh status" in namespace "r1" should eventually contain "wan0 dns 2001:db8::77 2001:db8::53"
     And command "tests/scripts/resolvectl_stub.sh status" in namespace "r1" should eventually contain "wan0 domain example.com"
 
   Scenario: Stopping the RA host takes what it gave back

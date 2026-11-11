@@ -1,14 +1,14 @@
-# A DHCP lease's name servers for the host (system name-server dhcp)
+# A DHCP lease's name servers for the host
 
 ## Overview
 
 A lease names name servers and search domains. `show dhcp client
-leases` shows them; the host itself uses them only where
-`system name-server dhcp <if>` says so (the resolver task,
-docs/design/dhcp-client.md §13). They are then handed to
-systemd-resolved as that link's DNS configuration, by running
-`resolvectl`, and taken back when the lease ends or the entry is
-deleted.
+leases` shows them, and the host itself uses them: nothing but
+`address dhcp` is configured for that. They are handed to
+systemd-resolved as the link's DNS configuration, by running
+`resolvectl` (the resolver task, docs/design/dhcp-client.md §13), and
+taken back when the lease ends. `dhcp-options no-name-server` keeps
+an interface's name servers from the host: they are then only shown.
 
 No resolver is running here, and none must be reached: every daemon
 of the suite runs in a network namespace, from which `resolvectl`
@@ -31,22 +31,24 @@ Requires dnsmasq and nft on the host (tests/scripts/dhcp_server.sh).
 
 ## Config Files
 
-- r1.yaml: `address dhcp` on wan0.
-- r1-dns.yaml: the same with `system name-server dhcp wan0`.
+- r1.yaml: `address dhcp` on wan0, and nothing else.
+- r1-no-name-server.yaml: the same with `dhcp-options no-name-server`.
 
 ## Test Scenarios
 
 | Scenario | Result |
 |----------|--------|
 | Setup the server and a router with a DHCP WAN | |
-| Without the entry the lease's name servers are only shown | |
-| The entry hands the lease's name servers and domains to the host | |
+| The lease hands its name servers and domains to the host | |
 | Releasing the lease takes them back, and a new lease gives them again | |
 | Other name servers at a renewal replace the first | |
 | A resolver that is away gets them once it is back | |
 | An error after the old name servers are gone does not leave them taken for held | |
 | Name servers set by a command that got no answer are still taken back | |
 | An interface made again is given its name servers again | |
-| Deleting the entry takes them back and leaves the lease | |
+| no-name-server takes them back and leaves the lease | |
+| A lease taken under no-name-server is only shown | |
+| Deleting no-name-server hands the held lease's name servers over | |
 | A restart hands the resumed lease's name servers over again | |
+| A restart under no-name-server resumes the lease and sets nothing | |
 | Teardown topology | |

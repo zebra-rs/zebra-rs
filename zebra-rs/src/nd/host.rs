@@ -82,6 +82,9 @@ pub struct HostConfig {
     pub distance: u8,
     /// `ra-options no-default-route`: routers are listed, not installed.
     pub no_default_route: bool,
+    /// `ra-options no-name-server`: the name servers and search domains
+    /// heard of are listed, and not the host's to use.
+    pub no_name_server: bool,
 }
 
 impl Default for HostConfig {
@@ -91,6 +94,7 @@ impl Default for HostConfig {
             dhcpv6: false,
             distance: DEFAULT_DISTANCE,
             no_default_route: false,
+            no_name_server: false,
         }
     }
 }
@@ -296,9 +300,10 @@ pub enum HostAction {
     },
     /// Give a SLAAC address up.
     AddrDel { ifindex: u32, addr: Ipv6Net },
-    /// Tell the resolver task what RAs now say of name resolution on
-    /// `ifname`: `None` when that is nothing (any more). Whether the
-    /// host uses it is the resolver's configuration, not the RA host's.
+    /// Tell the resolver task what RAs now give the host of name
+    /// resolution on `ifname`: `None` when that is nothing (any more).
+    /// What is told is used; `ra-options no-name-server` is why an
+    /// interface's is not told.
     Dns {
         ifname: String,
         dns: Option<LinkDns>,
@@ -898,8 +903,12 @@ impl RaHosts {
         self.sync_dns();
     }
 
-    /// Tell the resolver task what the hosts now know of name
-    /// resolution: every change, once, by interface name.
+    /// Tell the resolver task what the hosts now give the system of
+    /// name resolution: every change, once, by interface name. What is
+    /// said there is the system's to use, as the routes are, so nothing
+    /// is said of an interface with `ra-options no-name-server`: set
+    /// under a running host, that takes its name servers back, and
+    /// deleted, it gives the ones still held.
     ///
     /// A host says it for as long as it runs and its options have
     /// lifetime left, link up or down: the system resolver itself leaves
@@ -908,7 +917,17 @@ impl RaHosts {
     fn sync_dns(&mut self) {
         let mut now = BTreeMap::new();
         for (ifindex, host) in &self.hosts {
-            if let (Some(link), Some(dns)) = (self.links.get(ifindex), host.link_dns()) {
+            let Some(link) = self.links.get(ifindex) else {
+                continue;
+            };
+            let kept_back = self
+                .config
+                .get(&link.name)
+                .is_some_and(|cfg| cfg.no_name_server);
+            if kept_back {
+                continue;
+            }
+            if let Some(dns) = host.link_dns() {
                 now.insert(link.name.clone(), dns);
             }
         }
@@ -1901,6 +1920,60 @@ mod tests {
         assert_eq!(reported(&mut hosts), wan0(None));
         hosts.link_del(WAN2);
         assert_eq!(reported(&mut hosts), [("wan1".to_string(), None)]);
+    }
+
+    /// `ra-options no-name-server`: the host hears of the name servers
+    /// and holds them as ever, for `show`, and reports none, which only
+    /// what is reported gives to the system. Deleted, the leaf gives
+    /// the ones still held; set under a running host, it takes them
+    /// back. The routers and the routes are not touched by either.
+    #[test]
+    fn no_name_server_keeps_what_ras_name_from_the_system() {
+        let now = t0();
+        let mut hosts = hosts_with(&[(WAN, "wan0")], now);
+        hosts.update_config("wan0", now, |cfg| cfg.no_name_server = true);
+        let options = vec![
+            pio("2001:db8:1::/64", la(), 3600, 1800),
+            rdnss(600, &["2001:db8::53"]),
+            dnssl(600, &["example.com"]),
+        ];
+        hosts.on_ra(WAN, ll("fe80::1"), &ra(1800, options), now);
+        assert_eq!(reported(&mut hosts), []);
+        let host = hosts.host(WAN).unwrap();
+        assert_eq!((host.dns.len(), host.search.len()), (1, 1));
+        let installed = hosts.installed().clone();
+        assert!(!installed.is_empty());
+
+        hosts.update_config("wan0", now + secs(1), |cfg| cfg.no_name_server = false);
+        assert_eq!(
+            reported(&mut hosts),
+            wan0(Some(link_dns(&["2001:db8::53"], &["example.com"])))
+        );
+        hosts.update_config("wan0", now + secs(2), |cfg| cfg.no_name_server = true);
+        assert_eq!(reported(&mut hosts), wan0(None));
+        assert_eq!(hosts.host(WAN).unwrap().routers.len(), 1);
+        assert_eq!(hosts.installed(), &installed);
+
+        // What runs out while they are kept back is nobody's news.
+        hosts.expire(now + secs(700));
+        assert_eq!(hosts.host(WAN).unwrap().dns.len(), 0);
+        assert_eq!(reported(&mut hosts), []);
+    }
+
+    /// One interface keeping its name servers back says nothing of the
+    /// others.
+    #[test]
+    fn no_name_server_is_one_interface_s() {
+        let now = t0();
+        let mut hosts = hosts_with(&[(WAN, "wan0"), (WAN2, "wan1")], now);
+        hosts.update_config("wan1", now, |cfg| cfg.no_name_server = true);
+        let options = vec![rdnss(600, &["2001:db8::53"])];
+        hosts.on_ra(WAN, ll("fe80::1"), &ra(1800, options.clone()), now);
+        hosts.on_ra(WAN2, ll("fe80::1"), &ra(1800, options), now);
+        assert_eq!(
+            reported(&mut hosts),
+            wan0(Some(link_dns(&["2001:db8::53"], &[])))
+        );
     }
 
     /// The name is what the resolver knows an interface by: a renamed

@@ -29,13 +29,14 @@ impl Dhcpc {
             .insert("/interface/ipv4/address".to_string(), config_address);
         self.callbacks
             .insert("/system/hostname".to_string(), config_hostname);
-        let options: [(&str, Callback); 7] = [
+        let options: [(&str, Callback); 8] = [
             ("/client-id", config_client_id),
             ("/host-name", config_host_name),
             ("/vendor-class-id", config_vendor_class_id),
             ("/user-class", config_user_class),
             ("/default-route-distance", config_distance),
             ("/no-default-route", config_no_default_route),
+            ("/no-name-server", config_no_name_server),
             ("/reject", config_reject),
         ];
         for (leaf, callback) in options {
@@ -212,6 +213,12 @@ fn config_distance(dhcpc: &mut Dhcpc, mut args: Args, op: ConfigOp) -> Option<()
 fn config_no_default_route(dhcpc: &mut Dhcpc, mut args: Args, op: ConfigOp) -> Option<()> {
     let cfg = dhcpc.touch(&mut args)?;
     cfg.no_default_route = op.is_set();
+    Some(())
+}
+
+fn config_no_name_server(dhcpc: &mut Dhcpc, mut args: Args, op: ConfigOp) -> Option<()> {
+    let cfg = dhcpc.touch(&mut args)?;
+    cfg.no_name_server = op.is_set();
     Some(())
 }
 

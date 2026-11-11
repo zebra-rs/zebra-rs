@@ -19,7 +19,6 @@ use super::parse::State;
 use super::parse::parse;
 use super::paths::{path_from_command, path_try_trim, paths_str};
 use super::pim::{despawn_pim, spawn_pim};
-use super::resolver::spawn_resolver;
 use super::stamp::{despawn_stamp, spawn_stamp};
 use super::subscribe::{ConfigSubscriber, path_has_prefix, pb as config_pb};
 use super::util::trim_first_line;
@@ -1021,7 +1020,6 @@ impl ConfigManager {
         let mut cradle = false;
         let mut pim = false;
         let mut dhcpc = false;
-        let mut resolver = false;
         for (proto, tx) in self.cm_clients.borrow().iter() {
             tx.send(ConfigRequest::new(Vec::new(), ConfigOp::CommitStart))
                 .unwrap();
@@ -1051,9 +1049,6 @@ impl ConfigManager {
             }
             if proto == "dhcpc" {
                 dhcpc = true;
-            }
-            if proto == "resolver" {
-                resolver = true;
             }
         }
         // Same by-value capture problem for the IS-IS→BGP BGP-LS producer
@@ -1219,14 +1214,6 @@ impl ConfigManager {
             {
                 dhcpc = true;
                 spawn_dhcpc(self);
-            }
-            // The resolver task holds `system name-server …`. It is
-            // spawned with the first source of name servers too
-            // (`spawn_dhcpc`, `spawn_nd`), which `spawn_resolver` allows
-            // for.
-            if !resolver && op == ConfigOp::Set && line.starts_with("system name-server ") {
-                resolver = true;
-                spawn_resolver(self);
             }
             // The cradle engine supervisor consumes `system ebpf` (its own
             // knob), `system cradle grpc-endpoint` (shared with the FIB
@@ -3041,62 +3028,46 @@ mod save_config_tests {
         assert_eq!(violations(), Vec::<String>::new());
     }
 
-    /// `system name-server dhcp <if>` reaches the tasks as the path the
-    /// resolver task listens for, with the interface as its argument,
-    /// and names one interface per command.
+    /// `interface <if> ipv4 dhcp-options no-name-server` reaches the
+    /// tasks as the path the DHCP client listens for, with the interface
+    /// as its argument, and takes no value.
     #[test]
-    fn name_server_dhcp_names_one_interface_under_the_resolver_s_path() {
-        let cm = manager_with_config(&temp_path("name-server-path"));
+    fn no_name_server_reaches_the_dhcp_client_under_its_options_path() {
+        let cm = manager_with_config(&temp_path("no-name-server-path"));
         let paths = cm
-            .paths("system name-server dhcp wan0".to_string())
+            .paths("interface wan0 ipv4 dhcp-options no-name-server".to_string())
             .expect("the line parses");
         let (path, mut args) = path_from_command(&paths);
-        assert_eq!(path, "/system/name-server/dhcp");
+        assert_eq!(path, "/interface/ipv4/dhcp-options/no-name-server");
         assert_eq!(args.string().as_deref(), Some("wan0"));
         assert_eq!(args.string(), None);
 
         let mode = cm.modes.get("configure").expect("configure mode");
-        let (code, _, _) = cm.execute(mode, "set system name-server dhcp wan0");
+        let line = "set interface wan0 ipv4 dhcp-options no-name-server";
+        let (code, _, _) = cm.execute(mode, line);
         assert_eq!(code, ExecCode::Show);
-        let (code, _, _) = cm.execute(mode, "set system name-server dhcp wan0 wan1");
-        assert_ne!(code, ExecCode::Show, "two interfaces in one command");
+        let (code, _, _) = cm.execute(mode, &format!("{line} wan1"));
+        assert_ne!(code, ExecCode::Show, "the leaf takes no value");
     }
 
-    /// The first `system name-server …` line spawns the resolver task
-    /// and subscribes it, so that it hears of the line; a source spawned
-    /// later is handed the same task.
+    /// The resolver task is spawned with its first source and handed to
+    /// every later one. It has no configuration of its own, so it is
+    /// not among the tasks a commit is sent to.
     #[tokio::test]
-    async fn name_server_line_spawns_the_resolver_task_once() {
-        let cm = manager_with_config(&temp_path("name-server-spawn"));
-        let mode = cm.modes.get("configure").expect("configure mode");
-        let edit = |line: &str| {
-            let (code, output, _) = cm.execute(mode, line);
-            assert_eq!(code, ExecCode::Show, "`{line}` rejected: {output:?}");
-        };
-        let running = || {
-            let mut running = String::new();
-            cm.store.running.borrow().list(&mut running);
-            running
-        };
+    async fn the_resolver_task_is_spawned_once_and_takes_no_configuration() {
+        use crate::config::resolver::spawn_resolver;
+
+        let cm = manager_with_config(&temp_path("resolver-spawn"));
         assert!(cm.resolver_tx.borrow().is_none());
 
-        edit("set system name-server dhcp wan0");
-        cm.commit_config().expect("the entry commits");
-        assert!(running().contains("system name-server dhcp wan0"));
-        assert!(cm.cm_clients.borrow().contains_key("resolver"));
+        let first = spawn_resolver(&cm);
         assert!(cm.protocol_tasks.borrow().contains_key("resolver"));
-        let first = cm.resolver_tx.borrow().clone().expect("a sender");
+        assert!(!cm.cm_clients.borrow().contains_key("resolver"));
+        let kept = cm.resolver_tx.borrow().clone().expect("a sender");
+        assert!(first.same_channel(&kept));
 
-        // Another entry, and a source asking for the sender: the task
-        // there is, not a second one.
-        edit("set system name-server dhcp wan1");
-        cm.commit_config().expect("a second entry commits");
-        assert!(first.same_channel(&spawn_resolver(&cm)));
-
-        edit("delete system name-server dhcp wan0");
-        edit("delete system name-server dhcp wan1");
-        cm.commit_config().expect("the entries go");
-        assert!(!running().contains("name-server"));
+        // Another source asking for the sender: the task there is, not
+        // a second one.
         assert!(first.same_channel(&spawn_resolver(&cm)));
     }
 
@@ -7627,6 +7598,7 @@ module test-insomnia-gated {
             "set interface eth0 ipv4 dhcp-options user-class isp",
             "set interface eth0 ipv4 dhcp-options default-route-distance 220",
             "set interface eth0 ipv4 dhcp-options no-default-route",
+            "set interface eth0 ipv4 dhcp-options no-name-server",
             "set interface eth0 ipv4 dhcp-options reject 192.0.2.66",
             "set interface eth0 ipv4 dhcp-options reject 192.0.2.0/24",
         ] {
@@ -7664,6 +7636,7 @@ module test-insomnia-gated {
             "set interface eth0 ipv6 address 2001:db8::1/64",
             "set interface eth0 ipv6 ra-options default-route-distance 220",
             "set interface eth0 ipv6 ra-options no-default-route",
+            "set interface eth0 ipv6 ra-options no-name-server",
         ] {
             let (code, _, _) = parse(line, entry.clone(), None, State::new());
             assert_eq!(code, ExecCode::Success, "`{line}` must parse");
