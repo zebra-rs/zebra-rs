@@ -904,18 +904,18 @@ persistence, show and the BDD features are the rest of P4.
   server withholds (NoAddrsAvail, NoPrefixAvail, or silence about it) is
   so asked for again with every Renew and Rebind, while the rest binds
   (WPD-6).
-- **One Renew for all of it** (RFC 8415 §18.2.4), and each identity
-  association with its own T1 and T2, worked out as for an address. The
-  Renew goes out at the earliest T1, the Rebind at the earliest T2.
+- **Each identity association has its own T1 and T2**, worked out as
+  for an address, and each is kept (RFC 8415 §21.4): a Renew from its
+  T1, with its server and about all that server leases (§18.2.4), and
+  the Rebind from its T2 (§18.2.5).
 - **A Reply that leaves an identity association out** extends the rest,
   which is in use at once (RFC 8415 §18.2.10.1). The one left out keeps
   its lifetimes and its own T1 and T2, and the Renew or Rebind goes on
   for it at its retransmission pace, which is the rate limit the RFC
-  asks for. The exchange is over when every identity association held
-  has been answered in it, by one Reply or by several: a Rebind is for
-  any server to answer.
-  - A Renew that goes on ends at the earliest T2 of the lease as it
-    then is, and a Rebind follows.
+  asks for. A Renew is over when everything it asks about has been
+  answered in it, by one Reply or by several, or is past its T2 and so
+  the Rebind's to ask about, or was given by another exchange since the
+  Renew went out.
   - A Rebind in a Confirm's place goes on to the end of the Confirm's
     ten seconds. An answer for the address says nothing of whether the
     prefix is right for the link.
@@ -977,9 +977,12 @@ persistence, show and the BDD features are the rest of P4.
     that is leased from it. So a server that does not answer holds up
     nobody else's renewal, and every T1 a server names is kept (RFC
     8415 §21.4). `renew` by hand asks every server at once;
-  - from the earliest T2 of the lease any server is asked, about all of
-    it, with a Rebind in the place of the Renews. It goes on until
-    nothing is past its T2 any more: extended, or run out;
+  - what is past its T2 is asked about with the Rebind: one, for any
+    server, about that alone. A Renew goes on beside it for what a
+    server leases that is not past its T2. The Rebind goes on until
+    nothing is past its T2 any more: extended, or run out. A Reply to
+    it has no say about what is not past its T2 when the Reply comes:
+    something a Request has given again since, for one;
   - the Request after NoBinding is one more exchange, with the server
     that said it. The Renews with the other servers, or the Rebind, go
     on beside it, and their Replies are taken: it holds up neither a T1
@@ -997,6 +1000,24 @@ persistence, show and the BDD features are the rest of P4.
     what a Reply says of it is an answer to a question from before. A
     Request names what is held when it is sent, not when it first went
     out;
+  - a Renew leaves out likewise what another exchange has given since
+    it went out, and does not wait for an answer about it;
+  - whatever is between its T1 and its T2 and is asked about by no
+    exchange under way gets a Renew with its server. So for what a
+    Request leaves out since another exchange gave it again: a Renew
+    with the same server goes out beside the Request, about that. A
+    Renew leaves to a Request that is out what the Request asks about.
+    And so for what
+    a Renew leaves out: a new Renew with that server takes its place,
+    and asks about all that server leases. No other server's Renew is
+    touched;
+  - a Request to a server takes the place of a Renew with it, whichever
+    exchange the NoBinding came to: the Request asks about all that
+    server leases. One Request asks a server about all it has no record
+    of: when it says NoBinding for something a Request that is out does
+    not ask for, a new Request takes that one's place and asks for
+    both. NoBinding for what the Request is out for already brings no
+    other;
   - a Release goes to each server for its own, one after another, and a
     Decline to the server of the addresses. A Decline is exchanged
     alone: the Renews under way begin again when it is over, which is
