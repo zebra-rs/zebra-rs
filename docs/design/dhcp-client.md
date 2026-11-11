@@ -976,12 +976,24 @@ persistence, show and the BDD features are the rest of P4.
     at its own pace, and is over when the server has answered for all
     that is leased from it. So a server that does not answer holds up
     nobody else's renewal, and every T1 a server names is kept (RFC
-    8415 §21.4). `renew` by hand asks every server at once. At the
-    earliest T2 of the lease any server is asked, about all of it;
-  - the Request after NoBinding is one more such exchange, with the
-    server that said it. The Renews with the other servers go on beside
-    it and their Replies are taken. The state shows `requesting` while
-    one is out, and T2 waits for its answer;
+    8415 §21.4). `renew` by hand asks every server at once;
+  - from the earliest T2 of the lease any server is asked, about all of
+    it, with a Rebind in the place of the Renews. It goes on until
+    nothing is past its T2 any more: extended, or run out;
+  - the Request after NoBinding is one more exchange, with the server
+    that said it. The Renews with the other servers, or the Rebind, go
+    on beside it, and their Replies are taken: it holds up neither a T1
+    nor a T2. The state shows `requesting` while one is out. A server
+    that says NoBinding again to the Rebind gets no second Request
+    while the first is out;
+  - what one server answers moves no other server's times: the lease's
+    times go on counting from where they did;
+  - a Request has no say about what another exchange has given since
+    it went out. When an identity association its server had no record
+    of is given again, by whatever server, it is no longer that
+    Request's to restore or to drop, and a Request with nothing left to
+    recover is over. A Request names what is held when it is sent, not
+    when it first went out;
   - a Release goes to each server for its own, one after another, and a
     Decline to the server of the addresses. A Decline is exchanged
     alone: the Renews under way begin again when it is over, which is

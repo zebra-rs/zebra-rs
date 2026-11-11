@@ -18,7 +18,7 @@
 //! | `Requesting` | Request sent to the chosen server, or to one that had no record of what it leased |
 //! | `Bound` | lease held, waiting for T1 |
 //! | `Renewing` | a Renew under way with each server whose leases have reached T1, until T2 |
-//! | `Rebinding` | Rebind sent to any server, T2..expiry |
+//! | `Rebinding` | Rebind sent to any server, from the earliest T2 until nothing is past its T2 |
 //! | `Confirming` | is a lease kept across a restart or a link loss right for this link? A Confirm, or a Rebind when the lease holds a prefix |
 //! | `Declining` | Decline sent for an address that failed DAD |
 //! | `Releasing` | Release sent, waiting for the server's Reply |
@@ -453,11 +453,11 @@ pub struct Client {
     /// asked. With a lease held: whose exchange is being dealt with
     /// (`renewals`).
     server: Option<Server>,
-    /// `Renewing`, and `Requesting` with a lease held: the exchanges under
-    /// way, one for each server asked. None of them waits for another.
-    /// While one is sent, or its answer read, it is in `state`, `server`,
-    /// `exchange` and `wake` instead, like any other state's exchange;
-    /// otherwise `state` says `Requesting` when one of them is a Request.
+    /// `Renewing`, `Rebinding`, and `Requesting` with a lease held: the
+    /// exchanges under way. None of them waits for another. While one is
+    /// sent, or its answer read, it is in `state`, `server`, `exchange`
+    /// and `wake` instead, like any other state's exchange; otherwise
+    /// `state` names the most pressing of them (`renewing`).
     renewals: Vec<Renewal>,
     /// Servers that are not sent a Request yet, and until when
     /// (`on_recovery_reply`).
@@ -479,14 +479,15 @@ pub struct Client {
     random: Box<dyn FnMut() -> u32 + Send>,
 }
 
-/// An exchange under way with one server of a lease, about what is leased
-/// from it: a Renew, or the Request that follows when that server answers
-/// NoBinding.
+/// An exchange under way about a lease that is held: a Renew with one
+/// server about what is leased from it, the Request that follows when
+/// that server answers NoBinding, or the Rebind, which is for any server
+/// and about all of the lease.
 struct Renewal {
-    /// Who is asked. For a Request, also what it names and what the
-    /// server had no record of.
+    /// Who is asked: nobody in particular (no DUID) in a Rebind. For a
+    /// Request, also what it names and what the server had no record of.
     server: Server,
-    /// `Renewing` or `Requesting`: which of the two.
+    /// `Renewing`, `Requesting` or `Rebinding`: which of the three.
     state: State,
     exchange: Exchange,
     /// When it is sent again.
@@ -570,7 +571,8 @@ struct Server {
     preference: u8,
     /// How many of the identity associations asked for it offers.
     count: usize,
-    /// Named again in the Request.
+    /// Before a lease is held: what it offers, named again in the
+    /// Request.
     named: Named,
     /// A Request after NoBinding: the identity associations the server
     /// had no record of.
@@ -580,6 +582,10 @@ struct Server {
 impl Renewal {
     fn is_request(&self) -> bool {
         self.state == State::Requesting
+    }
+
+    fn is_rebind(&self) -> bool {
+        self.state == State::Rebinding
     }
 }
 
@@ -669,17 +675,6 @@ impl Held {
     fn first_expiry(&self) -> Option<Instant> {
         let valid = self.lease.lifetimes().into_iter().map(|(_, valid)| valid);
         valid.filter_map(|valid| self.at(valid)).min()
-    }
-
-    /// When the last one does; `None` when one never does.
-    fn last_expiry(&self) -> Option<Instant> {
-        self.lease
-            .lifetimes()
-            .into_iter()
-            .map(|(_, valid)| self.at(valid))
-            .collect::<Option<Vec<Instant>>>()?
-            .into_iter()
-            .max()
     }
 
     /// §18.2.12: a lease with a delegated prefix is verified with a
@@ -1059,8 +1054,8 @@ impl Client {
                     self.retransmit(now, out);
                 }
             }
-            // With a lease held: the exchanges with its servers.
-            State::Renewing | State::Requesting if !self.renewals.is_empty() => {
+            // With a lease held: the exchanges about it.
+            State::Renewing | State::Requesting | State::Rebinding if !self.renewals.is_empty() => {
                 self.on_renewals_timeout(now, out);
             }
             State::Requesting => {
@@ -1071,14 +1066,9 @@ impl Client {
                     self.solicit(now);
                 }
             }
-            // T1, or T2 ending a Renew: `settle` sends what the lease's
-            // timers call for now.
-            State::Bound | State::Renewing => self.settle(now, out),
-            State::Rebinding => {
-                if !self.retransmit(now, out) {
-                    self.settle(now, out);
-                }
-            }
+            // T1 or T2: `settle` sends what the lease's timers call for
+            // now.
+            State::Bound | State::Renewing | State::Rebinding => self.settle(now, out),
             State::Confirming => {
                 let Some(exchange) = &self.exchange else {
                     // The delay before the first Confirm is over.
@@ -1156,8 +1146,8 @@ impl Client {
         }
     }
 
-    /// `Renewing`, and `Requesting` with a lease held: the timer of the
-    /// exchanges under way with the lease's servers.
+    /// `Renewing`, `Rebinding`, and `Requesting` with a lease held: the
+    /// timer of the exchanges under way about the lease.
     fn on_renewals_timeout(&mut self, now: Instant, out: &mut Vec<Action>) {
         // Each is sent again at its own pace.
         let is_due = |r: &&Renewal| r.wake.is_some_and(|wake| now >= wake);
@@ -1167,7 +1157,7 @@ impl Client {
             if !self.load(xid) {
                 continue;
             }
-            // A Renew goes on until T2. A Request is given up.
+            // A Renew and a Rebind go on. A Request is given up.
             if !self.retransmit(now, out) {
                 self.on_unanswered_request(now, out);
             }
@@ -1400,8 +1390,9 @@ impl Client {
         };
         let lost = self.server.take().map(|server| server.lost);
         held.lease.forget(&lost.unwrap_or_default());
-        self.apply(&mut held, answer, &grant, now, out);
-        let lease = held.lease;
+        let given = self.apply(&mut held, answer, &grant, now, out);
+        self.restored(&given);
+        let lease = &held.lease;
         if !lease.has_leases() {
             refusal.get_or_insert("no usable address or prefix in the reply".to_string());
         }
@@ -1419,20 +1410,25 @@ impl Client {
         // asked again, and may say NoBinding again: it is not sent another
         // Request for a while, longer each time, or a server that says
         // NoBinding and then gives nothing would be asked in a tight loop.
-        let wait = Duration::from_secs(self.backoff);
-        let longer = (self.backoff * 2).min(BACKOFF_MAX);
-        self.bind(lease, now, out);
         let is_due = |(t1, server_id): (Option<Instant>, &Vec<u8>)| {
             *server_id == answer.server_id && t1.is_some_and(|t1| now >= t1)
         };
-        if self
-            .held
-            .as_ref()
-            .is_some_and(|held| held.renewals().any(is_due))
-        {
+        if held.renewals().any(is_due) {
+            let wait = Duration::from_secs(self.backoff);
             self.quiet.push((answer.server_id.clone(), now + wait));
-            self.backoff = longer;
+            self.backoff = (self.backoff * 2).min(BACKOFF_MAX);
+        } else {
+            self.backoff = BACKOFF_FIRST;
         }
+        // The Request is over. The lease's times count on from where they
+        // did (`apply`): other exchanges may be under way, and `renewing`
+        // says what this one's end leaves.
+        self.exchange = None;
+        out.push(Action::Bind {
+            lease: held.lease.clone(),
+            fresh: true,
+        });
+        self.held = Some(held);
     }
 
     /// Whether `server_id` is not to be sent a Request yet.
@@ -1471,7 +1467,8 @@ impl Client {
             return;
         };
         // What the Reply holds is taken, whatever it says of the rest.
-        self.apply(&mut held, answer, &grant, now, out);
+        let given = self.apply(&mut held, answer, &grant, now, out);
+        self.restored(&given);
         if !held.lease.has_leases() {
             out.push(Action::Log(format!(
                 "server {} took the lease back",
@@ -1485,7 +1482,10 @@ impl Client {
         // and what is held stays in use meanwhile. Unless a Request to it
         // has just come to nothing (`on_recovery_reply`): then this is a
         // Reply that leaves that identity association out.
-        let quiet = self.is_quiet(&answer.server_id, now);
+        // Nor when one is under way with it, which a Rebind beside it can
+        // bring about.
+        let asked = |r: &Renewal| r.server.id == answer.server_id;
+        let quiet = self.is_quiet(&answer.server_id, now) || self.renewals.iter().any(asked);
         if let Some(lost) = lost.clone().filter(|_| !quiet) {
             if !grant.is_empty() {
                 out.push(Action::Bind {
@@ -1501,13 +1501,18 @@ impl Client {
             // of what it had no record of; another server's is left out
             // (`left_out`).
             self.server = Some(Server {
-                named: held.named_but(&Ias::default()),
                 lost,
                 ..Server::asked(answer.server_id.clone())
             });
             self.held = Some(held);
-            // One more exchange with a server of the lease: the others go
-            // on beside it.
+            // One more exchange about the lease: the others go on beside
+            // it. It takes the place of the Renew that brought it about;
+            // a Rebind is for the other servers too, and goes on.
+            let server = self.server.take();
+            if self.state == State::Rebinding {
+                self.store_as(Server::asked(Vec::new()));
+            }
+            self.server = server;
             self.request(now, out);
             self.store();
             return self.renewing(now, out);
@@ -1533,7 +1538,9 @@ impl Client {
             exchange.answered.add(&grant);
             exchange.answered.cover(&held.lease, &left_out)
         });
-        if over && self.state != State::Renewing {
+        // A Rebind sent in a Confirm's place is alone, and its end is the
+        // end of the verification.
+        if over && self.state == State::Confirming {
             return self.bind(held.lease, now, out);
         }
         out.push(Action::Bind {
@@ -1541,8 +1548,8 @@ impl Client {
             fresh: true,
         });
         if over {
-            // `Renewing`: other servers' Renews may be under way, and
-            // `renewing` says what this one's end leaves.
+            // Other exchanges may be under way, and `renewing` says what
+            // this one's end leaves.
             self.backoff = BACKOFF_FIRST;
         } else {
             out.push(Action::Log(format!(
@@ -1556,7 +1563,7 @@ impl Client {
     /// Apply `grant` to what is `held` (§18.2.10.1). An identity
     /// association the Reply speaks of gets its T1 and T2 from it; one it
     /// does not speak of keeps its own, like the lifetimes of what the
-    /// Reply does not name.
+    /// Reply does not name. Returns the ones it gave something of.
     ///
     /// The lease's times go on counting from where they did, moved on by
     /// whole seconds: a Reply that leaves something out may come again
@@ -1570,11 +1577,12 @@ impl Client {
         grant: &Grant<'_>,
         now: Instant,
         out: &mut Vec<Action>,
-    ) {
+    ) -> Ias {
+        let mut given = Ias::default();
         held.rebase(now);
         // Nothing for us in the Reply: the rest of it is not ours either.
         if grant.is_empty() {
-            return;
+            return given;
         }
         let lease = &mut held.lease;
         // An identity association is leased from the server that last gave
@@ -1590,6 +1598,7 @@ impl Client {
             });
             if merge(&mut ia.addresses, addresses_in(theirs), |a| a.address) {
                 ia.server_id.clone_from(&answer.server_id);
+                given.ia_na = true;
             }
             let lifetimes = lifetimes(&ia.addresses);
             (ia.t1, ia.t2) = renewal_times(theirs.t1, theirs.t2, &lifetimes);
@@ -1611,6 +1620,7 @@ impl Client {
             let ia = &mut lease.ia_pd[at];
             if merge(&mut ia.prefixes, prefixes_in(theirs), |p| p.prefix) {
                 ia.server_id.clone_from(&answer.server_id);
+                given.ia_pd.push(ia.iaid);
             }
             let lifetimes = lifetimes(&ia.prefixes);
             (ia.t1, ia.t2) = renewal_times(theirs.t1, theirs.t2, &lifetimes);
@@ -1631,6 +1641,19 @@ impl Client {
                 ia_pd: std::mem::take(&mut lease.ia_pd),
                 ..self.lease_from(answer, out)
             };
+        }
+        given
+    }
+
+    /// Identity associations have been given again, by whatever server. A
+    /// Request that is out because its server had no record of one of
+    /// them has no say about it any more: what that server gives or does
+    /// not give must not undo what is held now.
+    fn restored(&mut self, given: &Ias) {
+        for renewal in &mut self.renewals {
+            let lost = &mut renewal.server.lost;
+            lost.ia_na &= !given.ia_na;
+            lost.ia_pd.retain(|iaid| !given.ia_pd.contains(iaid));
         }
     }
 
@@ -1886,13 +1909,10 @@ impl Client {
             lease: held.lease.clone(),
             fresh: true,
         });
-        // What ran out may be all that a Renew or a Rebind still went on
-        // for (`on_renewal_reply`): with every identity association left
-        // answered, it is over.
+        // What ran out may be all that a Renew or the Rebind still went on
+        // for.
         if !self.renewals.is_empty() {
             self.renewing(now, out);
-        } else if self.answered_all() {
-            self.settle(now, out);
         }
         false
     }
@@ -2005,62 +2025,70 @@ impl Client {
         self.wake = Some(now + self.delay(CNF_MAX_DELAY));
     }
 
-    /// Put a held lease in the state its timers call for, sending what
-    /// that state sends. Only with a link: without one a lease waits in
-    /// `Bound` with no timer (`on_link`).
+    /// Put a held lease in the state its timers call for, with nothing
+    /// under way from before, sending what that state sends. Only with a
+    /// link: without one a lease waits in `Bound` with no timer
+    /// (`on_link`).
     fn settle(&mut self, now: Instant, out: &mut Vec<Action>) {
-        let Some(held) = &self.held else {
+        if self.held.is_none() {
             return;
-        };
-        let (t2, end) = (held.t2(), held.last_expiry());
-        self.idle(State::Bound);
-        if t2.is_some_and(|t2| now >= t2) {
-            self.state = State::Rebinding;
-            self.begin(REB_TIMEOUT, 0, end, now, out);
-        } else {
-            self.renewing(now, out);
         }
+        self.idle(State::Bound);
+        self.renewing(now, out);
     }
 
-    /// `Renewing`, `Bound` before it, and `Requesting` with a lease held:
-    /// bring the exchanges under way with the lease's servers in line with
-    /// the lease, and set the state and the timer.
+    /// With a lease held and a link: bring the exchanges under way about
+    /// the lease in line with it, and set the state and the timer.
     ///
     /// Each server something is leased from has a Renew of its own. It
     /// begins when an identity association leased from that server
     /// reaches its T1, is sent again at its own pace, and is over when the
     /// server has answered for all that is leased from it. So a server
     /// that does not answer holds up nobody else's renewal (RFC 8415
-    /// §18.2.4, §21.4). At the earliest T2 of the lease any server is
-    /// asked, about all of it.
+    /// §18.2.4, §21.4).
+    ///
+    /// From the earliest T2 of the lease any server is asked, about all of
+    /// it, with a Rebind in the place of the Renews. It goes on until
+    /// nothing is past its T2 any more: extended, or run out.
+    ///
+    /// A Request that follows NoBinding goes on beside either until it is
+    /// answered or given up, and holds up neither.
     fn renewing(&mut self, now: Instant, out: &mut Vec<Action>) {
         let Some(held) = &self.held else {
             return;
         };
-        // A Renew is over when its server has answered for all that is
-        // leased from it, or nothing is any more. A Request ends with its
-        // answer, or when it is given up.
-        self.renewals.retain(|renewal| {
-            let others = held.others(&renewal.server.id, &Ias::default());
-            renewal.is_request() || !renewal.exchange.answered.cover(&held.lease, &others)
+        let rebinding = held.t2().is_some_and(|t2| now >= t2);
+        self.renewals.retain(|renewal| match renewal.state {
+            // A Request goes on until it is answered or given up, or
+            // until another exchange has restored all that its server
+            // had no record of (`restored`).
+            State::Requesting => !renewal.server.lost.is_empty(),
+            State::Rebinding => rebinding,
+            // A Renew is over when its server has answered for all that
+            // is leased from it, or nothing is any more.
+            _ => {
+                let others = held.others(&renewal.server.id, &Ias::default());
+                !rebinding && !renewal.exchange.answered.cover(&held.lease, &others)
+            }
         });
-        // T2: any server's turn, with a Rebind (`settle`). A Request under
-        // way is answered first.
-        let recovering = self.renewals.iter().any(Renewal::is_request);
-        if !recovering && held.t2().is_some_and(|t2| now >= t2) {
-            return self.settle(now, out);
-        }
-        // To begin: a server with something past its T1, and no Renew
-        // under way.
+        // To begin: the Rebind, or a Renew with each server that has
+        // something past its T1 and no exchange under way.
         let mut begin: Vec<Vec<u8>> = Vec::new();
         for (t1, server_id) in held.renewals() {
             let asked = |r: &Renewal| r.server.id == *server_id;
             if t1.is_some_and(|t1| now >= t1)
+                && !rebinding
                 && !self.renewals.iter().any(asked)
                 && !begin.contains(server_id)
             {
                 begin.push(server_id.clone());
             }
+        }
+        if rebinding && !self.renewals.iter().any(Renewal::is_rebind) {
+            self.state = State::Rebinding;
+            self.server = Some(Server::asked(Vec::new()));
+            self.begin(REB_TIMEOUT, 0, None, now, out);
+            self.store();
         }
         for server_id in begin {
             self.begin_renew(server_id, now, out);
@@ -2073,19 +2101,21 @@ impl Client {
             self.wake = held.t1();
             return;
         }
-        self.state = if recovering {
+        // The state is the most pressing of what is under way.
+        self.state = if self.renewals.iter().any(Renewal::is_request) {
             State::Requesting
+        } else if rebinding {
+            State::Rebinding
         } else {
             State::Renewing
         };
-        // Next: an exchange to send again, a T1 of a server that has none
-        // under way, or T2, which waits for a Request under way.
+        // Next: an exchange to send again and, before T2, a T1 of a server
+        // that has none under way, or T2 itself.
         let again = self.renewals.iter().filter_map(|renewal| renewal.wake);
         let asked = |server_id: &Vec<u8>| self.renewals.iter().any(|r| r.server.id == *server_id);
         let t1 = held.renewals().filter(|(_, server_id)| !asked(server_id));
-        let t1 = t1.filter_map(|(t1, _)| t1);
-        let t2 = held.t2().filter(|_| !recovering);
-        self.wake = again.chain(t1).chain(t2).min();
+        let ahead = t1.filter_map(|(t1, _)| t1).chain(held.t2());
+        self.wake = again.chain(ahead.filter(|_| !rebinding)).min();
     }
 
     /// Begin a Renew with one server. It speaks of what is leased from
@@ -2117,7 +2147,13 @@ impl Client {
     /// Put the exchange being dealt with back among those under way, if
     /// it still is.
     fn store(&mut self) {
-        if let (Some(server), Some(exchange)) = (self.server.take(), self.exchange.take()) {
+        if let Some(server) = self.server.take() {
+            self.store_as(server);
+        }
+    }
+
+    fn store_as(&mut self, server: Server) {
+        if let Some(exchange) = self.exchange.take() {
             self.renewals.push(Renewal {
                 server,
                 state: self.state,
@@ -2134,19 +2170,11 @@ impl Client {
     /// which does speak of what its server had no record of. No other
     /// message is for one server while a lease is held.
     fn left_out(&self) -> Ias {
+        let for_one = matches!(self.state, State::Renewing | State::Requesting);
         match (&self.held, &self.server) {
-            (Some(held), Some(server)) => held.others(&server.id, &server.lost),
+            (Some(held), Some(server)) if for_one => held.others(&server.id, &server.lost),
             _ => Ias::default(),
         }
-    }
-
-    /// Whether the Renew or the Rebind under way has been answered for
-    /// every identity association it asks about.
-    fn answered_all(&self) -> bool {
-        let (Some(held), Some(exchange)) = (&self.held, &self.exchange) else {
-            return false;
-        };
-        exchange.answered.cover(&held.lease, &self.left_out())
     }
 
     /// Send the current state's message for the first time: a new
@@ -2249,7 +2277,13 @@ impl Client {
                 let Some(server) = &self.server else {
                     return;
                 };
-                (msg::REQUEST, Some(&server.id), server.named.clone(), true)
+                // Before a lease is held, what the server offered. After
+                // NoBinding, what is held as the Request goes out.
+                let named = match &self.held {
+                    Some(_) => held(),
+                    None => server.named.clone(),
+                };
+                (msg::REQUEST, Some(&server.id), named, true)
             }
             // A Confirm speaks of addresses only. §18.2.12: a lease with
             // a delegated prefix is asked about with a Rebind instead,
@@ -6208,7 +6242,11 @@ mod tests {
         };
         let options = vec![ia_status(status::NO_BINDING)];
         let reply = answer_from(&OTHER_DUID, &rebind, msg::REPLY, options);
-        let request = sent(&deliver(&mut c, &reply, t)).clone();
+        let actions = deliver(&mut c, &reply, t);
+        let [Action::Log(_), Action::Send(request)] = &actions[..] else {
+            panic!("{actions:?}")
+        };
+        let request = request.clone();
         assert_eq!(request.msg_type, msg::REQUEST);
         assert_eq!(addresses_of(&request), [ADDRESS]);
         // The prefix is the first server's: not this one's to speak of.
@@ -6216,6 +6254,14 @@ mod tests {
         assert_eq!(c.state(), State::Requesting);
         let (_, actions) = fire(&mut c);
         assert_eq!(sent(&actions).transaction_id, request.transaction_id);
+        // The Rebind goes on beside the Request, as it was.
+        let again = loop {
+            let (_, actions) = fire(&mut c);
+            if sent(&actions).msg_type == msg::REBIND {
+                break sent(&actions).clone();
+            }
+        };
+        assert_eq!(again.transaction_id, rebind.transaction_id);
         let reply = answer_from(&OTHER_DUID, &request, msg::REPLY, vec![one_address()]);
         let actions = deliver(&mut c, &reply, t);
         let Some(Action::Bind { lease, fresh: true }) = actions.first() else {
@@ -6512,6 +6558,30 @@ mod tests {
         let actions = deliver(&mut c, &answer(&renew, msg::REPLY, lost()), t + secs(1));
         assert_eq!(sent(&actions).msg_type, msg::REQUEST);
 
+        // A Request that leaves nothing more to renew ends the growing
+        // wait, like any answer for all of it: the next one that comes to
+        // nothing makes its server quiet for a second again.
+        let mut c = client_asking(both(), Options::default());
+        acquire_all(&mut c, t0, vec![one_address(), one_prefix()]);
+        let (t, renew) = first_renew(&mut c);
+        let renew = round(&mut c, &renew, t);
+        let t = t + secs(1);
+        let request = sent(&deliver(&mut c, &answer(&renew, msg::REPLY, lost()), t)).clone();
+        let back = vec![one_address(), ia_pd_status(PD, status::NO_PREFIX_AVAIL)];
+        let actions = deliver(&mut c, &answer(&request, msg::REPLY, back), t);
+        assert!(
+            matches!(&actions[..], [Action::Bind { fresh: true, .. }]),
+            "{actions:?}"
+        );
+        assert_eq!(c.state(), State::Bound);
+        let (t, renew) = first_renew(&mut c);
+        let renew = round(&mut c, &renew, t);
+        let soon = t + Duration::from_millis(999);
+        let actions = deliver(&mut c, &answer(&renew, msg::REPLY, lost()), soon);
+        assert!(matches!(&actions[..], [Action::Log(_)]), "{actions:?}");
+        let actions = deliver(&mut c, &answer(&renew, msg::REPLY, lost()), t + secs(1));
+        assert_eq!(sent(&actions).msg_type, msg::REQUEST);
+
         // What such a Reply does give is taken all the same.
         let mut c = client_asking(both(), Options::default());
         acquire_all(&mut c, t0, vec![one_address(), one_prefix()]);
@@ -6698,63 +6768,334 @@ mod tests {
     }
 
     #[test]
-    fn t2_waits_for_a_request_under_way() {
-        let t0 = Instant::now();
+    fn a_request_has_no_say_about_what_another_server_gave_since() {
+        let lost = || vec![status_option(status::NO_BINDING)];
+        // From the Renew at T1 to the Rebind at T2, with the server's
+        // Request out: returns the Request, the Rebind, and when.
+        let to_rebind = |c: &mut Client| {
+            let (t, renew) = first_renew(c);
+            let request = sent(&deliver(c, &answer(&renew, msg::REPLY, lost()), t)).clone();
+            assert_eq!(request.msg_type, msg::REQUEST);
+            loop {
+                let (now, actions) = fire(c);
+                if sent(&actions).msg_type == msg::REBIND {
+                    break (request, sent(&actions).clone(), now);
+                }
+            }
+        };
+        // The server has no record of the address. Before it answers the
+        // Request, another server gives the address again, in answer to
+        // the Rebind.
         let mut c = client(Options::default());
-        let t0 = acquire(&mut c, t0, ia(10, 20, &[(ADDRESS, 3600, 7200)]));
+        acquire(&mut c, Instant::now(), ia(10, 20, &[(ADDRESS, 3600, 7200)]));
+        let (request, rebind, t) = to_rebind(&mut c);
+        let reply = answer_from(&OTHER_DUID, &rebind, msg::REPLY, vec![one_address()]);
+        let actions = deliver(&mut c, &reply, t);
+        let [Action::Bind { lease, fresh: true }] = &actions[..] else {
+            panic!("{actions:?}")
+        };
+        assert_eq!(lease.ia_na.as_ref().unwrap().server_id, OTHER_DUID);
+        // The Request has nothing left to ask for: it is over, whatever
+        // its server says now, and the lease is the other server's to
+        // renew.
+        assert_eq!(c.state(), State::Bound);
+        assert_eq!(c.deadline(), Some(t + secs(1800)));
+        let refusal = vec![ia_status(status::NO_ADDRS_AVAIL)];
+        assert!(deliver(&mut c, &answer(&request, msg::REPLY, refusal), t).is_empty());
+        let (_, renew) = first_renew(&mut c);
+        assert_eq!(renew.option(opt::SERVER_ID), Some(&OTHER_DUID[..]));
+        assert_eq!(addresses_of(&renew), [ADDRESS]);
+
+        // No record of the address nor of the prefix, and the other
+        // server gives the address alone: the Request goes on, for the
+        // prefix.
+        let both_lost_and = |c: &mut Client, given: Dhcp6Option| {
+            let lease = vec![
+                ia(10, 20, &[(ADDRESS, 3600, 7200)]),
+                ia_pd(PD, 10, 20, &[(DELEGATED, 3600, 7200)]),
+            ];
+            acquire_all(c, Instant::now(), lease);
+            let (request, rebind, t) = to_rebind(c);
+            let reply = answer_from(&OTHER_DUID, &rebind, msg::REPLY, vec![given]);
+            deliver(c, &reply, t);
+            assert_eq!(c.state(), State::Requesting);
+            (request, t)
+        };
+        let both_lost = |c: &mut Client| both_lost_and(c, one_address());
+        // Refused: the prefix goes, and the address stays.
+        let mut c = client_asking(both(), Options::default());
+        let (request, t) = both_lost(&mut c);
+        let refusal = vec![status_option(status::NO_ADDRS_AVAIL)];
+        let actions = deliver(&mut c, &answer(&request, msg::REPLY, refusal), t);
+        let [Action::Log(_), Action::Bind { lease, fresh: true }] = &actions[..] else {
+            panic!("{actions:?}")
+        };
+        assert!(lease.ia_pd.is_empty());
+        assert_eq!(lease.ia_na.as_ref().unwrap().server_id, OTHER_DUID);
+        assert_eq!(c.state(), State::Bound);
+        // Never answered: likewise.
+        let mut c = client_asking(both(), Options::default());
+        both_lost(&mut c);
+        let actions = loop {
+            let (_, actions) = fire(&mut c);
+            if c.state() != State::Requesting {
+                break actions;
+            }
+        };
+        let [Action::Log(_), Action::Bind { lease, fresh: true }] = &actions[..] else {
+            panic!("{actions:?}")
+        };
+        assert!(lease.ia_pd.is_empty());
+        assert_eq!(lease.ia_na.as_ref().unwrap().server_id, OTHER_DUID);
+        assert_eq!(c.state(), State::Bound);
+        // The other way about: the prefix given again, the address
+        // refused.
+        let mut c = client_asking(both(), Options::default());
+        let (request, t) = both_lost_and(&mut c, one_prefix());
+        let refusal = vec![status_option(status::NO_ADDRS_AVAIL)];
+        let actions = deliver(&mut c, &answer(&request, msg::REPLY, refusal), t);
+        let [Action::Log(_), Action::Bind { lease, fresh: true }] = &actions[..] else {
+            panic!("{actions:?}")
+        };
+        assert_eq!(lease.ia_na, None);
+        assert_eq!(lease.ia_pd[0].server_id, OTHER_DUID);
+
+        // Two servers have no record of the address, and each is sent a
+        // Request. What one gives, the other's refusal does not undo.
+        const THIRD_DUID: [u8; 10] = [0, 3, 0, 1, 2, 0, 0, 0, 0, 0xfc];
+        let mut c = client(Options::default());
+        acquire(&mut c, Instant::now(), ia(10, 20, &[(ADDRESS, 3600, 7200)]));
+        let (_, rebind, t) = to_rebind(&mut c);
+        let no_record = |server: &[u8]| answer_from(server, &rebind, msg::REPLY, lost());
+        let first = sent(&deliver(&mut c, &no_record(&OTHER_DUID), t)).clone();
+        let second = sent(&deliver(&mut c, &no_record(&THIRD_DUID), t)).clone();
+        assert_eq!(first.option(opt::SERVER_ID), Some(&OTHER_DUID[..]));
+        assert_eq!(second.option(opt::SERVER_ID), Some(&THIRD_DUID[..]));
+        let reply = answer_from(&THIRD_DUID, &second, msg::REPLY, vec![one_address()]);
+        let actions = deliver(&mut c, &reply, t);
+        let [Action::Bind { lease, fresh: true }] = &actions[..] else {
+            panic!("{actions:?}")
+        };
+        assert_eq!(lease.ia_na.as_ref().unwrap().server_id, THIRD_DUID);
+        assert_eq!(c.state(), State::Bound);
+        let refusal = vec![ia_status(status::NO_ADDRS_AVAIL)];
+        let late = answer_from(&OTHER_DUID, &first, msg::REPLY, refusal);
+        assert!(deliver(&mut c, &late, t).is_empty());
+        assert!(c.lease(t).is_some());
+    }
+
+    #[test]
+    fn a_request_names_what_is_held_when_it_is_sent() {
+        let mut c = client(Options::default());
+        let two = ia(10, 1000, &[(ADDRESS, 30, 35), (ADDRESS2, 3600, 7200)]);
+        let t0 = acquire(&mut c, Instant::now(), two);
         let (t, renew) = first_renew(&mut c);
         let reply = answer(&renew, msg::REPLY, vec![ia_status(status::NO_BINDING)]);
         let request = sent(&deliver(&mut c, &reply, t)).clone();
-        // Nobody answers. T2 comes and goes: the Request is what is sent,
-        // as often as a Request is.
-        let mut asked = 1;
-        let (ended, actions) = loop {
+        assert_eq!(addresses_of(&request), [ADDRESS, ADDRESS2]);
+        // One address runs out with the Request still out: it is not
+        // asked for again.
+        let again = loop {
             let (now, actions) = fire(&mut c);
+            if now > t0 + secs(35) {
+                break sent(&actions).clone();
+            }
+        };
+        assert_eq!(again.msg_type, msg::REQUEST);
+        assert_eq!(again.transaction_id, request.transaction_id);
+        assert_eq!(addresses_of(&again), [ADDRESS2]);
+    }
+
+    #[test]
+    fn what_one_server_answers_moves_no_other_servers_times() {
+        // The address is to be renewed first; the prefix is another
+        // server's.
+        let address_first = || {
+            let mut lease = mixed();
+            lease.ia_na.as_mut().unwrap().t1 = 100;
+            (lease.ia_pd[0].t1, lease.ia_pd[0].t2) = (3000, 3200);
+            lease
+        };
+        let left = |c: &Client, at: Instant| {
+            let lease = c.lease(at).unwrap();
+            let prefix = &lease.ia_pd[0].prefixes[0];
+            (prefix.preferred, prefix.valid)
+        };
+        // A Renew answered a moment after a whole second.
+        let (mut c, t0) = holding(address_first());
+        first_renew(&mut c);
+        let (t, actions) = fire(&mut c);
+        assert!((t - t0).subsec_millis() > 0);
+        let again = sent(&actions).clone();
+        deliver(&mut c, &answer(&again, msg::REPLY, vec![one_address()]), t);
+        assert_eq!(c.state(), State::Bound);
+        assert_eq!(left(&c, t0 + secs(200)), (3400, 7000));
+
+        // So for the Request after NoBinding.
+        let (mut c, t0) = holding(address_first());
+        let (t, renew) = first_renew(&mut c);
+        let reply = answer(&renew, msg::REPLY, vec![ia_status(status::NO_BINDING)]);
+        deliver(&mut c, &reply, t);
+        let (t, actions) = fire(&mut c);
+        assert!((t - t0).subsec_millis() > 0);
+        let request = sent(&actions).clone();
+        assert_eq!(request.msg_type, msg::REQUEST);
+        deliver(
+            &mut c,
+            &answer(&request, msg::REPLY, vec![one_address()]),
+            t,
+        );
+        assert_eq!(c.state(), State::Bound);
+        assert_eq!(left(&c, t0 + secs(200)), (3400, 7000));
+    }
+
+    #[test]
+    fn a_rebind_goes_out_at_t2_beside_a_request() {
+        // The address is one server's. The prefix is another's, to be
+        // rebound at 150 s and gone at 180 s.
+        let two_servers = || {
+            let mut lease = mixed();
+            lease.ia_na.as_mut().unwrap().t1 = 100;
+            (lease.ia_pd[0].t1, lease.ia_pd[0].t2) = (100, 150);
+            lease.ia_pd[0].prefixes = vec![prefix(DELEGATED, 170, 180)];
+            lease
+        };
+        // The address's server has no record of it, and does not answer
+        // the Request; the prefix's server does not answer its Renew.
+        let recovering = |c: &mut Client| {
+            let (t, actions) = fire(c);
+            let [Action::Send(to_a), Action::Send(to_b)] = &actions[..] else {
+                panic!("{actions:?}")
+            };
+            let to_b = to_b.clone();
+            let reply = answer(to_a, msg::REPLY, vec![ia_status(status::NO_BINDING)]);
+            let request = sent(&deliver(c, &reply, t)).clone();
+            assert_eq!(request.msg_type, msg::REQUEST);
+            (request, to_b)
+        };
+        // Until T2 the Request and the Renew are sent, each at its pace.
+        // At T2 a Rebind takes the Renew's place, for any server and
+        // about all of the lease, with the Request still out.
+        let to_t2 = |c: &mut Client, request: &ClientMessage, to_b: &ClientMessage| loop {
+            let (now, actions) = fire(c);
+            let [Action::Send(message)] = &actions[..] else {
+                panic!("{actions:?}")
+            };
+            if message.msg_type == msg::REBIND {
+                break (now, message.clone());
+            }
+            let xid = message.transaction_id;
+            assert!(xid == request.transaction_id || xid == to_b.transaction_id);
+        };
+        let (mut c, t0) = holding(two_servers());
+        let (request, to_b) = recovering(&mut c);
+        let (at, rebind) = to_t2(&mut c, &request, &to_b);
+        assert_eq!(at, t0 + secs(150));
+        assert!(rebind.option(opt::SERVER_ID).is_none());
+        assert_eq!(addresses_of(&rebind), [ADDRESS]);
+        assert_eq!(pds_of(&rebind), [named(PD, DELEGATED)]);
+        assert_eq!(c.state(), State::Requesting);
+        // A server extends the prefix: nothing is past its T2 any more,
+        // and the Rebind is over. The Request goes on.
+        let reply = answer_from(&OTHER_DUID, &rebind, msg::REPLY, vec![one_prefix()]);
+        let actions = deliver(&mut c, &reply, at);
+        let [Action::Bind { lease, fresh: true }, Action::Log(_)] = &actions[..] else {
+            panic!("{actions:?}")
+        };
+        assert_eq!(lease.ia_pd[0].prefixes, [prefix(DELEGATED, 3600, 7200)]);
+        assert_eq!(c.state(), State::Requesting);
+        for _ in 0..3 {
+            let (_, actions) = fire(&mut c);
             if c.state() != State::Requesting {
-                break (now, actions);
+                break;
             }
             let [Action::Send(message)] = &actions[..] else {
                 panic!("{actions:?}")
             };
-            assert_eq!(message.msg_type, msg::REQUEST);
             assert_eq!(message.transaction_id, request.transaction_id);
-            asked += 1;
+        }
+
+        // Nobody answers the Rebind either: it is sent until the prefix
+        // runs out, and is over then.
+        let (mut c, t0) = holding(two_servers());
+        let (request, to_b) = recovering(&mut c);
+        let (_, rebind) = to_t2(&mut c, &request, &to_b);
+        let mut rebinds = 1;
+        let actions = loop {
+            let (now, actions) = fire(&mut c);
+            if now == t0 + secs(180) {
+                break actions;
+            }
+            let xid = sent(&actions).transaction_id;
+            assert!(xid == request.transaction_id || xid == rebind.transaction_id);
+            rebinds += usize::from(xid == rebind.transaction_id);
         };
-        assert_eq!(asked, REQ_MAX_RC);
-        assert!(ended > t0 + secs(20));
+        assert!(rebinds >= 2, "{rebinds}");
+        let [Action::Bind { lease, fresh: true }] = &actions[..] else {
+            panic!("{actions:?}")
+        };
+        assert!(lease.ia_pd.is_empty());
+        assert_eq!(c.state(), State::Requesting);
+        let (_, actions) = fire(&mut c);
+        assert_eq!(sent(&actions).transaction_id, request.transaction_id);
+
+        // One server, and T2 comes with its Request out. The Rebind goes
+        // out beside it. NoBinding again, to the Rebind, brings no second
+        // Request.
+        let mut c = client(Options::default());
+        let t0 = acquire(&mut c, Instant::now(), ia(10, 20, &[(ADDRESS, 3600, 7200)]));
+        let (t, renew) = first_renew(&mut c);
+        let lost = || vec![ia_status(status::NO_BINDING)];
+        let request = sent(&deliver(&mut c, &answer(&renew, msg::REPLY, lost()), t)).clone();
+        let (at, rebind) = to_t2(&mut c, &request, &request);
+        assert_eq!(at, t0 + secs(20));
+        let actions = deliver(&mut c, &answer(&rebind, msg::REPLY, lost()), at);
+        assert!(matches!(&actions[..], [Action::Log(_)]), "{actions:?}");
+        // The Request is sent as often as a Request is, then given up:
+        // nothing is left.
+        let mut asked = 0;
+        let actions = loop {
+            let (_, actions) = fire(&mut c);
+            if c.state() != State::Requesting {
+                break actions;
+            }
+            let [Action::Send(message)] = &actions[..] else {
+                panic!("{actions:?}")
+            };
+            asked += u32::from(message.msg_type == msg::REQUEST);
+        };
         assert!(
             matches!(&actions[..], [Action::Log(_), Action::Unbind]),
             "{actions:?}"
         );
         assert_eq!(c.state(), State::Soliciting);
+        // Counted from T2 on: the Request had gone out a few times before.
+        assert!((4..REQ_MAX_RC).contains(&asked), "{asked}");
 
-        // Answered after T2, with something still to renew: any server
-        // is asked next, with a Rebind and no Renew before it.
+        // The Request answered after T2, with something still past it:
+        // the Rebind that is under way goes on.
         let mut c = client_asking(both(), Options::default());
         let lease = vec![
             ia(10, 20, &[(ADDRESS, 3600, 7200)]),
             ia_pd(PD, 10, 20, &[(DELEGATED, 3600, 7200)]),
         ];
-        let (t0, _) = acquire_all(&mut c, Instant::now(), lease);
+        acquire_all(&mut c, Instant::now(), lease);
         let (t, renew) = first_renew(&mut c);
         let lost = vec![
             ia_status(status::NO_BINDING),
             ia_pd_status(PD, status::NO_PREFIX_AVAIL),
         ];
         let request = sent(&deliver(&mut c, &answer(&renew, msg::REPLY, lost), t)).clone();
-        let mut now = t;
-        while now < t0 + secs(20) {
-            let (at, actions) = fire(&mut c);
-            assert_eq!(sent(&actions).msg_type, msg::REQUEST);
-            now = at;
-        }
+        let (at, rebind) = to_t2(&mut c, &request, &request);
         let back = vec![one_address(), ia_pd_status(PD, status::NO_PREFIX_AVAIL)];
-        let actions = deliver(&mut c, &answer(&request, msg::REPLY, back), now);
-        let [Action::Bind { .. }, Action::Send(rebind)] = &actions[..] else {
-            panic!("{actions:?}")
-        };
-        assert_eq!(rebind.msg_type, msg::REBIND);
+        let actions = deliver(&mut c, &answer(&request, msg::REPLY, back), at);
+        assert!(
+            matches!(&actions[..], [Action::Bind { fresh: true, .. }]),
+            "{actions:?}"
+        );
         assert_eq!(c.state(), State::Rebinding);
+        let (_, actions) = fire(&mut c);
+        assert_eq!(sent(&actions).transaction_id, rebind.transaction_id);
     }
 
     #[test]
