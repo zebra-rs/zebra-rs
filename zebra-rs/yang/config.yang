@@ -6064,11 +6064,12 @@ module config {
               "The name servers and search domains Router Advertisements
                name (RDNSS, DNSSL) are the host's own: they are handed
                to systemd-resolved as the interface's DNS configuration,
-               behind a DHCPv4 lease's, and taken back when their
+               behind those of a DHCP lease, and taken back when their
                lifetime runs out (the resolver task,
                docs/design/dhcp-client.md §13). With this leaf they are
-               only shown (`show ipv6 nd interface`). The lease's own
-               are `ipv4 dhcp-options no-name-server`'s to keep back.";
+               only shown (`show ipv6 nd interface`). The ones a lease
+               names are `ipv4 dhcp-options no-name-server`'s and `ipv6
+               dhcpv6-options no-name-server`'s to keep back.";
           }
         }
         container dhcpv6-options {
@@ -6111,6 +6112,22 @@ module config {
           leaf no-release {
             ext:help "Do not release the lease when the client stops";
             type empty;
+          }
+          leaf no-name-server {
+            ext:help "Do not use the server's name servers for the host";
+            type empty;
+            description
+              "The name servers and search domains a DHCPv6 server
+               names, with a lease or to `parameters-only`, are the
+               host's own: they are handed to systemd-resolved as the
+               interface's DNS configuration, behind those of a DHCPv4
+               lease and ahead of the advertised ones, and taken back
+               when the client gives them up (the resolver task,
+               docs/design/dhcp-client.md §13). With this leaf they are
+               only shown (`show dhcpv6 client leases`). The ones a
+               DHCPv4 lease or Router Advertisements name are `ipv4
+               dhcp-options no-name-server`'s and `ipv6 ra-options
+               no-name-server`'s to keep back.";
           }
           list pd {
             ext:help "Ask for a delegated prefix (IA_PD)";

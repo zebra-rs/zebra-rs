@@ -44,11 +44,12 @@ impl Dhcpc {
         }
         self.callbacks
             .insert("/interface/ipv6/address".to_string(), config_address6);
-        let options6: [(&str, Callback); 6] = [
+        let options6: [(&str, Callback); 7] = [
             ("/duid", config_duid),
             ("/parameters-only", config_parameters_only),
             ("/rapid-commit", config_rapid_commit),
             ("/no-release", config_no_release),
+            ("/no-name-server", config_no_name_server6),
             ("/pd", config_pd),
             ("/pd/length", config_pd_length),
         ];
@@ -173,6 +174,12 @@ fn config_pd_length(dhcpc: &mut Dhcpc, mut args: Args, op: ConfigOp) -> Option<(
     } else if let Some(pd) = cfg.pd.get_mut(&id) {
         pd.length = None;
     }
+    Some(())
+}
+
+fn config_no_name_server6(dhcpc: &mut Dhcpc, mut args: Args, op: ConfigOp) -> Option<()> {
+    let cfg = dhcpc.touch6(&mut args)?;
+    cfg.no_name_server = op.is_set();
     Some(())
 }
 

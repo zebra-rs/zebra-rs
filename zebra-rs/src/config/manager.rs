@@ -3138,6 +3138,28 @@ mod save_config_tests {
         assert_eq!(handed_over(&mut engine), 2);
     }
 
+    /// `interface <if> ipv6 dhcpv6-options no-name-server` reaches the
+    /// tasks as the path the DHCP client listens for, with the interface
+    /// as its argument, and takes no value.
+    #[test]
+    fn no_name_server_reaches_the_dhcpv6_client_under_its_options_path() {
+        let cm = manager_with_config(&temp_path("no-name-server6-path"));
+        let paths = cm
+            .paths("interface wan0 ipv6 dhcpv6-options no-name-server".to_string())
+            .expect("the line parses");
+        let (path, mut args) = path_from_command(&paths);
+        assert_eq!(path, "/interface/ipv6/dhcpv6-options/no-name-server");
+        assert_eq!(args.string().as_deref(), Some("wan0"));
+        assert_eq!(args.string(), None);
+
+        let mode = cm.modes.get("configure").expect("configure mode");
+        let line = "set interface wan0 ipv6 dhcpv6-options no-name-server";
+        let (code, _, _) = cm.execute(mode, line);
+        assert_eq!(code, ExecCode::Show);
+        let (code, _, _) = cm.execute(mode, &format!("{line} wan1"));
+        assert_ne!(code, ExecCode::Show, "the leaf takes no value");
+    }
+
     /// `interface <if> ipv4 dhcp-options no-name-server` reaches the
     /// tasks as the path the DHCP client listens for, with the interface
     /// as its argument, and takes no value.

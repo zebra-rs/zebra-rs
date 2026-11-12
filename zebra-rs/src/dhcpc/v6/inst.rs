@@ -23,7 +23,7 @@
 //! answered the Release or it has been sent as often as it is to be.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::net::Ipv6Addr;
+use std::net::{IpAddr, Ipv6Addr};
 use std::time::Instant;
 
 use dhcp_packet::v6::Message as Dhcp6Message;
@@ -32,9 +32,10 @@ use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 use crate::config::Args;
 use crate::dhcpc::ident::{self, DuidStore};
-use crate::dhcpc::inst::{DEFAULT_DISTANCE, Dhcpc, lifetime, unix_now};
+use crate::dhcpc::inst::{DEFAULT_DISTANCE, Dhcpc, lifetime, report_dns, unix_now};
 use crate::dhcpc::lease::Kept6;
 use crate::fib::AddrOpts;
+use crate::resolver::{LinkDns, Source};
 use crate::rib::entry::RibEntry;
 use crate::rib::link::{AddrOrigin, LinkAddr};
 use crate::rib::{Message, Nexthop, RibType};
@@ -54,6 +55,9 @@ pub struct IfConfig6 {
     pub no_release: bool,
     /// `dhcpv6-options pd <id>`: the delegations to ask for, by IAID.
     pub pd: BTreeMap<u32, PdConfig>,
+    /// `no-name-server`: the name servers and search domains the server
+    /// names are shown, not reported for the host's own use.
+    pub no_name_server: bool,
 }
 
 /// `dhcpv6-options pd <id> …`.
@@ -177,6 +181,8 @@ pub struct V6 {
     /// The discard routes the RIB was last told of: each delegated
     /// prefix, in a VRF's table (`None`: the default one).
     pd_routes: BTreeSet<(Option<String>, Ipv6Net)>,
+    /// What the resolver task was last told, by interface (`sync_dns6`).
+    reported_dns: BTreeMap<String, LinkDns>,
 }
 
 impl V6 {
@@ -190,8 +196,20 @@ impl V6 {
             duid: None,
             touched: Vec::new(),
             pd_routes: BTreeSet::new(),
+            reported_dns: BTreeMap::new(),
         }
     }
+}
+
+/// What a server said of name servers, if anything: the servers (option
+/// 23) and the search list (option 24). The same for a lease and for
+/// what `parameters-only` was given without one.
+fn lease_dns6(lease: &Lease) -> Option<LinkDns> {
+    let dns = LinkDns {
+        servers: lease.dns_servers.iter().copied().map(IpAddr::V6).collect(),
+        domains: lease.domain_list.clone(),
+    };
+    (dns != LinkDns::default()).then_some(dns)
 }
 
 fn addresses(lease: &Lease) -> &[Address] {
@@ -739,7 +757,9 @@ impl Dhcpc {
         {
             self.v6.ifaces.insert(name.to_string(), iface);
         }
+        // Every change to a client or its configuration ends here.
         self.sync_pd_routes();
+        self.sync_dns6();
     }
 
     /// Hand the RIB a discard route for each delegated prefix held, in
@@ -782,6 +802,32 @@ impl Dhcpc {
             });
         }
         self.v6.pd_routes = wanted;
+    }
+
+    /// Tell the resolver task what the clients now say of name servers:
+    /// every change, once. They are the host's own unless the interface
+    /// has `dhcpv6-options no-name-server`: set while they are held, it
+    /// takes them back; deleted, it gives the held ones.
+    ///
+    /// Only the current client says anything. One on its way out holds
+    /// a lease only to release it (one saved under another DUID, until
+    /// the link can carry the Release), as a DHCPv4 lease on its way
+    /// back says nothing either.
+    fn sync_dns6(&mut self) {
+        let Some(resolver) = &self.resolver else {
+            return;
+        };
+        let mut now = BTreeMap::new();
+        for (name, iface) in &self.v6.ifaces {
+            if iface.cfg.no_name_server {
+                continue;
+            }
+            let held = iface.session.as_ref().and_then(|s| s.bound.as_ref());
+            if let Some(dns) = held.and_then(lease_dns6) {
+                now.insert(name.clone(), dns);
+            }
+        }
+        report_dns(resolver, Source::Dhcp6, &mut self.v6.reported_dns, now);
     }
 
     /// Feed `event` to `slot`'s client and carry out what it asks for.
@@ -1058,6 +1104,7 @@ mod tests {
     use crate::dhcpc::lease::Store;
     use crate::dhcpc::v6::client::{Ia, IaPd};
     use crate::dhcpc::v6::show::show_leases6;
+    use crate::resolver::Report;
     use crate::rib::client::{ProtoId, RibClient, RibInbound};
     use crate::rib::link::AddrFlags;
 
@@ -2197,5 +2244,233 @@ mod tests {
         assert_eq!(duid_of(&b), OTHER_DUID);
         let other = &b.dhcpc.v6.ifaces["dhcpc6-test1"];
         assert_eq!(other.session.as_ref().unwrap().client.identity().0, first);
+    }
+
+    const DNS1: Ipv6Addr = Ipv6Addr::new(0x2001, 0xdb8, 0x53, 0, 0, 0, 0, 0x53);
+    const DNS2: Ipv6Addr = Ipv6Addr::new(0x2001, 0xdb8, 0x53, 0, 0, 0, 0, 0x54);
+
+    /// `lease()`, with what a server says of name resolution.
+    fn lease_with_dns(addresses: &[Ipv6Addr]) -> Lease {
+        Lease {
+            dns_servers: vec![DNS1, DNS2],
+            domain_list: vec!["example.com".to_string(), "corp.example".to_string()],
+            ..lease(addresses)
+        }
+    }
+
+    fn its_dns() -> LinkDns {
+        LinkDns {
+            servers: vec![IpAddr::V6(DNS1), IpAddr::V6(DNS2)],
+            domains: vec!["example.com".to_string(), "corp.example".to_string()],
+        }
+    }
+
+    /// Take the resolver's place.
+    fn resolver(b: &mut Bench) -> UnboundedReceiver<Report> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        b.dhcpc.set_resolver(tx);
+        rx
+    }
+
+    /// What the task reported of `IF` since the last call.
+    fn reported(rx: &mut UnboundedReceiver<Report>) -> Vec<Option<LinkDns>> {
+        let mut out = Vec::new();
+        while let Ok(report) = rx.try_recv() {
+            assert_eq!((report.ifname.as_str(), report.source), (IF, Source::Dhcp6));
+            out.push(report.dns);
+        }
+        out
+    }
+
+    /// The resolver hears of a lease's name servers when the lease is
+    /// held, once, and that they are gone when it is given up.
+    #[tokio::test]
+    async fn a_held_lease_reports_its_name_servers_until_it_ends() {
+        let mut b = bench("dns-held");
+        let mut rx = resolver(&mut b);
+        save(&b, &DUID, 60, &lease_with_dns(&[ADDRESS]));
+        configure(&mut b, &DUID);
+        assert_eq!(state(&b), State::Bound);
+        assert_eq!(reported(&mut rx), [Some(its_dns())]);
+
+        // Verified with the server, a leaf that is not about them
+        // changed: nothing is said twice.
+        make_ready(&mut b);
+        b.dhcpc.v6.ifaces.get_mut(IF).unwrap().cfg.rapid_commit = true;
+        b.dhcpc.reconcile6(IF);
+        assert_eq!(reported(&mut rx), []);
+
+        b.dhcpc.release6(verb());
+        assert_eq!(reported(&mut rx), [None]);
+        b.dhcpc.reconcile6(IF);
+        assert_eq!(reported(&mut rx), []);
+    }
+
+    #[tokio::test]
+    async fn deleting_the_configuration_takes_the_name_servers_back() {
+        let mut b = bench("dns-config");
+        let mut rx = resolver(&mut b);
+        save(&b, &DUID, 0, &lease_with_dns(&[ADDRESS]));
+        configure(&mut b, &DUID);
+        reported(&mut rx);
+        b.dhcpc.v6.ifaces.get_mut(IF).unwrap().cfg = IfConfig6::default();
+        b.dhcpc.reconcile6(IF);
+        assert_eq!(reported(&mut rx), [None]);
+    }
+
+    #[tokio::test]
+    async fn a_deleted_link_takes_the_name_servers_back() {
+        let mut b = bench("dns-link");
+        let mut rx = resolver(&mut b);
+        save(&b, &DUID, 0, &lease_with_dns(&[ADDRESS]));
+        configure(&mut b, &DUID);
+        reported(&mut rx);
+        b.dhcpc.link_deleted6(IFINDEX, IF);
+        assert_eq!(reported(&mut rx), [None]);
+    }
+
+    /// One `dhcpv6-options` leaf of `IF` set or deleted, as the
+    /// configuration delivers it, and the end of its commit.
+    fn commit_option(b: &mut Bench, leaf: &str, op: ConfigOp) {
+        let callback = b.dhcpc.callbacks[&format!("/interface/ipv6/dhcpv6-options/{leaf}")];
+        callback(&mut b.dhcpc, verb(), op);
+        b.dhcpc
+            .process_cm_msg(ConfigRequest::new(Vec::new(), ConfigOp::CommitEnd));
+    }
+
+    /// `dhcpv6-options no-name-server`: the lease is held like any
+    /// other, and the host is told nothing of its name servers. Deleted
+    /// under a held lease it gives the ones held, and set it takes them
+    /// back, without the server or the lease hearing of either.
+    #[tokio::test]
+    async fn no_name_server_keeps_a_lease_s_name_servers_from_the_host() {
+        let mut b = bench("dns-opt-out");
+        let mut rx = resolver(&mut b);
+        save(&b, &DUID, 0, &lease_with_dns(&[ADDRESS]));
+        commit_option(&mut b, "no-name-server", ConfigOp::Set);
+        assert!(b.dhcpc.v6.ifaces[IF].cfg.no_name_server);
+        configure(&mut b, &DUID);
+        assert_eq!(state(&b), State::Bound);
+        assert_eq!(reported(&mut rx), []);
+        asked(&mut b);
+
+        commit_option(&mut b, "no-name-server", ConfigOp::Delete);
+        assert!(!b.dhcpc.v6.ifaces[IF].cfg.no_name_server);
+        assert_eq!(reported(&mut rx), [Some(its_dns())]);
+        commit_option(&mut b, "no-name-server", ConfigOp::Set);
+        assert_eq!(reported(&mut rx), [None]);
+        assert_eq!(state(&b), State::Bound);
+        assert!(asked(&mut b).is_empty());
+        assert!(saved(&b).is_some());
+    }
+
+    /// The leaf alone, with no client asked for, is kept and says
+    /// nothing; deleted, nothing is left of the interface.
+    #[tokio::test]
+    async fn no_name_server_alone_starts_nothing() {
+        let mut b = bench("dns-opt-out-alone");
+        let mut rx = resolver(&mut b);
+        commit_option(&mut b, "no-name-server", ConfigOp::Set);
+        assert!(b.dhcpc.v6.ifaces[IF].session.is_none());
+        assert!(b.dhcpc.v6.ifaces[IF].cfg.no_name_server);
+        commit_option(&mut b, "no-name-server", ConfigOp::Delete);
+        assert!(!b.dhcpc.v6.ifaces.contains_key(IF));
+        assert_eq!(reported(&mut rx), []);
+    }
+
+    /// Another DUID is another client: the lease goes back and its name
+    /// servers with it, before the successor has any.
+    #[tokio::test]
+    async fn another_duid_takes_the_name_servers_back() {
+        let mut b = bench("dns-other-duid");
+        let mut rx = resolver(&mut b);
+        save(&b, &DUID, 0, &lease_with_dns(&[ADDRESS]));
+        configure(&mut b, &DUID);
+        make_ready(&mut b);
+        assert_eq!(reported(&mut rx), [Some(its_dns())]);
+        configure(&mut b, &OTHER_DUID);
+        assert_eq!(retiring(&b), Some(State::Releasing));
+        assert_eq!(reported(&mut rx), [None]);
+    }
+
+    /// A lease saved under another DUID is resumed only to be released
+    /// as who took it, and held until the link can carry the Release.
+    /// The host is not pointed at its name servers meanwhile.
+    #[tokio::test]
+    async fn a_lease_on_its_way_back_reports_no_name_servers() {
+        let mut b = bench("dns-retiring");
+        let mut rx = resolver(&mut b);
+        save(&b, &OTHER_DUID, 600, &lease_with_dns(&[ADDRESS]));
+        configure(&mut b, &DUID);
+        // Held, with its address on the interface.
+        assert_eq!(retiring(&b), Some(State::Bound));
+        let held = b.dhcpc.v6.ifaces[IF].retiring.as_ref().unwrap();
+        assert_eq!(
+            held.session.bound.as_ref().and_then(lease_dns6),
+            Some(its_dns())
+        );
+        assert_eq!(reported(&mut rx), []);
+        // Nor when it goes back.
+        make_ready(&mut b);
+        assert_eq!(retiring(&b), Some(State::Releasing));
+        assert_eq!(reported(&mut rx), []);
+    }
+
+    /// A lease that runs out takes its name servers with it.
+    #[tokio::test]
+    async fn a_lease_that_runs_out_takes_the_name_servers_back() {
+        let mut b = bench("dns-expires");
+        let mut rx = resolver(&mut b);
+        save(&b, &DUID, 7190, &lease_with_dns(&[ADDRESS]));
+        configure(&mut b, &DUID);
+        assert_eq!(reported(&mut rx), [Some(its_dns())]);
+        // The link never comes: at the end of its lifetime it goes.
+        run_timers(&mut b, Duration::from_secs(20));
+        assert_eq!(reported(&mut rx), [None]);
+    }
+
+    /// What `parameters-only` is given comes without a lease, and its
+    /// name servers are reported all the same. Other servers at the
+    /// next answer replace them.
+    #[tokio::test]
+    async fn parameters_without_a_lease_report_their_name_servers() {
+        let mut b = bench("dns-parameters");
+        let mut rx = resolver(&mut b);
+        let cfg = &mut b.dhcpc.v6.ifaces.entry(IF.to_string()).or_default().cfg;
+        cfg.parameters_only = true;
+        cfg.duid = Some(DUID.to_vec());
+        b.dhcpc.reconcile6(IF);
+        assert_eq!(reported(&mut rx), []);
+
+        let given = |servers: Vec<Ipv6Addr>| Lease {
+            ia_na: None,
+            dns_servers: servers,
+            ..lease_with_dns(&[])
+        };
+        fn session(b: &mut Bench) -> &mut Session {
+            let iface = b.dhcpc.v6.ifaces.get_mut(IF).unwrap();
+            iface.session.as_mut().expect("a client")
+        }
+        session(&mut b).bound = Some(given(vec![DNS1, DNS2]));
+        b.dhcpc.reconcile6(IF);
+        assert_eq!(reported(&mut rx), [Some(its_dns())]);
+        assert!(asked(&mut b).is_empty());
+
+        session(&mut b).bound = Some(given(vec![DNS2]));
+        b.dhcpc.reconcile6(IF);
+        let mut other = its_dns();
+        other.servers.remove(0);
+        assert_eq!(reported(&mut rx), [Some(other)]);
+    }
+
+    /// A lease that names no server and no domain says nothing.
+    #[tokio::test]
+    async fn a_lease_without_name_servers_reports_nothing() {
+        let mut b = bench("dns-none");
+        let mut rx = resolver(&mut b);
+        save(&b, &DUID, 0, &lease(&[ADDRESS]));
+        configure(&mut b, &DUID);
+        assert_eq!(state(&b), State::Bound);
+        assert_eq!(reported(&mut rx), []);
     }
 }

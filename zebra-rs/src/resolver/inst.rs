@@ -882,8 +882,8 @@ mod tests {
     }
 
     /// What DHCP says goes ahead of what Router Advertisements say (RFC
-    /// 8106 §5.3.1), each in its own order, and what both say is said
-    /// once.
+    /// 8106 §5.3.1), a DHCPv4 lease ahead of a DHCPv6 one, each in its
+    /// own order, and what several say is said once.
     #[test]
     fn dhcp_goes_ahead_of_router_advertisements() {
         let mut sources = BTreeMap::new();
@@ -896,6 +896,13 @@ mod tests {
             ),
         );
         sources.insert(
+            Source::Dhcp6,
+            dns(
+                &["2001:db8:53::53", "2001:db8::11"],
+                &["v6.example", "example.com"],
+            ),
+        );
+        sources.insert(
             Source::Dhcp4,
             dns(&["198.51.100.53", "198.51.100.54"], &["example.com"]),
         );
@@ -905,10 +912,11 @@ mod tests {
                 &[
                     "198.51.100.53",
                     "198.51.100.54",
+                    "2001:db8:53::53",
+                    "2001:db8::11",
                     "2001:db8::99",
-                    "2001:db8::11"
                 ],
-                &["example.com", "ra.example"]
+                &["example.com", "v6.example", "ra.example"]
             )
         );
     }
