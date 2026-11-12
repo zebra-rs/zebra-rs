@@ -285,14 +285,12 @@ impl<B: Backend> Resolver<B> {
             if self.waiting.remove(&old) {
                 self.waiting.insert(new.clone());
             }
-            // What is still noted under the new name was for another
-            // interface, which is gone, or for a command that may have
-            // reached this one: what it holds is then not known.
-            let known = !self.applied.contains_key(&new);
-            let held = Held {
-                dns: held.dns.filter(|_| known),
-                ..held
-            };
+            // What is still noted under the new name is not this
+            // interface's: it was for one that is gone, or for a command
+            // that found none there. Or it is this interface's, noted
+            // before the last command that said the old name. Either way
+            // the name is this interface's now, and what it holds is
+            // what came with it.
             self.applied.insert(new, held);
         }
     }
