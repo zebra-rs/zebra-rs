@@ -1908,6 +1908,49 @@ async fn configuring_a_slaac_address_keeps_it_past_the_ra_host() {
     ip(&["link", "del", "perm6"]);
 }
 
+/// An address from a delegated prefix has the prefix's lifetime and
+/// brings the route to its /64. The kernel removes that route with the
+/// address only when the address is permanent, so giving the address up
+/// has to see to the route: left alone it stays for as long as the
+/// prefix had been valid. It stays while another address of the link is
+/// in the /64.
+#[tokio::test]
+#[ignore = "requires root in an isolated network namespace"]
+async fn a_dynamic_address_given_up_takes_its_prefix_route_along() {
+    require_netns();
+    let mut rib = Rib::new(false).unwrap();
+    let index = dummy_link(&mut rib, "pd6");
+    let pd = crate::rib::link::AddrOrigin::Pd;
+    let lease = crate::fib::AddrOpts {
+        valid_lft: 3600,
+        preferred_lft: 1800,
+        noprefixroute: false,
+        broadcast: None,
+    };
+    let route = |subnet: &str| ip(&["-6", "route", "show", subnet, "dev", "pd6"]);
+
+    let alone = "2001:db8:100:1::1/64";
+    rib.addr_dyn_add(index, alone.parse().unwrap(), pd, lease)
+        .await;
+    assert_eq!(kernel_addr("pd6", alone).0, 3600);
+    assert!(route("2001:db8:100:1::/64").contains("expires"));
+    rib.addr_dyn_del(index, alone.parse().unwrap(), pd).await;
+    assert!(!ip(&["-6", "addr", "show", "dev", "pd6"]).contains("2001:db8:100:1::1"));
+    assert_eq!(route("2001:db8:100:1::/64"), "");
+    assert!(rib.links[&index].addr6.iter().all(|a| a.dynamic.is_none()));
+
+    // Beside an address the operator put in the same /64, whose route
+    // it is as well.
+    let shared = "2001:db8:100:2::1/64";
+    ip(&["-6", "addr", "add", "2001:db8:100:2::2/64", "dev", "pd6"]);
+    rib.addr_dyn_add(index, shared.parse().unwrap(), pd, lease)
+        .await;
+    rib.addr_dyn_del(index, shared.parse().unwrap(), pd).await;
+    assert!(!ip(&["-6", "addr", "show", "dev", "pd6"]).contains("2001:db8:100:2::1/"));
+    assert!(route("2001:db8:100:2::/64").contains("2001:db8:100:2::/64"));
+    ip(&["link", "del", "pd6"]);
+}
+
 /// A restart with a route record from the earlier run: the DHCP client's
 /// and the RA host's routes it names come back as their owners' leftovers,
 /// a route the owner installs again replaces its leftover, and the sweep

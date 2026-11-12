@@ -1,0 +1,15 @@
+# r1 as in r1.yaml, without lan1: what a restart finds when the
+# interface was taken out of the delegation while zebra-rs was down.
+interface:
+- if-name: wan0
+  ipv6:
+    address:
+    - dhcpv6
+    dhcpv6-options:
+      pd:
+      - id: 1
+        length: 56
+        interface:
+        - if-name: lan0
+          sla-id: 1
+          address: 1

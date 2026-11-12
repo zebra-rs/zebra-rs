@@ -6155,6 +6155,47 @@ module config {
                  what it sees fit. Changing it gives the prefix back and
                  asks again.";
             }
+            list interface {
+              ext:help "Give an interface a /64 of the delegated prefix";
+              key "if-name";
+              description
+                "An interface behind this router that is numbered from
+                 the delegation: it gets an address in one /64 of the
+                 prefix, for as long as the prefix is held and with the
+                 prefix's lifetimes, and the /64 is then on-link there.
+                 Not the interface the prefix is delegated on (RFC 8415
+                 section 6.3), and in the same VRF as it. Each interface
+                 of a delegation needs a /64 of its own: an `sla-id` no
+                 other has.";
+              leaf if-name {
+                ext:help "Interface name";
+                ext:dynamic "rib:interface";
+                type string;
+              }
+              leaf sla-id {
+                ext:help "Which /64 of the prefix: the subnet's number (default 0)";
+                type uint32;
+                description
+                  "The number of the /64 within the delegated prefix:
+                   the bits between the prefix's length and 64. A /56
+                   has 256 of them, 0 to 255; a /64 is its own only
+                   subnet, 0. A number the prefix the server delegates
+                   has no room for leaves the interface without an
+                   address, which the log and `show dhcpv6 client
+                   leases` say.";
+              }
+              leaf address {
+                ext:help "Host part of the interface's address (default: from its MAC, EUI-64)";
+                type uint64 {
+                  range "1..18446744073709551615";
+                }
+                description
+                  "The low 64 bits of the address: 1 gives `<subnet>::1`.
+                   Unset, they are made from the interface's hardware
+                   address (modified EUI-64), which an interface without
+                   one, a loopback for one, cannot do.";
+              }
+            }
           }
         }
       }

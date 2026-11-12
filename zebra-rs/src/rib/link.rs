@@ -266,6 +266,11 @@ pub enum AddrOrigin {
     Slaac,
     /// An address of a DHCPv6 lease (an IA_NA), held by the `dhcpc` task.
     Dhcp6,
+    /// An address in a /64 of a prefix delegated over DHCPv6 (an IA_PD),
+    /// which the `dhcpc` task gives an interface behind the router
+    /// (`dhcpv6-options pd <id> interface`). Unlike the others it brings
+    /// its connected route: the /64 is this router's to put on a link.
+    Pd,
 }
 
 impl fmt::Display for AddrOrigin {
@@ -274,6 +279,7 @@ impl fmt::Display for AddrOrigin {
             AddrOrigin::Dhcp4 => "dhcp",
             AddrOrigin::Slaac => "slaac",
             AddrOrigin::Dhcp6 => "dhcpv6",
+            AddrOrigin::Pd => "dhcpv6-pd",
         })
     }
 }
@@ -1941,9 +1947,31 @@ impl Rib {
         }
         // The claim stays on until the address is gone: `addr_del` reads
         // it to tell whether the address brought a connected route.
+        let leaves_route = existing.has_connected_route() && existing.has_lifetime();
         match addr {
             IpNet::V4(v4addr) => self.addr4_remove(ifindex, v4addr).await,
             IpNet::V6(v6addr) => {
+                // The kernel takes an IPv6 address's prefix route away
+                // with the address only when the address is permanent.
+                // One with a lifetime leaves the route to run out by
+                // itself, at the time the address would have: a
+                // delegated prefix that is given back, or replaced by
+                // another, would stay on-link here for as long as it
+                // had been valid. So the address is made permanent
+                // first. The kernel then removes the route with it,
+                // unless another address of the link is in the prefix.
+                if leaves_route
+                    && let Err(e) = self
+                        .fib_handle
+                        .addr_replace(ifindex, &addr, &crate::fib::AddrOpts::permanent())
+                        .await
+                {
+                    tracing::warn!(
+                        ifindex,
+                        %addr,
+                        "dynamic address: its prefix route may outlive it: {e}"
+                    );
+                }
                 self.fib_handle.addr_del_ipv6(ifindex, &v6addr).await;
                 self.addr_del(FibAddr {
                     addr,
