@@ -2709,6 +2709,7 @@ mod tests {
             // As many bits as an sla-id has, and more.
             ("2001:db8::/32", u32::MAX, Ok("2001:db8:ffff:ffff::/64")),
             ("2001::/16", u32::MAX, Ok("2001:0:ffff:ffff::/64")),
+            ("::/0", 5, Ok("0:0:0:5::/64")),
             // Nothing to give.
             ("2001:db8:100:5:8000::/65", 0, Err(NoAddress::NoSubnet)),
             ("2001:db8:100:5::1/128", 0, Err(NoAddress::NoSubnet)),
