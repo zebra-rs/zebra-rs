@@ -5,9 +5,10 @@ P2 (the RA host), P3 (the DHCPv6 client for an address and for
 `parameters-only`) and P4 (prefix delegation) are implemented:
 `dhcpv6-options pd <id>` asks for a delegated prefix, which is held,
 saved, shown and given a discard route, and `pd <id> interface <lan>`
-numbers an interface behind the router from it. Advertising those /64s
-to the hosts on such an interface (ND-PIO) and what follows is
-design.** Where a
+numbers an interface behind the router from it. ND-PIO is implemented
+too: an advertising interface names the /64s of its addresses in its
+Router Advertisements, those of a delegated prefix among them. What
+follows that is design.** Where a
 phase found the code to be different from what this document assumed,
 the text below says what was built and why.
 
@@ -106,7 +107,8 @@ zebra-rs's per-family containers. §16 lists the deviations.
     produces it.
   - `nd-packet` types the SLLA, PIO and MTU options. RDNSS and DNSSL come
     through as `NdOption::Unknown`.
-  - The RAs zebra-rs sends carry no PIO (`nd/config.rs:133`, `nd/send.rs:92`).
+  - The RAs zebra-rs sends carried no PIO (`nd/config.rs:133`,
+    `nd/send.rs:92`). They do since ND-PIO (D14).
 - There is no resolver, NTP or domain config. zebra-rs writes no
   resolv.conf. `system hostname` is internal only (`config.yang:610`).
 - **Show routing.** `show dhcp …` / `show dhcpv6 …` are routed whole to the
@@ -206,9 +208,16 @@ would bypass the RIB.
   - When the lease ends, the address stays. When the configuration is
     deleted while the lease holds, the RIB tells the client, which puts
     the lease's lifetime back.
-- `RibRx::AddrAdd` must also fire when only the lifetimes change. Today it
-  is silent (`AddrUpdate::Unchanged`), and `nd` needs the new lifetimes to
-  advertise PIOs (D14).
+- A change of lifetimes alone must reach `nd`, which needs the new
+  lifetimes to advertise PIOs (D14). As built it is not an
+  `RibRx::AddrAdd`, as first planned, but a message of its own,
+  `RibRx::AddrRenewed`, sent to the `global_links` subscribers only:
+  - an `AddrAdd` has a protocol that advertises an interface's
+    addresses originate anew, and a renewal comes with every lease and
+    every Router Advertisement heard (the reason
+    `AddrUpdate::Unchanged` was silent);
+  - `link_addr_update` so tells a renewal (`AddrUpdate::Renewed`) from
+    a notification that changes nothing.
 
 ### D6. Lease routes are protocol routes
 
@@ -454,7 +463,46 @@ per-interface helper is new.
   - advertise a removed prefix with preferred lifetime 0 and valid
     lifetime min(remaining, 2 h) (L-13).
 
-  Today `nd` sends no PIO. This is a dependency, ND-PIO (§14).
+  As built (ND-PIO, `nd/prefix.rs`):
+  - **Which prefixes.** The /64 of each global address of the
+    interface that is in the kernel and brings its connected route: a
+    configured one, and one from a delegated prefix. That is RFC 4861
+    §6.2.1's default for `AdvPrefixList`. Not a SLAAC or a leased
+    address (`noprefixroute`: another router's prefix), not one that
+    failed DAD, and not a prefix of another length, which no host
+    forms an address from. Both flags, L and A, are set.
+  - **No configuration.** `send-advertisements true` is all there is:
+    an interface that advertises names what it has. An interface with
+    link-local addresses alone (BGP unnumbered) names nothing, as
+    before.
+  - **Lifetimes.** RFC 4861's defaults (30 days valid, 7 preferred)
+    for an address that never ends, the same in every advertisement.
+    What is left of them, to the second, for an address that has
+    lifetimes: `nd` notes when they end as the RIB reports the address
+    (`RibRx::AddrAdd`, `AddrRenewed`, D5) and works out the rest when
+    an advertisement is built, not when it is scheduled.
+  - **A prefix that came or went is told at once**, as a router that
+    starts advertising tells what it has: the initial advertisements
+    again (RFC 4861 §6.2.4), the first within half a second. **A
+    lifetime that moved is told once, soon**: the old one may run out
+    before the next periodic advertisement, which can be ten minutes
+    away. Both keep to the three seconds between advertisements.
+  - **A prefix that went** (the delegation changed or was given back,
+    or the address was deleted) is advertised with both lifetimes 0
+    and its flags as they were, for as long as the valid lifetime it
+    was last advertised with: what was left of the address's, or 30
+    days for one that never ended. That is RFC 9096 §3.5, which
+    replaces the L-13 of RFC 7084 this document first went by (a
+    preferred lifetime of 0, and a valid one of the remaining lifetime
+    or two hours). A host that hears it deprecates its address, no
+    longer takes the prefix for on-link, and keeps the address for two
+    hours at most (RFC 4862 §5.5.3); one that was away meanwhile still
+    hears it when it is back. When the prefix comes back it is itself
+    again.
+  - **Shown** in `show ipv6 nd interface`, with the lifetimes of the
+    moment, and on one that went `(withdrawn, named for another …)`.
+  - Not kept across a restart: a prefix that went while zebra-rs was
+    down is not advertised as gone (§16).
 - **Show JSON** carries everything a consumer needs: address, gateway, DNS
   and delegated prefixes.
 - **Other zebra-rs code** gets a read-only handle,
@@ -567,7 +615,7 @@ A config-migration tool only has to move paths. No values change.
 | RA on-link prefix (L=1) | `Ra`, lives as long as the PIO's valid lifetime. Built (P2) as a nexthop with no gateway pinned to the interface, not `Nexthop::Link`, which the RIB does not install for a protocol route; the FIB installs it as `dev <if>` with no nexthop object | `proto ra` |
 | IA_NA address | `AddrDynAdd(Dhcp6)`, /128, `noprefixroute` | IA lifetimes |
 | Delegated prefix | `DhcpClient` discard route at distance 210, in the WAN interface's VRF (WPD-5). Built as `Nexthop::Blackhole`: the RIB has no unreachable form, so the packet is dropped without the ICMPv6 Destination Unreachable that WPD-5(a) asks for (§16). An unreachable form of `Nexthop` is what would send it | `blackhole <prefix> proto dhcp` |
-| LAN /64 from a delegation | `AddrDynAdd(Pd)` on the LAN interface, with its prefix route: the /64 is a connected route. When the address is given up, the RIB makes it permanent before it deletes it (`Rib::addr_dyn_del`): the kernel removes an IPv6 address's prefix route with the address only when the address is permanent, and one with a lifetime would leave its /64 on-link until that lifetime ran out | the prefix's lifetimes; `<subnet>/64 dev <lan> proto kernel` |
+| LAN /64 from a delegation | `AddrDynAdd(Pd)` on the LAN interface, with its prefix route: the /64 is a connected route. When the address is given up, the RIB makes it permanent before it deletes it (`Rib::addr_dyn_del`): the kernel removes an IPv6 address's prefix route with the address only when the address is permanent, and one with a lifetime would leave its /64 on-link until that lifetime ran out. The kernel reports that step as it reports any change to an address, after the address is gone from the RIB; that notification is dropped (`Rib::addr_withdrawing`), or the address would be back for a moment, as a permanent one, and every subscriber told of it | the prefix's lifetimes; `<subnet>/64 dev <lan> proto kernel` |
 
 **Withdrawal** happens on expiry, NAK, Release, a deleted configuration, a
 VRF move, or a router lifetime of 0. A withdrawal sends the matching
@@ -1478,7 +1526,7 @@ is given), and Router Advertisements (RDNSS, DNSSL).**
 | P2 (done) | RA host in `nd`: RS, default route, on-link prefixes, `ipv6 address autoconf`, `ra-options`, `accept_ra=0`; show section | P1's RIB plumbing |
 | P3 (done) | DHCPv6 IA_NA and `parameters-only`; DUID; `show dhcpv6 client leases`, `renew/release dhcpv6` | P0, P2 |
 | P4 (done) | IA_PD: discard route, LAN assignment, prefix change. The state machine, `dhcpv6-options pd <id> [length]`, the discard route, `pd <id> interface <lan>` with `AddrOrigin::Pd` and the `sla-id` arithmetic, prefixes and the addresses they give in the lease file and in show, `dhcpv6_client_pd`, `dhcpv6_client_pd_lan`. Left: an unreachable form of the route (§16), `dhcpv6_pd_insomnia` | P3 |
-| ND-PIO | `nd` advertises PIOs for LAN /64s with counted-down lifetimes, deprecates removed ones (L-13), `RibRx::AddrAdd` on lifetime change | P1's RIB plumbing; parallel to P2–P4 |
+| ND-PIO (done) | `nd` advertises PIOs for LAN /64s with counted-down lifetimes, deprecates removed ones (L-13 as RFC 9096 has it), `RibRx::AddrRenewed` on lifetime change; `ra_prefix` | P1's RIB plumbing; parallel to P2–P4 |
 | Resolver (the three sources done) | The `resolver` task; the name servers of a DHCPv4 lease, of a DHCPv6 server and of Router Advertisements to systemd-resolved by default, `no-name-server` under `dhcp-options`, `dhcpv6-options` and `ra-options` to keep them back (§13). Next: leftovers across a restart | P1; P2 and P3 for their sources |
 | P5 | MTU options, Reconfigure, IA_TA, prefix exclude, RFC 4191 routes, stable-privacy identifiers, `redistribute dhcp` | as needed |
 
@@ -1546,7 +1594,8 @@ client, and logs each message, which is what a scenario reads.
 | `dhcpv6_client` | IA_NA /128 with `noprefixroute`; default route and on-link prefix from the RA, and no SLAAC address unless `autoconf` is set too; renew; `release`; zebra-rs restart keeps the address and confirms it; `parameters-only`; deleted configuration releases |
 | `dhcpv6_client_dns` | against a stand-in for `resolvectl`, and a server whose lease and whose Router Advertisements name different name servers: the lease's servers and search list set with nothing configured but `address dhcpv6`, ahead of the advertised ones and behind a DHCPv4 lease's; reverted on `release` and on setting `dhcpv6-options no-name-server`, which leaves the advertised ones, and set again when that is deleted; nothing set for a lease taken, or resumed after a restart, under `no-name-server`; set again after a restart; what `parameters-only` is given set with no lease and no RA host; deleted configuration reverts |
 | `dhcpv6_client_pd` | As built: the address and the prefix in one exchange, with the hint on the wire; the discard route in the RIB and in the kernel, and that it ends a packet which a routed prefix without one sends round between the two routers; renew; a restart resumes the prefix and its route and verifies them by a Rebind; a second `pd`, and one the server has nothing for; a prefix without an address; `parameters-only` refused beside `pd`; deleted configuration releases and withdraws |
-| `dhcpv6_client_pd_lan` | As built: two interfaces numbered from one delegation, one by `address` and one by EUI-64, each with the prefix's lifetime and the route to its /64; a host behind the router reached from the delegating router through the prefix; a link set down and up has its address again; a renewal that brings other lifetimes moves the addresses'; another prefix replaces the discard route and the addresses, and the old /64 is on-link no longer; an `sla-id` moved, one beyond the prefix (no address, and said), two interfaces on one /64 and the upstream interface refused, none of it a new lease; a restart keeps the addresses and removes that of an interface no longer configured; an interface, then the delegation, deleted. With ND-PIO: a LAN host SLAACs from it |
+| `dhcpv6_client_pd_lan` | As built: two interfaces numbered from one delegation, one by `address` and one by EUI-64, each with the prefix's lifetime and the route to its /64; a host behind the router reached from the delegating router through the prefix; a link set down and up has its address again; a renewal that brings other lifetimes moves the addresses'; another prefix replaces the discard route and the addresses, and the old /64 is on-link no longer; an `sla-id` moved, one beyond the prefix (no address, and said), two interfaces on one /64 and the upstream interface refused, none of it a new lease; a restart keeps the addresses and removes that of an interface no longer configured; an interface, then the delegation, deleted |
+| `ra_prefix` | As built: a router that numbers an interface from a delegated prefix, has an address of its own on it and advertises there; a host with nothing configured forms an address in both /64s, takes the router for its default and reaches the delegating router; the configured prefix has RFC 4861's lifetimes and the delegated one the lease's; a renewal with longer lifetimes reaches the host without waiting for the periodic advertisement; another prefix from the server gives the host a new address, deprecates the old one and takes its on-link route away; a configured address deleted deprecates its prefix, and set again restores it; so does a delegation given back; an interface that stops advertising names nothing |
 | `dhcpv6_pd_insomnia` | a zebra-rs + insomnia router serving PD (insomnia's existing DHCPv6 server) to a zebra-rs client router: both sides of the feature in one topology |
 
 ---
@@ -1565,6 +1614,8 @@ client, and logs each message, which is what a scenario reads.
 | Prefix exclude | RFC 7084 WPD-8 (SHOULD) | not supported | P5 |
 | Route for a delegated prefix | RFC 7084 WPD-5: discard, and (a) SHOULD answer with ICMPv6 Destination Unreachable | a blackhole route: the packet is dropped and nothing is sent | the RIB has no unreachable nexthop; the loop WPD-5 is there to prevent is prevented either way |
 | Internal address from PD | RFC 7084 WAA-7 | explicit `pd … interface lo` | no implicit interfaces |
+| PIO lifetimes of a delegated prefix | RFC 9096 §3.4 (L-16, SHOULD): at most 45 min preferred and 90 min valid, whatever the lease says | the lease's remaining lifetimes, which is what §3.3 (L-15, MUST) asks: never past them | D14's rule; the caps cost the hosts their addresses when the router is away for 90 minutes, and are for the operator to choose. Not built |
+| A prefix that went while zebra-rs was not running | RFC 9096 §3.5 (SHOULD): record the prefixes advertised on stable storage, and deprecate them after a restart | not advertised as gone: `nd` learns the prefixes from the addresses the interface has when it starts | needs a record on disk, as the routes and the name servers have; the hosts keep such a prefix for what was left of its lifetime |
 | IPv6-only preferred (option 108) | RFC 8925 | not requested | a dual-stack WAN wants its IPv4 lease |
 | ACD | RFC 5227: 3 probes, 1–2 s apart | 2 probes, 1 s apart | bounded bind delay |
 | A full RDNSS or DNSSL list | RFC 8106 §6.2 (d): make room by dropping the entry that expires first | a new entry past 64 held is ignored | what systemd-networkd does, with its bound (`NDISC_RDNSS_MAX`, `NDISC_DNSSL_MAX`): whoever advertises last does not get to push the others out |

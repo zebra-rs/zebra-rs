@@ -534,9 +534,12 @@ and `lan2` an address in `2001:db8:100:2::/64`.
 - **Changing the interfaces does not touch the lease.** Only adding or
   deleting the `pd` itself, or changing its `length`, asks the server
   again.
-- **Hosts on the interface are not told yet.** The Router
-  Advertisements zebra-rs sends carry no prefix, so a host does not
-  form an address from the /64 by itself ([Not done yet](#not-done-yet)).
+- **Hosts on the interface get their addresses from it** when the
+  interface sends Router Advertisements (`ipv6 router-advertisements
+  send-advertisements true`): the /64 is named in them with the
+  prefix's lifetimes, and a prefix that the server replaces is taken
+  out of use on the hosts at once. See
+  [Router Advertisements](ch-00-02-interface-configuration.md#router-advertisements).
 
 ```
 router> show dhcpv6 client leases
@@ -566,9 +569,9 @@ interface was taken out of the configuration meanwhile is removed.
 - The interface MTU option (26) is not applied.
 - A classless route whose router is `0.0.0.0` (an on-link destination)
   is not installed; a log line says so.
-- A /64 of a delegated prefix that an interface is numbered from is
-  not advertised to the hosts on it: Router Advertisements carry no
-  prefix yet.
+- A delegated prefix that changed while zebra-rs was not running is
+  not taken out of use on the hosts behind the router: they keep their
+  old addresses until the lifetime they last heard runs out.
 - The discard route of a delegated prefix drops a packet without the
   ICMPv6 Destination Unreachable that RFC 7084 asks for.
 - The RA host does not advertise the prefixes it learns on other

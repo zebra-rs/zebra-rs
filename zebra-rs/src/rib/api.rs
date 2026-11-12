@@ -133,6 +133,14 @@ pub enum RibRx {
     },
     AddrAdd(LinkAddr),
     AddrDel(LinkAddr),
+    /// The lifetimes of an address that is known moved, and nothing
+    /// else of it did: a lease was renewed, a Router Advertisement
+    /// heard again. Not an `AddrAdd`, which has a protocol that
+    /// advertises an interface's addresses originate anew: this comes
+    /// with every renewal. It is for whoever counts lifetimes down
+    /// (`nd`, for the prefixes its Router Advertisements name), and
+    /// goes to `global_links` subscribers only.
+    AddrRenewed(LinkAddr),
     RouterIdUpdate(Ipv4Addr),
     /// The running config's `system hostname`, `None` when it has none:
     /// the name a protocol advertises for this router when no hostname of
@@ -476,6 +484,16 @@ impl Rib {
     pub fn api_addr_add_vrf(&self, addr: &LinkAddr, vrf_id: u32) {
         for (_, sub) in self.client_registry.iter_link_subs(vrf_id) {
             let _ = sub.rib_rx_tx.send(RibRx::AddrAdd(addr.clone()));
+        }
+    }
+
+    /// Push `AddrRenewed` to the `global_links` subscribers: the ones
+    /// that follow every interface, whichever VRF it is in.
+    pub fn api_addr_renewed(&self, addr: &LinkAddr) {
+        let vrf_id = self.ifindex_vrf_id(addr.ifindex);
+        let subs = self.client_registry.iter_link_subs(vrf_id);
+        for (_, sub) in subs.filter(|(_, sub)| sub.global_links) {
+            let _ = sub.rib_rx_tx.send(RibRx::AddrRenewed(addr.clone()));
         }
     }
 

@@ -760,11 +760,14 @@ pub enum AddrUpdate {
     /// every registry fed by AddrAdd is idempotent against
     /// re-delivery of a known address.
     Refreshed,
-    /// The address was present and nothing broadcast-worthy changed —
-    /// a kernel re-notify, or an `IFA_CACHEINFO` lifetime renewal
-    /// (adopted into the stored entry silently: every RA refreshes
-    /// the lifetimes, and re-broadcasting each one would have IS-IS
-    /// re-originating LSPs on the RA interval).
+    /// The address was present and only its lifetimes moved
+    /// (`IFA_CACHEINFO`): a lease renewed, or an RA heard again. The
+    /// stored entry follows. It is not an `AddrAdd` to protocol clients
+    /// (every RA refreshes the lifetimes, and re-broadcasting each one
+    /// would have IS-IS re-originating LSPs on the RA interval); those
+    /// that count lifetimes down are told with `RibRx::AddrRenewed`.
+    Renewed,
+    /// The address was present and nothing changed: a kernel re-notify.
     Unchanged,
 }
 
@@ -817,8 +820,11 @@ pub fn link_addr_update(link: &mut Link, addr: LinkAddr) -> AddrUpdate {
         // Flag / scope movement is broadcast-worthy (Refreshed);
         // lifetime renewal is adopted silently — see [`AddrUpdate`].
         let mut refreshed = false;
+        let mut renewed = false;
         if !addr.config {
             refreshed = existing.scope != addr.scope || existing.flags != addr.flags;
+            renewed = existing.valid_lft != addr.valid_lft
+                || existing.preferred_lft != addr.preferred_lft;
             existing.scope = addr.scope;
             existing.flags = addr.flags;
             existing.valid_lft = addr.valid_lft;
@@ -834,6 +840,8 @@ pub fn link_addr_update(link: &mut Link, addr: LinkAddr) -> AddrUpdate {
             AddrUpdate::Merged
         } else if refreshed {
             AddrUpdate::Refreshed
+        } else if renewed {
+            AddrUpdate::Renewed
         } else {
             AddrUpdate::Unchanged
         };
@@ -1657,13 +1665,17 @@ impl Rib {
                 }
             }
             // Don't re-broadcast a notification that changed nothing (the
-            // kernel echoing an address we already hold, a lifetime-only
-            // renewal). Added / Merged / Refreshed all carry state a
-            // subscriber can act on; every AddrAdd-fed registry is
-            // idempotent against re-delivery of a known address.
+            // kernel echoing an address we already hold). Added / Merged /
+            // Refreshed all carry state a subscriber can act on; every
+            // AddrAdd-fed registry is idempotent against re-delivery of
+            // a known address. A lifetime-only renewal is its own,
+            // narrower message (`RibRx::AddrRenewed`).
             if matches!(
                 update,
-                AddrUpdate::Added | AddrUpdate::Merged | AddrUpdate::Refreshed
+                AddrUpdate::Added
+                    | AddrUpdate::Merged
+                    | AddrUpdate::Refreshed
+                    | AddrUpdate::Renewed
             ) {
                 // Broadcast the merged entry, not the raw incoming addr —
                 // a config push landing on a kernel-known address must
@@ -1679,7 +1691,11 @@ impl Rib {
                     .find(|a| a.addr == addr.addr)
                     .cloned()
                     .unwrap_or(addr);
-                self.api_addr_add(&canonical);
+                if update == AddrUpdate::Renewed {
+                    self.api_addr_renewed(&canonical);
+                } else {
+                    self.api_addr_add(&canonical);
+                }
             }
         }
     }
@@ -1960,17 +1976,25 @@ impl Rib {
                 // had been valid. So the address is made permanent
                 // first. The kernel then removes the route with it,
                 // unless another address of the link is in the prefix.
-                if leaves_route
-                    && let Err(e) = self
+                if leaves_route {
+                    let permanent = crate::fib::AddrOpts::permanent();
+                    match self
                         .fib_handle
-                        .addr_replace(ifindex, &addr, &crate::fib::AddrOpts::permanent())
+                        .addr_replace(ifindex, &addr, &permanent)
                         .await
-                {
-                    tracing::warn!(
-                        ifindex,
-                        %addr,
-                        "dynamic address: its prefix route may outlive it: {e}"
-                    );
+                    {
+                        // The kernel will report the address as a
+                        // permanent one, which is not to be taken for
+                        // an address that appeared (`addr_withdrawing`).
+                        Ok(()) => {
+                            self.addr_withdrawing.insert((ifindex, addr));
+                        }
+                        Err(e) => tracing::warn!(
+                            ifindex,
+                            %addr,
+                            "dynamic address: its prefix route may outlive it: {e}"
+                        ),
+                    }
                 }
                 self.fib_handle.addr_del_ipv6(ifindex, &v6addr).await;
                 self.addr_del(FibAddr {
@@ -2714,6 +2738,53 @@ mod tests {
         assert!(matches!(flags.as_slice(), [f] if !f.tentative), "{flags:?}");
     }
 
+    /// A renewal is told as what it is, to those that follow every
+    /// link (`nd` counts down the prefixes it advertises), and to no
+    /// protocol as an address that appeared: IS-IS would originate anew
+    /// with every lease renewal.
+    #[tokio::test]
+    async fn a_renewal_is_told_to_those_that_follow_lifetimes_only() {
+        use crate::rib::api::RibRx;
+        use crate::rib::client::ProtoId;
+
+        let mut rib = Rib::new(false).expect("rib");
+        let (tx, mut protocol) = tokio::sync::mpsc::unbounded_channel();
+        rib.client_registry
+            .register_with_id(ProtoId::from_raw(0), "isis", tx, 0, false);
+        let (tx, mut follower) = tokio::sync::mpsc::unbounded_channel();
+        rib.client_registry
+            .register_with_id(ProtoId::from_raw(1), "nd", tx, 0, true);
+        rib.links.insert(1, test_link());
+        let leased = |preferred, valid| FibAddr {
+            addr: "2001:db8:100:1::1/64".parse().unwrap(),
+            link_index: 1,
+            valid_lft: Some(valid),
+            preferred_lft: Some(preferred),
+            ..Default::default()
+        };
+
+        rib.addr_add_from(leased(3600, 7200), AddrFrom::Dynamic(AddrOrigin::Pd));
+        assert!(matches!(protocol.try_recv(), Ok(RibRx::AddrAdd(_))));
+        assert!(matches!(follower.try_recv(), Ok(RibRx::AddrAdd(_))));
+
+        // The lease is renewed.
+        rib.addr_add_from(leased(1800, 3600), AddrFrom::Dynamic(AddrOrigin::Pd));
+        assert!(protocol.try_recv().is_err());
+        let Ok(RibRx::AddrRenewed(renewed)) = follower.try_recv() else {
+            panic!("the renewal is told");
+        };
+        assert_eq!(
+            (renewed.preferred_lft, renewed.valid_lft),
+            (Some(1800), Some(3600))
+        );
+        assert_eq!(renewed.dynamic, Some(AddrOrigin::Pd));
+        assert!(follower.try_recv().is_err());
+
+        // The same lifetimes again say nothing to anybody.
+        rib.addr_add_from(leased(1800, 3600), AddrFrom::Dynamic(AddrOrigin::Pd));
+        assert!(protocol.try_recv().is_err() && follower.try_recv().is_err());
+    }
+
     /// A lease's address is claimed (`dynamic`), not configured: a
     /// renewal only moves its lifetimes, a kernel notification keeps the
     /// claim, and once the kernel expires it, it is gone for good instead
@@ -2793,7 +2864,7 @@ mod tests {
     }
 
     #[test]
-    fn test_link_addr_update_lifetime_renewal_is_silent() {
+    fn test_link_addr_update_lifetime_renewal_is_no_address_event() {
         let mut link = test_link();
         let mut slaac = test_addr_v6("2001:db8::5054:ff:fe00:1/64", false, true);
         slaac.valid_lft = Some(86400);
@@ -2801,12 +2872,23 @@ mod tests {
         assert_eq!(link_addr_update(&mut link, slaac), AddrUpdate::Added);
 
         // Each RA renews the lifetimes; the stored entry follows but
-        // protocol clients are NOT re-notified — Unchanged, not
-        // Refreshed, or IS-IS would re-originate LSPs per RA interval.
+        // protocol clients are NOT re-notified with an AddrAdd —
+        // Renewed, not Refreshed, or IS-IS would re-originate LSPs per
+        // RA interval.
         let mut renewed = test_addr_v6("2001:db8::5054:ff:fe00:1/64", false, true);
         renewed.valid_lft = Some(86400);
         renewed.preferred_lft = Some(13000);
+        assert_eq!(
+            link_addr_update(&mut link, renewed.clone()),
+            AddrUpdate::Renewed
+        );
+        assert_eq!(link.addr6[0].preferred_lft, Some(13000));
+        // The same word again says nothing, and neither does the
+        // configuration's entry for the address, which knows no
+        // lifetime.
         assert_eq!(link_addr_update(&mut link, renewed), AddrUpdate::Unchanged);
+        let config = test_addr_v6("2001:db8::5054:ff:fe00:1/64", true, true);
+        assert_eq!(link_addr_update(&mut link, config), AddrUpdate::Merged);
         assert_eq!(link.addr6[0].preferred_lft, Some(13000));
     }
 

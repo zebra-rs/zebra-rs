@@ -17,12 +17,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::net::Ipv6Addr;
 use std::time::Instant;
 
-use nd_packet::RaFlags;
+use nd_packet::{NdOption, RaFlags};
 
 use crate::rib::api::RibRx;
 use crate::rib::link::{Link, LinkAddr};
 
 use super::host::{HostLink, RaHosts};
+use super::prefix::{Advertised, Change, Prefixes};
 use super::send::{RaEvent, RaSendConfig, RaSender};
 use super::{DropReason, NdRecv, NdSend};
 
@@ -161,6 +162,10 @@ pub struct NdEngine {
     /// RIB. Independent of `senders`: an interface can be either, or
     /// both.
     hosts: RaHosts,
+    /// What each interface names of prefixes in its advertisements
+    /// (the RA sender's side): kept for every link, since an address
+    /// may come before the interface is told to advertise.
+    prefixes: Prefixes,
 }
 
 /// What a link-local can do for RA, from its kernel state.
@@ -295,6 +300,7 @@ impl NdEngine {
             neighbors: BTreeMap::new(),
             link_locals: BTreeMap::new(),
             hosts: RaHosts::new(),
+            prefixes: Prefixes::default(),
         }
     }
 
@@ -328,8 +334,39 @@ impl NdEngine {
             RibRx::LinkDel(ifindex) => self.process_link_del(ifindex),
             RibRx::AddrAdd(addr) => self.process_addr(&addr, true, now),
             RibRx::AddrDel(addr) => self.process_addr(&addr, false, now),
+            // Only its lifetimes moved: those of the prefix it gives.
+            RibRx::AddrRenewed(addr) => {
+                let change = self.prefixes.addr_add(&addr, now);
+                self.prefixes_changed(addr.ifindex, change, now);
+            }
             _ => {}
         }
+    }
+
+    /// What `ifindex` advertises of prefixes has changed: have its
+    /// hosts hear of it.
+    ///
+    /// A prefix that came or went is told like a router that starts
+    /// advertising tells what it has, a few times in short order (RFC
+    /// 4861 §6.2.4 allows that when the information changes): a host
+    /// that misses the one advertisement which names a prefix on its
+    /// way out would go on using it. A lifetime that moved is told
+    /// once, soon: the old one may end before the next advertisement
+    /// is due.
+    fn prefixes_changed(&mut self, ifindex: u32, change: Change, now: Instant) {
+        let Some(sender) = self.senders.get_mut(&ifindex) else {
+            return;
+        };
+        match change {
+            Change::None => {}
+            Change::Lifetime => sender.advertise_soon(now),
+            Change::Prefixes => sender.restart_initial(now),
+        }
+    }
+
+    /// The prefixes `ifindex` names in its advertisements at `now`.
+    pub fn prefixes(&self, ifindex: u32, now: Instant) -> Vec<Advertised> {
+        self.prefixes.advertised(ifindex, now)
     }
 
     /// Absorb a link-add notification from RIB. The reverse — the
@@ -377,6 +414,8 @@ impl NdEngine {
         if !was_down {
             self.update_link_local_hold(link.index, was_held, now);
         }
+        let change = self.prefixes.link_set(link.index, &link.addr6, now);
+        self.prefixes_changed(link.index, change, now);
 
         // Deferred config apply: the operator's `send-advertisements`
         // may have been committed before RIB announced this link.
@@ -502,6 +541,12 @@ impl NdEngine {
             self.hosts
                 .addr_event(addr.ifindex, net, addr.flags.dadfailed, add);
         }
+        let change = if add {
+            self.prefixes.addr_add(addr, now)
+        } else {
+            self.prefixes.addr_del(addr, now)
+        };
+        self.prefixes_changed(addr.ifindex, change, now);
         let Some((ll, state)) = link_local_state(addr) else {
             return;
         };
@@ -586,6 +631,7 @@ impl NdEngine {
     /// back up through the deferred apply in `process_link_add`.
     pub fn process_link_del(&mut self, ifindex: u32) {
         self.hosts.link_del(ifindex);
+        self.prefixes.link_del(ifindex);
         self.senders.remove(&ifindex);
         self.down_links.remove(&ifindex);
         self.link_locals.remove(&ifindex);
@@ -790,6 +836,7 @@ impl NdEngine {
     /// failure, but not every one: the address can go between the
     /// RIB's view and the `sendmsg`, and the socket can fail on its own.
     pub fn tick(&mut self, now: Instant, mut send: impl FnMut(NdSend) -> std::io::Result<()>) {
+        self.prefixes.expire(now);
         for (&ifindex, sender) in self.senders.iter_mut() {
             // Disjoint field borrows: `senders` is mutably borrowed by
             // the iterator; `down_links`, `link_locals`,
@@ -802,11 +849,20 @@ impl NdEngine {
                 continue;
             };
             let (RaEvent::SendUnsolicited { ra } | RaEvent::SendSolicited { ra }) = &ev;
+            // The interface's prefixes, with the lifetimes they have at
+            // this moment: the sender's template knows neither.
+            let mut ra = ra.clone();
+            let prefixes = self.prefixes.advertised(ifindex, now);
+            ra.options.extend(
+                prefixes
+                    .iter()
+                    .map(|prefix| NdOption::PrefixInformation(prefix.option())),
+            );
             let frame = NdSend::RouterAdvert {
                 ifindex,
                 src: ra_source(&self.link_locals, ifindex),
                 dst: ALL_NODES,
-                ra: ra.clone(),
+                ra,
             };
             let name = self
                 .name_by_ifindex
@@ -968,6 +1024,20 @@ pub(crate) mod fixtures {
             ifindex,
             fib: true,
             scope: AddrScope::Link,
+            ..Default::default()
+        }
+    }
+
+    /// Global address `addr` on `ifindex`, with (preferred, valid)
+    /// lifetimes when it has any.
+    pub(crate) fn global(ifindex: u32, addr: &str, lifetimes: Option<(u32, u32)>) -> LinkAddr {
+        LinkAddr {
+            addr: addr.parse().unwrap(),
+            ifindex,
+            fib: true,
+            scope: AddrScope::Universe,
+            preferred_lft: lifetimes.map(|(preferred, _)| preferred),
+            valid_lft: lifetimes.map(|(_, valid)| valid),
             ..Default::default()
         }
     }
@@ -1281,6 +1351,150 @@ mod tests {
         eng.process_link_add(&link("eth0", 7), start);
         assert!(eng.is_enabled(7), "pending config applied on LinkAdd");
         assert!(eng.next_wakeup().is_some());
+    }
+
+    /// The prefixes the Router Advertisements among `sent` name, as
+    /// `prefix preferred/valid`, with the interface each went out of.
+    fn prefixes_told(sent: &[NdSend]) -> Vec<String> {
+        let mut out = Vec::new();
+        for frame in sent {
+            let NdSend::RouterAdvert { ifindex, ra, .. } = frame else {
+                continue;
+            };
+            for option in &ra.options {
+                if let NdOption::PrefixInformation(pi) = option {
+                    assert!(pi.flags.contains(nd_packet::PrefixInfoFlags::L));
+                    assert!(pi.flags.contains(nd_packet::PrefixInfoFlags::A));
+                    out.push(format!(
+                        "if{ifindex} {}/{} {}/{}",
+                        pi.prefix, pi.prefix_length, pi.preferred_lifetime, pi.valid_lifetime
+                    ));
+                }
+            }
+        }
+        out
+    }
+
+    fn secs(n: u64) -> Duration {
+        Duration::from_secs(n)
+    }
+
+    /// An advertising interface names the /64 of each of its global
+    /// addresses, with RFC 4861's lifetimes for one that never ends and
+    /// what is left of them for one that does; an interface without
+    /// one names none.
+    #[test]
+    fn an_advertisement_names_the_interface_s_prefixes() {
+        let start = t0();
+        let mut eng = NdEngine::new();
+        // The addresses come with the link, before it is told to
+        // advertise.
+        let mut eth0 = link("eth0", 7);
+        eth0.addr6.push(global(7, "2001:db8:1::1/64", None));
+        eth0.addr6
+            .push(global(7, "2001:db8:100:1::1/64", Some((3600, 7200))));
+        eng.process_link_add(&eth0, start);
+        eng.process_link_add(&link("eth1", 8), start);
+        eng.set_ra_config("eth0".into(), RaSendConfig::default(), start);
+        eng.set_ra_config("eth1".into(), RaSendConfig::default(), start);
+
+        // The first of the initial advertisements, 16 s on.
+        let sent = tick_ok(&mut eng, start + secs(16));
+        assert_eq!(sent.len(), 2);
+        assert_eq!(
+            prefixes_told(&sent),
+            [
+                "if7 2001:db8:1::/64 604800/2592000",
+                "if7 2001:db8:100:1::/64 3584/7184",
+            ]
+        );
+        // The engine says the same to `show`.
+        let shown = eng.prefixes(7, start + secs(16));
+        assert_eq!(shown.len(), 2);
+        assert_eq!((shown[1].preferred, shown[1].valid), (3584, 7184));
+        assert!(eng.prefixes(8, start).is_empty());
+    }
+
+    /// A prefix that comes or goes is told at once, as a router that
+    /// starts advertising tells what it has; a lifetime that moves is
+    /// told once, soon; and a prefix that went is named on its way out.
+    #[test]
+    fn a_change_of_prefixes_is_advertised_without_waiting_for_the_schedule() {
+        let start = t0();
+        let mut eng = NdEngine::new();
+        eng.process_link_add(&link("eth0", 7), start);
+        eng.set_ra_config("eth0".into(), RaSendConfig::default(), start);
+        // Through the three initial advertisements, and one periodic.
+        for at in [16, 32, 48, 700] {
+            assert_eq!(tick_ok(&mut eng, start + secs(at)).len(), 1, "{at}");
+        }
+        assert_eq!(eng.sender(7).unwrap().initial_remaining(), 0);
+        let quiet = start + secs(710);
+        assert!(tick_ok(&mut eng, quiet).is_empty());
+
+        // An address from a delegated prefix arrives.
+        let leased = || global(7, "2001:db8:100:1::1/64", Some((3600, 7200)));
+        eng.process_rib_msg(RibRx::AddrAdd(leased()), quiet);
+        let sent = tick_ok(&mut eng, quiet + secs(1));
+        assert_eq!(prefixes_told(&sent), ["if7 2001:db8:100:1::/64 3599/7199"]);
+        // It is the first of three again.
+        let sender = eng.sender(7).unwrap();
+        assert_eq!(sender.initial_remaining(), 2);
+        for at in [17, 33] {
+            assert_eq!(tick_ok(&mut eng, quiet + secs(1 + at)).len(), 1, "{at}");
+        }
+        // Back on the periodic schedule; flush the one that is due.
+        let later = quiet + secs(1800);
+        assert_eq!(tick_ok(&mut eng, later - secs(10)).len(), 1);
+        assert!(tick_ok(&mut eng, later).is_empty());
+
+        // The lease is renewed: only the lifetimes move. One
+        // advertisement, soon, and no new start.
+        eng.process_rib_msg(RibRx::AddrRenewed(leased()), later);
+        let sent = tick_ok(&mut eng, later + secs(1));
+        assert_eq!(prefixes_told(&sent), ["if7 2001:db8:100:1::/64 3599/7199"]);
+        assert_eq!(eng.sender(7).unwrap().initial_remaining(), 0);
+        assert!(tick_ok(&mut eng, later + secs(20)).is_empty());
+        // The kernel saying the same again, a second on, brings none.
+        let again = global(7, "2001:db8:100:1::1/64", Some((3599, 7199)));
+        eng.process_rib_msg(RibRx::AddrRenewed(again), later + secs(1));
+        assert!(tick_ok(&mut eng, later + secs(30)).is_empty());
+
+        // The prefix is taken away, 100 s into its 7200: named at once
+        // with both lifetimes zero.
+        let gone = later + secs(100);
+        eng.process_rib_msg(RibRx::AddrDel(leased()), gone);
+        let sent = tick_ok(&mut eng, gone + secs(1));
+        assert_eq!(prefixes_told(&sent), ["if7 2001:db8:100:1::/64 0/0"]);
+        assert_eq!(eng.sender(7).unwrap().initial_remaining(), 2);
+        assert_eq!(eng.prefixes(7, gone)[0].gone, Some(7100));
+        // For as long as its valid lifetime was, and then no more.
+        let sent = tick_ok(&mut eng, gone + secs(7099));
+        assert_eq!(prefixes_told(&sent), ["if7 2001:db8:100:1::/64 0/0"]);
+        assert!(eng.prefixes(7, gone + secs(7100)).is_empty());
+        // The next periodic advertisement names none.
+        let sent = tick_ok(&mut eng, gone + secs(7100 + 700));
+        assert_eq!(sent.len(), 1);
+        assert!(prefixes_told(&sent).is_empty());
+    }
+
+    /// A deleted link takes its prefixes along: a link made anew under
+    /// the same index starts with none.
+    #[test]
+    fn a_deleted_link_forgets_its_prefixes() {
+        let start = t0();
+        let mut eng = NdEngine::new();
+        let mut eth0 = link("eth0", 7);
+        eth0.addr6.push(global(7, "2001:db8:1::1/64", None));
+        eng.process_link_add(&eth0, start);
+        assert_eq!(eng.prefixes(7, start).len(), 1);
+        eng.process_link_del(7);
+        assert!(eng.prefixes(7, start).is_empty());
+        // A link described anew without the address: on its way out.
+        eng.process_link_add(&eth0, start);
+        eng.process_link_add(&link("eth0", 7), start);
+        let now = eng.prefixes(7, start);
+        assert!(now.len() == 1 && now[0].gone.is_some(), "{now:?}");
     }
 
     #[test]
