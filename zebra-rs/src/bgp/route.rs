@@ -13230,10 +13230,7 @@ fn entry_matches_bgpls(
     {
         return false;
     }
-    if match_color.is_some() && !matches_color(entry, bgp_attr) {
-        return false;
-    }
-    true
+    match_color.is_none() || matches_color(entry, bgp_attr)
 }
 
 /// The egress copy of a locally originated attribute (BGP-LS, SR Policy)
@@ -17537,10 +17534,7 @@ fn entry_matches(
             return false;
         }
     }
-    if !matches_color(entry, bgp_attr) {
-        return false;
-    }
-    true
+    matches_color(entry, bgp_attr)
 }
 
 /// Color (RFC 9012 §4.3) match shared between the IPv4 and EVPN
@@ -17769,10 +17763,7 @@ fn entry_matches_evpn(
             return false;
         }
     }
-    if !matches_color(entry, bgp_attr) {
-        return false;
-    }
-    true
+    matches_color(entry, bgp_attr)
 }
 
 /// Apply a `set community <community-set> [additive]` action to `bgp_attr`.
