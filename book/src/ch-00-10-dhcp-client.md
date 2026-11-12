@@ -1,8 +1,60 @@
 # DHCP Client
 
+zebra-rs can take an interface's addresses, routes and name servers
+from the network. It runs the clients itself: a DHCPv4 client, a DHCPv6
+client, and a host for IPv6 Router Advertisements. No dhclient, dhcpcd,
+systemd-networkd or NetworkManager is involved, and none should manage
+the same interface.
+
+All of it is configured on the interface, and all of it is part of
+every zebra-rs. No `--feature` flag turns it on. The DHCP *server* and
+relay are another matter: they are the insomnia daemon's, and their
+commands need
+[`--feature insomnia`](ch-00-05-command-line-options.md#--feature-modulefeature).
+
+| Under `interface <name>` | What it does | Section |
+|---|---|---|
+| `ipv4 address dhcp` | Leases an IPv4 address, with its default route and classless routes. | [IPv4: DHCP](#ipv4-dhcp) |
+| `ipv4 dhcp-options …` | Tunes that client. | [Options](#options) |
+| `ipv6 address autoconf` | Takes the default route, the on-link prefixes and SLAAC addresses from Router Advertisements. | [IPv6: Router Advertisements and SLAAC](#ipv6-router-advertisements-and-slaac) |
+| `ipv6 ra-options …` | Tunes what Router Advertisements give. | the same |
+| `ipv6 address dhcpv6` | Leases an IPv6 address. Its routes come from Router Advertisements. | [IPv6: DHCPv6](#ipv6-dhcpv6) |
+| `ipv6 dhcpv6-options pd <id>` | Has a prefix delegated, to number the interfaces behind the router from. | [IPv6: prefix delegation](#ipv6-prefix-delegation) |
+| `ipv6 dhcpv6-options parameters-only` | Asks a DHCPv6 server for name servers and the like, and for nothing to lease. | [IPv6: DHCPv6](#ipv6-dhcpv6) |
+
+An uplink that takes everything from its provider, and numbers one
+interface behind the router from the prefix it is delegated:
+
+```
+interface wan0 {
+  ipv4 {
+    address dhcp;
+  }
+  ipv6 {
+    address dhcpv6;
+    dhcpv6-options {
+      pd 1 {
+        length 56;
+        interface lan0 {
+          sla-id 1;
+          address 1;
+        }
+      }
+    }
+  }
+}
+```
+
+**The name servers an interface learns are the router's own, by
+default.** A lease's, a DHCPv6 server's and the ones Router
+Advertisements name are handed to systemd-resolved with nothing more
+configured, and `no-name-server` keeps them back: see
+[Name servers](#name-servers).
+
+## IPv4: DHCP
+
 `interface <name> ipv4 address dhcp` leases an IPv4 address from a DHCP
-server. zebra-rs runs the client itself; no dhclient, dhcpcd or
-systemd-networkd is involved, and none should manage the same interface.
+server.
 
 ```
 interface wan0 {
@@ -121,26 +173,40 @@ VRF's table and nothing reaches the default table.
 
 ## Name servers
 
-A DHCPv4 lease names name servers and search domains, and so do a
-DHCPv6 server ([below](#ipv6-dhcpv6)) and Router Advertisements where
-the RA host runs (RDNSS and DNSSL, see
-[below](#ipv6-router-advertisements-and-slaac)). The router itself uses
-them: `address dhcp` is all it takes for a DHCPv4 lease's, `address
-dhcpv6`, `dhcpv6-options pd` or `dhcpv6-options parameters-only` for a
-DHCPv6 server's, and `address autoconf`, `address dhcpv6` or
-`dhcpv6-options pd` for the advertised ones.
+**The router uses the name servers it learns, by default.** Nothing is
+configured for it: what gets an interface its address also gets the
+router its name servers and search domains, as it gets it a default
+route. No `--feature` flag is involved.
 
-The DHCPv4 lease's name servers (option 6) and search domains (the
-domain name, option 15, then the search list, option 119), behind them
-the DHCPv6 server's (options 23 and 24), and behind those the ones
-Router Advertisements name, are given to systemd-resolved as that
-link's DNS configuration: what `resolvectl dns wan0 …` and
-`resolvectl domain wan0 …` set, and `resolvectl status wan0` shows.
-zebra-rs does not write `/etc/resolv.conf`.
+| Learned from | On an interface with | Kept back with |
+|---|---|---|
+| A DHCPv4 lease: the name servers (option 6), and as search domains the domain name (option 15), then the search list (option 119) | `ipv4 address dhcp` | `ipv4 dhcp-options no-name-server` |
+| A DHCPv6 server ([below](#ipv6-dhcpv6)): the name servers (option 23) and the search list (option 24), with a lease or without one | `ipv6 address dhcpv6`, `dhcpv6-options pd` or `dhcpv6-options parameters-only` | `ipv6 dhcpv6-options no-name-server` |
+| Router Advertisements ([below](#ipv6-router-advertisements-and-slaac)): RDNSS and DNSSL | `ipv6 address autoconf`, `address dhcpv6` or `dhcpv6-options pd` | `ipv6 ra-options no-name-server` |
 
-`/etc/resolv.conf` is systemd-resolved's own file and names its local
-listener (`nameserver 127.0.0.53`) whatever it has been given: it does
-not show an interface's name servers. `resolvectl status` does.
+zebra-rs gives them to systemd-resolved as that link's DNS
+configuration: what `resolvectl dns wan0 …` and `resolvectl domain
+wan0 …` set, and `resolvectl status wan0` shows. It does not write
+`/etc/resolv.conf`. It does not touch systemd-resolved's own settings
+either, nor an interface it has learned nothing on.
+
+```
+router> show dhcp client leases
+Interface: wan0
+  ...
+  DNS servers:  198.51.100.53
+  Domain:       example.com
+
+$ resolvectl status wan0
+Link 3 (wan0)
+    Current Scopes: DNS
+         Protocols: +DefaultRoute -LLMNR -mDNS -DNSOverTLS DNSSEC=no/unsupported
+Current DNS Server: 198.51.100.53
+       DNS Servers: 198.51.100.53
+        DNS Domain: example.com
+```
+
+### Keeping them back
 
 `no-name-server` keeps an interface's name servers from the router, by
 where they come from: under `dhcp-options` the DHCPv4 lease's, under
@@ -168,21 +234,7 @@ interface wan1 {
 }
 ```
 
-```
-router> show dhcp client leases
-Interface: wan0
-  ...
-  DNS servers:  198.51.100.53
-  Domain:       example.com
-
-$ resolvectl status wan0
-Link 3 (wan0)
-    Current Scopes: DNS
-         Protocols: +DefaultRoute -LLMNR -mDNS -DNSOverTLS DNSSEC=no/unsupported
-Current DNS Server: 198.51.100.53
-       DNS Servers: 198.51.100.53
-        DNS Domain: example.com
-```
+### How they follow what is learned
 
 - **They follow the lease.** They are set when the lease is bound,
   replaced when a renewal names others, and taken back
@@ -220,20 +272,124 @@ Current DNS Server: 198.51.100.53
   the command is tried again: after 5 seconds at first, then at growing
   intervals up to 5 minutes.
 
-What it needs:
+### Setting up the host
 
-- systemd-resolved, and `resolvectl` on the path.
-- zebra-rs running as root, which the packaged service does. Started
+What zebra-rs needs for it. A stock Ubuntu installation has the first
+two in place.
+
+- **systemd-resolved running, and `resolvectl` on the path.** On Ubuntu
+  24.04 both are in the `systemd-resolved` package.
+
+  ```
+  $ systemctl is-active systemd-resolved
+  active
+  ```
+
+- **`/etc/resolv.conf` pointing at systemd-resolved**, so that the
+  programs on the router ask it. The usual form is a symbolic link to
+  its stub file:
+
+  ```
+  $ readlink /etc/resolv.conf
+  ../run/systemd/resolve/stub-resolv.conf
+  ```
+
+  That file names systemd-resolved's local listener (`nameserver
+  127.0.0.53`) and the search domains in use, whatever name servers it
+  has been given. It does not list an interface's name servers;
+  `resolvectl status` does.
+- **zebra-rs running as root**, which the packaged service does. Started
   with file capabilities alone (`make run`), it leases the address and
   the routes as ever, logs `cannot tell whether this is the host's
   network namespace (…; zebra-rs is not root): the system resolver is
   left alone` and sets no name server.
-- zebra-rs in the host's network namespace. `resolvectl` identifies an
-  interface to systemd-resolved by its index, and the indexes of another
-  namespace are those of other interfaces on the host. Run in another
-  network namespace, zebra-rs logs `this is not the host's network
-  namespace: the system resolver is left alone` and sets nothing.
-- No other network manager setting the interface's DNS.
+- **zebra-rs in the host's network namespace.** `resolvectl` identifies
+  an interface to systemd-resolved by its index, and the indexes of
+  another namespace are those of other interfaces on the host. Run in
+  another network namespace, zebra-rs logs `this is not the host's
+  network namespace: the system resolver is left alone` and sets
+  nothing.
+- **No other network manager on the interface.** netplan,
+  systemd-networkd and NetworkManager set an interface's DNS
+  themselves, and systemd-resolved takes nobody else's word for an
+  interface systemd-networkd manages: the command fails with `Link wan0
+  is managed.` Leave the interfaces zebra-rs leases on out of their
+  configuration.
+
+### Name servers of your own
+
+zebra-rs has no command for a fixed name server: it passes on what an
+interface learns, and nothing else. A name server that no lease names
+is systemd-resolved's own configuration:
+
+```
+# /etc/systemd/resolved.conf.d/dns.conf
+[Resolve]
+DNS=192.0.2.53 2001:db8::53
+Domains=example.net
+```
+
+```
+$ sudo systemctl restart systemd-resolved
+```
+
+- **Both are asked.** For a name that is under none of the search
+  domains, systemd-resolved asks its own servers (`DNS=`) and those of
+  every link that has some, and takes the first answer that succeeds.
+  A name under a search domain goes to the servers that domain came
+  with. So a fixed server does not replace an uplink's: to have the
+  router ask the fixed ones alone, set `no-name-server` on the uplinks
+  as well.
+- **`FallbackDNS=`** is used only while no other name server is known.
+  With a lease that names one, it is not asked.
+- **Restarting systemd-resolved** keeps what zebra-rs has set:
+  systemd-resolved saves each link's settings and reads them again when
+  it starts.
+- **An interface zebra-rs has learned nothing on** is not touched, so
+  `resolvectl dns lan0 …` by hand stays as it is set. On an interface
+  that leases, zebra-rs sets the link's list anew whenever what is
+  learned changes: name servers added to it by hand do not last.
+
+This is about the router's own lookups. Handing name servers to the
+hosts behind the router is the DHCP server's part (the insomnia daemon,
+[`--feature insomnia`](ch-00-05-command-line-options.md#--feature-modulefeature));
+the Router Advertisements zebra-rs sends name none.
+
+### Checking
+
+What each source has learned, whether the router uses it or not:
+
+```
+router> show dhcp client leases
+router> show dhcpv6 client leases
+router> show ipv6 nd interface wan0
+```
+
+What systemd-resolved holds for the link, and a lookup with the link
+that answered it:
+
+```
+$ resolvectl status wan0
+$ resolvectl query www.example.com
+```
+
+What zebra-rs did is in its log (`journalctl -u zebra-rs` with the
+packaged service):
+
+| Log line | What it says |
+|---|---|
+| `resolver: wan0: name servers 198.51.100.53, search example.com` | Set. |
+| `resolver: wan0: name servers withdrawn` | Taken back: what named them ended, or `no-name-server` was set. |
+| `resolver: wan0: name servers not set: resolvectl: No such file or directory …` | `resolvectl` is not installed. Install systemd-resolved; zebra-rs tries again by itself. |
+| `resolver: wan0: name servers not set: resolvectl: … Link wan0 is managed.` | systemd-networkd manages the interface. Take it out of the netplan or networkd configuration. |
+| `resolver: this is not the host's network namespace: the system resolver is left alone` | zebra-rs runs in another network namespace, and sets nothing until it is started in the host's. |
+| `resolver: cannot tell whether this is the host's network namespace (…; zebra-rs is not root): the system resolver is left alone` | zebra-rs is not root, and sets nothing until it is started as root. |
+
+A failure is said once for an interface, and the command is tried again
+as described above. The lease, its address and its routes do not depend
+on it.
+
+### In a VRF, and after a restart
 
 **VRF.** systemd-resolved does not know about VRFs. The name servers of
 an interface in a VRF are set all the same, but its queries to them are
@@ -566,6 +722,11 @@ interface was taken out of the configuration meanwhile is removed.
 ## Not done yet
 
 - The NTP servers of a lease are shown but not applied to the system.
+- Name servers reach the router only through systemd-resolved. On a
+  host without it they are shown and not used.
+- No fixed name server can be configured in zebra-rs, and no show
+  command says what was handed to systemd-resolved: `resolvectl status`
+  does ([Name servers](#name-servers)).
 - The interface MTU option (26) is not applied.
 - A classless route whose router is `0.0.0.0` (an on-link destination)
   is not installed; a log line says so.
