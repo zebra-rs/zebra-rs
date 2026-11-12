@@ -3216,12 +3216,16 @@ mod save_config_tests {
     #[tokio::test]
     async fn the_resolver_task_starts_by_itself_for_what_an_earlier_run_left() {
         use crate::config::resolver::resume_from;
-        use crate::resolver::record::Record;
+        use crate::resolver::record::{Origin, Record};
 
         let dir =
             std::env::temp_dir().join(format!("zebra-resolver-resume-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let record = |name: &str| Record::load(dir.join(name), "this-boot".to_string());
+        let here = Origin {
+            boot: "this-boot".to_string(),
+            netns: "net:[4026531840]".to_string(),
+        };
+        let record = |name: &str| Record::load(dir.join(name), here.clone());
 
         let cm = manager_with_config(&temp_path("resolver-resume-nothing"));
         resume_from(&cm, record("nothing.json"));

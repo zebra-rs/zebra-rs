@@ -81,6 +81,10 @@ impl Backend for Resolvectl {
         exec(&program, &argv(op), self.timeout).await
     }
 
+    fn permitted(&mut self) -> Result<(), String> {
+        self.program().map(|_| ())
+    }
+
     fn ifindex(&self, ifname: &str) -> Option<u32> {
         nix::net::if_::if_nametoindex(ifname).ok()
     }
@@ -329,6 +333,7 @@ mod tests {
     fn a_named_program_is_run_whatever_the_namespace() {
         let mut named = Resolvectl::new(Some("/opt/stand-in".into()));
         assert_eq!(named.program(), Ok(OsString::from("/opt/stand-in")));
+        assert_eq!(named.permitted(), Ok(()));
         // Not looked at.
         assert_eq!(named.host, None);
 
@@ -340,8 +345,13 @@ mod tests {
             system.program(),
             Err("this is not the host's network namespace".to_string())
         );
+        assert_eq!(
+            system.permitted(),
+            Err("this is not the host's network namespace".to_string())
+        );
         system.host = Some(Ok(()));
         assert_eq!(system.program(), Ok(OsString::from("resolvectl")));
+        assert_eq!(system.permitted(), Ok(()));
     }
 
     #[tokio::test]

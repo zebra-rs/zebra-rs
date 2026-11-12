@@ -66,6 +66,11 @@ pub enum Failure {
 pub trait Backend: Send + 'static {
     fn run(&mut self, op: &Op) -> impl Future<Output = Result<(), Failure>> + Send;
 
+    /// Whether the system resolver is this backend's to configure, or
+    /// why not: what [`Failure::Refused`] would say of any command,
+    /// known without running one.
+    fn permitted(&mut self) -> Result<(), String>;
+
     /// The index of the interface of that name, if there is one. The
     /// system resolver keeps an interface's settings for as long as that
     /// interface exists: one deleted and made again under the same name
@@ -153,7 +158,17 @@ impl<B: Backend> Resolver<B> {
     ///
     /// An interface that has gone, or whose name is another interface's
     /// now, holds nothing: its settings went with it.
+    ///
+    /// Where the system resolver is not ours to configure, nothing is
+    /// taken over and no record is kept: this zebra-rs has set nothing
+    /// and will set nothing. The file is then not ours either. The state
+    /// directory is the host's whatever the network namespace, so what
+    /// is there is the record of the zebra-rs that may, and writing it
+    /// anew from here would lose that one's interfaces.
     pub fn resume(&mut self, record: Record, wait: Duration) {
+        if self.backend.permitted().is_err() {
+            return;
+        }
         self.record = record;
         for (name, ifindex) in self.record.links().clone() {
             if self.backend.ifindex(&name) != Some(ifindex) {
@@ -546,14 +561,18 @@ mod tests {
         /// each command was started.
         record: Option<std::path::PathBuf>,
         recorded: Vec<Vec<(String, u32)>>,
+        /// The system resolver is not this backend's to configure.
+        refuses: bool,
     }
 
-    /// The boot the benches run in.
-    const BOOT: &str = "this-boot";
+    /// Where the benches run.
+    fn here() -> crate::resolver::record::Origin {
+        crate::resolver::record::tests::at("this-boot")
+    }
 
     /// What the record at `path` names.
     fn on_record(path: &std::path::Path) -> Vec<(String, u32)> {
-        Record::load(path.to_path_buf(), BOOT.to_string())
+        Record::load(path.to_path_buf(), here())
             .links()
             .iter()
             .map(|(name, index)| (name.clone(), *index))
@@ -579,7 +598,18 @@ mod tests {
             if let Some(path) = script.record.clone() {
                 script.recorded.push(on_record(&path));
             }
+            if script.refuses {
+                return Err(Failure::Refused("not here".to_string()));
+            }
             script.answers.pop_front().unwrap_or(Ok(()))
+        }
+
+        fn permitted(&mut self) -> Result<(), String> {
+            if self.0.lock().unwrap().refuses {
+                Err("not here".to_string())
+            } else {
+                Ok(())
+            }
         }
 
         fn ifindex(&self, ifname: &str) -> Option<u32> {
@@ -690,7 +720,7 @@ mod tests {
         /// are now, when not all of `left` as they were.
         fn after(test: &str, left: &[(&str, u32)], index: Option<&[(&str, u32)]>) -> Bench {
             let path = crate::resolver::record::tests::scratch(test);
-            let mut earlier = Record::load(path.clone(), BOOT.to_string());
+            let mut earlier = Record::load(path.clone(), here());
             for (name, ifindex) in left {
                 earlier.hold(name, *ifindex);
             }
@@ -707,7 +737,7 @@ mod tests {
 
         /// Take over from the earlier run, with `WAIT` for the sources.
         fn resume(&mut self) {
-            let record = Record::load(self.path(), BOOT.to_string());
+            let record = Record::load(self.path(), here());
             self.resolver.resume(record, WAIT);
         }
 
@@ -976,6 +1006,38 @@ mod tests {
         b.answer(&[Err(Failure::Refused("not here".to_string()))]);
         b.report(WAN, Some(dns(&["198.51.100.53"], &[]))).await;
         assert_eq!(b.record(), []);
+    }
+
+    /// A zebra-rs that may not configure the system resolver (in
+    /// another network namespace, or not root) has set nothing. The
+    /// record in the state directory, which it shares with the one that
+    /// may, is that one's: it is not taken over, and it is not written,
+    /// neither without the interfaces that are not there in this
+    /// namespace nor with the ones this zebra-rs would have set.
+    #[tokio::test]
+    async fn a_resolver_that_is_not_ours_leaves_the_record_alone() {
+        // One of the other's interfaces has a namesake here, with the
+        // same index, and one has not.
+        let other = [(WAN, 7), ("wan1", 8)];
+        let mut b = Bench::after("not-ours", &other, Some(&[(WAN, 7)]));
+        {
+            let mut script = b.mock.0.lock().unwrap();
+            script.missing.push("wan1".to_string());
+            script.index.insert("wan2".to_string(), 9);
+            script.refuses = true;
+        }
+        b.resume();
+        assert_eq!(b.resolver.sweep, None);
+        assert_eq!(b.record(), links(&other));
+        b.sweep().await;
+        assert_eq!(b.ran(), []);
+
+        // Its own interface learns name servers: refused, as ever, and
+        // the record still names what it named.
+        b.report("wan2", Some(dns(&["198.51.100.53"], &[]))).await;
+        assert_eq!(b.ran().len(), 1);
+        assert_eq!(b.recorded(), [links(&other)]);
+        assert_eq!(b.record(), links(&other));
     }
 
     /// An interface that is not there has no index and cannot hold

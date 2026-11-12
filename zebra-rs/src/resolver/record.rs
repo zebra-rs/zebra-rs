@@ -16,9 +16,21 @@
 //! over (`--leftover-sweep-time`, as the RIB waits before it sweeps the
 //! routes of an earlier run).
 //!
-//! A record is good for the boot it was written in. resolved keeps its
-//! links' settings under `/run`, so a reboot ends them all, and an index
-//! of the boot before says nothing about the interface that has it now.
+//! A record is good where it was written ([`Origin`]): in that boot,
+//! and in that network namespace.
+//!
+//! - resolved keeps its links' settings under `/run`, so a reboot ends
+//!   them all, and an index of the boot before says nothing about the
+//!   interface that has it now.
+//! - An index is one namespace's, and the state directory is not: a
+//!   network namespace does not isolate `/var/lib`. A zebra-rs in
+//!   another namespace that finds this file must not take its
+//!   interfaces for the ones named.
+//!
+//! And it is only kept by a zebra-rs that may configure the system
+//! resolver at all ([`super::inst::Resolver::resume`]): one that may
+//! not has set nothing, and would only write over the record of the one
+//! that has.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -29,10 +41,20 @@ use serde::{Deserialize, Serialize};
 /// and the RIB's record of their routes.
 pub const FILE: &str = "resolver.json";
 
+/// Where a record was written, and is good.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Origin {
+    /// The boot of the host.
+    pub boot: String,
+    /// The network namespace, as `/proc/self/ns/net` names it.
+    pub netns: String,
+}
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct Stored {
-    /// The boot the settings were made in.
-    boot: String,
+    /// Where the settings were made.
+    #[serde(flatten)]
+    origin: Origin,
     links: Vec<StoredLink>,
 }
 
@@ -46,16 +68,16 @@ struct StoredLink {
 pub struct Record {
     /// Where the record is kept; `None` keeps it in memory only (tests).
     path: Option<PathBuf>,
-    boot: String,
+    origin: Origin,
     /// The interfaces named, each with its index.
     links: BTreeMap<String, u32>,
 }
 
 impl Record {
     /// The record at `path`, which is kept there from now on, as far as
-    /// it was written in this `boot`. A missing or unreadable file, or
-    /// one of another boot, is an empty record.
-    pub fn load(path: PathBuf, boot: String) -> Record {
+    /// it was written at this `origin`. A missing or unreadable file, or
+    /// one of another boot or network namespace, is an empty record.
+    pub fn load(path: PathBuf, origin: Origin) -> Record {
         let stored: Stored = match std::fs::read(&path) {
             Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|e| {
                 tracing::warn!("{}: unreadable, ignored: {e}", path.display());
@@ -63,7 +85,7 @@ impl Record {
             }),
             Err(_) => Stored::default(),
         };
-        let links = if stored.boot == boot {
+        let links = if stored.origin == origin {
             stored
                 .links
                 .into_iter()
@@ -74,7 +96,7 @@ impl Record {
         };
         Record {
             path: Some(path),
-            boot,
+            origin,
             links,
         }
     }
@@ -107,7 +129,7 @@ impl Record {
             return;
         };
         let stored = Stored {
-            boot: self.boot.clone(),
+            origin: self.origin.clone(),
             links: self
                 .links
                 .iter()
@@ -131,12 +153,20 @@ impl Record {
     }
 }
 
-/// What names this boot of the host: the kernel makes it up anew at
-/// every start. Unreadable, it is empty, at every boot alike.
-pub fn boot_id() -> String {
-    std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
-        .map(|id| id.trim().to_string())
-        .unwrap_or_default()
+/// Where this zebra-rs runs: the boot, which the kernel names anew at
+/// every start, and the network namespace.
+///
+/// `None` when either cannot be read. Then no record is kept at all:
+/// one that cannot be told from another boot's, or another namespace's,
+/// would have interfaces reverted that this zebra-rs never set.
+pub fn origin() -> Option<Origin> {
+    let boot = std::fs::read_to_string("/proc/sys/kernel/random/boot_id").ok()?;
+    let netns = std::fs::read_link("/proc/self/ns/net").ok()?;
+    let origin = Origin {
+        boot: boot.trim().to_string(),
+        netns: netns.to_string_lossy().into_owned(),
+    };
+    (!origin.boot.is_empty() && !origin.netns.is_empty()).then_some(origin)
 }
 
 #[cfg(test)]
@@ -153,6 +183,14 @@ pub(super) mod tests {
         dir.join(FILE)
     }
 
+    /// A boot, in the one network namespace the tests here are in.
+    pub fn at(boot: &str) -> Origin {
+        Origin {
+            boot: boot.to_string(),
+            netns: "net:[4026531840]".to_string(),
+        }
+    }
+
     fn links(items: &[(&str, u32)]) -> BTreeMap<String, u32> {
         items
             .iter()
@@ -163,26 +201,23 @@ pub(super) mod tests {
     #[test]
     fn the_record_names_its_interfaces_to_the_next_run() {
         let path = scratch("next-run");
-        let mut record = Record::load(path.clone(), "boot-a".to_string());
+        let mut record = Record::load(path.clone(), at("boot-a"));
         assert_eq!(record.links(), &links(&[]));
         record.hold("wan0", 5);
         record.hold("wan1", 6);
         assert_eq!(
-            Record::load(path.clone(), "boot-a".to_string()).links(),
+            Record::load(path.clone(), at("boot-a")).links(),
             &links(&[("wan0", 5), ("wan1", 6)])
         );
         // One taken back, and one that is another interface now.
         record.note(links(&[("wan1", 9)]));
         assert_eq!(
-            Record::load(path.clone(), "boot-a".to_string()).links(),
+            Record::load(path.clone(), at("boot-a")).links(),
             &links(&[("wan1", 9)])
         );
         // None left: the file says so, and is not just the last one's.
         record.note(links(&[]));
-        assert_eq!(
-            Record::load(path, "boot-a".to_string()).links(),
-            &links(&[])
-        );
+        assert_eq!(Record::load(path, at("boot-a")).links(), &links(&[]));
     }
 
     /// The settings went with the boot they were made in, and its
@@ -190,18 +225,51 @@ pub(super) mod tests {
     #[test]
     fn a_record_of_another_boot_names_nothing() {
         let path = scratch("another-boot");
-        Record::load(path.clone(), "boot-a".to_string()).hold("wan0", 5);
-        let mut rebooted = Record::load(path.clone(), "boot-b".to_string());
+        Record::load(path.clone(), at("boot-a")).hold("wan0", 5);
+        let mut rebooted = Record::load(path.clone(), at("boot-b"));
         assert_eq!(rebooted.links(), &links(&[]));
         // What this boot writes is this boot's.
         rebooted.hold("wan0", 2);
         assert_eq!(
-            Record::load(path.clone(), "boot-b".to_string()).links(),
+            Record::load(path.clone(), at("boot-b")).links(),
             &links(&[("wan0", 2)])
         );
+        assert_eq!(Record::load(path, at("boot-a")).links(), &links(&[]));
+    }
+
+    /// The state directory is the host's, whatever the network
+    /// namespace. A zebra-rs in another one has its own interfaces under
+    /// those names and numbers, and none of them holds what is named.
+    #[test]
+    fn a_record_of_another_network_namespace_names_nothing() {
+        let path = scratch("another-netns");
+        Record::load(path.clone(), at("boot-a")).hold("wan0", 5);
+        let elsewhere = Origin {
+            netns: "net:[4026532528]".to_string(),
+            ..at("boot-a")
+        };
+        assert_eq!(Record::load(path.clone(), elsewhere).links(), &links(&[]));
         assert_eq!(
-            Record::load(path, "boot-a".to_string()).links(),
-            &links(&[])
+            Record::load(path, at("boot-a")).links(),
+            &links(&[("wan0", 5)])
+        );
+    }
+
+    /// The file says where it was written, in words a reader can check
+    /// against `/proc`.
+    #[test]
+    fn the_file_names_where_it_was_written() {
+        let path = scratch("file");
+        Record::load(path.clone(), at("boot-a")).hold("wan0", 5);
+        let file: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(
+            file,
+            serde_json::json!({
+                "boot": "boot-a",
+                "netns": "net:[4026531840]",
+                "links": [{ "interface": "wan0", "ifindex": 5 }],
+            })
         );
     }
 
@@ -210,12 +278,12 @@ pub(super) mod tests {
         let path = scratch("not-a-record");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, b"{ not json").unwrap();
-        let mut record = Record::load(path.clone(), "boot-a".to_string());
+        let mut record = Record::load(path.clone(), at("boot-a"));
         assert_eq!(record.links(), &links(&[]));
         // And it is replaced by the first thing there is to record.
         record.hold("wan0", 5);
         assert_eq!(
-            Record::load(path, "boot-a".to_string()).links(),
+            Record::load(path, at("boot-a")).links(),
             &links(&[("wan0", 5)])
         );
     }
@@ -225,7 +293,7 @@ pub(super) mod tests {
     #[test]
     fn what_the_record_already_says_is_not_written_again() {
         let path = scratch("not-again");
-        let mut record = Record::load(path.clone(), "boot-a".to_string());
+        let mut record = Record::load(path.clone(), at("boot-a"));
         record.hold("wan0", 5);
         std::fs::remove_file(&path).unwrap();
         record.hold("wan0", 5);
@@ -236,9 +304,10 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn the_boot_has_a_name() {
-        let id = boot_id();
-        assert_eq!(id.len(), 36, "{id:?}");
-        assert_eq!(id, boot_id());
+    fn this_run_knows_where_it_is() {
+        let here = origin().expect("/proc");
+        assert_eq!(here.boot.len(), 36, "{here:?}");
+        assert!(here.netns.starts_with("net:["), "{here:?}");
+        assert_eq!(Some(here), origin());
     }
 }

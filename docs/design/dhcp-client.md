@@ -1346,8 +1346,9 @@ is given), and Router Advertisements (RDNSS, DNSSL).**
   taken back:
   - **A record** (`<state dir>/resolver.json`, `resolver/record.rs`)
     names the interfaces that hold something of ours, each with its
-    index, and the boot it was written in. It does not say what they
-    hold: what is learned again is set again whatever it is.
+    index, and where it was written: the boot and the network
+    namespace. It does not say what they hold: what is learned again is
+    set again whatever it is.
   - **Written ahead.** An interface is named before the first command
     that may give it something is started, and until a revert has
     worked or the interface is gone. A run ended while `resolvectl` is
@@ -1371,13 +1372,25 @@ is given), and Router Advertisements (RDNSS, DNSSL).**
     again before the wait is over. The others are reverted when it is
     over: a lease lost, a router gone, or `no-name-server` set, while
     zebra-rs was down.
-  - **By index, and by boot.** An interface that is gone, or whose name
-    is another interface's now (at startup or at the end of the wait),
-    holds nothing and is dropped without a revert, which could only
-    take away what somebody else gave the new one. A record of another
-    boot names nothing: resolved keeps its links' settings under
-    `/run`, and the indexes of the boot before are other interfaces'
-    now, or the same ones' by chance.
+  - **By index, by boot and by namespace.** An interface that is gone,
+    or whose name is another interface's now (at startup or at the end
+    of the wait), holds nothing and is dropped without a revert, which
+    could only take away what somebody else gave the new one. A record
+    of another boot names nothing: resolved keeps its links' settings
+    under `/run`, and the indexes of the boot before are other
+    interfaces' now, or the same ones' by chance. Nor does one of
+    another network namespace (`/proc/self/ns/net`), whose indexes are
+    its own. Where the boot or the namespace cannot be read, no record
+    is kept at all.
+  - **Only where resolved is ours to configure.** The state directory
+    is the host's whatever the network namespace, so a second zebra-rs
+    in a namespace finds the first one's record there unless
+    `ZEBRA_DHCP_STATE_DIR` says otherwise. One that is refused (see the
+    hazards below) has set nothing: it takes nothing over and never
+    writes the file, which would lose the other's interfaces. The
+    number that names a namespace can be used again once that one is
+    gone, so it is this, and not the namespace in the record, that
+    keeps the two apart for good.
   - A run of a version before the record left none: what it set and
     the next run does not learn stays, as it did.
 

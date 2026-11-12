@@ -29,14 +29,14 @@ pub fn spawn_resolver(config: &ConfigManager) -> ResolverTx {
     spawn_with(config, host_record())
 }
 
-/// What the run before this one left on this host. A unit test is not
-/// a run of this host's zebra-rs and takes over nothing: whatever a
-/// record there names is not a test's to take back.
+/// What the run before this one left on this host, in this boot and
+/// this network namespace; kept in memory alone where those cannot be
+/// told. A unit test is not a run of this host's zebra-rs and takes over
+/// nothing: whatever a record there names is not a test's to take back.
 fn host_record() -> Record {
-    if cfg!(test) {
-        Record::default()
-    } else {
-        Record::load(record_path(), record::boot_id())
+    match record::origin() {
+        Some(origin) if !cfg!(test) => Record::load(record_path(), origin),
+        _ => Record::default(),
     }
 }
 
