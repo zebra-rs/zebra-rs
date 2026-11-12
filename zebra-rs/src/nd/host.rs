@@ -80,6 +80,10 @@ pub struct HostConfig {
     /// the on-link prefixes a leased address needs. No SLAAC address
     /// comes of it.
     pub dhcpv6: bool,
+    /// `ipv6 dhcpv6-options pd <id>`: likewise for a delegated prefix,
+    /// whose traffic leaves by the default route. The delegations
+    /// configured, by id.
+    pub pd: BTreeSet<u32>,
     /// `ra-options default-route-distance`.
     pub distance: u8,
     /// `ra-options no-default-route`: routers are listed, not installed.
@@ -94,6 +98,7 @@ impl Default for HostConfig {
         Self {
             autoconf: false,
             dhcpv6: false,
+            pd: BTreeSet::new(),
             distance: DEFAULT_DISTANCE,
             no_default_route: false,
             no_name_server: false,
@@ -103,9 +108,9 @@ impl Default for HostConfig {
 
 impl HostConfig {
     /// Whether the RA host runs: for `autoconf`, and for the DHCPv6
-    /// client's `address dhcpv6` (`pd` will ask for it too, §4).
+    /// client's `address dhcpv6` and `dhcpv6-options pd`.
     pub fn enabled(&self) -> bool {
-        self.autoconf || self.dhcpv6
+        self.autoconf || self.dhcpv6 || !self.pd.is_empty()
     }
 }
 
@@ -1467,6 +1472,49 @@ mod tests {
         // Without `autoconf` there is no address either.
         hosts.update_config("wan0", now, |cfg| cfg.autoconf = false);
         assert!(hosts.host(WAN).is_none());
+    }
+
+    /// `dhcpv6-options pd` runs the RA host too, for the default route
+    /// a delegated prefix's traffic leaves by, and forms no address. The
+    /// host stays for as long as one delegation is configured.
+    #[test]
+    fn pd_runs_the_host_without_forming_addresses() {
+        let now = t0();
+        let mut hosts = hosts_with(&[(WAN, "wan0")], now);
+        hosts.update_config("wan0", now, |cfg| {
+            cfg.autoconf = false;
+            cfg.pd = BTreeSet::from([1, 2]);
+        });
+        assert!(hosts.config("wan0").enabled());
+        assert!(hosts.host(WAN).is_some());
+        hosts.take_actions();
+        let prefix = pio("2001:db8:2::/64", la(), 3600, 1800);
+        hosts.on_ra(WAN, ll("fe80::1"), &ra(1800, vec![prefix]), now);
+        let actions = hosts.take_actions();
+        assert!(
+            !actions
+                .iter()
+                .any(|a| matches!(a, HostAction::AddrAdd { .. })),
+            "{actions:?}"
+        );
+        let installed: Vec<_> = hosts.installed().keys().cloned().collect();
+        assert_eq!(
+            installed,
+            vec![(None, net("::/0")), (None, net("2001:db8:2::/64"))]
+        );
+        // One delegation less changes nothing; the last one gone, the
+        // host and its routes go.
+        hosts.update_config("wan0", now, |cfg| {
+            cfg.pd.remove(&1);
+        });
+        assert!(hosts.host(WAN).is_some());
+        assert_eq!(hosts.installed().len(), 2);
+        hosts.update_config("wan0", now, |cfg| {
+            cfg.pd.remove(&2);
+        });
+        assert!(!hosts.config("wan0").enabled());
+        assert!(hosts.host(WAN).is_none());
+        assert!(hosts.installed().is_empty());
     }
 
     /// `address dhcpv6` runs the RA host for the default route and the

@@ -1,0 +1,11 @@
+# r1: a DHCPv6 WAN that asks for an address and for one delegated
+# prefix, hinting at a /56.
+interface:
+- if-name: wan0
+  ipv6:
+    address:
+    - dhcpv6
+    dhcpv6-options:
+      pd:
+      - id: 1
+        length: 56

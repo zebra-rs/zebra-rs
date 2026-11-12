@@ -6076,10 +6076,10 @@ module config {
           ext:help "DHCPv6 client options";
           description
             "Options of the DHCPv6 client (VyOS's `dhcpv6-options`
-             leaves). `address dhcpv6` starts it to lease an address;
-             `parameters-only` starts it to ask for the other
-             configuration alone. Without either they are stored and
-             unused.";
+             leaves). `address dhcpv6` starts it to lease an address,
+             `pd` to have a prefix delegated, and `parameters-only` to
+             ask for the other configuration alone. Without any of
+             them they are stored and unused.";
           leaf duid {
             ext:help "DHCP unique identifier of this client: xx:xx:...";
             // Three octets at least, said by the pattern itself; that
@@ -6128,6 +6128,33 @@ module config {
                DHCPv4 lease or Router Advertisements name are `ipv4
                dhcp-options no-name-server`'s and `ipv6 ra-options
                no-name-server`'s to keep back.";
+          }
+          list pd {
+            ext:help "Ask for a delegated prefix (IA_PD)";
+            key "id";
+            description
+              "Prefix delegation (RFC 8415): ask the server for a prefix
+               to hand out behind this router. Each entry is one
+               delegation; its `id` is the IAID of the IA_PD the client
+               asks with, which is what the server keys the delegation
+               on. The prefix is held with a discard route, so that
+               traffic for the part of it not in use goes nowhere, not
+               back out to the server. Not together with
+               `parameters-only`.";
+            leaf id {
+              ext:help "Identifier of this delegation (IAID)";
+              type uint32;
+            }
+            leaf length {
+              ext:help "Prefix length to ask for: a hint (default 64)";
+              type uint8 {
+                range "32..64";
+              }
+              description
+                "The length the client hints at. The server delegates
+                 what it sees fit. Changing it gives the prefix back and
+                 asks again.";
+            }
           }
         }
       }

@@ -24,6 +24,35 @@ pub struct AddressView {
     pub valid_in: u32,
 }
 
+/// One delegated prefix.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct PrefixView {
+    pub prefix: String,
+    /// Seconds left; `u32::MAX` never ends.
+    pub preferred_in: u32,
+    pub valid_in: u32,
+}
+
+/// One delegation asked for (`dhcpv6-options pd <id>`), with what is
+/// held of it.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct DelegationView {
+    /// The IAID of its IA_PD.
+    pub id: u32,
+    /// Empty while nothing is delegated.
+    pub prefixes: Vec<PrefixView>,
+    /// Who the prefixes are leased from: a delegation can be another
+    /// server's than the address.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server_duid: Option<String>,
+    /// Seconds, for this delegation; absent when it is never renewed,
+    /// or holds nothing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub renew_in: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rebind_in: Option<u32>,
+}
+
 /// One interface's client, in the keys `show -j` keeps stable.
 #[derive(Debug, Serialize, PartialEq, Eq)]
 pub struct LeaseView6 {
@@ -42,7 +71,11 @@ pub struct LeaseView6 {
     pub server_duid: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub addresses: Vec<AddressView>,
-    /// Seconds; absent when the lease is never renewed.
+    /// The delegations asked for, in the order of their ids.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub pd: Vec<DelegationView>,
+    /// Seconds, until the first of anything leased is renewed; absent
+    /// when the lease is never renewed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub renew_in: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -77,6 +110,7 @@ fn view(dhcpc: &Dhcpc, name: &str, iface: &Iface6, now: Instant) -> LeaseView6 {
         server: None,
         server_duid: None,
         addresses: vec![],
+        pd: vec![],
         renew_in: None,
         rebind_in: None,
         dns_servers: vec![],
@@ -92,6 +126,7 @@ fn view(dhcpc: &Dhcpc, name: &str, iface: &Iface6, now: Instant) -> LeaseView6 {
     // The IAID names the IA_NA: a client that asks for no address has
     // none.
     view.iaid = asks.ia_na;
+    view.pd = asks.ia_pd.iter().map(|pd| delegation(pd.iaid)).collect();
     // What is in the RIB, with the time it has left now.
     let Some(lease) = session
         .bound
@@ -113,8 +148,26 @@ fn view(dhcpc: &Dhcpc, name: &str, iface: &Iface6, now: Instant) -> LeaseView6 {
             })
             .collect();
     }
-    // One Renew, and one Rebind, is for everything leased: at the
-    // earliest time any of it asks for.
+    for ia in &lease.ia_pd {
+        // Each is one the client asked for.
+        let Some(pd) = view.pd.iter_mut().find(|pd| pd.id == ia.iaid) else {
+            continue;
+        };
+        pd.prefixes = ia
+            .prefixes
+            .iter()
+            .map(|p| PrefixView {
+                prefix: p.prefix.to_string(),
+                preferred_in: p.preferred,
+                valid_in: p.valid,
+            })
+            .collect();
+        pd.server_duid = Some(format_duid(&ia.server_id));
+        pd.renew_in = (ia.t1 != u32::MAX).then_some(ia.t1);
+        pd.rebind_in = (ia.t2 != u32::MAX).then_some(ia.t2);
+    }
+    // The next Renew, and the next Rebind, of anything leased: each
+    // identity association has its own times.
     if lease.has_leases() {
         let (t1, t2) = lease.renewal();
         view.renew_in = (t1 != u32::MAX).then_some(t1);
@@ -132,6 +185,17 @@ fn view(dhcpc: &Dhcpc, name: &str, iface: &Iface6, now: Instant) -> LeaseView6 {
         .collect();
     view.obtained = session.obtained;
     view
+}
+
+/// A delegation that holds nothing.
+fn delegation(id: u32) -> DelegationView {
+    DelegationView {
+        id,
+        prefixes: vec![],
+        server_duid: None,
+        renew_in: None,
+        rebind_in: None,
+    }
 }
 
 fn render(view: &LeaseView6, out: &mut String) -> std::fmt::Result {
@@ -161,7 +225,27 @@ fn render(view: &LeaseView6, out: &mut String) -> std::fmt::Result {
         )?;
         label = "";
     }
-    if !view.addresses.is_empty() {
+    // Each delegation asked for, with what it holds.
+    let mut label = "Prefix:";
+    for pd in &view.pd {
+        for prefix in &pd.prefixes {
+            writeln!(
+                out,
+                "  {label:<13} {} preferred {} valid {} (pd {})",
+                prefix.prefix,
+                lifetime(prefix.preferred_in),
+                lifetime(prefix.valid_in),
+                pd.id,
+            )?;
+            label = "";
+        }
+        if pd.prefixes.is_empty() {
+            writeln!(out, "  {label:<13} none (pd {})", pd.id)?;
+            label = "";
+        }
+    }
+    let leased = !view.addresses.is_empty() || view.pd.iter().any(|pd| !pd.prefixes.is_empty());
+    if leased {
         let or_never = |time: Option<u32>| time.map_or("never".to_string(), lifetime);
         writeln!(out, "  Renew in:     {}", or_never(view.renew_in))?;
         writeln!(out, "  Rebind in:    {}", or_never(view.rebind_in))?;
@@ -235,6 +319,7 @@ mod tests {
                     valid_in: u32::MAX,
                 },
             ],
+            pd: vec![],
             renew_in: Some(1200),
             rebind_in: None,
             dns_servers: vec!["2001:db8::53".into(), "2001:db8::35".into()],
@@ -302,6 +387,101 @@ mod tests {
                 "duid": "00:01:00:01:32:85:1b:00:52:54:00:12:34:56",
                 "iaid": 1_194_042_915u32,
             })
+        );
+    }
+
+    #[test]
+    fn delegations_show_what_they_hold() {
+        let held = DelegationView {
+            prefixes: vec![
+                PrefixView {
+                    prefix: "2001:db8:100::/56".into(),
+                    preferred_in: 3000,
+                    valid_in: 6600,
+                },
+                PrefixView {
+                    prefix: "2001:db8:200::/56".into(),
+                    preferred_in: u32::MAX,
+                    valid_in: u32::MAX,
+                },
+            ],
+            server_duid: Some("00:03:00:01:02:00:00:00:00:fd".into()),
+            renew_in: Some(1500),
+            rebind_in: None,
+            ..delegation(1)
+        };
+        // Prefixes only: no IAID, which names the address's association.
+        let view = LeaseView6 {
+            iaid: None,
+            addresses: vec![],
+            pd: vec![held, delegation(7)],
+            dns_servers: vec![],
+            domain_search: vec![],
+            ntp_servers: vec![],
+            ..bound()
+        };
+        let mut out = String::new();
+        render(&view, &mut out).unwrap();
+        assert_eq!(
+            out,
+            "Interface: wan0\n\
+             \x20 VRF:          default\n\
+             \x20 State:        bound\n\
+             \x20 DUID:         00:01:00:01:32:85:1b:00:52:54:00:12:34:56\n\
+             \x20 Server:       fe80::1\n\
+             \x20 Server DUID:  00:03:00:01:02:00:00:00:00:fe\n\
+             \x20 Prefix:       2001:db8:100::/56 preferred 3000s valid 6600s (pd 1)\n\
+             \x20               2001:db8:200::/56 preferred forever valid forever (pd 1)\n\
+             \x20               none (pd 7)\n\
+             \x20 Renew in:     1200s\n\
+             \x20 Rebind in:    never\n"
+        );
+        let json = serde_json::to_value(&view).unwrap();
+        assert_eq!(
+            json["pd"],
+            serde_json::json!([
+                {
+                    "id": 1,
+                    "prefixes": [
+                        {"prefix": "2001:db8:100::/56", "preferred_in": 3000, "valid_in": 6600},
+                        {
+                            "prefix": "2001:db8:200::/56",
+                            "preferred_in": u32::MAX,
+                            "valid_in": u32::MAX,
+                        },
+                    ],
+                    "server_duid": "00:03:00:01:02:00:00:00:00:fd",
+                    "renew_in": 1500,
+                },
+                {"id": 7, "prefixes": []},
+            ])
+        );
+
+        // Asked for and not held yet: the delegation is named all the
+        // same, and nothing is to be renewed.
+        let view = LeaseView6 {
+            state: "soliciting".into(),
+            iaid: None,
+            server: None,
+            server_duid: None,
+            addresses: vec![],
+            pd: vec![delegation(1)],
+            renew_in: None,
+            dns_servers: vec![],
+            domain_search: vec![],
+            ntp_servers: vec![],
+            obtained: None,
+            ..bound()
+        };
+        let mut out = String::new();
+        render(&view, &mut out).unwrap();
+        assert_eq!(
+            out,
+            "Interface: wan0\n\
+             \x20 VRF:          default\n\
+             \x20 State:        soliciting\n\
+             \x20 DUID:         00:01:00:01:32:85:1b:00:52:54:00:12:34:56\n\
+             \x20 Prefix:       none (pd 1)\n"
         );
     }
 

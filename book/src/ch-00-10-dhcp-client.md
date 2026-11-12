@@ -126,8 +126,9 @@ DHCPv6 server ([below](#ipv6-dhcpv6)) and Router Advertisements where
 the RA host runs (RDNSS and DNSSL, see
 [below](#ipv6-router-advertisements-and-slaac)). The router itself uses
 them: `address dhcp` is all it takes for a DHCPv4 lease's, `address
-dhcpv6` or `dhcpv6-options parameters-only` for a DHCPv6 server's, and
-`address autoconf` or `address dhcpv6` for the advertised ones.
+dhcpv6`, `dhcpv6-options pd` or `dhcpv6-options parameters-only` for a
+DHCPv6 server's, and `address autoconf`, `address dhcpv6` or
+`dhcpv6-options pd` for the advertised ones.
 
 The DHCPv4 lease's name servers (option 6) and search domains (the
 domain name, option 15, then the search list, option 119), behind them
@@ -194,7 +195,8 @@ Current DNS Server: 198.51.100.53
 - **Advertised ones follow their lifetimes.** A name server or domain
   from a Router Advertisement is taken back when its lifetime runs out,
   at once when it is advertised with a lifetime of zero, when the RA
-  host stops (`address autoconf` and `address dhcpv6` both deleted),
+  host stops (`address autoconf`, `address dhcpv6` and every
+  `dhcpv6-options pd` deleted),
   and when `ra-options no-name-server` is set. Deleting that gives the
   ones still held to the router at once.
 - **Order.** What DHCP names goes ahead of what Router Advertisements
@@ -389,6 +391,8 @@ interface, and it does not run the RA host.
 | `rapid-commit` | Accept the two-message exchange (Rapid Commit) from a server that offers it. |
 | `no-release` | Do not release the lease when the client stops. |
 | `no-name-server` | Show the server's name servers and search domains, but do not give them to the router's own resolver ([Name servers](#name-servers)). |
+| `pd <id>` | Ask for a delegated prefix, under this identifier ([Prefix delegation](#ipv6-prefix-delegation)). |
+| `pd <id> length` | The prefix length to hint at, 32..64. Default 64. |
 
 ```
 show dhcpv6 client leases [interface <name>]
@@ -420,12 +424,75 @@ zebra-rs the client takes the lease from disk, uses it at once and asks
 the server whether it is still right for the link. With
 `parameters-only` the state is `informed` and no address is shown.
 
+## IPv6: prefix delegation
+
+`dhcpv6-options pd <id>` asks the DHCPv6 server for a prefix to use
+behind the router (RFC 8415), beside the address `address dhcpv6` asks
+for or without one. `<id>` names the delegation to the server (it is
+the IAID of the request), so an interface can ask for several. `length`
+is a hint: the server delegates what it sees fit.
+
+```
+interface wan1 {
+  ipv6 {
+    address dhcpv6;
+    dhcpv6-options {
+      pd 1 {
+        length 56;
+      }
+    }
+  }
+}
+```
+
+- **The prefix is held by a discard route**, a `D` route at
+  administrative distance 210 in the VRF of the interface. A packet for
+  a part of the prefix that nothing uses must not follow the default
+  route back to the provider, who routes the whole prefix here and
+  would send it back again. In the kernel it is a `blackhole` route
+  with `proto dhcp`. It stays while the link is down, and goes when the
+  prefix is given back or runs out.
+- **The default route** comes from Router Advertisements: `pd` runs the
+  RA host like `address dhcpv6` does, without forming a SLAAC address.
+- **What an interface asks for is asked for together.** Adding or
+  deleting a `pd`, or changing its `length`, gives the lease back and
+  asks again for everything the interface asks for, the address
+  included.
+- **Not with `parameters-only`**, which asks for nothing to lease.
+
+```
+router> show dhcpv6 client leases
+Interface: wan1
+  VRF:          default
+  State:        bound
+  DUID:         00:01:00:01:32:85:1b:00:52:54:00:12:34:56
+  IAID:         1194042915
+  Server:       fe80::1
+  Server DUID:  00:03:00:01:02:00:00:00:00:fe
+  Address:      2001:db8:1::100/128 preferred 3000s valid 6600s
+  Prefix:       2001:db8:100::/56 preferred 3000s valid 6600s (pd 1)
+  Renew in:     1200s
+  Rebind in:    2400s
+
+$ ip -6 route show 2001:db8:100::/56
+blackhole 2001:db8:100::/56 dev lo proto dhcp metric 1024 pref medium
+```
+
+A delegation that holds nothing shows as `none (pd <id>)`. In `json`,
+`pd` lists each delegation with its prefixes and, once it holds one,
+its own server and renewal times. After a restart of zebra-rs the lease
+is taken from disk with its prefixes, the discard routes are back at
+once, and the server is asked whether the lease still stands.
+
 ## Not done yet
 
 - The NTP servers of a lease are shown but not applied to the system.
 - The interface MTU option (26) is not applied.
 - A classless route whose router is `0.0.0.0` (an on-link destination)
   is not installed; a log line says so.
-- DHCPv6 prefix delegation.
+- A delegated prefix is held, and that is all: no address from it is
+  put on a LAN interface, and it is not advertised to the LAN.
+- The discard route of a delegated prefix drops a packet without the
+  ICMPv6 Destination Unreachable that RFC 7084 asks for.
 - The RA host does not advertise the prefixes it learns on other
   interfaces, and does not use stable-privacy or temporary addresses.

@@ -114,56 +114,74 @@ pub fn address_dhcp_exclusive(entries: &[(String, Vec<String>)]) -> Vec<String> 
 /// The callback paths [`dhcpv6_parameters_only_exclusive`] reads.
 pub const IPV6_ADDRESS_PATH: &str = "/interface/ipv6/address";
 pub const DHCPV6_PARAMETERS_ONLY_PATH: &str = "/interface/ipv6/dhcpv6-options/parameters-only";
+pub const DHCPV6_PD_PATH: &str = "/interface/ipv6/dhcpv6-options/pd";
 
 /// Whether a config line can carry an entry
 /// [`dhcpv6_parameters_only_exclusive`] reads.
 pub fn dhcpv6_mode_line(line: &str) -> bool {
     line.starts_with("interface ")
         && (line.contains(" ipv6 address dhcpv6")
-            || line.contains(" ipv6 dhcpv6-options parameters-only"))
+            || line.contains(" ipv6 dhcpv6-options parameters-only")
+            || line.contains(" ipv6 dhcpv6-options pd "))
 }
 
 /// `interface <name> ipv6 dhcpv6-options parameters-only` asks a DHCPv6
-/// server for configuration and no address (an Information-request
+/// server for configuration and nothing to lease (an Information-request
 /// carries no identity association), so it excludes `ipv6 address
-/// dhcpv6` on the same interface: the two are different exchanges, and
-/// one client speaks one of them. `entries` are a whole config's
-/// [`dhcpv6_mode_line`]s as (callback path, arguments); the result is
-/// one error per interface that has both, in the order the interfaces
-/// first appear.
+/// dhcpv6` and `ipv6 dhcpv6-options pd` on the same interface: they are
+/// different exchanges, and one client speaks one of them. `entries` are
+/// a whole config's [`dhcpv6_mode_line`]s as (callback path, arguments);
+/// the result is one error for each of the two an interface has beside
+/// `parameters-only`, in the order the interfaces first appear.
 pub fn dhcpv6_parameters_only_exclusive(entries: &[(String, Vec<String>)]) -> Vec<String> {
-    // Interface name, whether it has `address dhcpv6`, and whether it
-    // has `parameters-only`.
-    let mut interfaces: Vec<(&str, bool, bool)> = Vec::new();
+    #[derive(Default)]
+    struct Modes {
+        address: bool,
+        pd: bool,
+        parameters_only: bool,
+    }
+    let mut interfaces: Vec<(&str, Modes)> = Vec::new();
     for (path, args) in entries {
-        let (name, address) = match (path.as_str(), args.as_slice()) {
-            (IPV6_ADDRESS_PATH, [name, address]) if address == "dhcpv6" => (name, true),
-            (DHCPV6_PARAMETERS_ONLY_PATH, [name]) => (name, false),
+        let name = match (path.as_str(), args.as_slice()) {
+            (IPV6_ADDRESS_PATH, [name, address]) if address == "dhcpv6" => name,
+            (DHCPV6_PARAMETERS_ONLY_PATH, [name]) => name,
+            // The list entry, or a leaf of it.
+            (path, [name, ..]) if path.starts_with(DHCPV6_PD_PATH) => name,
             _ => continue,
         };
-        let index = match interfaces.iter().position(|(n, ..)| n == name) {
+        let index = match interfaces.iter().position(|(n, _)| n == name) {
             Some(index) => index,
             None => {
-                interfaces.push((name, false, false));
+                interfaces.push((name, Modes::default()));
                 interfaces.len() - 1
             }
         };
-        if address {
-            interfaces[index].1 = true;
-        } else {
-            interfaces[index].2 = true;
+        let modes = &mut interfaces[index].1;
+        match path.as_str() {
+            IPV6_ADDRESS_PATH => modes.address = true,
+            DHCPV6_PARAMETERS_ONLY_PATH => modes.parameters_only = true,
+            _ => modes.pd = true,
         }
     }
-    interfaces
-        .into_iter()
-        .filter(|(_, address, parameters_only)| *address && *parameters_only)
-        .map(|(name, ..)| {
-            format!(
+    let mut errors = Vec::new();
+    for (name, modes) in interfaces {
+        if !modes.parameters_only {
+            continue;
+        }
+        if modes.address {
+            errors.push(format!(
                 "interface {name} ipv6: dhcpv6-options parameters-only asks for no address \
                  and cannot be combined with address dhcpv6; delete one or the other"
-            )
-        })
-        .collect()
+            ));
+        }
+        if modes.pd {
+            errors.push(format!(
+                "interface {name} ipv6: dhcpv6-options parameters-only asks for no prefix \
+                 and cannot be combined with dhcpv6-options pd; delete one or the other"
+            ));
+        }
+    }
+    errors
 }
 
 /// A leaf value check: `Err` holds the reason, shown after the line.
@@ -429,8 +447,36 @@ mod tests {
             ]),
             [refused("eth2"), refused("eth0")]
         );
+        // A delegation is something leased too: its list entry, or a
+        // leaf of it, beside `parameters-only`.
+        let pd = |name: &str| leaf(DHCPV6_PD_PATH, &[name, "0"]);
+        let length = |name: &str| {
+            leaf(
+                "/interface/ipv6/dhcpv6-options/pd/length",
+                &[name, "0", "56"],
+            )
+        };
+        let no_prefix = |name: &str| {
+            format!(
+                "interface {name} ipv6: dhcpv6-options parameters-only asks for no prefix \
+                 and cannot be combined with dhcpv6-options pd; delete one or the other"
+            )
+        };
+        assert!(check(&[pd("eth0"), length("eth0")]).is_empty());
+        assert!(check(&[pd("eth0"), address("eth0", "dhcpv6")]).is_empty());
+        assert!(check(&[pd("eth0"), only("eth1")]).is_empty());
+        assert_eq!(check(&[pd("eth0"), only("eth0")]), [no_prefix("eth0")]);
+        assert_eq!(check(&[only("eth0"), length("eth0")]), [no_prefix("eth0")]);
+        assert_eq!(
+            check(&[pd("eth0"), only("eth0"), address("eth0", "dhcpv6")]),
+            [refused("eth0"), no_prefix("eth0")]
+        );
         // The lines it reads, and no others.
         assert!(dhcpv6_mode_line("interface eth0 ipv6 address dhcpv6"));
+        assert!(dhcpv6_mode_line("interface eth0 ipv6 dhcpv6-options pd 0"));
+        assert!(dhcpv6_mode_line(
+            "interface eth0 ipv6 dhcpv6-options pd 0 length 56"
+        ));
         assert!(dhcpv6_mode_line(
             "interface eth0 ipv6 dhcpv6-options parameters-only"
         ));
