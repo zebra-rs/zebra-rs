@@ -242,6 +242,18 @@ impl<R: RngSource> RaSender<R> {
         self.next_unsolicited_at = at;
     }
 
+    /// Something the advertisements say has changed, though not who
+    /// this router is to the link: have the next one go out soon, with
+    /// the delay and the rate limit of an answer to a solicitation
+    /// (§6.2.6), and leave the schedule as it is otherwise.
+    pub fn advertise_soon(&mut self, now: Instant) {
+        let mut at = now + self.rng.duration_in(Duration::ZERO, MAX_RA_DELAY_TIME);
+        if let Some(last) = self.last_multicast_at {
+            at = at.max(last + MIN_DELAY_BETWEEN_RAS);
+        }
+        self.next_unsolicited_at = self.next_unsolicited_at.min(at);
+    }
+
     /// The advertisement due as of `now`, if any. Nothing changes until
     /// the caller reports the outcome through [`Self::sent`] or
     /// [`Self::send_failed`], so an RA that never left uses up no slot.
@@ -630,6 +642,57 @@ mod tests {
         assert_eq!(tick_ok(&mut s, due).len(), 1);
         assert_eq!(s.initial_remaining(), MAX_INITIAL_RTR_ADVERTISEMENTS - 1);
         assert_eq!(s.next_wakeup(), due + MAX_INITIAL_RTR_ADVERT_INTERVAL);
+    }
+
+    /// Something the advertisements say changed: the next one goes out
+    /// within the delay of an answer to a solicitation, no sooner than
+    /// the rate limit allows, and nothing else of the schedule moves.
+    #[test]
+    fn advertise_soon_brings_the_next_advertisement_forward() {
+        let start = t0();
+        // What the sender draws, in order: three initial delays, a
+        // periodic one, the jitter of the first `advertise_soon`, the
+        // periodic delay after its advertisement, and the jitter of the
+        // two that follow.
+        let s1 = Duration::from_secs(1);
+        let rng = FixedRng::new([
+            s1,
+            s1,
+            s1,
+            Duration::from_secs(400),
+            Duration::from_millis(300),
+            Duration::from_secs(400),
+            Duration::from_millis(100),
+            Duration::from_millis(200),
+        ]);
+        let mut s = RaSender::with_rng(RaSendConfig::default(), rng, start);
+        let mut now = start;
+        for _ in 0..MAX_INITIAL_RTR_ADVERTISEMENTS {
+            now = s.next_wakeup().max(now + MIN_DELAY_BETWEEN_RAS);
+            assert_eq!(tick_ok(&mut s, now).len(), 1);
+        }
+        assert_eq!(s.initial_remaining(), 0);
+        let periodic = now + Duration::from_secs(400);
+        assert_eq!(s.next_wakeup(), periodic);
+
+        // Well after the last advertisement: after its jitter.
+        let change = now + Duration::from_secs(100);
+        s.advertise_soon(change);
+        assert_eq!(s.next_wakeup(), change + Duration::from_millis(300));
+        // Not a new start: it is one advertisement, and the periodic
+        // ones go on from it.
+        assert_eq!(s.initial_remaining(), 0);
+        let sent = s.next_wakeup();
+        assert_eq!(tick_ok(&mut s, sent).len(), 1);
+        assert_eq!(s.next_wakeup(), sent + Duration::from_secs(400));
+
+        // Right after one: not inside the rate limit.
+        s.advertise_soon(sent + Duration::from_secs(1));
+        let due = sent + MIN_DELAY_BETWEEN_RAS;
+        assert_eq!(s.next_wakeup(), due);
+        // One that is due sooner than this asks for stays where it is.
+        s.advertise_soon(sent + Duration::from_secs(10));
+        assert_eq!(s.next_wakeup(), due);
     }
 
     /// A send that fails uses up nothing: the initial count and the

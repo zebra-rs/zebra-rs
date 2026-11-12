@@ -1421,6 +1421,15 @@ pub struct Rib {
     /// How long after startup leftovers from an earlier run that no
     /// protocol has replaced are swept (`--leftover-sweep-time`).
     pub leftover_sweep_time: std::time::Duration,
+    /// Dynamic IPv6 addresses `addr_dyn_del` made permanent in the
+    /// kernel in order to delete them with their prefix route, by link
+    /// and address. The kernel reports that step like any change to an
+    /// address, after the address is gone from `links` here: taken at
+    /// its word, the notification would bring the address back, as a
+    /// permanent one nobody claims, until the one for the delete
+    /// arrives. So the notification that says "permanent" of such an
+    /// address is dropped, and the entry with it.
+    pub addr_withdrawing: BTreeSet<(u32, IpNet)>,
     /// EVPN multihoming: the `(ESI, VNI)` pairs BGP currently has a
     /// non-empty nexthop group for (`Message::EsNhg`). A MAC on such a
     /// segment installs through the group (RFC 7432 §8.4 aliasing); the
@@ -1657,6 +1666,7 @@ impl Rib {
             learned_ra: BTreeSet::new(),
             route_record: Default::default(),
             leftover_sweep_time: std::time::Duration::from_secs(120),
+            addr_withdrawing: BTreeSet::new(),
             es_groups: BTreeSet::new(),
             es_blocked: BTreeSet::new(),
             vtep_table: std::collections::BTreeSet::new(),
@@ -5012,6 +5022,13 @@ impl Rib {
                 self.link_delete(link).await;
             }
             FibMessage::NewAddr(addr) => {
+                // The step before our own delete of a dynamic address
+                // (`addr_withdrawing`): not an address that appeared.
+                if addr.valid_lft == Some(u32::MAX)
+                    && self.addr_withdrawing.remove(&(addr.link_index, addr.addr))
+                {
+                    return;
+                }
                 // Kernel netlink path: from_config=false. If a configured
                 // LinkAddr is already present for this address, the merge in
                 // link_addr_update will flip its `fib` flag to true.
@@ -5037,6 +5054,8 @@ impl Rib {
                 self.router_id_update();
             }
             FibMessage::DelAddr(addr) => {
+                // Gone for good: nothing of its withdrawal is under way.
+                self.addr_withdrawing.remove(&(addr.link_index, addr.addr));
                 // If the deleted address is still in config, push it
                 // back to the kernel rather than tearing down state.
                 // Recovery may be suppressed by hold-down; in either

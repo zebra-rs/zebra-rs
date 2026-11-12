@@ -1908,6 +1908,83 @@ async fn configuring_a_slaac_address_keeps_it_past_the_ra_host() {
     ip(&["link", "del", "perm6"]);
 }
 
+/// Giving a dynamic IPv6 address up makes it permanent in the kernel
+/// just before it is deleted. The kernel reports that step after the
+/// address is gone from the RIB: it is not an address that appeared,
+/// and nobody is told of one. Any other notification about the address
+/// is taken as it comes.
+#[tokio::test]
+async fn the_kernel_s_word_on_a_withdrawal_under_way_is_not_an_address() {
+    use crate::fib::FibAddr;
+    use crate::rib::api::RibRx;
+    use crate::rib::client::ProtoId;
+
+    let mut rib = Rib::new(false).unwrap();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    rib.client_registry
+        .register_with_id(ProtoId::from_raw(0), "nd", tx, 0, true);
+    rib.links.insert(
+        7,
+        Link {
+            index: 7,
+            name: "pd7".to_string(),
+            mtu: 1500,
+            original_mtu: 1500,
+            metric: 1,
+            flags: netlink_packet_route::link::LinkFlags::Up
+                | netlink_packet_route::link::LinkFlags::LowerUp
+                | netlink_packet_route::link::LinkFlags::Running,
+            link_type: crate::rib::LinkType::Ethernet,
+            label: false,
+            mac: None,
+            addr4: Vec::new(),
+            addr6: Vec::new(),
+            master: None,
+            vni: None,
+            vrf_table: None,
+            bridge: false,
+            vxlan_local: None,
+            vxlan_metadata: None,
+            parent: None,
+            vlan_id: None,
+            mtu_error: None,
+        },
+    );
+    let addr: IpNet = "2001:db8:100:1::1/64".parse().unwrap();
+    let echo = |valid: u32| FibAddr {
+        addr,
+        link_index: 7,
+        valid_lft: Some(valid),
+        preferred_lft: Some(valid),
+        ..Default::default()
+    };
+
+    // As `addr_dyn_del` leaves it: gone from the link, and expected.
+    rib.addr_withdrawing.insert((7, addr));
+    rib.process_fib_msg(FibMessage::NewAddr(echo(u32::MAX)))
+        .await;
+    assert!(rib.links[&7].addr6.is_empty());
+    assert!(rx.try_recv().is_err());
+    assert!(rib.addr_withdrawing.is_empty());
+    // That was the one: the same word again is an address.
+    rib.process_fib_msg(FibMessage::NewAddr(echo(u32::MAX)))
+        .await;
+    assert_eq!(rib.links[&7].addr6.len(), 1);
+    assert!(matches!(rx.try_recv(), Ok(RibRx::AddrAdd(_))));
+    rib.process_fib_msg(FibMessage::DelAddr(echo(0))).await;
+    assert!(rib.links[&7].addr6.is_empty());
+    assert!(matches!(rx.try_recv(), Ok(RibRx::AddrDel(_))));
+
+    // A lease that puts the address back before the kernel has spoken
+    // is not what is expected, and the delete ends the expectation.
+    rib.addr_withdrawing.insert((7, addr));
+    rib.process_fib_msg(FibMessage::NewAddr(echo(3600))).await;
+    assert_eq!(rib.links[&7].addr6.len(), 1);
+    assert!(rib.addr_withdrawing.contains(&(7, addr)));
+    rib.process_fib_msg(FibMessage::DelAddr(echo(0))).await;
+    assert!(rib.addr_withdrawing.is_empty());
+}
+
 /// An address from a delegated prefix has the prefix's lifetime and
 /// brings the route to its /64. The kernel removes that route with the
 /// address only when the address is permanent, so giving the address up
@@ -1938,6 +2015,11 @@ async fn a_dynamic_address_given_up_takes_its_prefix_route_along() {
     assert!(!ip(&["-6", "addr", "show", "dev", "pd6"]).contains("2001:db8:100:1::1"));
     assert_eq!(route("2001:db8:100:1::/64"), "");
     assert!(rib.links[&index].addr6.iter().all(|a| a.dynamic.is_none()));
+    // The kernel's word on the step that made it permanent is expected.
+    assert!(
+        rib.addr_withdrawing
+            .contains(&(index, alone.parse().unwrap()))
+    );
 
     // Beside an address the operator put in the same /64, whose route
     // it is as well.

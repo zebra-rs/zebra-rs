@@ -1,0 +1,24 @@
+# r1: a DHCPv6 WAN that asks for an address and one delegated prefix,
+# numbers lan0 from it, and advertises on lan0, which also has an
+# address of its own. The VRF is there for lan0 to be moved into.
+vrf:
+- name: blue
+interface:
+- if-name: wan0
+  ipv6:
+    address:
+    - dhcpv6
+    dhcpv6-options:
+      pd:
+      - id: 1
+        length: 56
+        interface:
+        - if-name: lan0
+          sla-id: 1
+          address: 1
+- if-name: lan0
+  ipv6:
+    address:
+    - 2001:db8:aa::1/64
+    router-advertisements:
+      send-advertisements: true

@@ -196,6 +196,24 @@ struct JsonRaScheduler {
     next_unsolicited_in_secs: Option<u64>,
     solicited_pending: bool,
     last_multicast_secs_ago: Option<u64>,
+    /// The prefixes the advertisements name, with the lifetimes they
+    /// have now.
+    prefixes: Vec<JsonAdvertisedPrefix>,
+}
+
+/// One prefix of an advertising interface (a Prefix Information
+/// option).
+#[derive(Serialize)]
+struct JsonAdvertisedPrefix {
+    prefix: String,
+    valid_secs: u32,
+    preferred_secs: u32,
+    /// No address of the interface is in it any more: it is advertised
+    /// with both lifetimes zero, for as long as `withdrawn_for_secs`
+    /// says.
+    withdrawn: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    withdrawn_for_secs: Option<u32>,
 }
 
 #[derive(Serialize)]
@@ -567,6 +585,29 @@ fn render_interface_text(
             "    solicited reply pending: {}, last multicast {}",
             solicited, last_mc
         )?;
+        // The prefixes the advertisements name: the /64 of each global
+        // address of the interface. None is what an interface with
+        // link-local addresses alone has, and is not said.
+        let prefixes = nd.prefixes(ifindex, now);
+        if !prefixes.is_empty() {
+            writeln!(out, "    Prefixes ({}):", prefixes.len())?;
+        }
+        for prefix in &prefixes {
+            // One that went is named with both lifetimes zero, for as
+            // long as a host may still hold it.
+            let gone = prefix.gone.map(|left| {
+                let left = fmt_duration(left.into());
+                format!(" (withdrawn, named for another {left})")
+            });
+            writeln!(
+                out,
+                "      {} valid {}, preferred {}{}",
+                prefix.prefix,
+                fmt_duration(prefix.valid.into()),
+                fmt_duration(prefix.preferred.into()),
+                gone.unwrap_or_default()
+            )?;
+        }
     } else {
         writeln!(out, "  Router advertisement: disabled")?;
     }
@@ -730,6 +771,17 @@ fn build_interface_json(nd: &super::engine::NdEngine, ifindex: u32, now: Instant
             last_multicast_secs_ago: sender
                 .last_multicast_at()
                 .map(|t| now.saturating_duration_since(t).as_secs()),
+            prefixes: nd
+                .prefixes(ifindex, now)
+                .iter()
+                .map(|prefix| JsonAdvertisedPrefix {
+                    prefix: prefix.prefix.to_string(),
+                    valid_secs: prefix.valid,
+                    preferred_secs: prefix.preferred,
+                    withdrawn: prefix.gone.is_some(),
+                    withdrawn_for_secs: prefix.gone,
+                })
+                .collect(),
         }
     });
 
@@ -1178,6 +1230,76 @@ Icmp6InUnrelated                    \t99
 
     /// Same distinction in JSON: `suspended` is explicit and the stale
     /// countdown is `null` rather than a misleading `0`.
+    /// The prefixes an advertising interface names are listed with the
+    /// lifetimes they have now, one on its way out marked as that; an
+    /// interface that names none says nothing of prefixes.
+    #[test]
+    fn the_advertised_prefixes_are_shown() {
+        use crate::rib::api::RibRx;
+
+        let start = t0();
+        let mut eng = NdEngine::new();
+        let mut lan0 = link("lan0", 2);
+        lan0.addr6.push(global(2, "2001:db8:1::1/64", None));
+        lan0.addr6
+            .push(global(2, "2001:db8:100:1::1/64", Some((3600, 7200))));
+        let old = global(2, "2001:db8:900:1::1/64", Some((3600, 7200)));
+        lan0.addr6.push(old.clone());
+        eng.process_link_add(&lan0, start);
+        eng.process_link_add(&link("p2p0", 3), start);
+        eng.enable_interface(2, RaSendConfig::default(), start);
+        eng.enable_interface(3, RaSendConfig::default(), start);
+        // The hosts have heard of all three, and then one goes.
+        let told = start + std::time::Duration::from_secs(16);
+        eng.tick(told, |_| Ok(()));
+        eng.process_rib_msg(RibRx::AddrDel(old), told);
+
+        let now = start + std::time::Duration::from_secs(60);
+        let mut text = String::new();
+        render_interface_text(&mut text, &eng, 2, now).unwrap();
+        let want = "    Prefixes (3):\n\
+                    \x20     2001:db8:1::/64 valid 720h, preferred 168h\n\
+                    \x20     2001:db8:100:1::/64 valid 1h59m, preferred 59m\n\
+                    \x20     2001:db8:900:1::/64 valid 0s, preferred 0s \
+                    (withdrawn, named for another 1h59m)\n";
+        assert!(text.contains(want), "{text}");
+        let mut none = String::new();
+        render_interface_text(&mut none, &eng, 3, now).unwrap();
+        assert!(!none.contains("Prefixes"), "{none}");
+
+        let json = build_interface_json(&eng, 2, now);
+        let json: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&json).unwrap()).unwrap();
+        assert_eq!(
+            json["ra_scheduler"]["prefixes"],
+            serde_json::json!([
+                {
+                    "prefix": "2001:db8:1::/64",
+                    "valid_secs": 2_592_000,
+                    "preferred_secs": 604_800,
+                    "withdrawn": false,
+                },
+                {
+                    "prefix": "2001:db8:100:1::/64",
+                    "valid_secs": 7140,
+                    "preferred_secs": 3540,
+                    "withdrawn": false,
+                },
+                {
+                    "prefix": "2001:db8:900:1::/64",
+                    "valid_secs": 0,
+                    "preferred_secs": 0,
+                    "withdrawn": true,
+                    "withdrawn_for_secs": 7140,
+                },
+            ])
+        );
+        let none = build_interface_json(&eng, 3, now);
+        let none: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&none).unwrap()).unwrap();
+        assert_eq!(none["ra_scheduler"]["prefixes"], serde_json::json!([]));
+    }
+
     #[test]
     fn json_scheduler_reports_suspension_with_a_null_countdown() {
         let start = t0();
