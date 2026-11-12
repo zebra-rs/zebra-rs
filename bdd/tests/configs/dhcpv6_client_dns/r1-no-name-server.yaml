@@ -1,0 +1,11 @@
+# r1: a DHCPv6 lease on wan0, whose name servers the host does not use,
+# and neither the ones the router advertises.
+interface:
+- if-name: wan0
+  ipv6:
+    address:
+    - dhcpv6
+    dhcpv6-options:
+      no-name-server: null
+    ra-options:
+      no-name-server: null

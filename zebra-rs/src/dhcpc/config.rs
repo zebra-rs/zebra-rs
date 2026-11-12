@@ -44,11 +44,12 @@ impl Dhcpc {
         }
         self.callbacks
             .insert("/interface/ipv6/address".to_string(), config_address6);
-        let options6: [(&str, Callback); 4] = [
+        let options6: [(&str, Callback); 5] = [
             ("/duid", config_duid),
             ("/parameters-only", config_parameters_only),
             ("/rapid-commit", config_rapid_commit),
             ("/no-release", config_no_release),
+            ("/no-name-server", config_no_name_server6),
         ];
         for (leaf, callback) in options6 {
             self.callbacks.insert(format!("{OPTIONS6}{leaf}"), callback);
@@ -146,6 +147,12 @@ fn config_rapid_commit(dhcpc: &mut Dhcpc, mut args: Args, op: ConfigOp) -> Optio
 fn config_no_release(dhcpc: &mut Dhcpc, mut args: Args, op: ConfigOp) -> Option<()> {
     let cfg = dhcpc.touch6(&mut args)?;
     cfg.no_release = op.is_set();
+    Some(())
+}
+
+fn config_no_name_server6(dhcpc: &mut Dhcpc, mut args: Args, op: ConfigOp) -> Option<()> {
+    let cfg = dhcpc.touch6(&mut args)?;
+    cfg.no_name_server = op.is_set();
     Some(())
 }
 
