@@ -119,6 +119,11 @@ relay), with their show commands. The insomnia package ships a systemd
 drop-in that sets the flag. `--feature iso` is its old name; it still
 works, with a warning at startup.
 
+The DHCP *client* is not among them. `interface <name> ipv4 address
+dhcp`, `ipv6 address autoconf`, `ipv6 address dhcpv6` and their options
+are there without any flag, and so is the use of the name servers they
+learn: see [DHCP Client](ch-00-10-dhcp-client.md).
+
 ### System host name
 
 `system hostname` names the router inside zebra-rs: the vty prompt,
