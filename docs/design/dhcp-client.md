@@ -1336,13 +1336,27 @@ is given), and Router Advertisements (RDNSS, DNSSL).**
   were set last, and reverted if not. The same holds between a `dns`
   that worked and a `domain` that did not.
 - **The settings are an interface's, not a name's.** What was set is
-  noted with the index the name had then. A name that is another
-  interface now, deleted and made again, holds nothing whatever was
-  noted for it. It is set again, also when the lease that comes back on
-  it says nothing new. And it is not reverted: a revert goes by name,
-  and would take from the new interface what somebody else gave it. So
-  the index is looked at before every revert, the first try and each
-  later one, which can be 5 min after the one that failed.
+  noted with the index the name had then, and the index says which
+  interface it is.
+  - **Deleted and made again**, a name is another interface, which
+    holds nothing whatever was noted for the name. It is set again,
+    also when the lease that comes back on it says nothing new. And it
+    is not reverted: a revert goes by name, and would take from the new
+    interface what somebody else gave it.
+  - **Renamed**, an interface keeps its index, and resolved keeps its
+    settings (it holds its links by index, and only changes the name it
+    shows). What was noted follows the interface to the name it has
+    now. The sources say names: what none of them reports under the new
+    name is no longer wanted and is reverted, under the new name. Left
+    under the old one it would be lost with it, the settings still in.
+    Until zebra-rs follows a rename itself, a DHCP client goes on
+    reporting the old name, under which nothing can be set: renaming an
+    interface under a running zebra-rs takes its name servers from the
+    host.
+  - So the index is turned into the name the interface has at that
+    moment before every revert, the first try and each later one, which
+    can be 5 min after the one that failed. An index that is gone ends
+    it without a command.
 - **A restart of zebra-rs** leaves resolved as it is, as it leaves the
   lease's routes in the kernel. The resumed lease is reported and set
   again. What the earlier run set and this one does not learn again is
@@ -1390,11 +1404,14 @@ is given), and Router Advertisements (RDNSS, DNSSL).**
     again before the wait is over. The others are reverted when it is
     over: a lease lost, a router gone, or `no-name-server` set, while
     zebra-rs was down.
-  - **By index, by boot and by namespace.** An interface that is gone,
-    or whose name is another interface's now (at startup, at the end
-    of the wait, or before a later try of a revert that failed), holds
-    nothing and is dropped without a revert, which could only take away
-    what somebody else gave the new one. A record
+  - **By index, by boot and by namespace.** An interface whose index
+    is gone (at startup, at the end of the wait, or before a later try
+    of a revert that failed) holds nothing and is dropped without a
+    revert, which could only take away what somebody else gave an
+    interface made since under that name. One that was renamed, while
+    zebra-rs was down or since, is the same interface under another
+    name: it is taken over, and taken back, under the name it has. A
+    record
     of another boot names nothing: resolved keeps its links' settings
     under `/run`, and the indexes of the boot before are other
     interfaces' now, or the same ones' by chance. Nor does one of
@@ -1545,7 +1562,7 @@ client, and logs each message, which is what a scenario reads.
 | `dhcp_client` | lease → address and `D>* 0.0.0.0/0 [210/0]`; renew; `release`; server gone → expiry withdraws everything; zebra-rs restart keeps the address and re-verifies |
 | `dhcp_client_vrf` | WAN in VRF `red`; the route is in `red`'s table only |
 | `dhcp_client_dual_wan` | two leases at 210 / 220; link down on the first → the second's default is selected |
-| `dhcp_client_dns` | against a stand-in for `resolvectl`: the lease's servers and domains set with nothing configured but `address dhcp`; reverted on `release` and on setting `no-name-server`, and set again when that is deleted; nothing set for a lease taken, or resumed after a restart, under `no-name-server`; replaced at a renewal; retried after a failure; servers set last are set again after an error that came with the old list already dropped; servers set by a command that got no answer are reverted; an interface deleted and made again is set again; set again after a restart; what an earlier run set is kept past the leftover time by a run that resumes the lease, and taken back by one under `no-name-server` and by one with no DHCP client at all |
+| `dhcp_client_dns` | against a stand-in for `resolvectl`: the lease's servers and domains set with nothing configured but `address dhcp`; reverted on `release` and on setting `no-name-server`, and set again when that is deleted; nothing set for a lease taken, or resumed after a restart, under `no-name-server`; replaced at a renewal; retried after a failure; servers set last are set again after an error that came with the old list already dropped; servers set by a command that got no answer are reverted; an interface deleted and made again is set again; set again after a restart; what an earlier run set is kept past the leftover time by a run that resumes the lease, and taken back by one under `no-name-server`, by one with no DHCP client at all, and under its new name from an interface renamed while zebra-rs was down |
 | `ra_host` | RA default route `A`, SLAAC with `autoconf`, router lifetime 0 withdraws, `accept_ra` is 0 |
 | `ra_host_dns` | against a stand-in for `resolvectl`: RDNSS and DNSSL set with nothing configured but `address autoconf`, the newly heard first and an option in its own order; a lifetime of zero and a lifetime run out take one away; a DHCPv4 lease's server goes ahead and its end leaves the advertised ones; `ra-options no-name-server` takes the advertised ones back and leaves the lease's, what is heard under it is only shown, and deleting it sets what is held; stopping the RA host reverts |
 | `dhcpv6_client` | IA_NA /128 with `noprefixroute`; default route and on-link prefix from the RA, and no SLAAC address unless `autoconf` is set too; renew; `release`; zebra-rs restart keeps the address and confirms it; `parameters-only`; deleted configuration releases |

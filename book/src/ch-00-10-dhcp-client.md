@@ -253,7 +253,10 @@ then the interface keeps the name servers it had.
 zebra-rs knows which interfaces it had set from a record beside the
 leases (`resolver.json`). A reboot ends the record with the settings
 themselves, and an interface that was deleted and made again in the
-meantime is left alone. Name servers set by a version of zebra-rs that
+meantime is left alone. One that was renamed is still the same
+interface: its name servers are taken back under its new name, unless
+the configuration now has a DHCP client or `autoconf` on that name and
+it learns them again. Name servers set by a version of zebra-rs that
 kept no record are not taken back: `resolvectl revert <name>` does it by
 hand.
 

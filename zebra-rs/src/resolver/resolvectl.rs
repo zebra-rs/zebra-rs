@@ -104,6 +104,14 @@ impl Backend for Resolvectl {
     fn ifindex(&self, ifname: &str) -> Option<u32> {
         nix::net::if_::if_nametoindex(ifname).ok()
     }
+
+    fn ifname(&self, ifindex: u32) -> Option<String> {
+        let name = nix::net::if_::if_indextoname(ifindex).ok()?;
+        // nix 0.31 takes the null pointer that says "no such interface"
+        // for success, and hands back the empty name its buffer began
+        // with. No interface has that name.
+        name.into_string().ok().filter(|name| !name.is_empty())
+    }
 }
 
 /// The file `name` is run from: itself when it says where it is (a `/`
@@ -628,6 +636,9 @@ mod tests {
         let backend = Resolvectl::new(None);
         assert_eq!(backend.ifindex("lo"), Some(1));
         assert_eq!(backend.ifindex("zebra-absent0"), None);
+        // And an index has an interface, with a name, or none.
+        assert_eq!(backend.ifname(1), Some("lo".to_string()));
+        assert_eq!(backend.ifname(u32::MAX), None);
     }
 
     /// Against the real `resolvectl` and a running systemd-resolved,

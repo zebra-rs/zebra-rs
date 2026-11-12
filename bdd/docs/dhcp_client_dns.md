@@ -15,7 +15,9 @@ interfaces hold some (`resolver.json`, beside the lease). The next run
 sets what it learns again, the lease resumed from disk first of all,
 and takes back what it has not learned when its wait for the sources
 is over (`--leftover-sweep-time`): `no-name-server` set, or `address
-dhcp` deleted, while zebra-rs was not running.
+dhcp` deleted, while zebra-rs was not running. An interface renamed in
+that time is still the same interface, and is taken back under the
+name it has.
 
 No resolver is running here, and none must be reached: every daemon
 of the suite runs in a network namespace, from which `resolvectl`
@@ -61,4 +63,5 @@ Requires dnsmasq and nft on the host (tests/scripts/dhcp_server.sh).
 | A restart keeps the name servers of the lease it resumes | |
 | A restart under no-name-server takes back what the earlier run set | |
 | A restart without the DHCP client takes back what the earlier run set | |
+| A restart takes back what the earlier run set on an interface renamed since | |
 | Teardown topology | |

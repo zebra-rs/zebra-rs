@@ -33,6 +33,10 @@
 # them only while the name is still that interface. One deleted and made
 # again under the same name holds nothing.
 #
+# Unlike resolved, it does not follow a rename: what a renamed interface
+# holds is not shown under its new name. `history` is what says that a
+# revert asked for the new one.
+#
 # `spoil` is what resolved does when it cannot add an entry of a new list
 # (SetLinkDNS and SetLinkDomains in systemd 255): the list being replaced
 # is dropped whole, and then the error is reported. An error is no word
