@@ -31,6 +31,10 @@
 //! resolver at all ([`super::inst::Resolver::resume`]): one that may
 //! not has set nothing, and would only write over the record of the one
 //! that has.
+//!
+//! A write can fail. The record then knows that the file is behind it
+//! ([`Record::unsaved`]) and writes it at the next chance, whether or
+//! not there is anything new to say by then.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -71,6 +75,14 @@ pub struct Record {
     origin: Origin,
     /// The interfaces named, each with its index.
     links: BTreeMap<String, u32>,
+    /// The file does not say what `links` says: it has changed since the
+    /// last write that worked. Every [`Record::hold`] and
+    /// [`Record::note`] tries the write again until one does, also when
+    /// it has nothing new to say itself.
+    unsaved: bool,
+    /// That the record could not be written has been said; said again
+    /// only after a write that worked.
+    complained: bool,
 }
 
 impl Record {
@@ -98,6 +110,8 @@ impl Record {
             path: Some(path),
             origin,
             links,
+            unsaved: false,
+            complained: false,
         }
     }
 
@@ -110,22 +124,39 @@ impl Record {
     pub fn hold(&mut self, ifname: &str, ifindex: u32) {
         if self.links.get(ifname) != Some(&ifindex) {
             self.links.insert(ifname.to_string(), ifindex);
-            self.save();
+            self.unsaved = true;
         }
+        self.save();
     }
 
     /// These interfaces hold something of ours, and no other does.
     pub fn note(&mut self, links: BTreeMap<String, u32>) {
         if self.links != links {
             self.links = links;
-            self.save();
+            self.unsaved = true;
         }
+        self.save();
     }
 
-    /// Write the record, replacing the file in one step so a crash
-    /// leaves the old record or the new one.
-    fn save(&self) {
+    /// Whether the file is behind what the record says: the last write
+    /// failed. The next run would read the older word, and not know of
+    /// an interface set since.
+    pub fn unsaved(&self) -> bool {
+        self.unsaved
+    }
+
+    /// Write the record if the file is behind it, replacing the file in
+    /// one step so a crash leaves the old record or the new one.
+    ///
+    /// A write that fails (a full disk, a state directory not there
+    /// yet) leaves the record unsaved, and the same words said again are
+    /// then no reason to skip the write: it is tried until it works.
+    fn save(&mut self) {
+        if !self.unsaved {
+            return;
+        }
         let Some(path) = &self.path else {
+            self.unsaved = false;
             return;
         };
         let stored = Stored {
@@ -147,8 +178,24 @@ impl Record {
             std::fs::write(&tmp, serde_json::to_vec_pretty(&stored)?)?;
             std::fs::rename(&tmp, path)
         };
-        if let Err(e) = write() {
-            tracing::warn!("{}: resolver record not saved: {e}", path.display());
+        match write() {
+            Ok(()) => {
+                if self.complained {
+                    tracing::info!("{}: resolver record saved", path.display());
+                }
+                self.unsaved = false;
+                self.complained = false;
+            }
+            Err(e) if self.complained => {
+                tracing::debug!("{}: resolver record not saved: {e}", path.display());
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "{}: resolver record not saved, tried again later: {e}",
+                    path.display()
+                );
+                self.complained = true;
+            }
         }
     }
 }
@@ -301,6 +348,55 @@ pub(super) mod tests {
         assert!(!path.exists());
         record.hold("wan0", 6);
         assert!(path.exists());
+    }
+
+    /// A write that fails leaves the file behind the record. The same
+    /// said again is then no reason to skip the write: until one works,
+    /// an interface that is set is not on disk, and the next run would
+    /// not know to take it back.
+    #[test]
+    fn what_could_not_be_written_is_written_when_it_can_be() {
+        for again in ["hold", "note"] {
+            let path = scratch(&format!("written-later-{again}"));
+            // In the way of the record's directory: a file.
+            let dir = path.parent().unwrap();
+            std::fs::write(dir, b"").unwrap();
+            let mut record = Record::load(path.clone(), at("boot-a"));
+            assert!(!record.unsaved());
+            record.hold("wan0", 5);
+            assert!(record.unsaved(), "{again}");
+            // Still in the way: still behind.
+            record.hold("wan0", 5);
+            record.note(links(&[("wan0", 5)]));
+            assert!(record.unsaved(), "{again}");
+
+            std::fs::remove_file(dir).unwrap();
+            match again {
+                "hold" => record.hold("wan0", 5),
+                _ => record.note(links(&[("wan0", 5)])),
+            }
+            assert!(!record.unsaved(), "{again}");
+            assert_eq!(
+                Record::load(path.clone(), at("boot-a")).links(),
+                &links(&[("wan0", 5)]),
+                "{again}"
+            );
+            // Written, and not again for the same words.
+            std::fs::remove_file(&path).unwrap();
+            record.hold("wan0", 5);
+            record.note(links(&[("wan0", 5)]));
+            assert!(!path.exists(), "{again}");
+        }
+    }
+
+    /// A record kept in memory only has no file to be behind.
+    #[test]
+    fn a_record_without_a_file_is_never_unsaved() {
+        let mut record = Record::default();
+        record.hold("wan0", 5);
+        assert!(!record.unsaved());
+        record.note(links(&[]));
+        assert!(!record.unsaved());
     }
 
     #[test]

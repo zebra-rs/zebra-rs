@@ -196,19 +196,36 @@ impl<B: Backend> Resolver<B> {
     /// no source has claimed is no longer kept for them, and the next
     /// look at what is wanted takes it back. Except from an interface
     /// that went, or was made again, during the wait: that one holds
-    /// nothing.
+    /// nothing, as every withdrawal finds out for itself
+    /// ([`Resolver::departed`]).
     fn swept(&mut self) {
         self.sweep = None;
-        for name in std::mem::take(&mut self.waiting) {
-            let now = self.backend.ifindex(&name);
-            if self
-                .applied
-                .get(&name)
-                .is_some_and(|held| held.ifindex != now)
-            {
-                self.applied.remove(&name);
-            }
+        self.waiting.clear();
+    }
+
+    /// Whether the interface that holds what is noted under `name` is
+    /// no longer there: gone, or deleted and made again, so that the
+    /// name is another interface's now. Its settings went with it.
+    ///
+    /// Asked before every withdrawal, the first try and each later one.
+    /// A revert goes by name. Run after the interface was made again, it
+    /// would take from the new one what somebody else has given it, and
+    /// a withdrawal that failed can wait minutes for its next try.
+    fn departed(&self, name: &str) -> bool {
+        let now = self.backend.ifindex(name);
+        match self.applied.get(name).and_then(|held| held.ifindex) {
+            Some(was) => now != Some(was),
+            // Not there when its command was started, which may have
+            // found it all the same: whatever has the name now is the
+            // one to ask.
+            None => now.is_none(),
         }
+    }
+
+    /// Nothing is held under `name` any more.
+    fn forget(&mut self, name: &str) {
+        self.applied.remove(name);
+        self.complained.remove(name);
     }
 
     /// The interfaces that hold something of ours, as the record names
@@ -306,15 +323,18 @@ impl<B: Backend> Resolver<B> {
 
     /// Have the backend make up the difference between what the system
     /// resolver holds and what is wanted, and the record say which
-    /// interfaces hold something after that. True when a command failed
-    /// and is to be tried again.
+    /// interfaces hold something after that. True when there is
+    /// something to try again: a command that failed, or a record that
+    /// could not be written. An interface that is set and not on disk
+    /// is one the next run would not know to take back, so the write is
+    /// not left for the next change to bring, which may be hours away.
     async fn reconcile(&mut self) -> bool {
         if self.refused {
             return false;
         }
         let failed = self.apply().await;
         self.record.note(self.held_links());
-        failed
+        failed || self.record.unsaved()
     }
 
     /// One command, and whether it could be started.
@@ -337,11 +357,15 @@ impl<B: Backend> Resolver<B> {
             .cloned()
             .collect();
         for name in gone {
+            if self.departed(&name) {
+                tracing::info!("resolver: {name}: its name servers went with the interface");
+                self.forget(&name);
+                continue;
+            }
             let failure = match self.run(Op::Revert(name.clone())).await {
                 Ok(()) => {
                     tracing::info!("resolver: {name}: name servers withdrawn");
-                    self.applied.remove(&name);
-                    self.complained.remove(&name);
+                    self.forget(&name);
                     continue;
                 }
                 Err(Failure::Refused(why)) => {
@@ -350,10 +374,10 @@ impl<B: Backend> Resolver<B> {
                 }
                 Err(failure) => failure,
             };
-            if self.backend.ifindex(&name).is_none() {
-                // The interface went, and its settings with it.
-                self.applied.remove(&name);
-                self.complained.remove(&name);
+            if self.departed(&name) {
+                // It went while the command ran, and its settings with
+                // it.
+                self.forget(&name);
                 continue;
             }
             // Asked again later. Until then a withdrawal that was
@@ -425,7 +449,9 @@ impl<B: Backend> Resolver<B> {
         let unknown = Held { ifindex, dns: None };
         // On record before the command is started: a run that is ended
         // while it is under way does not know how it went, and the next
-        // one must find the interface named.
+        // one must find the interface named. A record that cannot be
+        // written does not keep the servers from the host: it is tried
+        // again with the look that follows (`reconcile`).
         if let Some(ifindex) = ifindex
             && !self.unstarted
         {
@@ -553,6 +579,8 @@ mod tests {
         answers: VecDeque<Result<(), Failure>>,
         /// Interfaces that do not exist.
         missing: Vec<String>,
+        /// Interfaces that go while the next command runs.
+        leaving: Vec<String>,
         /// The index of the interfaces that do: 1 unless said here.
         index: BTreeMap<String, u32>,
         /// How long a command takes.
@@ -598,6 +626,8 @@ mod tests {
             if let Some(path) = script.record.clone() {
                 script.recorded.push(on_record(&path));
             }
+            let leaving = std::mem::take(&mut script.leaving);
+            script.missing.extend(leaving);
             if script.refuses {
                 return Err(Failure::Refused("not here".to_string()));
             }
@@ -897,6 +927,62 @@ mod tests {
         b.sync().await;
         assert_eq!(b.ran(), revert(WAN));
         assert_eq!(b.record(), []);
+    }
+
+    /// The interface is made again between that failure and the next
+    /// try. The index was right at the end of the wait and is not any
+    /// more: the try is not made, for it would revert the new interface,
+    /// and the record lets go of the old one.
+    #[tokio::test]
+    async fn a_leftover_whose_interface_is_made_again_before_the_next_try_is_left_alone() {
+        let mut b = Bench::after("made-again-before-retry", &[(WAN, 7)], None);
+        b.resume();
+        b.answer(&[failed()]);
+        b.sweep().await;
+        assert_eq!(b.ran(), revert(WAN));
+        assert_eq!(b.resolver.retry, Some(b.now + RETRY_MIN));
+        assert_eq!(b.record(), links(&[(WAN, 7)]));
+
+        b.recreate(WAN);
+        b.sync().await;
+        assert_eq!(b.ran(), []);
+        assert_eq!(b.resolver.retry, None);
+        assert_eq!(b.record(), []);
+        // Learned on the new interface, the servers are set on it.
+        b.report(WAN, Some(dns(&["198.51.100.53"], &[]))).await;
+        assert_eq!(b.ran(), set(WAN, &["198.51.100.53"], &[]));
+        assert_eq!(b.record(), links(&[(WAN, 8)]));
+    }
+
+    /// A record that cannot be written (a full disk, a state directory
+    /// in the making) does not keep the servers from the host. But an
+    /// interface that is set and not on disk is one the next run would
+    /// not take back: the write is tried again like a failed command,
+    /// with no change to bring it.
+    #[tokio::test]
+    async fn a_record_that_could_not_be_written_is_tried_again() {
+        let mut b = Bench::after("unwritten", &[], None);
+        b.resume();
+        b.mock.0.lock().unwrap().index.insert(WAN.to_string(), 7);
+        // In the way of the record's directory: a file.
+        let path = b.path();
+        let dir = path.parent().unwrap();
+        std::fs::write(dir, b"").unwrap();
+
+        b.report(WAN, Some(dns(&["198.51.100.53"], &[]))).await;
+        assert_eq!(b.ran(), set(WAN, &["198.51.100.53"], &[]));
+        assert_eq!(b.record(), []);
+        assert_eq!(b.resolver.retry, Some(b.now + RETRY_MIN));
+        // Still in the way: tried again, later each time.
+        b.sync().await;
+        assert_eq!(b.resolver.retry, Some(b.now + RETRY_MIN * 2));
+
+        std::fs::remove_file(dir).unwrap();
+        b.sync().await;
+        assert_eq!(b.ran(), []);
+        assert_eq!(b.record(), links(&[(WAN, 7)]));
+        assert_eq!(b.resolver.retry, None);
+        assert_eq!(b.resolver.backoff, RETRY_MIN);
     }
 
     /// A record of another boot, or none: nothing to wait for.
@@ -1234,18 +1320,95 @@ mod tests {
         assert_eq!(b.resolver.retry, None);
     }
 
+    /// The interface goes while the withdrawal runs, which fails for
+    /// it: the settings went with it, and there is nothing to try again.
     #[tokio::test]
     async fn a_failed_withdrawal_on_a_deleted_interface_is_the_end_of_it() {
         let mut b = Bench::new();
         b.report(WAN, Some(dns(&["198.51.100.53"], &[]))).await;
         b.ran();
-        b.mock.0.lock().unwrap().missing.push(WAN.to_string());
+        b.mock.0.lock().unwrap().leaving.push(WAN.to_string());
         b.answer(&[failed()]);
         b.report(WAN, None).await;
         assert_eq!(b.ran(), revert(WAN));
         assert_eq!(b.resolver.retry, None);
         b.sync().await;
         assert_eq!(b.ran(), []);
+    }
+
+    /// Gone before the withdrawal, there is nothing to ask for.
+    #[tokio::test]
+    async fn nothing_is_withdrawn_from_an_interface_that_is_gone() {
+        let mut b = Bench::new();
+        b.report(WAN, Some(dns(&["198.51.100.53"], &[]))).await;
+        b.ran();
+        b.mock.0.lock().unwrap().missing.push(WAN.to_string());
+        b.report(WAN, None).await;
+        assert_eq!(b.ran(), []);
+        assert_eq!(b.resolver.retry, None);
+        assert!(b.resolver.applied.is_empty());
+    }
+
+    /// Nor from one that was deleted and made again since it was set:
+    /// a revert goes by name, and would take from the new interface
+    /// what somebody else has given it.
+    #[tokio::test]
+    async fn nothing_is_withdrawn_from_an_interface_made_again_since() {
+        let mut b = Bench::new();
+        b.report(WAN, Some(dns(&["198.51.100.53"], &[]))).await;
+        b.ran();
+        b.recreate(WAN);
+        b.report(WAN, None).await;
+        assert_eq!(b.ran(), []);
+        assert_eq!(b.resolver.retry, None);
+        assert!(b.resolver.applied.is_empty());
+    }
+
+    /// The same between a withdrawal that failed and its next try,
+    /// which can be minutes later: the try is not made on the interface
+    /// that has the name by then.
+    #[tokio::test]
+    async fn a_failed_withdrawal_is_not_tried_again_on_an_interface_made_again() {
+        for failure in [failed(), not_run()] {
+            let mut b = Bench::new();
+            b.report(WAN, Some(dns(&["198.51.100.53"], &[]))).await;
+            b.ran();
+            b.answer(&[failure]);
+            b.report(WAN, None).await;
+            assert_eq!(b.ran(), revert(WAN));
+            assert_eq!(b.resolver.retry, Some(b.now + RETRY_MIN));
+
+            b.recreate(WAN);
+            b.sync().await;
+            assert_eq!(b.ran(), []);
+            assert_eq!(b.resolver.retry, None);
+            assert!(b.resolver.applied.is_empty());
+        }
+    }
+
+    /// An interface that was not there when its servers were asked for
+    /// has no index to go by. Its command was started all the same, and
+    /// may have found the interface: what has the name now is asked to
+    /// give them up, and nothing is asked when nothing has it.
+    #[tokio::test]
+    async fn what_may_have_been_set_on_an_interface_not_seen_is_taken_back_by_name() {
+        let mut b = Bench::new();
+        b.mock.0.lock().unwrap().missing.push(WAN.to_string());
+        b.answer(&[failed()]);
+        b.report(WAN, Some(dns(&["198.51.100.53"], &[]))).await;
+        b.ran();
+        b.mock.0.lock().unwrap().missing.clear();
+        b.report(WAN, None).await;
+        assert_eq!(b.ran(), revert(WAN));
+
+        let mut b = Bench::new();
+        b.mock.0.lock().unwrap().missing.push(WAN.to_string());
+        b.answer(&[failed()]);
+        b.report(WAN, Some(dns(&["198.51.100.53"], &[]))).await;
+        b.ran();
+        b.report(WAN, None).await;
+        assert_eq!(b.ran(), []);
+        assert!(b.resolver.applied.is_empty());
     }
 
     #[tokio::test]
@@ -1292,20 +1455,21 @@ mod tests {
     }
 
     /// The same, when the withdrawal was acted on by itself and could
-    /// not be started, the interface being there again by then. The
-    /// entry it leaves, to be tried again, says the servers are held: by
-    /// the old interface, which is no reason to leave the new one unset.
+    /// not be started, and the interface is made again before its next
+    /// try. The entry it leaves, to be tried again, says the servers are
+    /// held: by the old interface, which is no reason to leave the new
+    /// one unset.
     #[tokio::test]
-    async fn an_interface_made_again_during_a_withdrawal_is_given_them_too() {
+    async fn an_interface_made_again_after_a_failed_withdrawal_is_given_them_too() {
         let mut b = Bench::new();
         let lease = dns(&["198.51.100.53"], &[]);
         b.report(WAN, Some(lease.clone())).await;
         b.ran();
 
-        b.recreate(WAN);
         b.answer(&[not_run()]);
         b.report(WAN, None).await;
         assert_eq!(b.ran(), revert(WAN));
+        b.recreate(WAN);
         b.report(WAN, Some(lease)).await;
         assert_eq!(b.ran(), set(WAN, &["198.51.100.53"], &[]));
     }

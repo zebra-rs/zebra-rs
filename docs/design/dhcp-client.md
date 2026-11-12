@@ -1318,8 +1318,8 @@ is given), and Router Advertisements (RDNSS, DNSSL).**
   5 min, so a resolved that starts after zebra-rs still gets its
   servers. The wait counts from the end of the command: one that runs
   into its time limit takes longer than the first waits are. A revert
-  that fails is retried while the interface exists; when the interface
-  is gone, so are its settings.
+  that fails is retried while the interface it was for exists; when
+  that interface is gone, so are its settings.
 - **What resolved holds is not always known**, and whatever may be ours
   is reverted once it is no longer wanted. Only a command that could
   not be started is known to have changed nothing. One that ran and did
@@ -1339,7 +1339,10 @@ is given), and Router Advertisements (RDNSS, DNSSL).**
   noted with the index the name had then. A name that is another
   interface now, deleted and made again, holds nothing whatever was
   noted for it. It is set again, also when the lease that comes back on
-  it says nothing new.
+  it says nothing new. And it is not reverted: a revert goes by name,
+  and would take from the new interface what somebody else gave it. So
+  the index is looked at before every revert, the first try and each
+  later one, which can be 5 min after the one that failed.
 - **A restart of zebra-rs** leaves resolved as it is, as it leaves the
   lease's routes in the kernel. The resumed lease is reported and set
   again. What the earlier run set and this one does not learn again is
@@ -1358,6 +1361,13 @@ is given), and Router Advertisements (RDNSS, DNSSL).**
     nothing is named ahead until a command starts, so the record is not
     written and put right again with every try, and names no interface
     for the next run to revert time after time where it cannot.
+  - **A record that cannot be written** (a full disk, a state directory
+    that is not there yet) does not keep the name servers from the
+    host: they are set all the same. But an interface that is set and
+    not on disk is one the next run would not take back. So the record
+    stays unsaved until a write has worked, also when nothing more
+    changes in it, and the write is tried again like a failed command,
+    5 s later and then at doubling intervals up to 5 min.
   - **The next run** reads it at startup, before the configuration, and
     starts the resolver task for it when it names any interface: a
     configuration with no source of name servers any more (`address
@@ -1373,9 +1383,10 @@ is given), and Router Advertisements (RDNSS, DNSSL).**
     over: a lease lost, a router gone, or `no-name-server` set, while
     zebra-rs was down.
   - **By index, by boot and by namespace.** An interface that is gone,
-    or whose name is another interface's now (at startup or at the end
-    of the wait), holds nothing and is dropped without a revert, which
-    could only take away what somebody else gave the new one. A record
+    or whose name is another interface's now (at startup, at the end
+    of the wait, or before a later try of a revert that failed), holds
+    nothing and is dropped without a revert, which could only take away
+    what somebody else gave the new one. A record
     of another boot names nothing: resolved keeps its links' settings
     under `/run`, and the indexes of the boot before are other
     interfaces' now, or the same ones' by chance. Nor does one of
