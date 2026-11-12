@@ -20,7 +20,10 @@ interface enp0s6 {
 | `/interface/<name>/vrf` | leafref `/vrf/name` | Enslave the interface to a VRF master device. |
 | `/interface/<name>/bridge` | leafref `/bridge/name` | Enslave the interface to a bridge master device. See below. |
 | `/interface/<name>/ipv4/address` | list keyed by `inet:ipv4-prefix`, or `dhcp` | IPv4 address(es) with prefix length — one per command, repeatable. See [Multiple IPv4 Addresses](ch-00-09-multi-address.md). `dhcp` leases one instead, and excludes static addresses on the interface: see [DHCP Client](ch-00-10-dhcp-client.md). |
-| `/interface/<name>/ipv6/address` | list keyed by `inet:ipv6-prefix`, or `autoconf` | IPv6 address(es) with prefix length — one per command, repeatable. `autoconf` takes the default route, on-link prefixes and SLAAC addresses from Router Advertisements, beside any configured address: see [DHCP Client](ch-00-10-dhcp-client.md#ipv6-router-advertisements-and-slaac). |
+| `/interface/<name>/ipv4/dhcp-options/…` | container | Options of the DHCP client `address dhcp` starts: the identity it presents, the distance of its routes, `no-default-route`, `no-name-server`. See [DHCP Client](ch-00-10-dhcp-client.md#options). |
+| `/interface/<name>/ipv6/address` | list keyed by `inet:ipv6-prefix`, or `autoconf`, or `dhcpv6` | IPv6 address(es) with prefix length — one per command, repeatable. `autoconf` takes the default route, on-link prefixes and SLAAC addresses from Router Advertisements; `dhcpv6` leases an address from a DHCPv6 server. Both may stand beside configured addresses and beside each other: see [DHCP Client](ch-00-10-dhcp-client.md#ipv6-router-advertisements-and-slaac). |
+| `/interface/<name>/ipv6/ra-options/…` | container | Options for what Router Advertisements give the interface: the distance of the routes, `no-default-route`, `no-name-server`. See [DHCP Client](ch-00-10-dhcp-client.md#ipv6-router-advertisements-and-slaac). |
+| `/interface/<name>/ipv6/dhcpv6-options/…` | container | Options of the DHCPv6 client, and `pd <id>` to have a prefix delegated and number other interfaces from it. See [DHCP Client](ch-00-10-dhcp-client.md#ipv6-dhcpv6). |
 
 The list entry itself is not a separate "create interface" operation —
 it just attaches configuration to a kernel device that already exists
@@ -29,6 +32,50 @@ from this block; devices it does own come from their dedicated top-level
 lists ([`bridge`](ch-00-04-bridge-configuration.md),
 [`vxlan`](ch-00-03-vxlan-configuration.md),
 [`vlan`](ch-00-08-vlan-configuration.md), `vrf`).
+
+## Addresses from DHCP and Router Advertisements
+
+An interface can take its addresses from the network instead of from
+the configuration. zebra-rs has its own DHCPv4 client, DHCPv6 client
+and Router Advertisement host for that. They are part of every
+zebra-rs: no `--feature` flag turns them on, and no other DHCP client
+(dhclient, dhcpcd, systemd-networkd, NetworkManager) should manage the
+same interface.
+
+```
+interface wan0 {
+  ipv4 {
+    address dhcp;
+  }
+  ipv6 {
+    address autoconf;
+    address dhcpv6;
+  }
+}
+```
+
+| Configuration | What the interface gets |
+|---|---|
+| `ipv4 address dhcp` | A leased IPv4 address, a default route, and the classless routes the lease names. It is the interface's only IPv4 address entry: a commit with a static address beside it is refused. |
+| `ipv6 address autoconf` | A default route and on-link prefixes from Router Advertisements, and a SLAAC address in each /64 advertised for it. |
+| `ipv6 address dhcpv6` | A leased IPv6 address, as a /128. The default route and the on-link prefixes come from Router Advertisements, as with `autoconf`, without a SLAAC address. |
+| `ipv6 dhcpv6-options pd <id>` | A delegated prefix, to number the interfaces behind the router from. |
+
+- **Name servers come with the address.** The name servers and search
+  domains a lease or a Router Advertisement names become the router's
+  own, with nothing more configured: zebra-rs hands them to
+  systemd-resolved. `no-name-server` under `dhcp-options`,
+  `dhcpv6-options` or `ra-options` keeps them back. See
+  [Name servers](ch-00-10-dhcp-client.md#name-servers).
+- **The routes are ordinary routes**, at administrative distance 210 by
+  default, so a default route from a routing protocol or a static one
+  wins over a leased one.
+- **`show interface` says where an address is from**: `dhcp`, `slaac`,
+  `dhcpv6`, or `dhcpv6-pd` for one from a delegated prefix, with the
+  lifetimes it has left.
+
+The [DHCP Client](ch-00-10-dhcp-client.md) chapter has the options, the
+show commands and what each client does.
 
 ## Bridge and VRF enslavement
 
@@ -180,6 +227,9 @@ one. Each block holds:
   non-global scope, abnormal address state and finite lifetimes when
   they apply (see
   [Multiple IPv4 Addresses and the Secondary Flag](ch-00-09-multi-address.md)).
+  An address that is leased or learned names where it is from:
+  `dhcp`, `slaac`, `dhcpv6` or `dhcpv6-pd` (see
+  [DHCP Client](ch-00-10-dhcp-client.md)).
 - **The kernel's counters** for the interface.
 
 ```
@@ -249,7 +299,8 @@ JSON: a list of interface objects. The brief view carries `interface`,
 `vrf_binding`, `label_switching`, `inet_addresses` and
 `inet6_addresses`, each address with `address`, `scope` and (IPv4 only)
 `secondary`. Optional fields appear only when they apply: `mac_address`,
-`mtu_error`, an address's `flags`, `valid_lft` and `preferred_lft`, and
+`mtu_error`, an address's `flags`, `dynamic` (where a leased or learned
+address is from), `valid_lft` and `preferred_lft`, and
 a VLAN sub-interface's `vlan_id`, `parent` (the parent's name) and
 `parent_index`. The counters are in the text view only.
 
@@ -354,6 +405,8 @@ its `last_ra_*` values.
 | `interface <n> mtu <v>` | `mtu <v>` (interface) / `ip link set <n> mtu <v>` |
 | `no interface <n> mtu` | restore original — no direct FRR equivalent (FRR leaves the last value) |
 | `interface <n> ipv4 address <p>` | `ip address <p>` (interface) |
+| `interface <n> ipv4 address dhcp` | no FRR equivalent: an external client (dhclient, dhcpcd, systemd-networkd) |
+| `interface <n> ipv6 address autoconf` | no FRR equivalent: the kernel's own (`accept_ra`, `autoconf` sysctls) |
 | `interface <n> vrf <name>` | `ip link set <n> master <name>` (VRF master) |
 | `interface <n> bridge <name>` | `ip link set <n> master <name>` (bridge master) |
 
