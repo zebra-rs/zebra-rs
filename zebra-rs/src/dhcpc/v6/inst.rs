@@ -1536,6 +1536,7 @@ mod tests {
     use crate::dhcpc::v6::client::{Ia, IaPd};
     use crate::dhcpc::v6::show::show_leases6;
     use crate::resolver::Report;
+    use crate::rib::api::RibRx;
     use crate::rib::client::{ProtoId, RibClient, RibInbound};
     use crate::rib::link::AddrFlags;
 
@@ -2791,8 +2792,10 @@ mod tests {
         b.dhcpc.sync_pd_lan();
         assert!(asked(&mut b).is_empty());
         // A link that comes up may have lost its address: it is told
-        // again, and no other.
-        b.dhcpc.link_up6(LAN_IFINDEX);
+        // again, and no other. Going down says nothing.
+        b.dhcpc.process_rib_msg(RibRx::LinkDown(LAN_IFINDEX));
+        assert!(asked(&mut b).is_empty());
+        b.dhcpc.process_rib_msg(RibRx::LinkUp(LAN_IFINDEX));
         assert_eq!(asked(&mut b), [format!("lan0 add {first} 3000/6600")]);
 
         // An interface that goes takes its address out of the file, and
@@ -2979,6 +2982,26 @@ mod tests {
                 format!("lan0 {}", del(numbered)),
                 format!("lan0 {}", add(host))
             ]
+        );
+        config_line(
+            &mut b,
+            "pd/interface/address",
+            &["1", LAN],
+            ConfigOp::Delete,
+        );
+        assert_eq!(
+            asked(&mut b),
+            [format!("lan0 {}", del(host)), format!("lan0 {}", add(made))]
+        );
+        config_line(
+            &mut b,
+            "pd/interface/address",
+            &["1", LAN, "1"],
+            ConfigOp::Set,
+        );
+        assert_eq!(
+            asked(&mut b),
+            [format!("lan0 {}", del(made)), format!("lan0 {}", add(host))]
         );
         // A deleted entry is gone whichever of its lines comes last.
         config_line(&mut b, "pd/interface", &["1", LAN2], ConfigOp::Delete);

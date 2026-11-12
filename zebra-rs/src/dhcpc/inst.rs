@@ -371,7 +371,7 @@ impl Dhcpc {
         }
     }
 
-    fn process_rib_msg(&mut self, msg: RibRx) {
+    pub(super) fn process_rib_msg(&mut self, msg: RibRx) {
         match msg {
             RibRx::LinkAdd(link) => {
                 let name = link.name.clone();
