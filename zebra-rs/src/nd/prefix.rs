@@ -19,12 +19,22 @@
 //! - **A prefix that goes** is not just left out, which would have the
 //!   hosts go on using it for as long as they last heard. It is
 //!   advertised with both lifetimes zero, and its flags as they were,
-//!   for as long as the valid lifetime it was last advertised with
-//!   (RFC 9096 §3.5, which replaces RFC 7084's L-13). A host that hears
-//!   it starts no new connection from its address in the prefix, no
-//!   longer takes the prefix for on-link, and keeps the address for two
-//!   hours at most (RFC 4862 §5.5.3); and a host that was away for a
-//!   while still hears it when it is back.
+//!   until the longest valid lifetime it was ever advertised with is
+//!   over (RFC 9096 §3.5, which replaces RFC 7084's L-13). A host that
+//!   hears it starts no new connection from its address in the prefix,
+//!   no longer takes the prefix for on-link, and keeps the address for
+//!   two hours at most (RFC 4862 §5.5.3); and a host that was away for
+//!   a while still hears it when it is back.
+//!
+//!   The longest ever, not the last: a host does not take a valid
+//!   lifetime that an advertisement shortens to under two hours, and
+//!   one that missed the advertisement knows nothing of it. And only a
+//!   prefix that was advertised: of one no advertisement named, no
+//!   host knows.
+//! - **When a lifetime ends** is worked out from when the RIB noted it
+//!   (`LinkAddr::ends`), not from when the RIB says so again: a link
+//!   described anew (a move to another VRF) names the numbers it noted
+//!   then.
 //!
 //! Pure bookkeeping, with the clock handed in: the engine feeds it the
 //! RIB's address events and asks it for the options when an
@@ -57,16 +67,8 @@ struct Ends {
 
 impl Ends {
     fn of(addr: &LinkAddr, now: Instant) -> Ends {
-        let at = |secs: Option<u32>| match secs {
-            Some(secs) if secs != u32::MAX => Some(now + Duration::from_secs(secs.into())),
-            // Forever, or a configuration-path entry the kernel has not
-            // reported on: what is configured does not end.
-            _ => None,
-        };
-        Ends {
-            valid: at(addr.valid_lft),
-            preferred: at(addr.preferred_lft),
-        }
+        let (valid, preferred) = addr.ends(now);
+        Ends { valid, preferred }
     }
 
     /// Whether `other` says something else, beyond the same deadline
@@ -159,6 +161,9 @@ pub struct Prefixes {
     /// By link: the prefixes no address is in any more, each with when
     /// it is over.
     gone: BTreeMap<u32, BTreeMap<Ipv6Net, Instant>>,
+    /// By link: until when a host may hold each prefix, by what the
+    /// advertisements that went out said of it. The latest of them all.
+    told: BTreeMap<u32, BTreeMap<Ipv6Net, Instant>>,
 }
 
 impl Prefixes {
@@ -177,8 +182,14 @@ impl Prefixes {
         let held = self.held.entry(addr.ifindex).or_default();
         let had_prefix = held.keys().any(|other| other.trunc() == prefix);
         let old = held.insert(net, ends);
-        if let Some(gone) = self.gone.get_mut(&addr.ifindex) {
-            gone.remove(&prefix);
+        // Back before it was over: what the hosts were told of it then
+        // still holds for them.
+        if let Some(until) = self
+            .gone
+            .get_mut(&addr.ifindex)
+            .and_then(|gone| gone.remove(&prefix))
+        {
+            self.note_told(addr.ifindex, prefix, until);
         }
         match old {
             _ if !had_prefix => Change::Prefixes,
@@ -199,25 +210,41 @@ impl Prefixes {
         let Some(held) = self.held.get_mut(&ifindex) else {
             return Change::None;
         };
-        let Some(ends) = held.remove(&net) else {
+        if held.remove(&net).is_none() {
             return Change::None;
-        };
+        }
         let prefix = net.trunc();
         if held.keys().any(|other| other.trunc() == prefix) {
             // Another address of the link is still in it.
             return Change::Lifetime;
         }
-        // For as long as a host may still hold it: the valid lifetime
-        // it was last advertised with.
-        let left = match ends.valid {
-            None => Duration::from_secs(DEFAULT_VALID.into()),
-            Some(at) => at.saturating_duration_since(now),
-        };
-        if !left.is_zero() {
+        // For as long as a host may still hold it: until the longest
+        // valid lifetime an advertisement gave it is over. One that no
+        // advertisement named, no host holds.
+        let told = self.told.get_mut(&ifindex);
+        if let Some(until) = told.and_then(|told| told.remove(&prefix))
+            && until > now
+        {
             let gone = self.gone.entry(ifindex).or_default();
-            gone.insert(prefix, now + left);
+            gone.insert(prefix, until);
         }
         Change::Prefixes
+    }
+
+    fn note_told(&mut self, ifindex: u32, prefix: Ipv6Net, until: Instant) {
+        let told = self.told.entry(ifindex).or_default();
+        let known = told.entry(prefix).or_insert(until);
+        *known = (*known).max(until);
+    }
+
+    /// An advertisement of `ifindex` went out at `now` naming
+    /// `advertised` (what [`Self::advertised`] gave for it): the hosts
+    /// that heard it hold each prefix for the valid lifetime it said.
+    pub fn sent(&mut self, ifindex: u32, advertised: &[Advertised], now: Instant) {
+        for prefix in advertised.iter().filter(|p| p.gone.is_none()) {
+            let until = now + Duration::from_secs(prefix.valid.into());
+            self.note_told(ifindex, prefix.prefix, until);
+        }
     }
 
     /// The link is described anew, with every address it has: one that
@@ -242,18 +269,28 @@ impl Prefixes {
         change
     }
 
-    /// The link is gone, and with it whoever heard its advertisements.
-    pub fn link_del(&mut self, ifindex: u32) {
+    /// The link is gone, and its addresses with it. What its hosts were
+    /// told is kept until it is over: a link that moves to another VRF
+    /// is reported gone and back, with the hosts where they were, and a
+    /// prefix it does not come back with is to be named as gone.
+    pub fn link_del(&mut self, ifindex: u32, now: Instant) {
+        let held = self.held.get(&ifindex).into_iter().flatten();
+        let nets: Vec<Ipv6Net> = held.map(|(net, _)| *net).collect();
+        for net in nets {
+            self.remove(ifindex, net, now);
+        }
         self.held.remove(&ifindex);
-        self.gone.remove(&ifindex);
     }
 
-    /// Forget the prefixes that went and are over by `now`.
+    /// Forget what is over by `now`: the prefixes that went, and what
+    /// the hosts were told of the others.
     pub fn expire(&mut self, now: Instant) {
-        self.gone.retain(|_, gone| {
-            gone.retain(|_, until| *until > now);
-            !gone.is_empty()
-        });
+        for timed in [&mut self.gone, &mut self.told] {
+            timed.retain(|_, prefixes| {
+                prefixes.retain(|_, until| *until > now);
+                !prefixes.is_empty()
+            });
+        }
     }
 
     /// What an advertisement of `ifindex` names at `now`: its prefixes
@@ -295,7 +332,7 @@ impl Prefixes {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rib::link::{AddrFlags, AddrOrigin};
+    use crate::rib::link::{AddrFlags, AddrOrigin, NotedAt};
 
     const IF: u32 = 7;
 
@@ -318,6 +355,12 @@ mod tests {
             preferred_lft: lifetimes.map(|(preferred, _)| preferred),
             ..Default::default()
         }
+    }
+
+    /// An advertisement of `IF` goes out at `now`.
+    fn advertise(prefixes: &mut Prefixes, now: Instant) {
+        let named = prefixes.advertised(IF, now);
+        prefixes.sent(IF, &named, now);
     }
 
     /// What `IF` advertises at `now`, as text.
@@ -462,6 +505,7 @@ mod tests {
 
         // One that fails duplicate address detection after all is no
         // longer this router's: its prefix goes.
+        advertise(&mut prefixes, t0);
         let mut failed = tentative.clone();
         failed.flags.dadfailed = true;
         assert_eq!(prefixes.addr_add(&failed, t0), Change::Prefixes);
@@ -480,7 +524,9 @@ mod tests {
         for held in [&long, &short, &configured] {
             prefixes.addr_add(held, t0);
         }
+        advertise(&mut prefixes, t0);
         let t1 = t0 + secs(100);
+        advertise(&mut prefixes, t1);
         for held in [&long, &short, &configured] {
             assert_eq!(
                 prefixes.addr_del(held, t1),
@@ -489,9 +535,10 @@ mod tests {
                 held.addr
             );
         }
-        // Both lifetimes zero at once, each for as long as the valid
-        // lifetime it was last advertised with: what was left of an
-        // address's, and RFC 4861's 30 days for one that never ended.
+        // Both lifetimes zero at once, each until the valid lifetime
+        // an advertisement gave it is over: what was left of an
+        // address's, and RFC 4861's 30 days from the last one for an
+        // address that never ended.
         assert_eq!(
             told(&prefixes, t1),
             [
@@ -532,8 +579,83 @@ mod tests {
         // One whose time was up when it went leaves nothing to say.
         let mut prefixes = Prefixes::default();
         prefixes.addr_add(&short, t0);
+        advertise(&mut prefixes, t0);
         assert_eq!(prefixes.addr_del(&short, t0 + secs(600)), Change::Prefixes);
         assert!(told(&prefixes, t0 + secs(600)).is_empty());
+        // Nor does one that no advertisement named: no host holds it.
+        prefixes.addr_add(&long, t0);
+        assert_eq!(prefixes.addr_del(&long, t0 + secs(1)), Change::Prefixes);
+        assert!(told(&prefixes, t0 + secs(1)).is_empty());
+    }
+
+    /// Until the longest valid lifetime an advertisement gave the
+    /// prefix is over, not the last: a host takes no valid lifetime
+    /// that is shortened to under two hours, and one that missed the
+    /// advertisement which shortened it knows nothing of it.
+    #[test]
+    fn a_withdrawal_lasts_as_long_as_the_longest_lifetime_told() {
+        let t0 = Instant::now();
+        let mut prefixes = Prefixes::default();
+        let leased = addr("2001:db8:100:1::1/64", Some((3600, 7200)));
+        prefixes.addr_add(&leased, t0);
+        advertise(&mut prefixes, t0);
+        // The lease is cut to a minute, which is advertised too, and
+        // then the prefix is taken away.
+        let cut = addr("2001:db8:100:1::1/64", Some((60, 60)));
+        assert_eq!(prefixes.addr_add(&cut, t0 + secs(10)), Change::Lifetime);
+        advertise(&mut prefixes, t0 + secs(10));
+        assert_eq!(
+            told(&prefixes, t0 + secs(10)),
+            ["2001:db8:100:1::/64 60/60"]
+        );
+        assert_eq!(prefixes.addr_del(&cut, t0 + secs(20)), Change::Prefixes);
+        assert_eq!(
+            told(&prefixes, t0 + secs(20)),
+            ["2001:db8:100:1::/64 0/0 gone, for 7180"]
+        );
+        // Still named when the minute is long over.
+        assert_eq!(told(&prefixes, t0 + secs(7199)).len(), 1);
+        assert!(told(&prefixes, t0 + secs(7200)).is_empty());
+
+        // A prefix that came back and goes again: what the hosts were
+        // told the first time still holds for them.
+        let mut prefixes = Prefixes::default();
+        prefixes.addr_add(&leased, t0);
+        advertise(&mut prefixes, t0);
+        prefixes.addr_del(&leased, t0 + secs(100));
+        prefixes.addr_add(&cut, t0 + secs(200));
+        assert_eq!(prefixes.addr_del(&cut, t0 + secs(210)), Change::Prefixes);
+        assert_eq!(
+            told(&prefixes, t0 + secs(210)),
+            ["2001:db8:100:1::/64 0/0 gone, for 6990"]
+        );
+        prefixes.expire(t0 + secs(7200));
+        assert!(prefixes.gone.is_empty() && prefixes.told.is_empty());
+    }
+
+    /// A lifetime ends when the RIB noted it would, whenever the RIB
+    /// says so again: a link described anew names the numbers it noted
+    /// at the time.
+    #[test]
+    fn lifetimes_count_from_when_they_were_noted() {
+        let t0 = Instant::now();
+        let mut prefixes = Prefixes::default();
+        let mut leased = addr("2001:db8:100:1::1/64", Some((3600, 7200)));
+        leased.lft_noted = NotedAt(Some(t0));
+        // Half an hour on, the link is described anew with what was
+        // noted then.
+        let later = t0 + secs(1800);
+        let listed = [leased.clone()];
+        assert_eq!(prefixes.link_set(IF, &listed, later), Change::Prefixes);
+        assert_eq!(told(&prefixes, later), ["2001:db8:100:1::/64 1800/5400"]);
+        // And again: the same end, so nothing new.
+        let again = later + secs(600);
+        assert_eq!(prefixes.link_set(IF, &listed, again), Change::None);
+        assert_eq!(told(&prefixes, again), ["2001:db8:100:1::/64 1200/4800"]);
+        // The same numbers noted now are a renewal.
+        leased.lft_noted = NotedAt(Some(again));
+        assert_eq!(prefixes.addr_add(&leased, again), Change::Lifetime);
+        assert_eq!(told(&prefixes, again), ["2001:db8:100:1::/64 3600/7200"]);
     }
 
     #[test]
@@ -570,6 +692,7 @@ mod tests {
         // The same list again says nothing.
         assert_eq!(prefixes.link_set(IF, &listed, t0), Change::None);
         // One is no longer among them.
+        advertise(&mut prefixes, t0);
         assert_eq!(prefixes.link_set(IF, &listed[..1], t0), Change::Prefixes);
         assert_eq!(
             told(&prefixes, t0),
@@ -578,9 +701,32 @@ mod tests {
                 format!("2001:db8:2::/64 0/0 gone, for {DEFAULT_VALID}"),
             ]
         );
-        // The link itself gone: nobody is left to tell.
-        prefixes.link_del(IF);
+        // A link reported gone before any advertisement went out:
+        // nothing was told, and nothing is left of it.
+        let mut prefixes = Prefixes::default();
+        prefixes.link_set(IF, &listed, t0);
+        prefixes.link_del(IF, t0);
         assert!(told(&prefixes, t0).is_empty());
         assert_eq!(prefixes.addr_del(&first, t0), Change::None);
+
+        // Reported gone after its hosts were told (a move to another
+        // VRF is that, and the link back at once): its prefixes are on
+        // their way out, until it is back with them.
+        prefixes.link_set(IF, &listed, t0);
+        advertise(&mut prefixes, t0);
+        prefixes.link_del(IF, t0);
+        let both_gone = [
+            format!("2001:db8:1::/64 0/0 gone, for {DEFAULT_VALID}"),
+            format!("2001:db8:2::/64 0/0 gone, for {DEFAULT_VALID}"),
+        ];
+        assert_eq!(told(&prefixes, t0), both_gone);
+        assert_eq!(prefixes.link_set(IF, &listed[..1], t0), Change::Prefixes);
+        assert_eq!(
+            told(&prefixes, t0),
+            [
+                format!("2001:db8:1::/64 {DEFAULT_PREFERRED}/{DEFAULT_VALID}"),
+                format!("2001:db8:2::/64 0/0 gone, for {DEFAULT_VALID}"),
+            ]
+        );
     }
 }

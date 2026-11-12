@@ -1249,7 +1249,10 @@ Icmp6InUnrelated                    \t99
         eng.process_link_add(&link("p2p0", 3), start);
         eng.enable_interface(2, RaSendConfig::default(), start);
         eng.enable_interface(3, RaSendConfig::default(), start);
-        eng.process_rib_msg(RibRx::AddrDel(old), start);
+        // The hosts have heard of all three, and then one goes.
+        let told = start + std::time::Duration::from_secs(16);
+        eng.tick(told, |_| Ok(()));
+        eng.process_rib_msg(RibRx::AddrDel(old), told);
 
         let now = start + std::time::Duration::from_secs(60);
         let mut text = String::new();

@@ -217,7 +217,22 @@ would bypass the RIB.
     every Router Advertisement heard (the reason
     `AddrUpdate::Unchanged` was silent);
   - `link_addr_update` so tells a renewal (`AddrUpdate::Renewed`) from
-    a notification that changes nothing.
+    a notification that changes nothing. By when the lifetimes end,
+    not by their numbers: `LinkAddr` keeps when its lifetimes were
+    noted (`lft_noted`), since they are what was left at that moment
+    and are not counted down in the RIB. A server that gives the same
+    lifetimes with every renewal moves their end each time, and the
+    kernel's word on a renewal a second later, with a second less, does
+    not. `LinkAddr::ends` is what a subscriber reads: a link described
+    anew (a move to another VRF is a `LinkDel` and a `LinkAdd`) hands
+    out the numbers as they were noted, and counted from the moment
+    they arrive they would end too late.
+  - A dynamic address that is renewed is replaced in the kernel in
+    place and goes through no duplicate address detection. The RIB
+    noted it as tentative like a new one, which the kernel's
+    notification then took back: every renewal was two changes of the
+    address's state to every protocol. It keeps the state the kernel
+    last reported.
 
 ### D6. Lease routes are protocol routes
 
@@ -489,9 +504,15 @@ per-interface helper is new.
     away. Both keep to the three seconds between advertisements.
   - **A prefix that went** (the delegation changed or was given back,
     or the address was deleted) is advertised with both lifetimes 0
-    and its flags as they were, for as long as the valid lifetime it
-    was last advertised with: what was left of the address's, or 30
-    days for one that never ended. That is RFC 9096 §3.5, which
+    and its flags as they were, until the longest valid lifetime an
+    advertisement ever gave it is over: `nd` notes what each
+    advertisement that went out said (`Prefixes::sent`). The longest
+    and not the last, since a host does not take a valid lifetime that
+    is shortened to under two hours, and one that missed the
+    advertisement which shortened it knows nothing of it. A prefix no
+    advertisement named is not withdrawn: no host holds it. A link
+    reported gone and back keeps what its hosts were told, and a prefix
+    it comes back without is withdrawn. That is RFC 9096 §3.5, which
     replaces the L-13 of RFC 7084 this document first went by (a
     preferred lifetime of 0, and a valid one of the remaining lifetime
     or two hours). A host that hears it deprecates its address, no
@@ -1595,7 +1616,7 @@ client, and logs each message, which is what a scenario reads.
 | `dhcpv6_client_dns` | against a stand-in for `resolvectl`, and a server whose lease and whose Router Advertisements name different name servers: the lease's servers and search list set with nothing configured but `address dhcpv6`, ahead of the advertised ones and behind a DHCPv4 lease's; reverted on `release` and on setting `dhcpv6-options no-name-server`, which leaves the advertised ones, and set again when that is deleted; nothing set for a lease taken, or resumed after a restart, under `no-name-server`; set again after a restart; what `parameters-only` is given set with no lease and no RA host; deleted configuration reverts |
 | `dhcpv6_client_pd` | As built: the address and the prefix in one exchange, with the hint on the wire; the discard route in the RIB and in the kernel, and that it ends a packet which a routed prefix without one sends round between the two routers; renew; a restart resumes the prefix and its route and verifies them by a Rebind; a second `pd`, and one the server has nothing for; a prefix without an address; `parameters-only` refused beside `pd`; deleted configuration releases and withdraws |
 | `dhcpv6_client_pd_lan` | As built: two interfaces numbered from one delegation, one by `address` and one by EUI-64, each with the prefix's lifetime and the route to its /64; a host behind the router reached from the delegating router through the prefix; a link set down and up has its address again; a renewal that brings other lifetimes moves the addresses'; another prefix replaces the discard route and the addresses, and the old /64 is on-link no longer; an `sla-id` moved, one beyond the prefix (no address, and said), two interfaces on one /64 and the upstream interface refused, none of it a new lease; a restart keeps the addresses and removes that of an interface no longer configured; an interface, then the delegation, deleted |
-| `ra_prefix` | As built: a router that numbers an interface from a delegated prefix, has an address of its own on it and advertises there; a host with nothing configured forms an address in both /64s, takes the router for its default and reaches the delegating router; the configured prefix has RFC 4861's lifetimes and the delegated one the lease's; a renewal with longer lifetimes reaches the host without waiting for the periodic advertisement; another prefix from the server gives the host a new address, deprecates the old one and takes its on-link route away; a configured address deleted deprecates its prefix, and set again restores it; so does a delegation given back; an interface that stops advertising names nothing |
+| `ra_prefix` | As built: a router that numbers an interface from a delegated prefix, has an address of its own on it and advertises there; a host with nothing configured forms an address in both /64s, takes the router for its default and reaches the delegating router; the configured prefix has RFC 4861's lifetimes and the delegated one the lease's; a renewal with longer lifetimes reaches the host without waiting for the periodic advertisement; a renewal with the same lifetimes as before still moves their end; another prefix from the server gives the host a new address, deprecates the old one and takes its on-link route away, and the old one is named for as long as its longest lifetime, though its lease was cut short since; a configured address deleted deprecates its prefix, and set again restores it; so does a delegation given back; an interface that stops advertising names nothing |
 | `dhcpv6_pd_insomnia` | a zebra-rs + insomnia router serving PD (insomnia's existing DHCPv6 server) to a zebra-rs client router: both sides of the feature in one topology |
 
 ---

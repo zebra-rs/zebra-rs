@@ -13,10 +13,12 @@ Feature: Router Advertisements name the interface's prefixes (Prefix Information
   - A prefix whose address never ends is advertised with RFC 4861's
     lifetimes; one whose address has lifetimes (the lease's) with what
     is left of them.
-  - A renewal is told soon, not with the next periodic advertisement.
+  - A renewal is told soon, not with the next periodic advertisement,
+    also when it gives the same lifetimes as the one before.
   - A prefix that goes is advertised with both lifetimes zero (RFC 9096
     §3.5): the hosts stop using their address in it for new connections
-    and no longer take it for on-link.
+    and no longer take it for on-link. It is named that way until the
+    longest valid lifetime it was ever advertised with is over.
 
   Topology: s1 is the ISP side, a router with the small DHCPv6 server of
   dhcpv6_client_pd.feature, which routes what it delegates, and the
@@ -91,6 +93,21 @@ Feature: Router Advertisements name the interface's prefixes (Prefix Information
     And show command "show ipv6 nd interface lan0" in namespace "r1" should eventually contain "2001:db8:100:1::/64 valid 16h3"
     And command "ip -6 addr show dev eth0 scope global" in namespace "h1" should eventually contain "valid_lft 59"
 
+  Scenario: A renewal with the same lifetimes still moves their end
+    Given the test topology exists
+    # The server now gives 200 s, and gives them again with every
+    # renewal: the numbers do not change, and the prefix lasts longer
+    # all the same.
+    When I execute "tests/scripts/dhcpv6_server.py ra_prefix stop" in namespace "s1"
+    And I execute "tests/scripts/dhcpv6_server.py ra_prefix start srv0 --address 2001:db8:1::100 --pd 1=2001:db8:100::/56 --route --route-also 2001:db8:aa::/64 --preferred 100 --valid 200" in namespace "s1"
+    Then show command "renew dhcpv6 interface wan0" in namespace "r1" should contain "Renewing the DHCPv6 lease on wan0"
+    And show command "show ipv6 nd interface lan0" in namespace "r1" should eventually contain "2001:db8:100:1::/64 valid 3m1"
+    # Twenty seconds on, less than three minutes are left of it.
+    And show command "show ipv6 nd interface lan0" in namespace "r1" should eventually contain "2001:db8:100:1::/64 valid 2m5"
+    # Renewed, with the 200 s it had before: over three minutes again.
+    And show command "renew dhcpv6 interface wan0" in namespace "r1" should contain "Renewing the DHCPv6 lease on wan0"
+    And show command "show ipv6 nd interface lan0" in namespace "r1" should eventually contain "2001:db8:100:1::/64 valid 3m1"
+
   Scenario: A prefix that is replaced is taken out of use on the hosts
     Given the test topology exists
     When I execute "tests/scripts/dhcpv6_server.py ra_prefix stop" in namespace "s1"
@@ -98,7 +115,9 @@ Feature: Router Advertisements name the interface's prefixes (Prefix Information
     Then show command "renew dhcpv6 interface wan0" in namespace "r1" should contain "Renewing the DHCPv6 lease on wan0"
     And show command "show dhcpv6 client leases" in namespace "r1" should eventually contain "on lan0:    2001:db8:900:1::1/64"
     # The new prefix is advertised, and the old one with both lifetimes
-    # zero, for as long as the 60000 s it was last advertised with.
+    # zero, until the 60000 s it was once advertised with are over,
+    # though its lease was cut to 200 s since: a host may have heard
+    # the longer lifetime only.
     And show command "show ipv6 nd interface lan0" in namespace "r1" should eventually contain "2001:db8:900:1::/64 valid 16h3"
     And show command "show ipv6 nd interface lan0" in namespace "r1" should eventually contain "2001:db8:100:1::/64 valid 0s, preferred 0s (withdrawn, named for another 16h3"
     # The host has an address of the new prefix, no longer starts a

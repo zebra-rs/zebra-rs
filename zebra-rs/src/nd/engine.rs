@@ -331,7 +331,7 @@ impl NdEngine {
             RibRx::LinkAdd(link) => self.process_link_add(&link, now),
             RibRx::LinkDown(ifindex) => self.process_link_state(ifindex, false, now),
             RibRx::LinkUp(ifindex) => self.process_link_state(ifindex, true, now),
-            RibRx::LinkDel(ifindex) => self.process_link_del(ifindex),
+            RibRx::LinkDel(ifindex) => self.process_link_del(ifindex, now),
             RibRx::AddrAdd(addr) => self.process_addr(&addr, true, now),
             RibRx::AddrDel(addr) => self.process_addr(&addr, false, now),
             // Only its lifetimes moved: those of the prefix it gives.
@@ -629,9 +629,9 @@ impl NdEngine {
     /// durable intent, keyed by name rather than ifindex, so an
     /// interface re-created under the same name picks its RA config
     /// back up through the deferred apply in `process_link_add`.
-    pub fn process_link_del(&mut self, ifindex: u32) {
+    pub fn process_link_del(&mut self, ifindex: u32, now: Instant) {
         self.hosts.link_del(ifindex);
-        self.prefixes.link_del(ifindex);
+        self.prefixes.link_del(ifindex, now);
         self.senders.remove(&ifindex);
         self.down_links.remove(&ifindex);
         self.link_locals.remove(&ifindex);
@@ -852,9 +852,9 @@ impl NdEngine {
             // The interface's prefixes, with the lifetimes they have at
             // this moment: the sender's template knows neither.
             let mut ra = ra.clone();
-            let prefixes = self.prefixes.advertised(ifindex, now);
+            let named = self.prefixes.advertised(ifindex, now);
             ra.options.extend(
-                prefixes
+                named
                     .iter()
                     .map(|prefix| NdOption::PrefixInformation(prefix.option())),
             );
@@ -870,6 +870,9 @@ impl NdEngine {
                 .map_or("?", String::as_str);
             match send(frame) {
                 Ok(()) => {
+                    // The hosts have heard it: that is what a prefix
+                    // that goes later is to be withdrawn against.
+                    self.prefixes.sent(ifindex, &named, now);
                     let failures = sender.send_failures();
                     if failures > 0 {
                         tracing::info!(
@@ -1478,23 +1481,72 @@ mod tests {
         assert!(prefixes_told(&sent).is_empty());
     }
 
-    /// A deleted link takes its prefixes along: a link made anew under
-    /// the same index starts with none.
+    /// A link reported gone and back (a move to another VRF) is the same
+    /// link to its hosts. A lifetime still ends when the RIB noted it
+    /// would, not that long after the link is described again; and a
+    /// prefix the link comes back without is named as gone, for as long
+    /// as the hosts were told it would last. A link that goes before
+    /// any advertisement leaves nothing to say.
     #[test]
-    fn a_deleted_link_forgets_its_prefixes() {
+    fn a_link_gone_and_back_keeps_what_its_hosts_were_told() {
+        use crate::rib::link::NotedAt;
+
         let start = t0();
         let mut eng = NdEngine::new();
         let mut eth0 = link("eth0", 7);
         eth0.addr6.push(global(7, "2001:db8:1::1/64", None));
+        // As the RIB hands it out: with when its lifetimes were noted.
+        let mut leased = global(7, "2001:db8:100:1::1/64", Some((3600, 7200)));
+        leased.lft_noted = NotedAt(Some(start));
+        eth0.addr6.push(leased);
         eng.process_link_add(&eth0, start);
-        assert_eq!(eng.prefixes(7, start).len(), 1);
-        eng.process_link_del(7);
+        // Gone before anybody was told of a prefix.
+        eng.process_link_del(7, start);
         assert!(eng.prefixes(7, start).is_empty());
-        // A link described anew without the address: on its way out.
+
         eng.process_link_add(&eth0, start);
-        eng.process_link_add(&link("eth0", 7), start);
-        let now = eng.prefixes(7, start);
-        assert!(now.len() == 1 && now[0].gone.is_some(), "{now:?}");
+        eng.set_ra_config("eth0".into(), RaSendConfig::default(), start);
+        let sent = tick_ok(&mut eng, start + secs(16));
+        assert_eq!(
+            prefixes_told(&sent),
+            [
+                "if7 2001:db8:1::/64 604800/2592000",
+                "if7 2001:db8:100:1::/64 3584/7184",
+            ]
+        );
+
+        // Half an hour on the link moves to another VRF: gone, and back
+        // with the addresses as the RIB noted them at the start.
+        let moved = start + secs(1800);
+        eng.process_link_del(7, moved);
+        eng.process_link_add(&eth0, moved);
+        let sent = tick_ok(&mut eng, moved + secs(16));
+        assert_eq!(
+            prefixes_told(&sent),
+            [
+                "if7 2001:db8:1::/64 604800/2592000",
+                "if7 2001:db8:100:1::/64 1784/5384",
+            ]
+        );
+
+        // Gone again, and back without the leased address: its prefix
+        // is named as gone until the two hours the hosts heard are over.
+        let again = moved + secs(100);
+        eng.process_link_del(7, again);
+        eth0.addr6.pop();
+        eng.process_link_add(&eth0, again);
+        let now = eng.prefixes(7, again);
+        assert_eq!(now.len(), 2, "{now:?}");
+        assert_eq!(now[0].gone, None);
+        assert_eq!(now[1].gone, Some(7200 - 1900));
+        let sent = tick_ok(&mut eng, again + secs(16));
+        assert_eq!(
+            prefixes_told(&sent),
+            [
+                "if7 2001:db8:1::/64 604800/2592000",
+                "if7 2001:db8:100:1::/64 0/0",
+            ]
+        );
     }
 
     #[test]
@@ -2133,7 +2185,7 @@ mod tests {
         eng.process_link_add(&link("eth0", 7), start);
         eng.set_ra_config("eth0".into(), RaSendConfig::default(), start);
         assert_eq!(tick_ok(&mut eng, start + Duration::from_secs(16)).len(), 1);
-        eng.process_link_del(7);
+        eng.process_link_del(7, t0());
         assert!(!eng.is_enabled(7));
         assert!(eng.next_wakeup().is_none());
         assert!(tick_ok(&mut eng, start + Duration::from_secs(600)).is_empty());
@@ -2149,7 +2201,7 @@ mod tests {
         eng.process_link_add(&link("eth0", 7), start);
         eng.process_link_add(&link("swp1", 7), start);
         eng.process_link_add(&link("eth0", 9), start);
-        eng.process_link_del(7);
+        eng.process_link_del(7, t0());
         assert!(eng.ifname_of(7).is_none());
         assert!(eng.ifindex_of("swp1").is_none());
         assert_eq!(eng.ifindex_of("eth0"), Some(9));
@@ -2172,12 +2224,12 @@ mod tests {
         eng.process_link_add(&link("eth0", 9), start);
         assert_eq!(eng.ifname_of(7), Some("eth0"));
         assert_eq!(eng.ifindex_of("eth0"), Some(9));
-        eng.process_link_del(7);
+        eng.process_link_del(7, t0());
         assert!(eng.ifname_of(7).is_none());
         assert_eq!(eng.ifindex_of("eth0"), Some(9));
 
         // A delete for an ifindex we never saw is a no-op.
-        eng.process_link_del(99);
+        eng.process_link_del(99, t0());
         assert_eq!(eng.ifindex_of("eth0"), Some(9));
     }
 
@@ -2200,7 +2252,7 @@ mod tests {
         assert!(eng.counters().contains_key(&7));
         assert!(eng.neighbors().contains_key(&7));
 
-        eng.process_link_del(7);
+        eng.process_link_del(7, t0());
         assert!(!eng.is_enabled(7));
         assert!(eng.ifname_of(7).is_none());
         assert!(eng.ifindex_of("eth0").is_none());
@@ -2276,7 +2328,7 @@ mod tests {
         assert_eq!(eng.counters()[&7].rx_rs, 1);
 
         let moved = start + Duration::from_secs(20);
-        eng.process_link_del(7);
+        eng.process_link_del(7, t0());
         assert!(!eng.is_enabled(7));
         eng.process_link_add(&link("eth1", 7), moved);
 
@@ -2792,7 +2844,7 @@ mod tests {
         gone.addr6.clear();
         eng.process_link_add(&gone, start);
         assert!(eng.is_waiting_for_link_local(7));
-        eng.process_link_del(7);
+        eng.process_link_del(7, t0());
         assert!(!eng.link_locals.contains_key(&7));
     }
 

@@ -11,7 +11,7 @@ L-2): `dhcpv6-options pd <id> interface <lan>` puts an address of the
 prefix on the interface, and the advertisement names its /64.
 
 - A prefix whose address never ends is advertised with RFC 4861's
-- A renewal is told soon, not with the next periodic advertisement.
+- A renewal is told soon, not with the next periodic advertisement,
 - A prefix that goes is advertised with both lifetimes zero (RFC 9096
 
 Topology: s1 is the ISP side, a router with the small DHCPv6 server of
@@ -35,6 +35,7 @@ Requires python3 on the host.
 | The advertisements name both prefixes of the interface | |
 | A host with nothing configured gets its addresses and its route | |
 | A renewal is told to the hosts soon | |
+| A renewal with the same lifetimes still moves their end | |
 | A prefix that is replaced is taken out of use on the hosts | |
 | A configured address that is deleted takes its prefix out of use too | |
 | A delegation that is given back takes its prefix out of use | |

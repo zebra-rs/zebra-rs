@@ -198,9 +198,9 @@ interface. Nothing more is configured for it.
   prefix is advertised with both lifetimes 0 (RFC 9096). A host that
   hears it starts no new connection from its address in the prefix,
   no longer takes the prefix for on-link, and keeps the address for
-  two hours at most. The prefix is named that way for as long as the
-  valid lifetime it was last advertised with, so that a host that was
-  away hears it too.
+  two hours at most. The prefix is named that way until the longest
+  valid lifetime it was advertised with is over, so that a host that
+  was away hears it too.
 
 `show ipv6 nd interface` lists the prefixes with the lifetimes they
 have at the moment ([below](#show-ipv6-nd-interface-ifname)).
