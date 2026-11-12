@@ -185,7 +185,8 @@ async fn exec(program: &OsStr, argv: &[String], limit: Duration) -> Result<(), F
 
 #[cfg(test)]
 mod tests {
-    use std::os::unix::fs::{PermissionsExt, symlink};
+    use std::io::Write;
+    use std::os::unix::fs::symlink;
     use std::path::PathBuf;
 
     use super::*;
@@ -203,10 +204,27 @@ mod tests {
         }
 
         /// An executable script.
+        ///
+        /// Written by a child and not by this process. A file this
+        /// process has open for writing is open in every child another
+        /// test's thread forks at that moment, until that child calls
+        /// exec, and the kernel refuses to run a file that anybody has
+        /// open for writing (ETXTBSY, "Text file busy"). The tests here
+        /// run side by side and all start programs.
         fn script(&self, name: &str, body: &str) -> OsString {
             let path = self.0.join(name);
-            std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let mut writer = std::process::Command::new("sh")
+                .args(["-c", r#"cat > "$0" && chmod 755 "$0""#])
+                .arg(&path)
+                .stdin(Stdio::piped())
+                .spawn()
+                .unwrap();
+            let mut stdin = writer.stdin.take().unwrap();
+            stdin
+                .write_all(format!("#!/bin/sh\n{body}\n").as_bytes())
+                .unwrap();
+            drop(stdin);
+            assert!(writer.wait().unwrap().success());
             path.into_os_string()
         }
     }
@@ -372,8 +390,9 @@ mod tests {
 
         // Nothing on standard error: how it ended.
         let silent = dir.script("silent", "exit 3");
-        let Err(Failure::Uncertain(error)) = exec(&silent, &[], TIMEOUT).await else {
-            panic!("an error exit does not say that nothing changed");
+        let error = match exec(&silent, &[], TIMEOUT).await {
+            Err(Failure::Uncertain(error)) => error,
+            other => panic!("an error exit does not say that nothing changed: {other:?}"),
         };
         assert!(error.ends_with("exit status: 3"), "{error}");
     }
@@ -383,8 +402,9 @@ mod tests {
     async fn a_program_that_is_killed_leaves_it_open_what_it_did() {
         let dir = Dir::new("killed");
         let killed = dir.script("killed", "kill -KILL $$");
-        let Err(Failure::Uncertain(error)) = exec(&killed, &[], TIMEOUT).await else {
-            panic!("a signal does not say that nothing changed");
+        let error = match exec(&killed, &[], TIMEOUT).await {
+            Err(Failure::Uncertain(error)) => error,
+            other => panic!("a signal does not say that nothing changed: {other:?}"),
         };
         assert!(error.ends_with("signal: 9 (SIGKILL)"), "{error}");
     }
@@ -394,8 +414,9 @@ mod tests {
         let dir = Dir::new("absent");
         let absent = dir.0.join("absent").into_os_string();
         // The one failure that says so.
-        let Err(Failure::NotRun(error)) = exec(&absent, &[], TIMEOUT).await else {
-            panic!("a program that cannot be started has done nothing");
+        let error = match exec(&absent, &[], TIMEOUT).await {
+            Err(Failure::NotRun(error)) => error,
+            other => panic!("a program that cannot be started has done nothing: {other:?}"),
         };
         assert!(error.contains("No such file"), "{error}");
     }
