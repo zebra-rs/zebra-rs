@@ -51,7 +51,8 @@ pub enum Op {
 pub enum Failure {
     /// The system resolver is not ours to configure, now or later.
     Refused(String),
-    /// The command could not be started: nothing was changed.
+    /// The command could not be started, or there was nothing to start
+    /// it with: nothing was changed.
     NotRun(String),
     /// The command was started and did not report success: it said no,
     /// gave no answer, or was cut short. None of them says what the
@@ -64,7 +65,25 @@ pub enum Failure {
 
 /// What carries the commands out ([`super::resolvectl::Resolvectl`]).
 pub trait Backend: Send + 'static {
-    fn run(&mut self, op: &Op) -> impl Future<Output = Result<(), Failure>> + Send;
+    /// What a command is run with.
+    type Program: Send + Sync;
+
+    /// Look for what the next command is to be run with. An error says
+    /// that no command can be started now, and none has been:
+    /// [`Failure::Refused`] where the system resolver is not ours, and
+    /// [`Failure::NotRun`] where there is nothing to run.
+    ///
+    /// Asked before every command. Whether one can be started is not
+    /// taken from how the last one went: a host without the program
+    /// today may have it at the next try.
+    fn program(&mut self) -> Result<Self::Program, Failure>;
+
+    /// Run `op` with what [`Backend::program`] found.
+    fn run(
+        &mut self,
+        program: &Self::Program,
+        op: &Op,
+    ) -> impl Future<Output = Result<(), Failure>> + Send;
 
     /// Whether the system resolver is this backend's to configure, or
     /// why not: what [`Failure::Refused`] would say of any command,
@@ -107,8 +126,8 @@ pub struct Resolver<B> {
     retry: Option<Instant>,
     backoff: Duration,
     /// The interfaces that hold something of ours, on disk for the next
-    /// run. An interface is named there before the first command that
-    /// may give it something is started: a run that is ended while the
+    /// run. An interface is named there before any command that may
+    /// give it something is started: a run that is ended while the
     /// command is under way has still left word of it.
     record: Record,
     /// The interfaces an earlier run left set, as far as no source of
@@ -117,11 +136,6 @@ pub struct Resolver<B> {
     waiting: BTreeSet<String>,
     /// When the wait for the sources is over.
     sweep: Option<Instant>,
-    /// The last command could not be started: on a host without the
-    /// program, most likely. Until one starts, no interface is named in
-    /// the record ahead of its command, or the record would be written
-    /// and put right again with every try.
-    unstarted: bool,
 }
 
 impl<B: Backend> Resolver<B> {
@@ -140,7 +154,6 @@ impl<B: Backend> Resolver<B> {
             record: Record::default(),
             waiting: BTreeSet::new(),
             sweep: None,
-            unstarted: false,
         }
     }
 
@@ -337,11 +350,26 @@ impl<B: Backend> Resolver<B> {
         failed || self.record.unsaved()
     }
 
-    /// One command, and whether it could be started.
-    async fn run(&mut self, op: Op) -> Result<(), Failure> {
-        let result = self.backend.run(&op).await;
-        self.unstarted = matches!(result, Err(Failure::NotRun(_)));
-        result
+    /// One command. What it is to be run with is looked for first, and
+    /// with nothing to run it with, nothing is started.
+    ///
+    /// `ahead` is the interface the command may give something to. It
+    /// is put on record once there is a program and before the command
+    /// is started: a run that is ended while the command is under way
+    /// does not know how it went, and the next one must find the
+    /// interface named.
+    ///
+    /// That holds for every command that can start, whatever became of
+    /// the one before it. And a host without the program has none that
+    /// can: nothing is put on record there, try after try, where putting
+    /// it and taking it off again would write the file every few minutes
+    /// for nothing.
+    async fn run(&mut self, op: Op, ahead: Option<(&str, u32)>) -> Result<(), Failure> {
+        let program = self.backend.program()?;
+        if let Some((name, ifindex)) = ahead {
+            self.record.hold(name, ifindex);
+        }
+        self.backend.run(&program, &op).await
     }
 
     async fn apply(&mut self) -> bool {
@@ -362,7 +390,7 @@ impl<B: Backend> Resolver<B> {
                 self.forget(&name);
                 continue;
             }
-            let failure = match self.run(Op::Revert(name.clone())).await {
+            let failure = match self.run(Op::Revert(name.clone()), None).await {
                 Ok(()) => {
                     tracing::info!("resolver: {name}: name servers withdrawn");
                     self.forget(&name);
@@ -447,18 +475,13 @@ impl<B: Backend> Resolver<B> {
         dns: &LinkDns,
     ) -> Result<(), Failure> {
         let unknown = Held { ifindex, dns: None };
-        // On record before the command is started: a run that is ended
-        // while it is under way does not know how it went, and the next
-        // one must find the interface named. A record that cannot be
-        // written does not keep the servers from the host: it is tried
-        // again with the look that follows (`reconcile`).
-        if let Some(ifindex) = ifindex
-            && !self.unstarted
-        {
-            self.record.hold(name, ifindex);
-        }
+        // On record before the command is started (`run`). A record
+        // that cannot be written does not keep the servers from the
+        // host: it is tried again with the look that follows
+        // (`reconcile`).
+        let ahead = ifindex.map(|ifindex| (name, ifindex));
         let servers = Op::Dns(name.to_string(), dns.servers.clone());
-        match self.run(servers).await {
+        match self.run(servers, ahead).await {
             Ok(()) => {}
             Err(failure) => {
                 if matches!(failure, Failure::Uncertain(_)) {
@@ -468,7 +491,8 @@ impl<B: Backend> Resolver<B> {
             }
         }
         self.applied.insert(name.to_string(), unknown);
-        self.run(Op::Domains(name.to_string(), dns.domains.clone()))
+        // The interface is on record from the servers' command.
+        self.run(Op::Domains(name.to_string(), dns.domains.clone()), None)
             .await?;
         let held = Held {
             ifindex,
@@ -591,6 +615,8 @@ mod tests {
         recorded: Vec<Vec<(String, u32)>>,
         /// The system resolver is not this backend's to configure.
         refuses: bool,
+        /// There is no program to run a command with.
+        absent: bool,
     }
 
     /// Where the benches run.
@@ -618,7 +644,20 @@ mod tests {
     struct Mock(Arc<Mutex<Script>>);
 
     impl Backend for Mock {
-        async fn run(&mut self, op: &Op) -> Result<(), Failure> {
+        type Program = ();
+
+        fn program(&mut self) -> Result<(), Failure> {
+            let script = self.0.lock().unwrap();
+            if script.refuses {
+                Err(Failure::Refused("not here".to_string()))
+            } else if script.absent {
+                Err(Failure::NotRun("no such program".to_string()))
+            } else {
+                Ok(())
+            }
+        }
+
+        async fn run(&mut self, _program: &(), op: &Op) -> Result<(), Failure> {
             let takes = self.0.lock().unwrap().takes;
             tokio::time::sleep(takes).await;
             let mut script = self.0.lock().unwrap();
@@ -628,9 +667,6 @@ mod tests {
             }
             let leaving = std::mem::take(&mut script.leaving);
             script.missing.extend(leaving);
-            if script.refuses {
-                return Err(Failure::Refused("not here".to_string()));
-            }
             script.answers.pop_front().unwrap_or(Ok(()))
         }
 
@@ -1049,37 +1085,90 @@ mod tests {
         assert_eq!(b.record(), links(&[(WAN, 7)]));
     }
 
-    /// On a host without `resolvectl` no command can be started, time
-    /// after time. Such an interface holds nothing, and the record says
-    /// so once: it is not written and put right again with every try,
-    /// nor does it name an interface for the next run to revert, time
-    /// after time, on a host that cannot.
+    /// On a host without `resolvectl` there is nothing to start, time
+    /// after time. That is seen by looking, before each command: none is
+    /// made, and the interface, which holds nothing, is never put on
+    /// record. The file is not written and put right again with every
+    /// try. It is not written at all.
     #[tokio::test]
     async fn a_host_without_the_program_keeps_no_record() {
         let mut b = Bench::after("no-program", &[], None);
         b.resume();
-        b.mock.0.lock().unwrap().index.insert(WAN.to_string(), 7);
-        b.answer(&[not_run()]);
+        {
+            let mut script = b.mock.0.lock().unwrap();
+            script.index.insert(WAN.to_string(), 7);
+            script.absent = true;
+        }
         b.report(WAN, Some(dns(&["198.51.100.53"], &[]))).await;
-        // The first try could not know.
-        assert_eq!(b.recorded(), [links(&[(WAN, 7)])]);
-        assert_eq!(b.record(), []);
+        // Tried again all the same: the program may come.
+        assert_eq!(b.resolver.retry, Some(b.now + RETRY_MIN));
+        for _ in 0..3 {
+            b.sync().await;
+        }
+        assert_eq!(b.ran(), []);
+        assert!(!b.path().exists());
+
+        // It has come: the interface is on record before the first
+        // command that can give it something.
+        b.mock.0.lock().unwrap().absent = false;
+        b.sync().await;
+        assert_eq!(b.ran(), set(WAN, &["198.51.100.53"], &[]));
+        let named = links(&[(WAN, 7)]);
+        assert_eq!(b.recorded(), [named.clone(), named.clone()]);
+        assert_eq!(b.record(), named);
+    }
+
+    /// A command that could not be started although its program was
+    /// found (no process to be had, just then) set nothing, and the
+    /// record says so again. It says nothing about the next try, which
+    /// is on record before it is started like any other: it may well
+    /// work, and the run be ended before the record is put right.
+    #[tokio::test]
+    async fn a_try_after_one_that_could_not_be_started_is_on_record_first() {
+        let mut b = Bench::after("after-not-run", &[], None);
+        b.resume();
+        b.mock.0.lock().unwrap().index.insert(WAN.to_string(), 7);
+        let named = links(&[(WAN, 7)]);
         for _ in 0..3 {
             b.answer(&[not_run()]);
+            b.learn(WAN, Some(dns(&["198.51.100.53"], &[])));
             b.sync().await;
-            assert_eq!(b.recorded(), [links(&[])]);
+            assert_eq!(b.recorded(), std::slice::from_ref(&named));
             assert_eq!(b.record(), []);
         }
-        // The program is there after all: its first success is on
-        // record when the commands are over.
+        // Ended in the next command: all that is left of that run is
+        // what the record said when the command was started.
         b.sync().await;
-        assert_eq!(b.ran().len(), 5 + 1);
+        assert_eq!(b.recorded()[0], named);
+
+        // And the one after it takes back what the command set.
+        let mut next = Bench::after("after-not-run", &[(WAN, 7)], None);
+        next.resume();
+        next.sweep().await;
+        assert_eq!(next.ran(), revert(WAN));
+    }
+
+    /// The program goes while an interface holds something. Nothing is
+    /// started to take it back, the interface stays noted and on record,
+    /// and the withdrawal is made when there is a program again.
+    #[tokio::test]
+    async fn a_withdrawal_with_no_program_to_run_waits_for_one() {
+        let mut b = Bench::after("no-program-revert", &[], None);
+        b.resume();
+        b.mock.0.lock().unwrap().index.insert(WAN.to_string(), 7);
+        b.report(WAN, Some(dns(&["198.51.100.53"], &[]))).await;
+        b.ran();
+        b.mock.0.lock().unwrap().absent = true;
+        b.report(WAN, None).await;
+        assert_eq!(b.ran(), []);
+        assert_eq!(b.resolver.retry, Some(b.now + RETRY_MIN));
         assert_eq!(b.record(), links(&[(WAN, 7)]));
-        // And from then on interfaces are named ahead again.
-        b.mock.0.lock().unwrap().index.insert("wan1".to_string(), 8);
-        b.recorded();
-        b.report("wan1", Some(dns(&["203.0.113.53"], &[]))).await;
-        assert_eq!(b.recorded()[0], links(&[(WAN, 7), ("wan1", 8)]));
+
+        b.mock.0.lock().unwrap().absent = false;
+        b.sync().await;
+        assert_eq!(b.ran(), revert(WAN));
+        assert_eq!(b.resolver.retry, None);
+        assert_eq!(b.record(), []);
     }
 
     /// Not ours to configure: no interface holds anything, and the one
@@ -1118,11 +1207,12 @@ mod tests {
         b.sweep().await;
         assert_eq!(b.ran(), []);
 
-        // Its own interface learns name servers: refused, as ever, and
-        // the record still names what it named.
+        // Its own interface learns name servers: refused, as ever,
+        // with no command made, and the record still names what it
+        // named.
         b.report("wan2", Some(dns(&["198.51.100.53"], &[]))).await;
-        assert_eq!(b.ran().len(), 1);
-        assert_eq!(b.recorded(), [links(&other)]);
+        assert_eq!(b.ran(), []);
+        assert!(b.resolver.refused);
         assert_eq!(b.record(), links(&other));
     }
 

@@ -1352,15 +1352,23 @@ is given), and Router Advertisements (RDNSS, DNSSL).**
     index, and where it was written: the boot and the network
     namespace. It does not say what they hold: what is learned again is
     set again whatever it is.
-  - **Written ahead.** An interface is named before the first command
-    that may give it something is started, and until a revert has
-    worked or the interface is gone. A run ended while `resolvectl` is
-    under way cannot say how that went, and the next one must find the
-    interface named. The exception is a host on which the command
-    cannot be started at all (no `resolvectl`): after such a failure
-    nothing is named ahead until a command starts, so the record is not
-    written and put right again with every try, and names no interface
-    for the next run to revert time after time where it cannot.
+  - **Written ahead.** An interface is named before any command that
+    may give it something is started, and until a revert has worked or
+    the interface is gone. A run ended while `resolvectl` is under way
+    cannot say how that went, and the next one must find the interface
+    named.
+  - **The program is looked for before every command** (`$PATH`, as
+    `execvp` looks; the file found is the one run). With none there is
+    nothing to start: no command is made and nothing is named. So a
+    host without `resolvectl` writes no record at all, where naming an
+    interface ahead and taking it off again would write the file with
+    every try. Whether a command can start is seen by looking, each
+    time, and not taken from how the last one went: a try that can
+    start is on record first, also after one that could not. What is
+    left is a program that is found and cannot be started (no process
+    to be had, or a file the kernel will not run): the interface is
+    named, the failure takes it off again, and that repeats with every
+    try.
   - **A record that cannot be written** (a full disk, a state directory
     that is not there yet) does not keep the name servers from the
     host: they are set all the same. But an interface that is set and

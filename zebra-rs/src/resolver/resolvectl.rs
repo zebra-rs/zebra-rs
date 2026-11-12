@@ -20,12 +20,21 @@
 //! with the same arguments. Whoever sets it answers for what that
 //! program reaches, so the namespace is not looked at: it is how the BDD
 //! suite, whose daemons all run in namespaces, sees the commands.
+//!
+//! **The program is looked for before every command** ([`locate`]), and
+//! the file found is the one run. A host without `resolvectl` is then
+//! known to be one before anything is started, and each time anew: the
+//! resolver task puts an interface on record before a command that may
+//! give it something, and must know whether there is such a command
+//! without taking it from how the last one went.
 
 use std::ffi::{OsStr, OsString};
-use std::path::Path;
+use std::os::unix::ffi::OsStrExt;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
+use nix::unistd::{AccessFlags, access};
 use tokio::process::Command;
 
 use super::inst::{Backend, Failure, Op};
@@ -61,8 +70,8 @@ impl Resolvectl {
         }
     }
 
-    /// The program to run, or why none may be.
-    fn program(&mut self) -> Result<OsString, String> {
+    /// The name of the program to run, or why none may be.
+    fn name(&mut self) -> Result<OsString, String> {
         if let Some(program) = &self.named {
             return Ok(program.clone());
         }
@@ -76,18 +85,50 @@ impl Resolvectl {
 }
 
 impl Backend for Resolvectl {
-    async fn run(&mut self, op: &Op) -> Result<(), Failure> {
-        let program = self.program().map_err(Failure::Refused)?;
-        exec(&program, &argv(op), self.timeout).await
+    type Program = PathBuf;
+
+    fn program(&mut self) -> Result<PathBuf, Failure> {
+        let name = self.name().map_err(Failure::Refused)?;
+        locate(&name, std::env::var_os("PATH").as_deref())
+            .ok_or_else(|| Failure::NotRun(format!("{}: no such program", name.to_string_lossy())))
+    }
+
+    async fn run(&mut self, program: &PathBuf, op: &Op) -> Result<(), Failure> {
+        exec(program.as_os_str(), &argv(op), self.timeout).await
     }
 
     fn permitted(&mut self) -> Result<(), String> {
-        self.program().map(|_| ())
+        self.name().map(|_| ())
     }
 
     fn ifindex(&self, ifname: &str) -> Option<u32> {
         nix::net::if_::if_nametoindex(ifname).ok()
     }
+}
+
+/// The file `name` is run from: itself when it says where it is (a `/`
+/// in it), else the first directory of `path` (`$PATH`) that has it, as
+/// `execvp` looks. Only a file this process may execute counts.
+///
+/// The spawn would look by itself, and say afterwards that it found
+/// nothing. Looking here says so before, and the spawn is given the
+/// file that was found, so the two cannot disagree: no program found is
+/// no command started.
+fn locate(name: &OsStr, path: Option<&OsStr>) -> Option<PathBuf> {
+    let runnable = |file: &Path| file.is_file() && access(file, AccessFlags::X_OK).is_ok();
+    if name.as_bytes().contains(&b'/') {
+        let file = Path::new(name);
+        return runnable(file).then(|| file.to_path_buf());
+    }
+    // What `execvp` searches without a `$PATH`.
+    let path = path.unwrap_or(OsStr::new("/bin:/usr/bin"));
+    std::env::split_paths(path)
+        // An empty entry is the current directory to `execvp`, and a
+        // relative one is under it. Neither is searched: a daemon does
+        // not run what happens to lie where it was started.
+        .filter(|dir| dir.is_absolute())
+        .map(|dir| dir.join(name))
+        .find(|file| runnable(file))
 }
 
 /// Whether `ours` and `init` are the same network namespace: this
@@ -332,7 +373,7 @@ mod tests {
     #[test]
     fn a_named_program_is_run_whatever_the_namespace() {
         let mut named = Resolvectl::new(Some("/opt/stand-in".into()));
-        assert_eq!(named.program(), Ok(OsString::from("/opt/stand-in")));
+        assert_eq!(named.name(), Ok(OsString::from("/opt/stand-in")));
         assert_eq!(named.permitted(), Ok(()));
         // Not looked at.
         assert_eq!(named.host, None);
@@ -342,7 +383,7 @@ mod tests {
         assert_eq!(system.named, None);
         system.host = Some(Err("this is not the host's network namespace".to_string()));
         assert_eq!(
-            system.program(),
+            system.name(),
             Err("this is not the host's network namespace".to_string())
         );
         assert_eq!(
@@ -350,8 +391,15 @@ mod tests {
             Err("this is not the host's network namespace".to_string())
         );
         system.host = Some(Ok(()));
-        assert_eq!(system.program(), Ok(OsString::from("resolvectl")));
+        assert_eq!(system.name(), Ok(OsString::from("resolvectl")));
         assert_eq!(system.permitted(), Ok(()));
+    }
+
+    /// What the resolver task does with one command: the program is
+    /// looked for, and what is found is run.
+    async fn run(backend: &mut Resolvectl, op: Op) -> Result<(), Failure> {
+        let program = backend.program()?;
+        backend.run(&program, &op).await
     }
 
     #[tokio::test]
@@ -359,11 +407,113 @@ mod tests {
         let mut system = Resolvectl::new(None);
         system.host = Some(Err("this is not the host's network namespace".to_string()));
         assert_eq!(
-            system.run(&Op::Revert("wan0".into())).await,
+            run(&mut system, Op::Revert("wan0".into())).await,
             Err(Failure::Refused(
                 "this is not the host's network namespace".to_string()
             ))
         );
+    }
+
+    /// The search is `execvp`'s: the directories of `$PATH` in their
+    /// order, and a name with a `/` in it is where it says. What is
+    /// found is a file this process may execute, and nothing else.
+    #[test]
+    fn the_program_is_looked_for_where_a_spawn_would_find_it() {
+        let dir = Dir::new("locate");
+        let sub = |name: &str| {
+            let sub = dir.0.join(name);
+            std::fs::create_dir_all(&sub).unwrap();
+            Dir(sub)
+        };
+        let (empty, first, second) = (sub("empty"), sub("first"), sub("second"));
+        let in_first = PathBuf::from(first.script("resolvectl", "exit 0"));
+        let in_second = PathBuf::from(second.script("resolvectl", "exit 0"));
+        let path =
+            |dirs: &[&Dir]| std::env::join_paths(dirs.iter().map(|dir| dir.0.clone())).unwrap();
+        let name = OsStr::new("resolvectl");
+
+        assert_eq!(
+            locate(name, Some(&path(&[&empty, &first, &second]))),
+            Some(in_first.clone())
+        );
+        assert_eq!(
+            locate(name, Some(&path(&[&second, &first]))),
+            Some(in_second.clone())
+        );
+        assert_eq!(locate(name, Some(&path(&[&empty]))), None);
+        assert_eq!(locate(name, Some(OsStr::new(""))), None);
+        // Said with its place, the path is not asked.
+        assert_eq!(
+            locate(in_second.as_os_str(), Some(&path(&[&first]))),
+            Some(in_second.clone())
+        );
+        assert_eq!(
+            locate(
+                empty.0.join("resolvectl").as_os_str(),
+                Some(&path(&[&first]))
+            ),
+            None
+        );
+        // Also when the place is said from where this process is: it is
+        // not looked for under the directories of the path.
+        assert!(dir.0.join("first/resolvectl").is_file());
+        assert_eq!(
+            locate(OsStr::new("first/resolvectl"), Some(dir.0.as_os_str())),
+            None
+        );
+
+        // A file that may not be executed is not a program, nor is a
+        // directory of that name: the search goes on past both.
+        let plain = sub("plain");
+        std::fs::write(plain.0.join("resolvectl"), b"#!/bin/sh\n").unwrap();
+        let folder = sub("folder");
+        std::fs::create_dir(folder.0.join("resolvectl")).unwrap();
+        assert_eq!(locate(name, Some(&path(&[&plain, &folder]))), None);
+        assert_eq!(
+            locate(name, Some(&path(&[&plain, &folder, &second]))),
+            Some(in_second)
+        );
+        assert_eq!(locate(plain.0.join("resolvectl").as_os_str(), None), None);
+
+        // A directory said from where this process is, is not
+        // searched, though the program is there by that way too.
+        let here = std::env::current_dir().unwrap();
+        let up: PathBuf = here.components().skip(1).map(|_| "..").collect();
+        let relative = up.join(first.0.strip_prefix("/").unwrap());
+        assert!(relative.is_relative() && relative.join(name).is_file());
+        assert_eq!(locate(name, Some(relative.as_os_str())), None);
+        // Nor is where it is itself, which an empty entry means.
+        assert_eq!(locate(name, Some(OsStr::new(":"))), None);
+    }
+
+    /// With no `$PATH` the search is `execvp`'s own.
+    #[test]
+    fn without_a_path_the_usual_places_are_searched() {
+        assert_eq!(
+            locate(OsStr::new("sh"), None),
+            Some(PathBuf::from("/bin/sh"))
+        );
+        assert_eq!(locate(OsStr::new("zebra-rs-no-such-program"), None), None);
+    }
+
+    /// No program is no command: it is said before anything is started,
+    /// as the one failure that changed nothing.
+    #[tokio::test]
+    async fn a_program_that_is_not_there_is_not_started() {
+        let dir = Dir::new("not-there");
+        let absent = dir.0.join("absent");
+        let mut backend = Resolvectl::new(Some(absent.clone().into_os_string()));
+        assert_eq!(
+            backend.program(),
+            Err(Failure::NotRun(format!(
+                "{}: no such program",
+                absent.display()
+            )))
+        );
+        // It comes, and the next look finds it.
+        let there = dir.script("absent", "exit 0");
+        assert_eq!(backend.program(), Ok(PathBuf::from(&there)));
+        assert_eq!(run(&mut backend, Op::Revert("wan0".into())).await, Ok(()));
     }
 
     #[tokio::test]
@@ -376,9 +526,11 @@ mod tests {
         );
         let mut backend = Resolvectl::new(Some(record));
         assert_eq!(
-            backend
-                .run(&Op::Domains("wan0".into(), strings(&["example.com"])))
-                .await,
+            run(
+                &mut backend,
+                Op::Domains("wan0".into(), strings(&["example.com"]))
+            )
+            .await,
             Ok(())
         );
         assert_eq!(
@@ -391,7 +543,7 @@ mod tests {
         let refuse = dir.script("refuse", "echo; echo 'Failed to set: no' >&2; exit 1");
         let mut backend = Resolvectl::new(Some(refuse.clone()));
         assert_eq!(
-            backend.run(&Op::Revert("wan0".into())).await,
+            run(&mut backend, Op::Revert("wan0".into())).await,
             Err(Failure::Uncertain(format!(
                 "{}: Failed to set: no",
                 refuse.to_string_lossy()
@@ -443,7 +595,7 @@ mod tests {
         backend.timeout = Duration::from_millis(300);
         // What it did before the limit is not known.
         assert_eq!(
-            backend.run(&Op::Revert("wan0".into())).await,
+            run(&mut backend, Op::Revert("wan0".into())).await,
             Err(Failure::Uncertain(format!(
                 "{}: no answer in 0.3 s",
                 slow.to_string_lossy()
@@ -520,32 +672,38 @@ mod tests {
         let link = Link;
         // No stand-in: the program is `resolvectl`, and this is the host.
         let mut backend = Resolvectl::new(None);
-        assert_eq!(backend.program(), Ok(OsString::from("resolvectl")));
+        assert_eq!(backend.name(), Ok(OsString::from("resolvectl")));
         let index = backend.ifindex(IF).expect("the dummy interface");
 
         let servers = vec![
             "198.51.100.53".parse().unwrap(),
             "2001:db8::53".parse().unwrap(),
         ];
-        assert_eq!(backend.run(&Op::Dns(IF.into(), servers)).await, Ok(()));
+        assert_eq!(run(&mut backend, Op::Dns(IF.into(), servers)).await, Ok(()));
         let domains = strings(&["example.com", "corp.example"]);
-        assert_eq!(backend.run(&Op::Domains(IF.into(), domains)).await, Ok(()));
+        assert_eq!(
+            run(&mut backend, Op::Domains(IF.into(), domains)).await,
+            Ok(())
+        );
         assert_eq!(held("dns"), "198.51.100.53 2001:db8::53");
         assert_eq!(held("domain"), "example.com corp.example");
 
         // No domains clears them and leaves the servers.
-        assert_eq!(backend.run(&Op::Domains(IF.into(), vec![])).await, Ok(()));
+        assert_eq!(
+            run(&mut backend, Op::Domains(IF.into(), vec![])).await,
+            Ok(())
+        );
         assert_eq!(held("domain"), "");
         assert_eq!(held("dns"), "198.51.100.53 2001:db8::53");
 
-        assert_eq!(backend.run(&Op::Revert(IF.into())).await, Ok(()));
+        assert_eq!(run(&mut backend, Op::Revert(IF.into())).await, Ok(()));
         assert_eq!(held("dns"), "");
 
         // An interface that is gone: the command says no, and there is
         // nothing left to take back.
         drop(link);
         assert!(matches!(
-            backend.run(&Op::Revert(IF.into())).await,
+            run(&mut backend, Op::Revert(IF.into())).await,
             Err(Failure::Uncertain(_))
         ));
         assert_eq!(backend.ifindex(IF), None);
