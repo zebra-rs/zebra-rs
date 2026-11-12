@@ -104,6 +104,15 @@ pub enum RibRx {
     /// `LinkDown` (operational down) — `LinkDel` is permanent for
     /// this ifindex.
     LinkDel(u32),
+    /// The `LinkDel` and the `LinkAdd` of this ifindex that follow are
+    /// one link moving to another VRF: the same device on the same
+    /// wire, not an end and a beginning. To `global_links` subscribers
+    /// only, which get both halves. For what a subscriber keeps about
+    /// the link's neighbours rather than about the link (`nd`: what its
+    /// hosts were told of prefixes), which a deleted device takes with
+    /// it and a moved one does not. A link that later has a deleted
+    /// one's index is another link, with other neighbours.
+    LinkMoving(u32),
     /// The MTU of an already-known link changed (operator
     /// `interface X mtu N`, or an external `ip link set`). Protocol
     /// modules cache MTU per interface for packet generation (OSPF DD
@@ -457,6 +466,16 @@ impl Rib {
     /// goes to the wrong subscribers.
     pub fn api_link_del(&self, ifindex: u32) {
         self.api_link_del_vrf(ifindex, self.ifindex_vrf_id(ifindex));
+    }
+
+    /// Tell the `global_links` subscribers that the `LinkDel` and
+    /// `LinkAdd` of `ifindex` they are about to get are a move to
+    /// another VRF (`RibRx::LinkMoving`).
+    pub fn api_link_moving(&self, ifindex: u32) {
+        let subs = self.client_registry.iter_link_subs(0);
+        for (_, sub) in subs.filter(|(_, sub)| sub.global_links) {
+            let _ = sub.rib_rx_tx.send(RibRx::LinkMoving(ifindex));
+        }
     }
 
     /// Push `LinkDel` to subscribers bound to an explicit `vrf_id`.

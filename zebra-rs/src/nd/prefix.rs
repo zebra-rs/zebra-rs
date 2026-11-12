@@ -40,7 +40,7 @@
 //! RIB's address events and asks it for the options when an
 //! advertisement is built.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
 use ipnet::{IpNet, Ipv6Net};
@@ -164,6 +164,9 @@ pub struct Prefixes {
     /// By link: until when a host may hold each prefix, by what the
     /// advertisements that went out said of it. The latest of them all.
     told: BTreeMap<u32, BTreeMap<Ipv6Net, Instant>>,
+    /// The links whose next delete is a move to another VRF
+    /// ([`Self::moving`]).
+    moving: BTreeSet<u32>,
 }
 
 impl Prefixes {
@@ -250,6 +253,8 @@ impl Prefixes {
     /// The link is described anew, with every address it has: one that
     /// is not among them went.
     pub fn link_set(&mut self, ifindex: u32, addrs: &[LinkAddr], now: Instant) -> Change {
+        // A move announced and not followed by its delete is over here.
+        self.moving.remove(&ifindex);
         let listed: Vec<Ipv6Net> = addrs.iter().filter_map(advertised).collect();
         let stale: Vec<Ipv6Net> = self
             .held
@@ -269,10 +274,21 @@ impl Prefixes {
         change
     }
 
-    /// The link is gone, and its addresses with it. What its hosts were
-    /// told is kept until it is over: a link that moves to another VRF
-    /// is reported gone and back, with the hosts where they were, and a
-    /// prefix it does not come back with is to be named as gone.
+    /// The delete of `ifindex` that follows is the first half of a move
+    /// to another VRF, which the RIB reports as a delete and an add:
+    /// the same link, with its hosts where they were.
+    pub fn moving(&mut self, ifindex: u32) {
+        self.moving.insert(ifindex);
+    }
+
+    /// The link is gone, and its addresses with it.
+    ///
+    /// So is what its hosts were told, with the device: a link that has
+    /// this index later is another link, whose hosts never heard of
+    /// these prefixes and are not to be told they are gone. Unless the
+    /// link is only moving to another VRF ([`Self::moving`]): then what
+    /// was told is kept, and a prefix the link does not come back with
+    /// is named as gone.
     pub fn link_del(&mut self, ifindex: u32, now: Instant) {
         let held = self.held.get(&ifindex).into_iter().flatten();
         let nets: Vec<Ipv6Net> = held.map(|(net, _)| *net).collect();
@@ -280,6 +296,10 @@ impl Prefixes {
             self.remove(ifindex, net, now);
         }
         self.held.remove(&ifindex);
+        if !self.moving.remove(&ifindex) {
+            self.gone.remove(&ifindex);
+            self.told.remove(&ifindex);
+        }
     }
 
     /// Forget what is over by `now`: the prefixes that went, and what
@@ -709,11 +729,12 @@ mod tests {
         assert!(told(&prefixes, t0).is_empty());
         assert_eq!(prefixes.addr_del(&first, t0), Change::None);
 
-        // Reported gone after its hosts were told (a move to another
-        // VRF is that, and the link back at once): its prefixes are on
-        // their way out, until it is back with them.
+        // Reported gone after its hosts were told, as the first half of
+        // a move to another VRF: its prefixes are on their way out,
+        // until it is back with them.
         prefixes.link_set(IF, &listed, t0);
         advertise(&mut prefixes, t0);
+        prefixes.moving(IF);
         prefixes.link_del(IF, t0);
         let both_gone = [
             format!("2001:db8:1::/64 0/0 gone, for {DEFAULT_VALID}"),
@@ -728,5 +749,26 @@ mod tests {
                 format!("2001:db8:2::/64 0/0 gone, for {DEFAULT_VALID}"),
             ]
         );
+
+        // Deleted for good: what its hosts were told goes with it. The
+        // link that has the index next has other hosts, who are told
+        // nothing of these prefixes; and the move was that one delete.
+        advertise(&mut prefixes, t0);
+        prefixes.link_del(IF, t0);
+        assert!(told(&prefixes, t0).is_empty());
+        let other = addr("2001:db8:9::1/64", None);
+        assert_eq!(prefixes.link_set(IF, &[other], t0), Change::Prefixes);
+        let want = [format!(
+            "2001:db8:9::/64 {DEFAULT_PREFERRED}/{DEFAULT_VALID}"
+        )];
+        assert_eq!(told(&prefixes, t0), want);
+        // A move that is announced and never comes is over when the
+        // link is described again.
+        advertise(&mut prefixes, t0);
+        prefixes.moving(IF);
+        prefixes.link_set(IF, &[], t0);
+        prefixes.link_del(IF, t0);
+        assert!(told(&prefixes, t0).is_empty());
+        assert!(prefixes.gone.is_empty() && prefixes.told.is_empty());
     }
 }

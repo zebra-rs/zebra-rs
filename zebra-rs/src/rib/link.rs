@@ -1214,6 +1214,8 @@ impl Rib {
                 for addr in link.addr4.iter().chain(link.addr6.iter()) {
                     self.api_addr_withdraw_vrf(addr, prev_vrf_id);
                 }
+                // To those that get both halves: one link, moving.
+                self.api_link_moving(ifindex);
                 self.api_link_del_vrf(ifindex, prev_vrf_id);
                 // Announce to the new VRF — link first, then its
                 // addresses — mirroring the subscribe() dump order. The

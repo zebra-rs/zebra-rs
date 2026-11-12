@@ -332,6 +332,9 @@ impl NdEngine {
             RibRx::LinkDown(ifindex) => self.process_link_state(ifindex, false, now),
             RibRx::LinkUp(ifindex) => self.process_link_state(ifindex, true, now),
             RibRx::LinkDel(ifindex) => self.process_link_del(ifindex, now),
+            // The delete that follows is a move to another VRF: the
+            // link's hosts are where they were.
+            RibRx::LinkMoving(ifindex) => self.prefixes.moving(ifindex),
             RibRx::AddrAdd(addr) => self.process_addr(&addr, true, now),
             RibRx::AddrDel(addr) => self.process_addr(&addr, false, now),
             // Only its lifetimes moved: those of the prefix it gives.
@@ -1481,12 +1484,13 @@ mod tests {
         assert!(prefixes_told(&sent).is_empty());
     }
 
-    /// A link reported gone and back (a move to another VRF) is the same
-    /// link to its hosts. A lifetime still ends when the RIB noted it
-    /// would, not that long after the link is described again; and a
-    /// prefix the link comes back without is named as gone, for as long
-    /// as the hosts were told it would last. A link that goes before
-    /// any advertisement leaves nothing to say.
+    /// A link that moves to another VRF is reported gone and back, and
+    /// is the same link to its hosts. A lifetime still ends when the RIB
+    /// noted it would, not that long after the link is described again;
+    /// and a prefix the link comes back without is named as gone, for
+    /// as long as the hosts were told it would last. A link that is
+    /// deleted takes what its hosts were told with it: another device
+    /// that has its index later has other hosts.
     #[test]
     fn a_link_gone_and_back_keeps_what_its_hosts_were_told() {
         use crate::rib::link::NotedAt;
@@ -1518,7 +1522,8 @@ mod tests {
         // Half an hour on the link moves to another VRF: gone, and back
         // with the addresses as the RIB noted them at the start.
         let moved = start + secs(1800);
-        eng.process_link_del(7, moved);
+        eng.process_rib_msg(RibRx::LinkMoving(7), moved);
+        eng.process_rib_msg(RibRx::LinkDel(7), moved);
         eng.process_link_add(&eth0, moved);
         let sent = tick_ok(&mut eng, moved + secs(16));
         assert_eq!(
@@ -1532,7 +1537,8 @@ mod tests {
         // Gone again, and back without the leased address: its prefix
         // is named as gone until the two hours the hosts heard are over.
         let again = moved + secs(100);
-        eng.process_link_del(7, again);
+        eng.process_rib_msg(RibRx::LinkMoving(7), again);
+        eng.process_rib_msg(RibRx::LinkDel(7), again);
         eth0.addr6.pop();
         eng.process_link_add(&eth0, again);
         let now = eng.prefixes(7, again);
@@ -1547,6 +1553,18 @@ mod tests {
                 "if7 2001:db8:100:1::/64 0/0",
             ]
         );
+
+        // The device is deleted, and another one has its index: the
+        // hosts on that one never heard of these prefixes, and are told
+        // nothing of them.
+        let deleted = again + secs(200);
+        eng.process_rib_msg(RibRx::LinkDel(7), deleted);
+        let mut other = link("eth9", 7);
+        other.addr6.push(global(7, "2001:db8:9::1/64", None));
+        eng.process_link_add(&other, deleted);
+        eng.set_ra_config("eth9".into(), RaSendConfig::default(), deleted);
+        let sent = tick_ok(&mut eng, deleted + secs(16));
+        assert_eq!(prefixes_told(&sent), ["if7 2001:db8:9::/64 604800/2592000"]);
     }
 
     #[test]

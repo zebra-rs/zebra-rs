@@ -1,6 +1,8 @@
 # r1: a DHCPv6 WAN that asks for an address and one delegated prefix,
 # numbers lan0 from it, and advertises on lan0, which also has an
-# address of its own.
+# address of its own. The VRF is there for lan0 to be moved into.
+vrf:
+- name: blue
 interface:
 - if-name: wan0
   ipv6:

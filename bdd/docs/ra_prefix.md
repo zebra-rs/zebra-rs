@@ -25,7 +25,7 @@ Requires python3 on the host.
 
 ## Config Files
 
-- r1.yaml: `address dhcpv6` and `pd 1 length 56 interface lan0 sla-id 1 address 1` on wan0; `2001:db8:aa::1/64` and `router-advertisements send-advertisements true` on lan0.
+- r1.yaml: `address dhcpv6` and `pd 1 length 56 interface lan0 sla-id 1 address 1` on wan0; `2001:db8:aa::1/64` and `router-advertisements send-advertisements true` on lan0; a VRF `blue`.
 
 ## Test Scenarios
 
@@ -38,6 +38,7 @@ Requires python3 on the host.
 | A renewal with the same lifetimes still moves their end | |
 | A prefix that is replaced is taken out of use on the hosts | |
 | A configured address that is deleted takes its prefix out of use too | |
+| A link that moves to another VRF keeps what its hosts were told | |
 | A delegation that is given back takes its prefix out of use | |
 | An interface that stops advertising names nothing | |
 | Teardown topology | |

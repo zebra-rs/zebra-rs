@@ -34,7 +34,7 @@ Feature: Router Advertisements name the interface's prefixes (Prefix Information
   Requires python3 on the host.
 
   Config files:
-  - r1.yaml: `address dhcpv6` and `pd 1 length 56 interface lan0 sla-id 1 address 1` on wan0; `2001:db8:aa::1/64` and `router-advertisements send-advertisements true` on lan0.
+  - r1.yaml: `address dhcpv6` and `pd 1 length 56 interface lan0 sla-id 1 address 1` on wan0; `2001:db8:aa::1/64` and `router-advertisements send-advertisements true` on lan0; a VRF `blue`.
 
   Scenario: Setup the delegating router, the advertising router and a host
     Given a clean test environment
@@ -141,6 +141,22 @@ Feature: Router Advertisements name the interface's prefixes (Prefix Information
     When I apply command "set interface lan0 ipv6 address 2001:db8:aa::1/64" in namespace "r1"
     Then show command "show ipv6 nd interface lan0" in namespace "r1" should eventually contain "2001:db8:aa::/64 valid 720h, preferred 168h"
     And command "ip -6 addr show dev eth0 deprecated" in namespace "h1" should eventually not contain "inet6 2001:db8:aa:"
+
+  Scenario: A link that moves to another VRF keeps what its hosts were told
+    Given the test topology exists
+    # lan0 leaves the VRF its prefix is delegated in, and is numbered from
+    # the delegation no longer. Its hosts are where they were: they are
+    # told that the prefix is gone.
+    When I apply command "set interface lan0 vrf blue" in namespace "r1"
+    Then show command "show dhcpv6 client leases" in namespace "r1" should eventually contain "on lan0:    none (in another VRF)"
+    And show command "show ipv6 nd interface lan0" in namespace "r1" should eventually contain "2001:db8:900:1::/64 valid 0s, preferred 0s (withdrawn"
+    And command "ip -6 addr show dev eth0 deprecated" in namespace "h1" should eventually contain "inet6 2001:db8:900:1:"
+    # Back where the prefix is delegated, it is numbered and advertised
+    # again.
+    When I apply command "delete interface lan0 vrf blue" in namespace "r1"
+    Then show command "show dhcpv6 client leases" in namespace "r1" should eventually contain "on lan0:    2001:db8:900:1::1/64"
+    And show command "show ipv6 nd interface lan0" in namespace "r1" should eventually contain "2001:db8:900:1::/64 valid 16h"
+    And command "ip -6 addr show dev eth0 deprecated" in namespace "h1" should eventually not contain "inet6 2001:db8:900:1:"
 
   Scenario: A delegation that is given back takes its prefix out of use
     Given the test topology exists

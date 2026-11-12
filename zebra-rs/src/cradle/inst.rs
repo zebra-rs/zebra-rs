@@ -243,7 +243,10 @@ impl Cradle {
                     // `global_links` subscriber we get every VRF's.
                     let reconcile = !matches!(
                         msg,
-                        RibRx::AddrAdd(_) | RibRx::AddrDel(_) | RibRx::AddrRenewed(_)
+                        RibRx::AddrAdd(_)
+                            | RibRx::AddrDel(_)
+                            | RibRx::AddrRenewed(_)
+                            | RibRx::LinkMoving(_)
                     );
                     self.process_rib_msg(msg);
                     if reconcile {
