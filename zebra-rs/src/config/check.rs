@@ -184,6 +184,128 @@ pub fn dhcpv6_parameters_only_exclusive(entries: &[(String, Vec<String>)]) -> Ve
     errors
 }
 
+/// The callback paths [`dhcpv6_pd_interfaces`] reads.
+pub const DHCPV6_PD_LENGTH_PATH: &str = "/interface/ipv6/dhcpv6-options/pd/length";
+pub const DHCPV6_PD_INTERFACE_PATH: &str = "/interface/ipv6/dhcpv6-options/pd/interface";
+pub const DHCPV6_PD_SLA_ID_PATH: &str = "/interface/ipv6/dhcpv6-options/pd/interface/sla-id";
+
+/// Whether a config line can carry an entry [`dhcpv6_pd_interfaces`]
+/// reads.
+pub fn dhcpv6_pd_line(line: &str) -> bool {
+    line.starts_with("interface ") && line.contains(" ipv6 dhcpv6-options pd ")
+}
+
+/// What [`dhcpv6_pd_interfaces`] finds: what a commit is refused for,
+/// and what it is only told.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct PdFindings {
+    pub errors: Vec<String>,
+    pub warnings: Vec<String>,
+}
+
+/// `interface <name> ipv6 dhcpv6-options pd <id> interface <lan>` gives
+/// `<lan>` one /64 of the prefix delegated to `<name>`: the one its
+/// `sla-id` numbers, the first when it has none. `entries` are a whole
+/// config's [`dhcpv6_pd_line`]s as (callback path, arguments). Refused,
+/// in the order the delegations first appear:
+///
+/// - `<lan>` that is `<name>` itself: a delegated prefix must not number
+///   the link it is delegated on (RFC 8415 §6.3);
+/// - two interfaces of one delegation with the same `sla-id`: they would
+///   share a /64, and each link needs its own.
+///
+/// And told, since only the server decides what it delegates: an
+/// `sla-id` that a prefix of the `length` asked for has no room for. It
+/// is looked at again against the prefix that is delegated (RFC 7084
+/// WPD-3), and without a `length` there is nothing to compare it with.
+pub fn dhcpv6_pd_interfaces(entries: &[(String, Vec<String>)]) -> PdFindings {
+    #[derive(Default)]
+    struct Delegation<'a> {
+        length: Option<u8>,
+        /// Each interface, and its `sla-id` when it has one.
+        interfaces: Vec<(&'a str, Option<u32>)>,
+    }
+    let mut delegations: Vec<((&str, &str), Delegation)> = Vec::new();
+    for (path, args) in entries {
+        let [name, id, rest @ ..] = args.as_slice() else {
+            continue;
+        };
+        if !path.starts_with(DHCPV6_PD_PATH) {
+            continue;
+        }
+        let key = (name.as_str(), id.as_str());
+        let index = match delegations.iter().position(|(k, _)| *k == key) {
+            Some(index) => index,
+            None => {
+                delegations.push((key, Delegation::default()));
+                delegations.len() - 1
+            }
+        };
+        let delegation = &mut delegations[index].1;
+        match (path.as_str(), rest) {
+            (DHCPV6_PD_LENGTH_PATH, [length]) => delegation.length = length.parse().ok(),
+            (DHCPV6_PD_INTERFACE_PATH, [lan]) => {
+                if !delegation.interfaces.iter().any(|(n, _)| n == lan) {
+                    delegation.interfaces.push((lan, None));
+                }
+            }
+            (DHCPV6_PD_SLA_ID_PATH, [lan, sla_id]) => {
+                let sla_id = sla_id.parse().ok();
+                match delegation.interfaces.iter_mut().find(|(n, _)| n == lan) {
+                    Some(interface) => interface.1 = sla_id,
+                    None => delegation.interfaces.push((lan, sla_id)),
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut findings = PdFindings::default();
+    for ((name, id), delegation) in delegations {
+        let at = format!("interface {name} ipv6 dhcpv6-options pd {id}");
+        for (lan, _) in &delegation.interfaces {
+            if *lan == name {
+                findings.errors.push(format!(
+                    "{at} interface {lan}: a delegated prefix cannot number the interface it \
+                     is delegated on; name an interface behind this router"
+                ));
+            }
+        }
+        // Each sla-id once, with every interface that has it.
+        let mut numbered: Vec<(u32, Vec<&str>)> = Vec::new();
+        for (lan, sla_id) in &delegation.interfaces {
+            let sla_id = sla_id.unwrap_or(0);
+            match numbered.iter_mut().find(|(n, _)| *n == sla_id) {
+                Some((_, interfaces)) => interfaces.push(lan),
+                None => numbered.push((sla_id, vec![lan])),
+            }
+        }
+        for (sla_id, interfaces) in numbered {
+            if interfaces.len() > 1 {
+                findings.errors.push(format!(
+                    "{at}: interfaces {} have the same sla-id {sla_id}, which is one /64; \
+                     give each its own",
+                    interfaces.join(", ")
+                ));
+            }
+        }
+        let Some(length) = delegation.length else {
+            continue;
+        };
+        let bits = 64u32.saturating_sub(length.into());
+        for (lan, sla_id) in &delegation.interfaces {
+            let sla_id = sla_id.unwrap_or(0);
+            if u64::from(sla_id) >> bits != 0 {
+                findings.warnings.push(format!(
+                    "{at} interface {lan}: sla-id {sla_id} is beyond the {} /64s of a /{length}; \
+                     the interface is numbered only if the server delegates a shorter prefix",
+                    1u64 << bits
+                ));
+            }
+        }
+    }
+    findings
+}
+
 /// A leaf value check: `Err` holds the reason, shown after the line.
 pub type ValueCheck = fn(&str) -> Result<(), String>;
 
@@ -384,7 +506,6 @@ mod tests {
         assert!(!etree_backend_line("system cradle grpc-endpoint unix:x"));
     }
 
-    /// `address dhcp` and a static address exclude each other on one
     /// A DUID is checked at commit for what the schema's pattern cannot
     /// say: how many octets it may have.
     #[test]
@@ -489,6 +610,131 @@ mod tests {
         ));
     }
 
+    /// The interfaces of a delegation: none is the one the prefix is
+    /// delegated on, each has a /64 of its own, and an `sla-id` beyond
+    /// the `length` asked for is only told.
+    #[test]
+    fn the_interfaces_of_a_delegation_are_checked() {
+        const PD: &str = "/interface/ipv6/dhcpv6-options/pd";
+        let pd = |name: &str, id: &str| leaf(PD, &[name, id]);
+        let length = |name: &str, id: &str, n: &str| leaf(DHCPV6_PD_LENGTH_PATH, &[name, id, n]);
+        let lan =
+            |name: &str, id: &str, lan: &str| leaf(DHCPV6_PD_INTERFACE_PATH, &[name, id, lan]);
+        let sla = |name: &str, id: &str, lan: &str, n: &str| {
+            leaf(DHCPV6_PD_SLA_ID_PATH, &[name, id, lan, n])
+        };
+        let host = |name: &str, id: &str, lan: &str| {
+            let path = "/interface/ipv6/dhcpv6-options/pd/interface/address";
+            leaf(path, &[name, id, lan, "1"])
+        };
+        let check = dhcpv6_pd_interfaces;
+        let clean = PdFindings::default();
+
+        // A delegation alone, with one interface, and with several that
+        // each have their own /64: the first for the one that names none.
+        assert_eq!(check(&[pd("wan0", "1"), length("wan0", "1", "56")]), clean);
+        assert_eq!(check(&[pd("wan0", "1"), lan("wan0", "1", "lan0")]), clean);
+        assert_eq!(
+            check(&[
+                pd("wan0", "1"),
+                lan("wan0", "1", "lan0"),
+                host("wan0", "1", "lan0"),
+                lan("wan0", "1", "lan1"),
+                sla("wan0", "1", "lan1", "1"),
+                sla("wan0", "1", "lan2", "2"),
+            ]),
+            clean
+        );
+        // The same sla-id under another delegation, or on another
+        // upstream interface, is another prefix's /64; and one interface
+        // may be numbered from two delegations.
+        assert_eq!(
+            check(&[
+                lan("wan0", "1", "lan0"),
+                lan("wan0", "2", "lan0"),
+                lan("wan1", "1", "lan0"),
+                lan("wan1", "1", "wan0"),
+                sla("wan1", "1", "wan0", "1"),
+            ]),
+            clean
+        );
+
+        // The interface the prefix is delegated on.
+        let found = check(&[lan("wan0", "1", "lan0"), sla("wan0", "1", "wan0", "1")]);
+        assert_eq!(
+            found.errors,
+            [
+                "interface wan0 ipv6 dhcpv6-options pd 1 interface wan0: a delegated prefix \
+              cannot number the interface it is delegated on; name an interface behind this \
+              router"
+            ]
+        );
+        // One /64 for two interfaces: said or by default, in whichever
+        // order the lines come, every interface named, once.
+        let same = |id: &str, interfaces: &str, n: u32| {
+            format!(
+                "interface wan0 ipv6 dhcpv6-options pd {id}: interfaces {interfaces} have the \
+                 same sla-id {n}, which is one /64; give each its own"
+            )
+        };
+        let found = check(&[lan("wan0", "1", "lan0"), lan("wan0", "1", "lan1")]);
+        assert_eq!(found.errors, [same("1", "lan0, lan1", 0)]);
+        let found = check(&[
+            sla("wan0", "1", "lan0", "5"),
+            lan("wan0", "1", "lan1"),
+            lan("wan0", "7", "lan3"),
+            sla("wan0", "7", "lan4", "0"),
+            lan("wan0", "1", "lan0"),
+            sla("wan0", "1", "lan1", "5"),
+            lan("wan0", "1", "lan2"),
+            sla("wan0", "1", "lan2", "5"),
+        ]);
+        assert_eq!(
+            found.errors,
+            [same("1", "lan0, lan1, lan2", 5), same("7", "lan3, lan4", 0)]
+        );
+        assert!(found.warnings.is_empty());
+
+        // Beyond the length asked for: told, not refused, and only when
+        // a length is asked for.
+        let beyond = |lan: &str, n: u32, count: u64, length: u8| {
+            format!(
+                "interface wan0 ipv6 dhcpv6-options pd 1 interface {lan}: sla-id {n} is beyond \
+                 the {count} /64s of a /{length}; the interface is numbered only if the server \
+                 delegates a shorter prefix"
+            )
+        };
+        let interfaces = [
+            lan("wan0", "1", "lan0"),
+            sla("wan0", "1", "lan1", "255"),
+            sla("wan0", "1", "lan2", "256"),
+        ];
+        assert_eq!(check(&interfaces), clean);
+        let mut hinted = interfaces.to_vec();
+        hinted.push(length("wan0", "1", "56"));
+        let found = check(&hinted);
+        assert!(found.errors.is_empty(), "{found:?}");
+        assert_eq!(found.warnings, [beyond("lan2", 256, 256, 56)]);
+        *hinted.last_mut().unwrap() = length("wan0", "1", "64");
+        assert_eq!(
+            check(&hinted).warnings,
+            [beyond("lan1", 255, 1, 64), beyond("lan2", 256, 1, 64)]
+        );
+        *hinted.last_mut().unwrap() = length("wan0", "1", "32");
+        assert_eq!(check(&hinted), clean);
+
+        // The lines it reads, and no others.
+        assert!(dhcpv6_pd_line("interface wan0 ipv6 dhcpv6-options pd 1"));
+        assert!(dhcpv6_pd_line(
+            "interface wan0 ipv6 dhcpv6-options pd 1 interface lan0 sla-id 1"
+        ));
+        assert!(!dhcpv6_pd_line("interface wan0 ipv6 address dhcpv6"));
+        assert!(!dhcpv6_pd_line(
+            "service dhcpv6-server interface wan0 ipv6 dhcpv6-options pd 1"
+        ));
+    }
+
+    /// `address dhcp` and a static address exclude each other on one
     /// interface, and only there: other interfaces, and the IPv6 list,
     /// are not counted.
     #[test]

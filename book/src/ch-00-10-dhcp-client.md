@@ -393,6 +393,9 @@ interface, and it does not run the RA host.
 | `no-name-server` | Show the server's name servers and search domains, but do not give them to the router's own resolver ([Name servers](#name-servers)). |
 | `pd <id>` | Ask for a delegated prefix, under this identifier ([Prefix delegation](#ipv6-prefix-delegation)). |
 | `pd <id> length` | The prefix length to hint at, 32..64. Default 64. |
+| `pd <id> interface <name>` | Give this interface an address in one /64 of the delegated prefix ([Numbering the interfaces behind the router](#numbering-the-interfaces-behind-the-router)). |
+| `pd <id> interface <name> sla-id` | Which /64 of the prefix: its number among them. Default 0, the first. |
+| `pd <id> interface <name> address` | The host part of the address. Default: made from the interface's hardware address (EUI-64). |
 
 ```
 show dhcpv6 client leases [interface <name>]
@@ -484,14 +487,88 @@ its own server and renewal times. After a restart of zebra-rs the lease
 is taken from disk with its prefixes, the discard routes are back at
 once, and the server is asked whether the lease still stands.
 
+### Numbering the interfaces behind the router
+
+`pd <id> interface <name>` gives an interface behind the router an
+address in one /64 of the delegated prefix. `sla-id` says which /64:
+the bits between the prefix's length and 64, so a /56 has 256 of them,
+0 to 255. `address` is the host part; without it the address is made
+from the interface's hardware address (EUI-64).
+
+```
+interface wan1 {
+  ipv6 {
+    dhcpv6-options {
+      pd 1 {
+        length 56;
+        interface lan1 {
+          sla-id 1;
+          address 1;
+        }
+        interface lan2 {
+          sla-id 2;
+        }
+      }
+    }
+  }
+}
+```
+
+With `2001:db8:100::/56` delegated, `lan1` gets `2001:db8:100:1::1/64`
+and `lan2` an address in `2001:db8:100:2::/64`.
+
+- **The address has the prefix's lifetimes** and follows the lease. A
+  renewal moves its lifetimes, another prefix from the server replaces
+  it, and it goes when the prefix is given back or runs out. `show
+  interface` marks it `dhcpv6-pd`.
+- **Its /64 is a connected route** on the interface, which takes that
+  part of the prefix off the discard route. The rest stays there.
+- **Each interface of a delegation needs its own /64.** A commit that
+  gives two of them the same `sla-id` is refused, and so is one that
+  names the interface the prefix is delegated on.
+- **The server decides how long the prefix is.** An `sla-id` that the
+  delegated prefix has no room for leaves that interface without an
+  address; the log and `show dhcpv6 client leases` say why. The same
+  goes for an interface in another VRF than the WAN interface, and for
+  one without a hardware address and without `address` (a loopback).
+- **Changing the interfaces does not touch the lease.** Only adding or
+  deleting the `pd` itself, or changing its `length`, asks the server
+  again.
+- **Hosts on the interface are not told yet.** The Router
+  Advertisements zebra-rs sends carry no prefix, so a host does not
+  form an address from the /64 by itself ([Not done yet](#not-done-yet)).
+
+```
+router> show dhcpv6 client leases
+Interface: wan1
+  VRF:          default
+  State:        bound
+  DUID:         00:01:00:01:32:85:1b:00:52:54:00:12:34:56
+  Server:       fe80::1
+  Server DUID:  00:03:00:01:02:00:00:00:00:fe
+  Prefix:       2001:db8:100::/56 preferred 3000s valid 6600s (pd 1)
+    on lan1:    2001:db8:100:1::1/64
+    on lan2:    2001:db8:100:2:5054:ff:fe12:3456/64
+  Renew in:     1200s
+  Rebind in:    2400s
+
+router> show interface lan1
+  inet6 2001:db8:100:1::1/64 dhcpv6-pd valid-lft 6600 preferred-lft 3000
+```
+
+After a restart of zebra-rs the addresses are still on their
+interfaces, and stay with the lease that is taken from disk. One whose
+interface was taken out of the configuration meanwhile is removed.
+
 ## Not done yet
 
 - The NTP servers of a lease are shown but not applied to the system.
 - The interface MTU option (26) is not applied.
 - A classless route whose router is `0.0.0.0` (an on-link destination)
   is not installed; a log line says so.
-- A delegated prefix is held, and that is all: no address from it is
-  put on a LAN interface, and it is not advertised to the LAN.
+- A /64 of a delegated prefix that an interface is numbered from is
+  not advertised to the hosts on it: Router Advertisements carry no
+  prefix yet.
 - The discard route of a delegated prefix drops a packet without the
   ICMPv6 Destination Unreachable that RFC 7084 asks for.
 - The RA host does not advertise the prefixes it learns on other

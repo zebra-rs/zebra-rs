@@ -18,6 +18,7 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
+use ipnet::Ipv6Net;
 use serde::{Deserialize, Serialize};
 
 use super::v4::client::Lease;
@@ -72,6 +73,12 @@ struct Stored6 {
     /// Reply about it arrived.
     obtained: u64,
     lease: Lease6,
+    /// The addresses the lease's prefixes have given other interfaces
+    /// (`dhcpv6-options pd <id> interface`), each with the name of the
+    /// interface it is on: they are in the kernel, and the next run has
+    /// only this to know them by.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    lan: Vec<(String, Ipv6Net)>,
 }
 
 /// A DHCPv6 lease read back from disk.
@@ -83,6 +90,9 @@ pub struct Kept6 {
     pub lease: Lease6,
     /// How many seconds its times are behind.
     pub elapsed: u32,
+    /// The addresses its prefixes had given other interfaces, by
+    /// interface name.
+    pub lan: Vec<(String, Ipv6Net)>,
 }
 
 pub struct Store {
@@ -182,13 +192,15 @@ impl Store {
     }
 
     /// As [`Store::save`], for a DHCPv6 lease taken as `identity` (the
-    /// DUID, and what was asked for), whose times count from `obtained`.
+    /// DUID, and what was asked for), whose times count from `obtained`,
+    /// and with the addresses its prefixes have given other interfaces.
     pub fn save6(
         &self,
         ifname: &str,
         identity: (&[u8], &Asks),
         obtained: u64,
         lease: &Lease6,
+        lan: &[(String, Ipv6Net)],
     ) -> io::Result<()> {
         let (duid, asks) = identity;
         let stored = Stored6 {
@@ -198,8 +210,25 @@ impl Store {
             pd: asks.ia_pd.iter().map(|pd| (pd.iaid, pd.length)).collect(),
             obtained,
             lease: lease.clone(),
+            lan: lan.to_vec(),
         };
         self.write(&self.path6(ifname), &stored)
+    }
+
+    /// Name other addresses as given by the prefixes of the lease kept
+    /// for `ifname`: they change with the configuration and the links,
+    /// while the lease stays what it is. Without a lease on disk there
+    /// is nothing to say it of.
+    pub fn set_lan6(&self, ifname: &str, lan: &[(String, Ipv6Net)]) -> io::Result<()> {
+        let path = self.path6(ifname);
+        let Some(mut stored) = self.read(&path, ifname, |s: &Stored6| &s.interface) else {
+            return Ok(());
+        };
+        if stored.lan == lan {
+            return Ok(());
+        }
+        stored.lan = lan.to_vec();
+        self.write(&path, &stored)
     }
 
     /// As [`Store::load`], for the DHCPv6 lease.
@@ -215,6 +244,7 @@ impl Store {
             },
             lease: stored.lease,
             elapsed: u32::try_from(elapsed).unwrap_or(u32::MAX),
+            lan: stored.lan,
         })
     }
 
@@ -322,7 +352,9 @@ mod tests {
             ia_pd: vec![],
         };
         assert_eq!(store.load6("wan0", 5000), None);
-        store.save6("wan0", (&duid, &asks), 4000, &lease6).unwrap();
+        store
+            .save6("wan0", (&duid, &asks), 4000, &lease6, &[])
+            .unwrap();
         assert_eq!(
             store.load6("wan0", 5000),
             Some(Kept6 {
@@ -330,6 +362,7 @@ mod tests {
                 asks: asks.clone(),
                 lease: lease6.clone(),
                 elapsed: 1000,
+                lan: vec![],
             })
         );
         // As it was written before prefixes were asked for: the IAID of
@@ -353,10 +386,34 @@ mod tests {
                     },
                 ],
             };
-            store.save6("wan0", (&duid, &asks), 4000, &lease6).unwrap();
+            store
+                .save6("wan0", (&duid, &asks), 4000, &lease6, &[])
+                .unwrap();
             assert_eq!(store.load6("wan0", 5000).map(|kept| kept.asks), Some(asks));
         }
-        store.save6("wan0", (&duid, &asks), 4000, &lease6).unwrap();
+        store
+            .save6("wan0", (&duid, &asks), 4000, &lease6, &[])
+            .unwrap();
+        // The addresses its prefixes gave other interfaces are named
+        // with it, and named anew while the lease stays what it is.
+        let lan = |name: &str, address: &str| (name.to_string(), address.parse().unwrap());
+        let given = [lan("lan0", "2001:db8:100:1::1/64")];
+        assert!(json.get("lan").is_none());
+        store
+            .save6("wan0", (&duid, &asks), 4000, &lease6, &given)
+            .unwrap();
+        assert_eq!(store.load6("wan0", 5000).unwrap().lan, given);
+        let now = [given[0].clone(), lan("lan1", "2001:db8:100:2::1/64")];
+        store.set_lan6("wan0", &now).unwrap();
+        let kept = store.load6("wan0", 5000).unwrap();
+        assert_eq!((kept.lan.as_slice(), kept.elapsed), (&now[..], 1000));
+        assert_eq!(kept.lease, lease6);
+        store.set_lan6("wan0", &[]).unwrap();
+        assert!(store.load6("wan0", 5000).unwrap().lan.is_empty());
+        // Of a lease that is not on disk there is nothing to say: no
+        // file is made for it.
+        store.set_lan6("wan1", &given).unwrap();
+        assert!(!dir.join("wan1.v6.json").exists());
         // Another interface; a clock behind the lease.
         assert_eq!(store.load6("wan1", 5000), None);
         assert_eq!(store.load6("wan0", 3999), None);

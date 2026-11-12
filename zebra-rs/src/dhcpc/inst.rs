@@ -393,6 +393,9 @@ impl Dhcpc {
                 link.up = up;
                 let name = link.name.clone();
                 self.sync_link6(&name);
+                if up {
+                    self.link_up6(ifindex);
+                }
                 if self.is_releasing(&name) {
                     // The old identity's client only has a RELEASE left
                     // to send, which the link coming up may now allow.

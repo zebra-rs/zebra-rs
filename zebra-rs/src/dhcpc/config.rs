@@ -1,7 +1,8 @@
 //! Configuration callbacks: `interface <if> ipv4 address dhcp`,
 //! `interface <if> ipv4 dhcp-options …` and `system hostname`; for
 //! DHCPv6, `interface <if> ipv6 address dhcpv6` and
-//! `interface <if> ipv6 dhcpv6-options …`, `pd <id>` among them.
+//! `interface <if> ipv6 dhcpv6-options …`, `pd <id>` and the interfaces
+//! under it among them.
 //!
 //! A callback only records the leaf and marks the interface as touched;
 //! [`Dhcpc::process_cm_msg`] applies everything at the end of the commit,
@@ -16,7 +17,7 @@ use crate::config::{Args, ConfigOp};
 
 use super::ident::parse_duid;
 use super::inst::{Dhcpc, IfConfig};
-use super::v6::inst::IfConfig6;
+use super::v6::inst::{IfConfig6, LanConfig};
 
 pub type Callback = fn(&mut Dhcpc, Args, ConfigOp) -> Option<()>;
 
@@ -44,7 +45,7 @@ impl Dhcpc {
         }
         self.callbacks
             .insert("/interface/ipv6/address".to_string(), config_address6);
-        let options6: [(&str, Callback); 7] = [
+        let options6: [(&str, Callback); 10] = [
             ("/duid", config_duid),
             ("/parameters-only", config_parameters_only),
             ("/rapid-commit", config_rapid_commit),
@@ -52,6 +53,9 @@ impl Dhcpc {
             ("/no-name-server", config_no_name_server6),
             ("/pd", config_pd),
             ("/pd/length", config_pd_length),
+            ("/pd/interface", config_pd_interface),
+            ("/pd/interface/sla-id", config_pd_sla_id),
+            ("/pd/interface/address", config_pd_host),
         ];
         for (leaf, callback) in options6 {
             self.callbacks.insert(format!("{OPTIONS6}{leaf}"), callback);
@@ -174,6 +178,54 @@ fn config_pd_length(dhcpc: &mut Dhcpc, mut args: Args, op: ConfigOp) -> Option<(
     } else if let Some(pd) = cfg.pd.get_mut(&id) {
         pd.length = None;
     }
+    Some(())
+}
+
+/// The `pd <id> interface <if>` entry a leaf of it names, for `op`. A
+/// set makes the entry, and the delegation above it; a delete finds it
+/// only while it is there, like `config_pd_length`.
+fn pd_interface<'a>(
+    dhcpc: &'a mut Dhcpc,
+    args: &mut Args,
+    op: ConfigOp,
+) -> Option<&'a mut LanConfig> {
+    let cfg = dhcpc.touch6(args)?;
+    let id = args.u32()?;
+    let ifname = args.string()?;
+    if op.is_set() {
+        let pd = cfg.pd.entry(id).or_default();
+        Some(pd.interfaces.entry(ifname).or_default())
+    } else {
+        cfg.pd.get_mut(&id)?.interfaces.get_mut(&ifname)
+    }
+}
+
+/// `dhcpv6-options pd <id> interface <if>`: an interface to number from
+/// the delegation.
+fn config_pd_interface(dhcpc: &mut Dhcpc, mut args: Args, op: ConfigOp) -> Option<()> {
+    let cfg = dhcpc.touch6(&mut args)?;
+    let id = args.u32()?;
+    let ifname = args.string()?;
+    if op.is_set() {
+        let pd = cfg.pd.entry(id).or_default();
+        pd.interfaces.entry(ifname).or_default();
+    } else if let Some(pd) = cfg.pd.get_mut(&id) {
+        pd.interfaces.remove(&ifname);
+    }
+    Some(())
+}
+
+/// `dhcpv6-options pd <id> interface <if> sla-id <n>`.
+fn config_pd_sla_id(dhcpc: &mut Dhcpc, mut args: Args, op: ConfigOp) -> Option<()> {
+    let lan = pd_interface(dhcpc, &mut args, op)?;
+    lan.sla_id = if op.is_set() { Some(args.u32()?) } else { None };
+    Some(())
+}
+
+/// `dhcpv6-options pd <id> interface <if> address <n>`: the host part.
+fn config_pd_host(dhcpc: &mut Dhcpc, mut args: Args, op: ConfigOp) -> Option<()> {
+    let lan = pd_interface(dhcpc, &mut args, op)?;
+    lan.address = if op.is_set() { Some(args.u64()?) } else { None };
     Some(())
 }
 

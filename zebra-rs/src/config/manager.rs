@@ -874,6 +874,13 @@ impl ConfigManager {
         self.checked_lines(text, check::dhcpv6_mode_line)
     }
 
+    /// The delegations among config `text`'s lines, with their
+    /// interfaces (`check::dhcpv6_pd_interfaces`), as callback paths and
+    /// arguments.
+    fn dhcpv6_pd_entries(&self, text: &str) -> Vec<(String, Vec<String>)> {
+        self.checked_lines(text, check::dhcpv6_pd_line)
+    }
+
     /// Commit the candidate. Refuses it, dispatching nothing, when it
     /// fails validation: mandatory nodes, the leaf value checks, or a label
     /// check it would newly break.
@@ -963,6 +970,30 @@ impl ConfigManager {
             }
             for error in &modes {
                 tracing::warn!("startup config: {error}");
+            }
+        }
+
+        // `dhcpv6-options pd <id> interface`: not the interface the
+        // prefix is delegated on, and one /64 for each. A startup config
+        // is only warned about, as above; the client then leaves the
+        // first alone, and numbers the others as they are configured.
+        // What is only told (an `sla-id` beyond the length asked for) is
+        // told when the commit brings it, not with every later one.
+        let pd = check::dhcpv6_pd_interfaces(&self.dhcpv6_pd_entries(&candidate));
+        if !pd.errors.is_empty() {
+            if !startup {
+                return Err(anyhow::anyhow!(pd.errors.join("\n")));
+            }
+            for error in &pd.errors {
+                tracing::warn!("startup config: {error}");
+            }
+        }
+        if !pd.warnings.is_empty() {
+            let before = check::dhcpv6_pd_interfaces(&self.dhcpv6_pd_entries(&running));
+            for warning in &pd.warnings {
+                if !before.warnings.contains(warning) {
+                    tracing::warn!("{warning}");
+                }
             }
         }
 
@@ -3252,6 +3283,59 @@ mod save_config_tests {
         assert_eq!(violations(), [refused]);
         edit("delete interface eth1 ipv6 dhcpv6-options pd 7");
         assert_eq!(violations(), Vec::<String>::new());
+    }
+
+    /// The interfaces of a delegation are checked at commit
+    /// (`check::dhcpv6_pd_interfaces`): the candidate's lines reach the
+    /// check as it reads them, and what it refuses refuses the commit.
+    #[test]
+    fn a_delegation_s_interfaces_are_checked_at_commit() {
+        let cm = manager_with_config(&temp_path("dhcpv6-pd-interfaces"));
+        let mode = cm.modes.get("configure").expect("configure mode");
+        let edit = |line: &str| {
+            let (code, output, _) = cm.execute(mode, line);
+            assert_eq!(code, ExecCode::Show, "`{line}` rejected: {output:?}");
+        };
+        let found = || {
+            let mut candidate = String::new();
+            cm.store.candidate.borrow().list(&mut candidate);
+            check::dhcpv6_pd_interfaces(&cm.dhcpv6_pd_entries(&candidate))
+        };
+        let at = "interface eth0 ipv6 dhcpv6-options pd 1";
+
+        edit("set interface eth0 ipv6 dhcpv6-options pd 1 length 56");
+        edit("set interface eth0 ipv6 dhcpv6-options pd 1 interface eth1 address 1");
+        edit("set interface eth0 ipv6 dhcpv6-options pd 1 interface eth2 sla-id 1");
+        edit("set interface eth0 ipv6 dhcpv6-options pd 2 interface eth1");
+        assert_eq!(found(), check::PdFindings::default());
+
+        // Two interfaces on one /64.
+        edit("set interface eth0 ipv6 dhcpv6-options pd 1 interface eth3");
+        let same = format!(
+            "{at}: interfaces eth1, eth3 have the same sla-id 0, which is one /64; give each \
+             its own"
+        );
+        assert_eq!(found().errors, std::slice::from_ref(&same));
+        let err = cm.commit_config().expect_err("one /64 for two interfaces");
+        assert_eq!(err.to_string(), same);
+        edit("set interface eth0 ipv6 dhcpv6-options pd 1 interface eth3 sla-id 300");
+        // Beyond the 256 /64s of the /56 asked for: only told.
+        let found_now = found();
+        assert!(found_now.errors.is_empty(), "{found_now:?}");
+        assert_eq!(found_now.warnings.len(), 1, "{found_now:?}");
+        assert!(found_now.warnings[0].starts_with(&format!("{at} interface eth3: sla-id 300 ")));
+
+        // The interface the prefix is delegated on.
+        edit("set interface eth0 ipv6 dhcpv6-options pd 1 interface eth0 sla-id 9");
+        let upstream = format!(
+            "{at} interface eth0: a delegated prefix cannot number the interface it is \
+             delegated on; name an interface behind this router"
+        );
+        assert_eq!(found().errors, std::slice::from_ref(&upstream));
+        let err = cm.commit_config().expect_err("the upstream interface");
+        assert_eq!(err.to_string(), upstream);
+        edit("delete interface eth0 ipv6 dhcpv6-options pd 1 interface eth0");
+        assert!(found().errors.is_empty());
     }
 
     /// `system hostname` is checked at commit: with `--feature insomnia` it
@@ -7822,6 +7906,11 @@ module test-insomnia-gated {
             "set interface eth0 ipv6 dhcpv6-options pd 0",
             "set interface eth0 ipv6 dhcpv6-options pd 4294967295 length 32",
             "set interface eth0 ipv6 dhcpv6-options pd 1 length 64",
+            "set interface eth0 ipv6 dhcpv6-options pd 1 interface eth1",
+            "set interface eth0 ipv6 dhcpv6-options pd 1 interface eth1 sla-id 0",
+            "set interface eth0 ipv6 dhcpv6-options pd 1 interface eth1 sla-id 4294967295",
+            "set interface eth0 ipv6 dhcpv6-options pd 1 interface eth1 address 1",
+            "set interface eth0 ipv6 dhcpv6-options pd 1 interface lo address 18446744073709551615",
         ] {
             let (code, _, _) = parse(line, entry.clone(), None, State::new());
             assert_eq!(code, ExecCode::Success, "`{line}` must parse");
@@ -7838,6 +7927,23 @@ module test-insomnia-gated {
                 "pd 7 length 56",
                 "/set/interface/ipv6/dhcpv6-options/pd/length",
                 vec!["eth0", "7", "56"],
+            ),
+            // An interface numbered from it: an entry under the
+            // delegation, with leaves of its own.
+            (
+                "pd 7 interface eth1",
+                "/set/interface/ipv6/dhcpv6-options/pd/interface",
+                vec!["eth0", "7", "eth1"],
+            ),
+            (
+                "pd 7 interface eth1 sla-id 3",
+                "/set/interface/ipv6/dhcpv6-options/pd/interface/sla-id",
+                vec!["eth0", "7", "eth1", "3"],
+            ),
+            (
+                "pd 7 interface eth1 address 1",
+                "/set/interface/ipv6/dhcpv6-options/pd/interface/address",
+                vec!["eth0", "7", "eth1", "1"],
             ),
         ] {
             let line = format!("set interface eth0 ipv6 dhcpv6-options {typed}");
@@ -7870,6 +7976,11 @@ module test-insomnia-gated {
             "set interface eth0 ipv6 dhcpv6-options pd one",
             "set interface eth0 ipv6 dhcpv6-options pd 1 length 31",
             "set interface eth0 ipv6 dhcpv6-options pd 1 length 65",
+            "set interface eth0 ipv6 dhcpv6-options pd 1 interface eth1 sla-id 4294967296",
+            "set interface eth0 ipv6 dhcpv6-options pd 1 interface eth1 sla-id -1",
+            "set interface eth0 ipv6 dhcpv6-options pd 1 interface eth1 address 0",
+            "set interface eth0 ipv6 dhcpv6-options pd 1 interface eth1 address 18446744073709551616",
+            "set interface eth0 ipv6 dhcpv6-options pd 1 interface eth1 address ::1",
         ] {
             let (code, _, _) = parse(line, entry.clone(), None, State::new());
             assert_ne!(code, ExecCode::Success, "`{line}` must be refused");
