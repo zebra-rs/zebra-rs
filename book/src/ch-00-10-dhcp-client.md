@@ -242,9 +242,19 @@ answered only with `net.ipv4.udp_l3mdev_accept` and
 on that interface keeps the router from asking servers that will not
 answer it.
 
-**Restart.** A restart of zebra-rs leaves what was set in place and sets
-it again from the resumed lease. `no-name-server` set while zebra-rs is
-not running takes nothing back: `resolvectl revert <name>` does it by
+**Restart.** zebra-rs leaves the name servers set when it stops, and
+sets them again from the resumed lease when it starts. What it does not
+learn again is taken back once `--leftover-sweep-time` has passed
+(120 s by default), like the routes of a lease that was not resumed: a
+lease that ran out, a router that no longer advertises, `no-name-server`
+set, or `address dhcp` deleted, while zebra-rs was not running. Until
+then the interface keeps the name servers it had.
+
+zebra-rs knows which interfaces it had set from a record beside the
+leases (`resolver.json`). A reboot ends the record with the settings
+themselves, and an interface that was deleted and made again in the
+meantime is left alone. Name servers set by a version of zebra-rs that
+kept no record are not taken back: `resolvectl revert <name>` does it by
 hand.
 
 ## Commands

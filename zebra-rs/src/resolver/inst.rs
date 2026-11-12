@@ -10,6 +10,12 @@
 //! [`Backend`] make up the difference, one command at a time. A command
 //! that fails is tried again later, so a resolver that starts after
 //! zebra-rs still gets its servers.
+//!
+//! zebra-rs leaves the system resolver as it is when it stops. Which
+//! interfaces then hold something of ours is kept on disk
+//! ([`super::record`]), and the next run takes back what it has not
+//! learned again by the time its wait for the sources is over
+//! ([`Resolver::resume`]).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
@@ -21,6 +27,7 @@ use tokio::time::{Instant, sleep_until};
 
 use crate::context::Task;
 
+use super::record::Record;
 use super::{LinkDns, Report, ResolverTx, Source};
 
 /// How long after a failed command the next try comes: this at first,
@@ -94,6 +101,22 @@ pub struct Resolver<B> {
     /// When to try the failed commands again.
     retry: Option<Instant>,
     backoff: Duration,
+    /// The interfaces that hold something of ours, on disk for the next
+    /// run. An interface is named there before the first command that
+    /// may give it something is started: a run that is ended while the
+    /// command is under way has still left word of it.
+    record: Record,
+    /// The interfaces an earlier run left set, as far as no source of
+    /// this run has had name servers for them yet. They are in `applied`
+    /// as holding something, and are not taken back until `sweep`.
+    waiting: BTreeSet<String>,
+    /// When the wait for the sources is over.
+    sweep: Option<Instant>,
+    /// The last command could not be started: on a host without the
+    /// program, most likely. Until one starts, no interface is named in
+    /// the record ahead of its command, or the record would be written
+    /// and put right again with every try.
+    unstarted: bool,
 }
 
 impl<B: Backend> Resolver<B> {
@@ -109,7 +132,78 @@ impl<B: Backend> Resolver<B> {
             refused: false,
             retry: None,
             backoff: RETRY_MIN,
+            record: Record::default(),
+            waiting: BTreeSet::new(),
+            sweep: None,
+            unstarted: false,
         }
+    }
+
+    /// Take over from the run before this one: `record` is what it left
+    /// on disk, and is kept from now on.
+    ///
+    /// An interface the record names, and that is still the interface it
+    /// was, holds something of that run's. What a source of this run has
+    /// name servers for is set as ever, the lease resumed from disk
+    /// first of all. What none has by the time `wait` is over is taken
+    /// back: a lease that was lost, a router that went, or
+    /// `no-name-server` set, while zebra-rs was not running. The sources
+    /// need that time. A lease is resumed at once, but a Router
+    /// Advertisement has to be heard again.
+    ///
+    /// An interface that has gone, or whose name is another interface's
+    /// now, holds nothing: its settings went with it.
+    pub fn resume(&mut self, record: Record, wait: Duration) {
+        self.record = record;
+        for (name, ifindex) in self.record.links().clone() {
+            if self.backend.ifindex(&name) != Some(ifindex) {
+                continue;
+            }
+            tracing::info!(
+                "resolver: {name}: holds name servers of an earlier run, taken back in {} s unless learned again",
+                wait.as_secs()
+            );
+            let held = Held {
+                ifindex: Some(ifindex),
+                dns: None,
+            };
+            self.applied.insert(name.clone(), held);
+            self.waiting.insert(name);
+        }
+        if !self.waiting.is_empty() {
+            self.sweep = Some(Instant::now() + wait);
+        }
+        // Without the ones that have gone.
+        self.record.note(self.held_links());
+    }
+
+    /// The wait for the sources is over: what an earlier run left and
+    /// no source has claimed is no longer kept for them, and the next
+    /// look at what is wanted takes it back. Except from an interface
+    /// that went, or was made again, during the wait: that one holds
+    /// nothing.
+    fn swept(&mut self) {
+        self.sweep = None;
+        for name in std::mem::take(&mut self.waiting) {
+            let now = self.backend.ifindex(&name);
+            if self
+                .applied
+                .get(&name)
+                .is_some_and(|held| held.ifindex != now)
+            {
+                self.applied.remove(&name);
+            }
+        }
+    }
+
+    /// The interfaces that hold something of ours, as the record names
+    /// them. One that was not there when it was to be set has no index
+    /// and holds nothing.
+    fn held_links(&self) -> BTreeMap<String, u32> {
+        self.applied
+            .iter()
+            .filter_map(|(name, held)| Some((name.clone(), held.ifindex?)))
+            .collect()
     }
 
     /// Where the sources send what they learn.
@@ -131,6 +225,10 @@ impl<B: Backend> Resolver<B> {
                     self.sync().await;
                 }
                 _ = sleep_until_opt(self.retry) => self.sync().await,
+                _ = sleep_until_opt(self.sweep) => {
+                    self.swept();
+                    self.sync().await;
+                }
             }
         }
     }
@@ -192,23 +290,39 @@ impl<B: Backend> Resolver<B> {
     }
 
     /// Have the backend make up the difference between what the system
-    /// resolver holds and what is wanted. True when a command failed and
-    /// is to be tried again.
+    /// resolver holds and what is wanted, and the record say which
+    /// interfaces hold something after that. True when a command failed
+    /// and is to be tried again.
     async fn reconcile(&mut self) -> bool {
         if self.refused {
             return false;
         }
+        let failed = self.apply().await;
+        self.record.note(self.held_links());
+        failed
+    }
+
+    /// One command, and whether it could be started.
+    async fn run(&mut self, op: Op) -> Result<(), Failure> {
+        let result = self.backend.run(&op).await;
+        self.unstarted = matches!(result, Err(Failure::NotRun(_)));
+        result
+    }
+
+    async fn apply(&mut self) -> bool {
         let wanted = self.wanted();
         let mut failed = false;
+        // Learned again, what an earlier run left is this run's.
+        self.waiting.retain(|name| !wanted.contains_key(name));
 
         let gone: Vec<String> = self
             .applied
             .keys()
-            .filter(|name| !wanted.contains_key(*name))
+            .filter(|name| !wanted.contains_key(*name) && !self.waiting.contains(*name))
             .cloned()
             .collect();
         for name in gone {
-            let failure = match self.backend.run(&Op::Revert(name.clone())).await {
+            let failure = match self.run(Op::Revert(name.clone())).await {
                 Ok(()) => {
                     tracing::info!("resolver: {name}: name servers withdrawn");
                     self.applied.remove(&name);
@@ -294,8 +408,16 @@ impl<B: Backend> Resolver<B> {
         dns: &LinkDns,
     ) -> Result<(), Failure> {
         let unknown = Held { ifindex, dns: None };
+        // On record before the command is started: a run that is ended
+        // while it is under way does not know how it went, and the next
+        // one must find the interface named.
+        if let Some(ifindex) = ifindex
+            && !self.unstarted
+        {
+            self.record.hold(name, ifindex);
+        }
         let servers = Op::Dns(name.to_string(), dns.servers.clone());
-        match self.backend.run(&servers).await {
+        match self.run(servers).await {
             Ok(()) => {}
             Err(failure) => {
                 if matches!(failure, Failure::Uncertain(_)) {
@@ -305,8 +427,7 @@ impl<B: Backend> Resolver<B> {
             }
         }
         self.applied.insert(name.to_string(), unknown);
-        self.backend
-            .run(&Op::Domains(name.to_string(), dns.domains.clone()))
+        self.run(Op::Domains(name.to_string(), dns.domains.clone()))
             .await?;
         let held = Held {
             ifindex,
@@ -421,6 +542,29 @@ mod tests {
         index: BTreeMap<String, u32>,
         /// How long a command takes.
         takes: Duration,
+        /// Where the resolver keeps its record, and what that named when
+        /// each command was started.
+        record: Option<std::path::PathBuf>,
+        recorded: Vec<Vec<(String, u32)>>,
+    }
+
+    /// The boot the benches run in.
+    const BOOT: &str = "this-boot";
+
+    /// What the record at `path` names.
+    fn on_record(path: &std::path::Path) -> Vec<(String, u32)> {
+        Record::load(path.to_path_buf(), BOOT.to_string())
+            .links()
+            .iter()
+            .map(|(name, index)| (name.clone(), *index))
+            .collect()
+    }
+
+    fn links(items: &[(&str, u32)]) -> Vec<(String, u32)> {
+        items
+            .iter()
+            .map(|(name, index)| (name.to_string(), *index))
+            .collect()
     }
 
     #[derive(Clone, Default)]
@@ -432,6 +576,9 @@ mod tests {
             tokio::time::sleep(takes).await;
             let mut script = self.0.lock().unwrap();
             script.ran.push(op.clone());
+            if let Some(path) = script.record.clone() {
+                script.recorded.push(on_record(&path));
+            }
             script.answers.pop_front().unwrap_or(Ok(()))
         }
 
@@ -535,6 +682,339 @@ mod tests {
                 dns,
             });
         }
+    }
+
+    impl Bench {
+        /// A run that keeps its record in `test`'s own place, after one
+        /// that left `left` there. `index` says which interfaces there
+        /// are now, when not all of `left` as they were.
+        fn after(test: &str, left: &[(&str, u32)], index: Option<&[(&str, u32)]>) -> Bench {
+            let path = crate::resolver::record::tests::scratch(test);
+            let mut earlier = Record::load(path.clone(), BOOT.to_string());
+            for (name, ifindex) in left {
+                earlier.hold(name, *ifindex);
+            }
+            let b = Bench::new();
+            {
+                let mut script = b.mock.0.lock().unwrap();
+                for (name, ifindex) in index.unwrap_or(left) {
+                    script.index.insert(name.to_string(), *ifindex);
+                }
+                script.record = Some(path);
+            }
+            b
+        }
+
+        /// Take over from the earlier run, with `WAIT` for the sources.
+        fn resume(&mut self) {
+            let record = Record::load(self.path(), BOOT.to_string());
+            self.resolver.resume(record, WAIT);
+        }
+
+        fn path(&self) -> std::path::PathBuf {
+            self.mock.0.lock().unwrap().record.clone().unwrap()
+        }
+
+        /// What the record on disk names.
+        fn record(&self) -> Vec<(String, u32)> {
+            on_record(&self.path())
+        }
+
+        /// What it named when each command since the last look was
+        /// started.
+        fn recorded(&mut self) -> Vec<Vec<(String, u32)>> {
+            std::mem::take(&mut self.mock.0.lock().unwrap().recorded)
+        }
+
+        /// The wait for the sources is over.
+        async fn sweep(&mut self) {
+            self.resolver.swept();
+            self.sync().await;
+        }
+    }
+
+    /// How long the benches wait for the sources.
+    const WAIT: Duration = Duration::from_secs(120);
+
+    /// A lease lost, or `no-name-server` set, while zebra-rs was not
+    /// running: nobody reports the interface, and what the earlier run
+    /// set on it is taken back once the sources have had their time.
+    #[tokio::test(start_paused = true)]
+    async fn what_an_earlier_run_left_is_taken_back_when_the_wait_is_over() {
+        let mut b = Bench::after("left", &[(WAN, 7)], None);
+        b.resume();
+        assert_eq!(b.resolver.sweep, Some(Instant::now() + WAIT));
+        // Not before: a source may yet say it has them.
+        b.sync().await;
+        b.report("wan1", None).await;
+        assert_eq!(b.ran(), []);
+        assert_eq!(b.record(), links(&[(WAN, 7)]));
+
+        b.sweep().await;
+        assert_eq!(b.ran(), revert(WAN));
+        assert_eq!(b.resolver.sweep, None);
+        assert_eq!(b.record(), []);
+        // Once.
+        b.sync().await;
+        assert_eq!(b.ran(), []);
+    }
+
+    /// The lease resumed from disk says the same servers as before the
+    /// restart. They are set all the same, for what the interface holds
+    /// is not known, and the end of the wait takes nothing from it.
+    #[tokio::test]
+    async fn what_is_learned_again_is_set_and_kept() {
+        let mut b = Bench::after("learned-again", &[(WAN, 7)], None);
+        b.resume();
+        b.report(WAN, Some(dns(&["198.51.100.53"], &["example.com"])))
+            .await;
+        assert_eq!(b.ran(), set(WAN, &["198.51.100.53"], &["example.com"]));
+        b.sweep().await;
+        assert_eq!(b.ran(), []);
+        assert_eq!(b.record(), links(&[(WAN, 7)]));
+        // From then on it is this run's, like any other.
+        b.report(WAN, None).await;
+        assert_eq!(b.ran(), revert(WAN));
+        assert_eq!(b.record(), []);
+    }
+
+    /// Learned again and lost within the wait (a resumed lease the
+    /// server refuses), it is taken back then and not at the end of the
+    /// wait: this run has had it, and knows it is over.
+    #[tokio::test]
+    async fn learned_again_and_lost_within_the_wait_is_taken_back_at_once() {
+        let mut b = Bench::after("lost-in-wait", &[(WAN, 7)], None);
+        b.resume();
+        b.report(WAN, Some(dns(&["198.51.100.53"], &[]))).await;
+        b.ran();
+        b.report(WAN, None).await;
+        assert_eq!(b.ran(), revert(WAN));
+        b.sweep().await;
+        assert_eq!(b.ran(), []);
+    }
+
+    /// One interface's source being heard is no word about another's:
+    /// the look at what is wanted that it brings leaves the other
+    /// interface as the earlier run left it, until the wait is over.
+    #[tokio::test]
+    async fn one_interface_learned_again_leaves_the_other_waiting() {
+        let mut b = Bench::after("other-waits", &[(WAN, 7), ("wan1", 8)], None);
+        b.resume();
+        b.report(WAN, Some(dns(&["198.51.100.53"], &[]))).await;
+        assert_eq!(b.ran(), set(WAN, &["198.51.100.53"], &[]));
+        assert_eq!(b.record(), links(&[(WAN, 7), ("wan1", 8)]));
+        b.sweep().await;
+        assert_eq!(b.ran(), revert("wan1"));
+        assert_eq!(b.record(), links(&[(WAN, 7)]));
+    }
+
+    /// Search domains alone resolve nothing and set nothing, so they
+    /// claim nothing either.
+    #[tokio::test]
+    async fn domains_alone_do_not_claim_what_an_earlier_run_left() {
+        let mut b = Bench::after("domains-alone", &[(WAN, 7)], None);
+        b.resume();
+        b.report(WAN, Some(dns(&[], &["example.com"]))).await;
+        assert_eq!(b.ran(), []);
+        b.sweep().await;
+        assert_eq!(b.ran(), revert(WAN));
+    }
+
+    /// The settings went with the interface. One that is gone, or whose
+    /// name is another interface's now, holds nothing of the earlier
+    /// run, and a revert would only take away what somebody else gave
+    /// the new one.
+    #[tokio::test]
+    async fn an_interface_that_is_another_now_holds_nothing_of_the_earlier_run() {
+        let now = [("wan1", 9)];
+        let mut b = Bench::after("another-now", &[(WAN, 7), ("wan1", 8)], Some(&now));
+        b.mock.0.lock().unwrap().missing.push(WAN.to_string());
+        b.resume();
+        assert_eq!(b.resolver.sweep, None);
+        // The record drops them at once, not at the next change.
+        assert_eq!(b.record(), []);
+        b.sweep().await;
+        assert_eq!(b.ran(), []);
+        // Learned on the new interface, the servers are set on it.
+        b.report("wan1", Some(dns(&["203.0.113.53"], &[]))).await;
+        assert_eq!(b.ran(), set("wan1", &["203.0.113.53"], &[]));
+        assert_eq!(b.record(), links(&[("wan1", 9)]));
+    }
+
+    /// The same for one made again while the wait runs.
+    #[tokio::test]
+    async fn an_interface_made_again_during_the_wait_is_left_alone() {
+        let mut b = Bench::after("made-again", &[(WAN, 7), ("wan1", 8)], None);
+        b.resume();
+        b.recreate(WAN);
+        b.sweep().await;
+        assert_eq!(b.ran(), revert("wan1"));
+        assert_eq!(b.record(), []);
+    }
+
+    /// A withdrawal that fails at the end of the wait is tried again
+    /// like any other, and the record names the interface until one
+    /// works.
+    #[tokio::test]
+    async fn a_leftover_that_cannot_be_taken_back_is_tried_again() {
+        let mut b = Bench::after("tried-again", &[(WAN, 7)], None);
+        b.resume();
+        b.answer(&[failed()]);
+        b.sweep().await;
+        assert_eq!(b.ran(), revert(WAN));
+        assert_eq!(b.resolver.retry, Some(b.now + RETRY_MIN));
+        assert_eq!(b.record(), links(&[(WAN, 7)]));
+        b.sync().await;
+        assert_eq!(b.ran(), revert(WAN));
+        assert_eq!(b.record(), []);
+    }
+
+    /// A record of another boot, or none: nothing to wait for.
+    #[tokio::test]
+    async fn a_run_with_nothing_left_to_it_waits_for_nothing() {
+        let mut b = Bench::after("nothing-left", &[], None);
+        b.resume();
+        assert_eq!(b.resolver.sweep, None);
+        b.sweep().await;
+        assert_eq!(b.ran(), []);
+    }
+
+    /// The interface is on record before the first command that may
+    /// give it something is started. A run ended while `resolvectl` is
+    /// under way cannot say how that went, and the next one must find
+    /// the interface named.
+    #[tokio::test]
+    async fn an_interface_is_on_record_before_its_first_command() {
+        let mut b = Bench::after("before-command", &[], None);
+        b.resume();
+        b.mock.0.lock().unwrap().index.insert(WAN.to_string(), 7);
+        b.report(WAN, Some(dns(&["198.51.100.53"], &[]))).await;
+        assert_eq!(b.ran().len(), 2);
+        let named = links(&[(WAN, 7)]);
+        assert_eq!(b.recorded(), [named.clone(), named.clone()]);
+        // And until the withdrawal has worked: named while it runs, not
+        // after it.
+        b.report(WAN, None).await;
+        assert_eq!(b.recorded(), [named]);
+        assert_eq!(b.record(), []);
+    }
+
+    /// The run that was ended while its command was under way: the
+    /// record names the interface, and the next run takes back what the
+    /// command may have set.
+    #[tokio::test]
+    async fn what_a_run_ended_in_mid_command_left_is_taken_back() {
+        let mut b = Bench::after("mid-command", &[], None);
+        b.resume();
+        b.mock.0.lock().unwrap().index.insert(WAN.to_string(), 7);
+        // Ended in the command: all that is left of that run is what
+        // the record said when the command was started.
+        b.report(WAN, Some(dns(&["198.51.100.53"], &[]))).await;
+        let at_command = b.recorded().remove(0);
+        assert_eq!(at_command, links(&[(WAN, 7)]));
+
+        let left: Vec<(&str, u32)> = at_command.iter().map(|(n, i)| (n.as_str(), *i)).collect();
+        let mut next = Bench::after("mid-command", &left, None);
+        next.resume();
+        next.sweep().await;
+        assert_eq!(next.ran(), revert(WAN));
+    }
+
+    /// A command that was started and did not succeed may have set
+    /// something: the interface stays on record, for this run to take
+    /// back or the next.
+    #[tokio::test]
+    async fn an_interface_a_command_may_have_set_stays_on_record() {
+        let mut b = Bench::after("may-have-set", &[], None);
+        b.resume();
+        b.mock.0.lock().unwrap().index.insert(WAN.to_string(), 7);
+        b.answer(&[failed()]);
+        b.report(WAN, Some(dns(&["198.51.100.53"], &[]))).await;
+        assert_eq!(b.record(), links(&[(WAN, 7)]));
+    }
+
+    /// On a host without `resolvectl` no command can be started, time
+    /// after time. Such an interface holds nothing, and the record says
+    /// so once: it is not written and put right again with every try,
+    /// nor does it name an interface for the next run to revert, time
+    /// after time, on a host that cannot.
+    #[tokio::test]
+    async fn a_host_without_the_program_keeps_no_record() {
+        let mut b = Bench::after("no-program", &[], None);
+        b.resume();
+        b.mock.0.lock().unwrap().index.insert(WAN.to_string(), 7);
+        b.answer(&[not_run()]);
+        b.report(WAN, Some(dns(&["198.51.100.53"], &[]))).await;
+        // The first try could not know.
+        assert_eq!(b.recorded(), [links(&[(WAN, 7)])]);
+        assert_eq!(b.record(), []);
+        for _ in 0..3 {
+            b.answer(&[not_run()]);
+            b.sync().await;
+            assert_eq!(b.recorded(), [links(&[])]);
+            assert_eq!(b.record(), []);
+        }
+        // The program is there after all: its first success is on
+        // record when the commands are over.
+        b.sync().await;
+        assert_eq!(b.ran().len(), 5 + 1);
+        assert_eq!(b.record(), links(&[(WAN, 7)]));
+        // And from then on interfaces are named ahead again.
+        b.mock.0.lock().unwrap().index.insert("wan1".to_string(), 8);
+        b.recorded();
+        b.report("wan1", Some(dns(&["203.0.113.53"], &[]))).await;
+        assert_eq!(b.recorded()[0], links(&[(WAN, 7), ("wan1", 8)]));
+    }
+
+    /// Not ours to configure: no interface holds anything, and the one
+    /// named ahead of the refused command is taken off the record.
+    #[tokio::test]
+    async fn a_refusal_leaves_nothing_on_record() {
+        let mut b = Bench::after("refused", &[], None);
+        b.resume();
+        b.mock.0.lock().unwrap().index.insert(WAN.to_string(), 7);
+        b.answer(&[Err(Failure::Refused("not here".to_string()))]);
+        b.report(WAN, Some(dns(&["198.51.100.53"], &[]))).await;
+        assert_eq!(b.record(), []);
+    }
+
+    /// An interface that is not there has no index and cannot hold
+    /// anything: it is not named, whatever its command answered.
+    #[tokio::test]
+    async fn an_interface_that_is_not_there_is_not_on_record() {
+        let mut b = Bench::after("not-there", &[], None);
+        b.resume();
+        b.mock.0.lock().unwrap().missing.push(WAN.to_string());
+        b.answer(&[failed()]);
+        b.report(WAN, Some(dns(&["198.51.100.53"], &[]))).await;
+        assert_eq!(b.recorded(), [links(&[])]);
+        assert_eq!(b.record(), []);
+    }
+
+    /// The task itself: the end of the wait comes by the clock, with
+    /// no report to bring it, and takes back what nothing has claimed.
+    #[tokio::test(start_paused = true)]
+    async fn the_task_takes_back_at_the_end_of_its_wait_what_nothing_claimed() {
+        let mut b = Bench::after("task-sweep", &[(WAN, 7), ("wan1", 8)], None);
+        b.resume();
+        let Bench { resolver, mock, .. } = b;
+        let tx = resolver.tx();
+        let _task = serve(resolver);
+        let ran = |mock: &Mock| std::mem::take(&mut mock.0.lock().unwrap().ran);
+
+        tx.send(Report {
+            ifname: WAN.to_string(),
+            source: Source::Dhcp4,
+            dns: Some(dns(&["198.51.100.53"], &[])),
+        })
+        .unwrap();
+        tokio::time::sleep(WAIT - Duration::from_secs(1)).await;
+        assert_eq!(ran(&mock), set(WAN, &["198.51.100.53"], &[]));
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert_eq!(ran(&mock), revert("wan1"));
+        // Once, and the wait is not begun again.
+        tokio::time::sleep(WAIT * 3).await;
+        assert_eq!(ran(&mock), []);
     }
 
     /// No configuration names the interface: that a source reports its

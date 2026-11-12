@@ -1340,8 +1340,46 @@ is given), and Router Advertisements (RDNSS, DNSSL).**
   interface now, deleted and made again, holds nothing whatever was
   noted for it. It is set again, also when the lease that comes back on
   it says nothing new.
-- **A restart of zebra-rs** leaves resolved as it is. The resumed lease
-  is reported and set again.
+- **A restart of zebra-rs** leaves resolved as it is, as it leaves the
+  lease's routes in the kernel. The resumed lease is reported and set
+  again. What the earlier run set and this one does not learn again is
+  taken back:
+  - **A record** (`<state dir>/resolver.json`, `resolver/record.rs`)
+    names the interfaces that hold something of ours, each with its
+    index, and the boot it was written in. It does not say what they
+    hold: what is learned again is set again whatever it is.
+  - **Written ahead.** An interface is named before the first command
+    that may give it something is started, and until a revert has
+    worked or the interface is gone. A run ended while `resolvectl` is
+    under way cannot say how that went, and the next one must find the
+    interface named. The exception is a host on which the command
+    cannot be started at all (no `resolvectl`): after such a failure
+    nothing is named ahead until a command starts, so the record is not
+    written and put right again with every try, and names no interface
+    for the next run to revert time after time where it cannot.
+  - **The next run** reads it at startup, before the configuration, and
+    starts the resolver task for it when it names any interface: a
+    configuration with no source of name servers any more (`address
+    dhcp` deleted while zebra-rs was down) spawns none of the tasks the
+    resolver otherwise comes with. Each interface named is noted as
+    holding something unknown.
+  - **A wait for the sources**, `--leftover-sweep-time` (120 s), the
+    time the RIB waits before it sweeps the routes of an earlier run.
+    A lease is resumed at once, but a Router Advertisement has to be
+    heard again. An interface a source has name servers for within it
+    is set and is this run's from then on, also when it loses them
+    again before the wait is over. The others are reverted when it is
+    over: a lease lost, a router gone, or `no-name-server` set, while
+    zebra-rs was down.
+  - **By index, and by boot.** An interface that is gone, or whose name
+    is another interface's now (at startup or at the end of the wait),
+    holds nothing and is dropped without a revert, which could only
+    take away what somebody else gave the new one. A record of another
+    boot names nothing: resolved keeps its links' settings under
+    `/run`, and the indexes of the boot before are other interfaces'
+    now, or the same ones' by chance.
+  - A run of a version before the record left none: what it set and
+    the next run does not learn stays, as it did.
 
 **Hazards.**
 
@@ -1383,11 +1421,6 @@ is given), and Router Advertisements (RDNSS, DNSSL).**
 
 **Not built yet.**
 
-- **Leftovers.** `no-name-server` set, or a lease lost, while zebra-rs
-  is not running leaves the link's settings in resolved until the link
-  goes or `resolvectl revert`. It needs a record of what was set, as
-  the RIB has for routes (`routes.json`), and a time to wait for the
-  sources after a start.
 - **Without root.** resolved's link calls are polkit actions
   (`org.freedesktop.resolve1.set-dns-servers`, `.set-domains`,
   `.revert`), which ask a caller that is not root for an
@@ -1419,7 +1452,7 @@ is given), and Router Advertisements (RDNSS, DNSSL).**
 | P3 (done) | DHCPv6 IA_NA and `parameters-only`; DUID; `show dhcpv6 client leases`, `renew/release dhcpv6` | P0, P2 |
 | P4 (the WAN half done) | IA_PD: discard route, LAN assignment, prefix change. Done: the state machine, `dhcpv6-options pd <id> [length]`, the discard route, prefixes in the lease file and in show, `dhcpv6_client_pd`. Left: `pd <id> interface <lan>` with `AddrOrigin::Pd` and the `sla-id` arithmetic for the LAN addresses, an unreachable form of the route (§16), `dhcpv6_pd_insomnia` | P3 |
 | ND-PIO | `nd` advertises PIOs for LAN /64s with counted-down lifetimes, deprecates removed ones (L-13), `RibRx::AddrAdd` on lifetime change | P1's RIB plumbing; parallel to P2–P4 |
-| Resolver (the three sources done) | The `resolver` task; the name servers of a DHCPv4 lease, of a DHCPv6 server and of Router Advertisements to systemd-resolved by default, `no-name-server` under `dhcp-options`, `dhcpv6-options` and `ra-options` to keep them back (§13). Next: leftovers across a restart | P1; P2 and P3 for their sources |
+| Resolver (the three sources done) | The `resolver` task; the name servers of a DHCPv4 lease, of a DHCPv6 server and of Router Advertisements to systemd-resolved by default, `no-name-server` under `dhcp-options`, `dhcpv6-options` and `ra-options` to keep them back; what an earlier run set and the next does not learn again taken back after `--leftover-sweep-time` (§13) | P1; P2 and P3 for their sources |
 | P5 | MTU options, Reconfigure, IA_TA, prefix exclude, RFC 4191 routes, stable-privacy identifiers, `redistribute dhcp` | as needed |
 
 Each phase is one PR, or a short series, with its own BDD feature.
@@ -1480,7 +1513,7 @@ client, and logs each message, which is what a scenario reads.
 | `dhcp_client` | lease → address and `D>* 0.0.0.0/0 [210/0]`; renew; `release`; server gone → expiry withdraws everything; zebra-rs restart keeps the address and re-verifies |
 | `dhcp_client_vrf` | WAN in VRF `red`; the route is in `red`'s table only |
 | `dhcp_client_dual_wan` | two leases at 210 / 220; link down on the first → the second's default is selected |
-| `dhcp_client_dns` | against a stand-in for `resolvectl`: the lease's servers and domains set with nothing configured but `address dhcp`; reverted on `release` and on setting `no-name-server`, and set again when that is deleted; nothing set for a lease taken, or resumed after a restart, under `no-name-server`; replaced at a renewal; retried after a failure; servers set last are set again after an error that came with the old list already dropped; servers set by a command that got no answer are reverted; an interface deleted and made again is set again; set again after a restart |
+| `dhcp_client_dns` | against a stand-in for `resolvectl`: the lease's servers and domains set with nothing configured but `address dhcp`; reverted on `release` and on setting `no-name-server`, and set again when that is deleted; nothing set for a lease taken, or resumed after a restart, under `no-name-server`; replaced at a renewal; retried after a failure; servers set last are set again after an error that came with the old list already dropped; servers set by a command that got no answer are reverted; an interface deleted and made again is set again; set again after a restart; what an earlier run set is kept past the leftover time by a run that resumes the lease, and taken back by one under `no-name-server` and by one with no DHCP client at all |
 | `ra_host` | RA default route `A`, SLAAC with `autoconf`, router lifetime 0 withdraws, `accept_ra` is 0 |
 | `ra_host_dns` | against a stand-in for `resolvectl`: RDNSS and DNSSL set with nothing configured but `address autoconf`, the newly heard first and an option in its own order; a lifetime of zero and a lifetime run out take one away; a DHCPv4 lease's server goes ahead and its end leaves the advertised ones; `ra-options no-name-server` takes the advertised ones back and leaves the lease's, what is heard under it is only shown, and deleting it sets what is held; stopping the RA host reverts |
 | `dhcpv6_client` | IA_NA /128 with `noprefixroute`; default route and on-link prefix from the RA, and no SLAAC address unless `autoconf` is set too; renew; `release`; zebra-rs restart keeps the address and confirms it; `parameters-only`; deleted configuration releases |

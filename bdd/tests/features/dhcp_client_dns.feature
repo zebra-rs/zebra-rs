@@ -10,6 +10,13 @@ Feature: A DHCP lease's name servers for the host
   taken back when the lease ends. `dhcp-options no-name-server` keeps
   an interface's name servers from the host: they are then only shown.
 
+  zebra-rs leaves them set when it stops, and keeps on disk which
+  interfaces hold some (`resolver.json`, beside the lease). The next run
+  sets what it learns again, the lease resumed from disk first of all,
+  and takes back what it has not learned when its wait for the sources
+  is over (`--leftover-sweep-time`): `no-name-server` set, or `address
+  dhcp` deleted, while zebra-rs was not running.
+
   No resolver is running here, and none must be reached: every daemon
   of the suite runs in a network namespace, from which `resolvectl`
   would configure some other interface of the host. The harness names
@@ -219,6 +226,58 @@ Feature: A DHCP lease's name servers for the host
     And daemon log in namespace "r1" should eventually contain "wan0: resumed 192.0.2.100/24"
     When I wait 3 seconds
     Then command "tests/scripts/resolvectl_stub.sh status" in namespace "r1" should not contain "wan0"
+
+  Scenario: A restart keeps the name servers of the lease it resumes
+    Given the test topology exists
+    # A run that sets them, with the stand-in's history begun anew.
+    When I stop zebra-rs in namespace "r1"
+    And I execute "tests/scripts/resolvectl_stub.sh reset" in namespace "r1"
+    And I start zebra-rs in namespace "r1"
+    And I apply config "r1.yaml" to namespace "r1"
+    Then command "tests/scripts/resolvectl_stub.sh status" in namespace "r1" should eventually contain "wan0 dns 198.51.100.54"
+    # And the next one, which finds them set and waits 5 seconds for its
+    # sources. The lease resumed from disk has claimed its own long
+    # before that: nothing is taken back, then or later.
+    When I stop zebra-rs in namespace "r1"
+    And I start zebra-rs in namespace "r1" sweeping leftovers after 5 seconds
+    And I apply config "r1.yaml" to namespace "r1"
+    Then daemon log in namespace "r1" should eventually contain "wan0: holds name servers of an earlier run"
+    And daemon log in namespace "r1" should eventually contain "wan0: resumed 192.0.2.100/24"
+    When I wait 8 seconds
+    Then command "tests/scripts/resolvectl_stub.sh status" in namespace "r1" should eventually contain "wan0 dns 198.51.100.54"
+    And command "tests/scripts/resolvectl_stub.sh status" in namespace "r1" should eventually contain "wan0 domain example.com"
+    And command "tests/scripts/resolvectl_stub.sh history" in namespace "r1" should not contain "revert"
+
+  Scenario: A restart under no-name-server takes back what the earlier run set
+    Given the test topology exists
+    # `no-name-server` set while zebra-rs was not running finds the
+    # servers of the run before still set. The lease is resumed and
+    # nobody reports its servers now, so they are taken back when the
+    # wait for the sources is over.
+    When I stop zebra-rs in namespace "r1"
+    And I start zebra-rs in namespace "r1" sweeping leftovers after 5 seconds
+    And I apply config "r1-no-name-server.yaml" to namespace "r1"
+    Then daemon log in namespace "r1" should eventually contain "wan0: resumed 192.0.2.100/24"
+    And command "tests/scripts/resolvectl_stub.sh status" in namespace "r1" should eventually not contain "wan0"
+    And command "tests/scripts/resolvectl_stub.sh history" in namespace "r1" should eventually contain "revert wan0"
+    And daemon log in namespace "r1" should eventually contain "resolver: wan0: name servers withdrawn"
+    # The lease is as it was, and its servers are still shown.
+    And show command "show dhcp client leases" in namespace "r1" should contain "State:        bound"
+    And show command "show dhcp client leases" in namespace "r1" should contain "DNS servers:  198.51.100.54"
+
+  Scenario: A restart without the DHCP client takes back what the earlier run set
+    Given the test topology exists
+    When I apply command "delete interface wan0 ipv4 dhcp-options no-name-server" in namespace "r1"
+    Then command "tests/scripts/resolvectl_stub.sh status" in namespace "r1" should eventually contain "wan0 dns 198.51.100.54"
+    # `address dhcp` deleted while zebra-rs was not running: this run is
+    # given no configuration at all, so it has no DHCP client and no
+    # other source of name servers. The resolver task is started for
+    # what the record names alone.
+    When I stop zebra-rs in namespace "r1"
+    And I start zebra-rs in namespace "r1" sweeping leftovers after 5 seconds
+    Then daemon log in namespace "r1" should eventually contain "wan0: holds name servers of an earlier run"
+    And command "tests/scripts/resolvectl_stub.sh status" in namespace "r1" should eventually not contain "wan0"
+    And daemon log in namespace "r1" should eventually contain "resolver: wan0: name servers withdrawn"
 
   Scenario: Teardown topology
     Given the test topology exists

@@ -9,10 +9,12 @@
 //! no-name-server`, `ipv6 ra-options no-name-server`). One task,
 //! [`inst::Resolver`], hands each interface's servers and search domains
 //! to systemd-resolved as that link's DNS configuration
-//! ([`resolvectl`]), and takes them back when the sources lose them.
+//! ([`resolvectl`]), and takes them back when the sources lose them,
+//! also what a run before this one set ([`record`]).
 //! zebra-rs never writes resolv.conf.
 
 pub mod inst;
+pub mod record;
 pub mod resolvectl;
 
 use std::net::IpAddr;

@@ -100,7 +100,7 @@ struct Arg {
 
     #[arg(
         long,
-        help = "Seconds after startup to remove routes an earlier run left in the kernel that no protocol has reinstalled",
+        help = "Seconds after startup to remove routes an earlier run left in the kernel that no protocol has reinstalled, and name servers it left with the system resolver that no interface has learned again",
         default_value_t = 120
     )]
     leftover_sweep_time: u64,
@@ -300,6 +300,15 @@ async fn run(arg: Arg) -> anyhow::Result<()> {
     script::sideeffect::spawn_drainer();
 
     tracing::info!("zebra-rs started");
+
+    // Name servers a run before this one left with the system resolver
+    // are taken back when the leftover time is over, unless learned
+    // again by then: also by a run whose configuration has no source of
+    // name servers any more, so before the configuration is read.
+    config
+        .leftover_sweep_time
+        .set(std::time::Duration::from_secs(arg.leftover_sweep_time));
+    config::resume_resolver(&config);
 
     config::event_loop(config).await;
 

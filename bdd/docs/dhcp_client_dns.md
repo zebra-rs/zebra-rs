@@ -10,6 +10,13 @@ systemd-resolved as the link's DNS configuration, by running
 taken back when the lease ends. `dhcp-options no-name-server` keeps
 an interface's name servers from the host: they are then only shown.
 
+zebra-rs leaves them set when it stops, and keeps on disk which
+interfaces hold some (`resolver.json`, beside the lease). The next run
+sets what it learns again, the lease resumed from disk first of all,
+and takes back what it has not learned when its wait for the sources
+is over (`--leftover-sweep-time`): `no-name-server` set, or `address
+dhcp` deleted, while zebra-rs was not running.
+
 No resolver is running here, and none must be reached: every daemon
 of the suite runs in a network namespace, from which `resolvectl`
 would configure some other interface of the host. The harness names
@@ -51,4 +58,7 @@ Requires dnsmasq and nft on the host (tests/scripts/dhcp_server.sh).
 | Deleting no-name-server hands the held lease's name servers over | |
 | A restart hands the resumed lease's name servers over again | |
 | A restart under no-name-server resumes the lease and sets nothing | |
+| A restart keeps the name servers of the lease it resumes | |
+| A restart under no-name-server takes back what the earlier run set | |
+| A restart without the DHCP client takes back what the earlier run set | |
 | Teardown topology | |
