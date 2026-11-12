@@ -24,6 +24,7 @@ interface enp0s6 {
 | `/interface/<name>/ipv6/address` | list keyed by `inet:ipv6-prefix`, or `autoconf`, or `dhcpv6` | IPv6 address(es) with prefix length — one per command, repeatable. `autoconf` takes the default route, on-link prefixes and SLAAC addresses from Router Advertisements; `dhcpv6` leases an address from a DHCPv6 server. Both may stand beside configured addresses and beside each other: see [DHCP Client](ch-00-10-dhcp-client.md#ipv6-router-advertisements-and-slaac). |
 | `/interface/<name>/ipv6/ra-options/…` | container | Options for what Router Advertisements give the interface: the distance of the routes, `no-default-route`, `no-name-server`. See [DHCP Client](ch-00-10-dhcp-client.md#ipv6-router-advertisements-and-slaac). |
 | `/interface/<name>/ipv6/dhcpv6-options/…` | container | Options of the DHCPv6 client, and `pd <id>` to have a prefix delegated and number other interfaces from it. See [DHCP Client](ch-00-10-dhcp-client.md#ipv6-dhcpv6). |
+| `/interface/<name>/ipv6/router-advertisements/send-advertisements` | `boolean` | Send Router Advertisements on the interface, naming its prefixes for the hosts on it. See [Router Advertisements](#router-advertisements). |
 
 The list entry itself is not a separate "create interface" operation —
 it just attaches configuration to a kernel device that already exists
