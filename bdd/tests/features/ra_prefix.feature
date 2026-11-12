@@ -79,9 +79,12 @@ Feature: Router Advertisements name the interface's prefixes (Prefix Information
 
   Scenario: A renewal is told to the hosts soon
     Given the test topology exists
+    # The advertisements that follow a new prefix are over: the next one
+    # is the periodic one, minutes away.
+    Then show command "show ipv6 nd interface lan0" in namespace "r1" should eventually contain "initial advertisements remaining 0"
     # The server comes back with longer lifetimes. The lease's new times
-    # are the address's on lan0, and the next advertisement, which does
-    # not wait for its period, has the host's address follow.
+    # are the address's on lan0, and an advertisement that does not
+    # wait for its period has the host's address follow.
     When I execute "tests/scripts/dhcpv6_server.py ra_prefix stop" in namespace "s1"
     And I execute "tests/scripts/dhcpv6_server.py ra_prefix start srv0 --address 2001:db8:1::100 --pd 1=2001:db8:100::/56 --route --route-also 2001:db8:aa::/64 --preferred 30000 --valid 60000" in namespace "s1"
     Then show command "renew dhcpv6 interface wan0" in namespace "r1" should contain "Renewing the DHCPv6 lease on wan0"

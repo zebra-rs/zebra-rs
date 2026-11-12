@@ -1587,6 +1587,22 @@ impl Rib {
             if local && let IpNet::V4(v4) = addr.addr {
                 addr.secondary = v4_secondary_verdict(link, v4);
             }
+            // A dynamic address that is in the kernel already is replaced
+            // in place (a renewal moves its lifetimes), which starts no
+            // duplicate address detection: what the kernel last said of
+            // the address's state holds. Mirrored as tentative like a new
+            // one, every renewal read as a change of state. Protocols
+            // were told of the address again, as one not usable yet, and
+            // once more when the kernel's notification took that back.
+            if matches!(from, AddrFrom::Dynamic(_))
+                && let Some(held) = link.addr6.iter().find(|a| a.addr == addr.addr && a.fib)
+            {
+                addr.flags = AddrFlags {
+                    noprefixroute: addr.flags.noprefixroute,
+                    permanent: false,
+                    ..held.flags
+                };
+            }
             let had_connected = {
                 let bucket = if addr.is_v4() {
                     &link.addr4
@@ -2764,11 +2780,18 @@ mod tests {
         };
 
         rib.addr_add_from(leased(3600, 7200), AddrFrom::Dynamic(AddrOrigin::Pd));
-        assert!(matches!(protocol.try_recv(), Ok(RibRx::AddrAdd(_))));
+        assert!(matches!(protocol.try_recv(), Ok(RibRx::AddrAdd(a)) if a.flags.tentative));
+        assert!(matches!(follower.try_recv(), Ok(RibRx::AddrAdd(_))));
+        // The kernel reports the end of duplicate address detection:
+        // that is a change of the address's state, and everybody's.
+        rib.addr_add(leased(3600, 7200), false);
+        assert!(matches!(protocol.try_recv(), Ok(RibRx::AddrAdd(a)) if !a.flags.tentative));
         assert!(matches!(follower.try_recv(), Ok(RibRx::AddrAdd(_))));
 
-        // The lease is renewed.
+        // The lease is renewed: the address is replaced in place, and
+        // is not in duplicate address detection again.
         rib.addr_add_from(leased(1800, 3600), AddrFrom::Dynamic(AddrOrigin::Pd));
+        assert!(!rib.links[&1].addr6[0].flags.tentative);
         assert!(protocol.try_recv().is_err());
         let Ok(RibRx::AddrRenewed(renewed)) = follower.try_recv() else {
             panic!("the renewal is told");
@@ -2780,8 +2803,10 @@ mod tests {
         assert_eq!(renewed.dynamic, Some(AddrOrigin::Pd));
         assert!(follower.try_recv().is_err());
 
-        // The same lifetimes again say nothing to anybody.
+        // The same lifetimes again say nothing to anybody: not from the
+        // client, and not as the kernel's own word on the renewal.
         rib.addr_add_from(leased(1800, 3600), AddrFrom::Dynamic(AddrOrigin::Pd));
+        rib.addr_add(leased(1800, 3600), false);
         assert!(protocol.try_recv().is_err() && follower.try_recv().is_err());
     }
 
