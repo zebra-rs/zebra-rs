@@ -42,7 +42,7 @@ Requires python3 on the host.
 | The prefix is held by an unreachable route | |
 | Renew by hand keeps the prefix | |
 | A restart keeps the prefix and its route | |
-| A blackhole route an earlier version left becomes the unreachable one | |
+| A blackhole route an earlier build left becomes the unreachable one | |
 | A restart that asks for no prefix takes the earlier run's route away | |
 | Another delegation is asked for as a new client | |
 | A prefix without an address | |

@@ -116,7 +116,7 @@ Feature: Interfaces numbered from a delegated prefix (dhcpv6-options pd <id> int
     And show command "show dhcpv6 client leases" in namespace "r1" should eventually not contain "2001:db8:100::/56"
     # The unreachable route and both addresses are the new prefix's.
     And command "ip -6 route show 2001:db8:900::/56" in namespace "r1" should eventually contain "unreachable 2001:db8:900::/56"
-    And command "ip -6 route show 2001:db8:100::/56" in namespace "r1" should eventually not contain "unreachable"
+    And kernel route "2001:db8:100::/56" in namespace "r1" should eventually be gone
     And command "ip -6 addr show dev lan0 scope global" in namespace "r1" should eventually contain "inet6 2001:db8:900:1::1/64 scope global dynamic"
     And command "ip -6 addr show dev lan0" in namespace "r1" should eventually not contain "2001:db8:100:1::1"
     And command "ip -6 addr show dev lan1 scope global" in namespace "r1" should eventually contain "inet6 2001:db8:900:2:0:ff:fe00:b1/64 scope global dynamic"
@@ -177,7 +177,7 @@ Feature: Interfaces numbered from a delegated prefix (dhcpv6-options pd <id> int
     When I apply command "delete interface wan0 ipv6 dhcpv6-options pd 1" in namespace "r1"
     Then command "cat /tmp/zebra-bdd-dhcp/dhcpv6_client_pd_lan/server.log" in namespace "s1" should eventually contain "RELEASE ia_na"
     And command "ip -6 addr show dev lan0" in namespace "r1" should eventually not contain "2001:db8:900:1::1"
-    And command "ip -6 route show 2001:db8:900::/56" in namespace "r1" should eventually not contain "unreachable"
+    And kernel route "2001:db8:900::/56" in namespace "r1" should eventually be gone
     And command "ip -6 route show 2001:db8:900:1::/64" in namespace "r1" should eventually not contain "dev lan0"
     And daemon log in namespace "r1" should eventually contain "dhcpv6 client: lan0: 2001:db8:900:1::1/64 withdrawn"
 

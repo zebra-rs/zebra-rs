@@ -30,7 +30,7 @@ use std::net::IpAddr;
 use ipnet::IpNet;
 
 use crate::rib::entry::RibEntry;
-use crate::rib::{BlackholeKind, Nexthop, NexthopMember, NexthopUni, RibType};
+use crate::rib::{Nexthop, NexthopMember, NexthopUni, RibType};
 
 use super::frame;
 
@@ -51,8 +51,6 @@ const RT_SCOPE_UNIVERSE: u8 = 0;
 
 const RTN_UNSPEC: u8 = 0;
 const RTN_UNICAST: u8 = 1;
-const RTN_BLACKHOLE: u8 = 6;
-const RTN_UNREACHABLE: u8 = 7;
 
 // ── route attributes ────────────────────────────────────────────────
 const RTA_DST: u16 = 1;
@@ -279,10 +277,7 @@ pub fn encode_route(
     // The discard route type, as FRR sends it: `RTN_BLACKHOLE` for its
     // `blackhole`/`Null0`, `RTN_UNREACHABLE` for its `reject`.
     let discard = match &entry.nexthop {
-        Nexthop::Blackhole(bh) => Some(match bh.kind {
-            BlackholeKind::Null => RTN_BLACKHOLE,
-            BlackholeKind::Unreachable => RTN_UNREACHABLE,
-        }),
+        Nexthop::Blackhole(bh) => Some(bh.kind.rtm_type()),
         _ => None,
     };
     let blackhole = discard.is_some();

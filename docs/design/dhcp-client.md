@@ -1138,14 +1138,20 @@ The task's part (`v6/inst.rs`):
     carries a kind (`BlackholeKind::Null` or `Unreachable`, as FRR's
     blackhole nexthop carries `Null0` or `reject`), which only the
     kernel install, the kernel import, FPM and the show commands read.
-    The kernel replaces one kind with the other in place, so the
-    blackhole route an earlier version left becomes the unreachable one
-    when the lease is resumed.
-  - The startup dump takes in an `unreachable` route only under
-    `RTPROT_DHCP`, where it may be an earlier run's (the route record
-    says whether it is). Any other stays out of the RIB as before: a
-    VRF's `unreachable default` at the bottom of its table would come
-    back as a distance-0 kernel default route.
+  - A kernel `unreachable` route is in the RIB only as an earlier run's
+    leftover: one under `RTPROT_DHCP` that the route record names, at
+    startup or afterwards. It is deleted when the client's route takes
+    its place, or swept. Any other stays out of the RIB, as every
+    unreachable route did before: another program's under `RTPROT_DHCP`
+    (systemd-networkd holds a delegated prefix with one) would come in
+    at distance 0 over every protocol's route for the prefix, and a
+    VRF's `unreachable default` at the bottom of its table as a kernel
+    default route.
+  - The blackhole route a build before this one left (no release had
+    it) goes the same way: the route record names it, so it is deleted
+    as a leftover when the lease is resumed and the unreachable route
+    is installed. Without the record the install replaces it in place:
+    the kernel keys a replace on prefix and priority, not on the kind.
   - The route is in the table of the VRF the WAN interface is in. A VRF
     the task hears of after its member moves the route there.
   - A client on its way out counts while it still holds its lease (one
@@ -1562,7 +1568,7 @@ is given), and Router Advertisements (RDNSS, DNSSL).**
 | P1 (done) | RIB plumbing (D5, D6); `dhcpc` task; DHCPv4 state machine, sockets, ACD, persistence; `show dhcp client leases`, `renew/release dhcp`; ungate `address dhcp` | P0 |
 | P2 (done) | RA host in `nd`: RS, default route, on-link prefixes, `ipv6 address autoconf`, `ra-options`, `accept_ra=0`; show section | P1's RIB plumbing |
 | P3 (done) | DHCPv6 IA_NA and `parameters-only`; DUID; `show dhcpv6 client leases`, `renew/release dhcpv6` | P0, P2 |
-| P4 (done) | IA_PD: discard route, LAN assignment, prefix change. The state machine, `dhcpv6-options pd <id> [length]`, the discard route, `pd <id> interface <lan>` with `AddrOrigin::Pd` and the `sla-id` arithmetic, prefixes and the addresses they give in the lease file and in show, `dhcpv6_client_pd`, `dhcpv6_client_pd_lan`. Left: an unreachable form of the route (§16), `dhcpv6_pd_insomnia` | P3 |
+| P4 (done) | IA_PD: discard route, LAN assignment, prefix change. The state machine, `dhcpv6-options pd <id> [length]`, the discard route, `pd <id> interface <lan>` with `AddrOrigin::Pd` and the `sla-id` arithmetic, prefixes and the addresses they give in the lease file and in show, `dhcpv6_client_pd`, `dhcpv6_client_pd_lan`. The route is an unreachable one (WPD-5(a)). Left: `dhcpv6_pd_insomnia` | P3 |
 | ND-PIO (done) | `nd` advertises PIOs for LAN /64s with counted-down lifetimes, deprecates removed ones (L-13 as RFC 9096 has it), `RibRx::AddrRenewed` on lifetime change; `ra_prefix` | P1's RIB plumbing; parallel to P2–P4 |
 | Resolver (the three sources done) | The `resolver` task; the name servers of a DHCPv4 lease, of a DHCPv6 server and of Router Advertisements to systemd-resolved by default, `no-name-server` under `dhcp-options`, `dhcpv6-options` and `ra-options` to keep them back (§13). Next: leftovers across a restart | P1; P2 and P3 for their sources |
 | P5 | MTU options, Reconfigure, IA_TA, prefix exclude, RFC 4191 routes, stable-privacy identifiers, `redistribute dhcp` | as needed |
@@ -1630,7 +1636,7 @@ client, and logs each message, which is what a scenario reads.
 | `ra_host_dns` | against a stand-in for `resolvectl`: RDNSS and DNSSL set with nothing configured but `address autoconf`, the newly heard first and an option in its own order; a lifetime of zero and a lifetime run out take one away; a DHCPv4 lease's server goes ahead and its end leaves the advertised ones; `ra-options no-name-server` takes the advertised ones back and leaves the lease's, what is heard under it is only shown, and deleting it sets what is held; stopping the RA host reverts |
 | `dhcpv6_client` | IA_NA /128 with `noprefixroute`; default route and on-link prefix from the RA, and no SLAAC address unless `autoconf` is set too; renew; `release`; zebra-rs restart keeps the address and confirms it; `parameters-only`; deleted configuration releases |
 | `dhcpv6_client_dns` | against a stand-in for `resolvectl`, and a server whose lease and whose Router Advertisements name different name servers: the lease's servers and search list set with nothing configured but `address dhcpv6`, ahead of the advertised ones and behind a DHCPv4 lease's; reverted on `release` and on setting `dhcpv6-options no-name-server`, which leaves the advertised ones, and set again when that is deleted; nothing set for a lease taken, or resumed after a restart, under `no-name-server`; set again after a restart; what `parameters-only` is given set with no lease and no RA host; deleted configuration reverts |
-| `dhcpv6_client_pd` | As built: the address and the prefix in one exchange, with the hint on the wire; the unreachable route in the RIB and in the kernel, and that it ends a packet which a routed prefix without one sends round between the two routers, with a Destination Unreachable to its sender; renew; a restart resumes the prefix and its route and verifies them by a Rebind; an earlier version's blackhole route becomes the unreachable one; a restart that asks for nothing has the leftover sweep take the route; a second `pd`, and one the server has nothing for; a prefix without an address; `parameters-only` refused beside `pd`; deleted configuration releases and withdraws |
+| `dhcpv6_client_pd` | As built: the address and the prefix in one exchange, with the hint on the wire; the unreachable route in the RIB and in the kernel, and that it ends a packet which a routed prefix without one sends round between the two routers, with a Destination Unreachable to its sender; renew; a restart resumes the prefix and its route and verifies them by a Rebind; an earlier build's blackhole route becomes the unreachable one; a restart that asks for nothing has the leftover sweep take the route; a second `pd`, and one the server has nothing for; a prefix without an address; `parameters-only` refused beside `pd`; deleted configuration releases and withdraws |
 | `dhcpv6_client_pd_lan` | As built: two interfaces numbered from one delegation, one by `address` and one by EUI-64, each with the prefix's lifetime and the route to its /64; a host behind the router reached from the delegating router through the prefix; a link set down and up has its address again; a renewal that brings other lifetimes moves the addresses'; another prefix replaces the discard route and the addresses, and the old /64 is on-link no longer; an `sla-id` moved, one beyond the prefix (no address, and said), two interfaces on one /64 and the upstream interface refused, none of it a new lease; a restart keeps the addresses and removes that of an interface no longer configured; an interface, then the delegation, deleted |
 | `ra_prefix` | As built: a router that numbers an interface from a delegated prefix, has an address of its own on it and advertises there; a host with nothing configured forms an address in both /64s, takes the router for its default and reaches the delegating router; the configured prefix has RFC 4861's lifetimes and the delegated one the lease's; a renewal with longer lifetimes reaches the host without waiting for the periodic advertisement; a renewal with the same lifetimes as before still moves their end; another prefix from the server gives the host a new address, deprecates the old one and takes its on-link route away, and the old one is named for as long as its longest lifetime, though its lease was cut short since; an interface moved to another VRF than its delegation's withdraws the prefix on its hosts, and moved back has it again; a configured address deleted deprecates its prefix, and set again restores it; so does a delegation given back; an interface that stops advertising names nothing |
 | `dhcpv6_pd_insomnia` | a zebra-rs + insomnia router serving PD (insomnia's existing DHCPv6 server) to a zebra-rs client router: both sides of the feature in one topology |

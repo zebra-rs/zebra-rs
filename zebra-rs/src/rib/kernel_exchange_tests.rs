@@ -2104,6 +2104,157 @@ async fn a_dynamic_address_given_up_takes_its_prefix_route_along() {
     ip(&["link", "del", "pd6"]);
 }
 
+/// An unreachable route under `RTPROT_DHCP` is in the RIB only as an
+/// earlier run's leftover the route record names: there the DHCP client's
+/// route for the delegated prefix replaces it, or the sweep takes it.
+/// Another program's (systemd-networkd holds a delegated prefix with one)
+/// stays out, at startup and afterwards, where its blackhole route is
+/// learned as before.
+#[tokio::test]
+async fn an_unreachable_route_is_in_the_rib_only_as_a_recorded_leftover() {
+    use crate::rib::route_record::{FILE, RouteRecord};
+    let dir = std::env::temp_dir().join(format!("route-record-unreach-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let path = dir.join(FILE);
+    let resumed: IpNet = "2001:db8:100::/56".parse().unwrap();
+    let given_up: IpNet = "2001:db8:200::/56".parse().unwrap();
+    let lost: IpNet = "2001:db8:300::/56".parse().unwrap();
+    let theirs: IpNet = "2001:db8:f00::/56".parse().unwrap();
+    let their_blackhole: IpNet = "2001:db8:e00::/56".parse().unwrap();
+
+    let mut earlier = RouteRecord::default();
+    earlier.load(path.clone());
+    for prefix in [resumed, given_up, lost] {
+        earlier.add(RibType::DhcpClient, RT_TABLE_MAIN, prefix, vec![1024], 210);
+    }
+
+    let unreachable = |prefix: IpNet| {
+        let mut msg = RouteMessage::default();
+        msg.header.address_family = AddressFamily::Inet6;
+        msg.header.destination_prefix_length = prefix.prefix_len();
+        msg.header.protocol = RouteProtocol::Dhcp;
+        msg.header.kind = RouteType::Unreachable;
+        msg.header.scope = RouteScope::Universe;
+        let IpNet::V6(net) = prefix else {
+            unreachable!()
+        };
+        msg.attributes.extend([
+            RouteAttribute::Table(RT_TABLE_MAIN),
+            RouteAttribute::Destination(RouteAddress::Inet6(net.addr())),
+            RouteAttribute::Priority(1024),
+        ]);
+        route_from_msg(msg).unwrap()
+    };
+    let rows = |rib: &Rib, prefix: IpNet| {
+        let IpNet::V6(net) = prefix else {
+            unreachable!()
+        };
+        rib.table_v6
+            .get(&net)
+            .map(|entries| {
+                entries
+                    .iter()
+                    .map(|e| (e.rtype, e.stale, e.distance, e.nexthop.clone()))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    };
+
+    let mut rib = Rib::new(false).unwrap();
+    rib.route_record.load(path);
+    for prefix in [resumed, given_up, lost, theirs] {
+        rib.process_fib_msg(FibMessage::NewRoute(unreachable(prefix)))
+            .await;
+    }
+    rib.process_fib_msg(FibMessage::NewRoute(kernel_route(
+        their_blackhole,
+        RouteProtocol::Dhcp,
+        true,
+        1024,
+        RT_TABLE_MAIN,
+    )))
+    .await;
+    let leftover = vec![(RibType::DhcpClient, true, 210, Nexthop::unreachable(1024))];
+    assert_eq!(rows(&rib, resumed), leftover);
+    assert_eq!(rows(&rib, given_up), leftover);
+    assert_eq!(rows(&rib, lost), leftover);
+    assert!(rows(&rib, theirs).is_empty(), "another program's stays out");
+    assert_eq!(
+        rows(&rib, their_blackhole),
+        vec![(RibType::Dhcp, false, 0, Nexthop::blackhole(1024))],
+        "as before"
+    );
+
+    // Another program's going is nothing to the RIB, and a leftover the
+    // kernel loses before the sweep goes from the RIB too.
+    rib.process_fib_msg(FibMessage::DelRoute(unreachable(theirs)))
+        .await;
+    assert!(rows(&rib, theirs).is_empty());
+    rib.process_fib_msg(FibMessage::DelRoute(unreachable(lost)))
+        .await;
+    assert!(rows(&rib, lost).is_empty());
+
+    // IPv4 keeps two routes of one priority side by side. Another
+    // program's unreachable route going leaves its blackhole route, which
+    // is learned, where it is.
+    let both: Ipv4Net = "198.51.100.0/24".parse().unwrap();
+    let their_unreachable = || {
+        let mut msg = RouteMessage::default();
+        msg.header.address_family = AddressFamily::Inet;
+        msg.header.destination_prefix_length = both.prefix_len();
+        msg.header.protocol = RouteProtocol::Dhcp;
+        msg.header.kind = RouteType::Unreachable;
+        msg.header.scope = RouteScope::Universe;
+        msg.attributes.extend([
+            RouteAttribute::Table(RT_TABLE_MAIN),
+            RouteAttribute::Destination(RouteAddress::Inet(both.addr())),
+            RouteAttribute::Priority(5),
+        ]);
+        route_from_msg(msg).unwrap()
+    };
+    rib.process_fib_msg(FibMessage::NewRoute(kernel_route(
+        IpNet::V4(both),
+        RouteProtocol::Dhcp,
+        true,
+        5,
+        RT_TABLE_MAIN,
+    )))
+    .await;
+    rib.process_fib_msg(FibMessage::NewRoute(their_unreachable()))
+        .await;
+    rib.process_fib_msg(FibMessage::DelRoute(their_unreachable()))
+        .await;
+    let learned: Vec<_> = rib.table.get(&both).unwrap().iter().collect();
+    assert_eq!(learned.len(), 1);
+    assert_eq!(learned[0].nexthop, Nexthop::blackhole(5));
+
+    // The lease is resumed: the client's route takes the leftover's place.
+    if let IpNet::V6(prefix) = resumed {
+        let mut entry = RibEntry::new(RibType::DhcpClient);
+        entry.distance = 210;
+        entry.nexthop = Nexthop::unreachable(0);
+        rib.ipv6_route_add(&prefix, entry, RT_TABLE_MAIN).await;
+    }
+    let held = rows(&rib, resumed);
+    assert_eq!(held.len(), 1);
+    assert_eq!(
+        (held[0].0, held[0].1, held[0].2),
+        (RibType::DhcpClient, false, 210)
+    );
+    assert!(held[0].3.is_unreachable());
+
+    // The sweep takes the one nothing asked for again, and after it an
+    // unreachable route under `RTPROT_DHCP` is nobody's leftover.
+    rib.process_msg(Message::SweepLeftovers, RT_TABLE_MAIN)
+        .await;
+    assert!(rows(&rib, given_up).is_empty());
+    assert_eq!(rows(&rib, resumed).len(), 1);
+    rib.process_fib_msg(FibMessage::NewRoute(unreachable(given_up)))
+        .await;
+    assert!(rows(&rib, given_up).is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A restart with a route record from the earlier run: the DHCP client's
 /// and the RA host's routes it names come back as their owners' leftovers,
 /// a route the owner installs again replaces its leftover, and the sweep

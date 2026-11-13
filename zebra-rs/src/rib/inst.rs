@@ -969,6 +969,12 @@ impl IlmEntry {
     }
 }
 
+/// A kernel-reported unreachable route the route record has not named as
+/// an earlier run's leftover: another program's.
+fn foreign_unreachable(route: &crate::fib::FibRoute) -> bool {
+    !route.entry.stale && route.entry.nexthop.is_unreachable()
+}
+
 /// Default administrative distance for an ILM entry owned by `rtype`,
 /// following the same FRR/Cisco convention as the IP RIB. BGP uses the
 /// eBGP value (20); VPN decap labels are uniquely owned, so the
@@ -5106,6 +5112,15 @@ impl Rib {
                     route.entry.distance = distance;
                     route.kernel_protocol = None;
                 }
+                // An unreachable route is in the RIB only as such a
+                // leftover. Any other under `RTPROT_DHCP` is another
+                // program's (systemd-networkd holds a delegated prefix
+                // with one): it stays out, as every unreachable route did
+                // before the DHCP client used one, and does not come in
+                // at distance 0 over every protocol's route for the prefix.
+                if foreign_unreachable(&route) {
+                    return;
+                }
                 if route.legacy_static {
                     self.legacy_statics
                         .insert((route.table_id, route.prefix, route.entry.metric));
@@ -5190,6 +5205,10 @@ impl Rib {
                     route.entry.stale = true;
                     route.entry.distance = distance;
                     route.kernel_protocol = None;
+                }
+                // Never taken in (see `NewRoute`): nothing of it to remove.
+                if foreign_unreachable(&route) {
+                    return;
                 }
                 if route.kernel_protocol == Some(RibType::Ra) {
                     self.learned_ra

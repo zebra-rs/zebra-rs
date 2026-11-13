@@ -29,7 +29,7 @@ impl Display for Nexthop {
 
 impl Display for BlackholeKind {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result {
-        f.write_str(self.as_str())
+        f.pad(self.as_str())
     }
 }
 

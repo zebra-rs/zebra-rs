@@ -176,6 +176,15 @@ impl BlackholeKind {
             Self::Unreachable => "unreachable",
         }
     }
+
+    /// The route type (`rtm_type`) the kernel and FPM know it by. FRR
+    /// sends the same two for its `blackhole` and `reject`.
+    pub fn rtm_type(&self) -> u8 {
+        match self {
+            Self::Null => libc::RTN_BLACKHOLE,
+            Self::Unreachable => libc::RTN_UNREACHABLE,
+        }
+    }
 }
 
 impl Nexthop {
@@ -193,6 +202,11 @@ impl Nexthop {
             metric,
             kind: BlackholeKind::Unreachable,
         })
+    }
+
+    /// Whether this is a discard route of the unreachable kind.
+    pub fn is_unreachable(&self) -> bool {
+        matches!(self, Self::Blackhole(bh) if bh.kind == BlackholeKind::Unreachable)
     }
 }
 

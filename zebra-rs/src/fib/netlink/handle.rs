@@ -373,17 +373,16 @@ pub(crate) fn ilm_leftover_from_msg(
 
 /// The kernel route type of a discard route.
 fn discard_route_type(kind: BlackholeKind) -> RouteType {
-    match kind {
-        BlackholeKind::Null => RouteType::BlackHole,
-        BlackholeKind::Unreachable => RouteType::Unreachable,
-    }
+    RouteType::from(kind.rtm_type())
 }
 
-/// The discard kind of a kernel route the RIB keeps. A blackhole route is
-/// kept whatever its protocol. An unreachable route is kept only under
-/// `RTPROT_DHCP`: that is how the DHCP client holds a delegated prefix,
-/// and an earlier run's must be seen to be taken over or swept. Any other
-/// stays out of the RIB, like a prohibit or a throw route: a VRF's
+/// The discard kind of a kernel route the RIB is told of. A blackhole
+/// route is passed on whatever its protocol. An unreachable route is
+/// passed on only under `RTPROT_DHCP`: that is how the DHCP client holds
+/// a delegated prefix, and an earlier run's must be seen to be swept. The
+/// RIB keeps it only when the route record names it as such a leftover
+/// (`FibMessage::NewRoute`); another program's stays out. So does every
+/// other unreachable route, like a prohibit or a throw route: a VRF's
 /// `unreachable default`, put at the bottom of its table so that a lookup
 /// does not go on to the main table, would come back as a distance-0
 /// kernel default route that outranks the VRF's own.
@@ -7335,10 +7334,10 @@ mod tests {
                     assert_eq!(route.entry.nexthop, Nexthop::blackhole(1024));
                 }
             }
-            // An unreachable route is the DHCP client's when it is under
-            // `RTPROT_DHCP`, and only then enters the RIB: an operator's
-            // (a VRF's `unreachable default`) stays out, as does every
-            // prohibit route.
+            // An unreachable route may be the DHCP client's when it is
+            // under `RTPROT_DHCP`, and only then reaches the RIB: an
+            // operator's (a VRF's `unreachable default`) stays out, as
+            // does every prohibit and throw route.
             for protocol in [
                 RouteProtocol::Static,
                 RouteProtocol::Boot,
@@ -7348,12 +7347,18 @@ mod tests {
                 RouteProtocol::Other(200),
             ] {
                 msg.header.protocol = protocol;
-                msg.header.kind = RouteType::Unreachable;
-                for dump in [true, false] {
-                    assert!(
-                        route_from_msg_with(msg.clone(), &BTreeMap::new(), dump).is_none(),
-                        "unreachable under {protocol:?}"
-                    );
+                for kind in [
+                    RouteType::Unreachable,
+                    RouteType::Prohibit,
+                    RouteType::Throw,
+                ] {
+                    msg.header.kind = kind;
+                    for dump in [true, false] {
+                        assert!(
+                            route_from_msg_with(msg.clone(), &BTreeMap::new(), dump).is_none(),
+                            "{kind:?} under {protocol:?}"
+                        );
+                    }
                 }
             }
             msg.header.protocol = RouteProtocol::Dhcp;
@@ -7366,10 +7371,11 @@ mod tests {
                 msg.header.kind = RouteType::BlackHole;
                 let route = route_from_msg_with(msg.clone(), &BTreeMap::new(), dump).unwrap();
                 assert_eq!(route.entry.nexthop, Nexthop::blackhole(1024));
-                msg.header.kind = RouteType::Prohibit;
-                assert!(route_from_msg_with(msg.clone(), &BTreeMap::new(), dump).is_none());
+                for kind in [RouteType::Prohibit, RouteType::Throw] {
+                    msg.header.kind = kind;
+                    assert!(route_from_msg_with(msg.clone(), &BTreeMap::new(), dump).is_none());
+                }
             }
-            msg.header.protocol = RouteProtocol::Static;
             msg.header.protocol = RouteProtocol::Bgp;
             msg.header.kind = RouteType::Unicast;
             assert!(

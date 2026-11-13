@@ -107,10 +107,12 @@ Feature: DHCPv6 prefix delegation on a WAN interface (ipv6 dhcpv6-options pd)
     And show command "show ipv6 route" in namespace "r1" should eventually contain "2001:db8:100::/56 [210/0]"
     And command "ip -6 route show 2001:db8:100::/56" in namespace "r1" should eventually contain "unreachable 2001:db8:100::/56"
 
-  Scenario: A blackhole route an earlier version left becomes the unreachable one
+  Scenario: A blackhole route an earlier build left becomes the unreachable one
     Given the test topology exists
     # Before the route said why, zebra-rs held a prefix with a blackhole
-    # route. One is put back as that version would have left it.
+    # route. One is put back as that build would have left it: the route
+    # record names it, so it is taken away as a leftover when the lease
+    # is resumed, and the unreachable route goes in.
     When I stop zebra-rs in namespace "r1"
     And I execute "ip -6 route replace blackhole 2001:db8:100::/56 proto dhcp metric 1024" in namespace "r1"
     Then command "ip -6 route show 2001:db8:100::/56" in namespace "r1" should eventually contain "blackhole 2001:db8:100::/56"
@@ -130,7 +132,7 @@ Feature: DHCPv6 prefix delegation on a WAN interface (ipv6 dhcpv6-options pd)
     When I stop zebra-rs in namespace "r1"
     Then command "ip -6 route show 2001:db8:100::/56" in namespace "r1" should eventually contain "unreachable 2001:db8:100::/56"
     When I start zebra-rs in namespace "r1" sweeping leftovers after 15 seconds
-    Then command "ip -6 route show 2001:db8:100::/56" in namespace "r1" should eventually not contain "unreachable"
+    Then kernel route "2001:db8:100::/56" in namespace "r1" should eventually be gone
     # Asked for again, the prefix and its route are back.
     When I apply config "r1.yaml" to namespace "r1"
     Then show command "show dhcpv6 client leases" in namespace "r1" should eventually contain "State:        bound"
@@ -159,7 +161,7 @@ Feature: DHCPv6 prefix delegation on a WAN interface (ipv6 dhcpv6-options pd)
     And I apply command "delete interface wan0 ipv6 dhcpv6-options pd 2" in namespace "r1"
     Then show command "show dhcpv6 client leases" in namespace "r1" should eventually not contain "(pd 2)"
     And show command "show dhcpv6 client leases" in namespace "r1" should eventually contain "Prefix:       2001:db8:100::/56 preferred"
-    And command "ip -6 route show 2001:db8:200::/56" in namespace "r1" should eventually not contain "unreachable"
+    And kernel route "2001:db8:200::/56" in namespace "r1" should eventually be gone
     And command "ip -6 route show 2001:db8:100::/56" in namespace "r1" should eventually contain "unreachable 2001:db8:100::/56"
 
   Scenario: A prefix without an address
@@ -180,7 +182,7 @@ Feature: DHCPv6 prefix delegation on a WAN interface (ipv6 dhcpv6-options pd)
     Given the test topology exists
     When I apply command "delete interface wan0 ipv6 dhcpv6-options pd 1" in namespace "r1"
     Then show command "show dhcpv6 client leases" in namespace "r1" should eventually contain "DHCPv6 client is not configured"
-    And command "ip -6 route show 2001:db8:100::/56" in namespace "r1" should eventually not contain "unreachable"
+    And kernel route "2001:db8:100::/56" in namespace "r1" should eventually be gone
     And show command "show ipv6 route" in namespace "r1" should eventually not contain "2001:db8:100::/56"
     And command "cat /tmp/zebra-bdd-dhcp/dhcpv6_client_pd/server.log" in namespace "s1" should eventually contain "RELEASE ia_pd 1 2001:db8:100::/56"
     # The delegating router routes it here no longer.
