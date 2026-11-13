@@ -8,6 +8,8 @@
 //! dispatched: a step (YANG has none), or a decimal64 range or
 //! `fraction-digits` (libyang extracts neither).
 
+use std::collections::BTreeMap;
+
 use crate::bgp::ethernet_segment::check_es_esi;
 use crate::flex_algo::check_max_link_loss;
 use crate::stamp::session::{check_loss_interval, check_loss_percent};
@@ -326,8 +328,23 @@ pub fn static_discard_line(line: &str) -> bool {
 /// one error per route that has both, in the order the routes first
 /// appear.
 pub fn static_discard_exclusive(entries: &[(String, Vec<String>)]) -> Vec<String> {
-    // The route (callback path and its keys), and which keywords it has.
-    let mut routes: Vec<((&str, &[String]), bool, bool)> = Vec::new();
+    /// A route's prefix as the static config keys it: parsed, so that
+    /// two spellings of one prefix are one route.
+    #[derive(PartialEq, Eq, PartialOrd, Ord)]
+    enum Prefix<'a> {
+        Net(ipnet::IpNet),
+        Text(&'a str),
+    }
+    struct Found<'a> {
+        /// Where the route first appears, and as it was written there.
+        order: usize,
+        keys: &'a [String],
+        blackhole: bool,
+        unreachable: bool,
+    }
+    // Keyed by family, VRF and prefix. A config may hold thousands of
+    // discard routes, and this runs with every commit: no list to scan.
+    let mut routes: BTreeMap<(&str, Option<&str>, Prefix), Found> = BTreeMap::new();
     for (path, args) in entries {
         let Some(family) = path
             .strip_prefix("/router/static/")
@@ -335,32 +352,42 @@ pub fn static_discard_exclusive(entries: &[(String, Vec<String>)]) -> Vec<String
         else {
             continue;
         };
-        if !matches!(family, "ipv4" | "ipv6" | "vrf/ipv4" | "vrf/ipv6") {
-            continue;
-        }
         let Some((nexthop, keys)) = args.split_last() else {
             continue;
+        };
+        let (vrf, prefix) = match (family, keys) {
+            ("ipv4" | "ipv6", [prefix]) => (None, prefix),
+            ("vrf/ipv4" | "vrf/ipv6", [vrf, prefix]) => (Some(vrf.as_str()), prefix),
+            _ => continue,
         };
         let (blackhole, unreachable) = match nexthop.as_str() {
             "blackhole" => (true, false),
             "unreachable" => (false, true),
             _ => continue,
         };
-        let key = (family, keys);
-        match routes.iter_mut().find(|(k, ..)| *k == key) {
-            Some((_, b, u)) => {
-                *b |= blackhole;
-                *u |= unreachable;
-            }
-            None => routes.push((key, blackhole, unreachable)),
-        }
+        let prefix = match prefix.parse() {
+            Ok(net) => Prefix::Net(net),
+            Err(_) => Prefix::Text(prefix),
+        };
+        let order = routes.len();
+        let found = routes.entry((family, vrf, prefix)).or_insert(Found {
+            order,
+            keys,
+            blackhole: false,
+            unreachable: false,
+        });
+        found.blackhole |= blackhole;
+        found.unreachable |= unreachable;
     }
-    routes
+    let mut both: Vec<_> = routes
         .into_iter()
-        .filter(|(_, blackhole, unreachable)| *blackhole && *unreachable)
-        .map(|((family, keys), ..)| {
+        .filter(|(_, found)| found.blackhole && found.unreachable)
+        .collect();
+    both.sort_by_key(|(_, found)| found.order);
+    both.into_iter()
+        .map(|((family, ..), found)| {
             // `vrf/ipv4` with keys [vrf, prefix]; `ipv4` with [prefix].
-            let route = match (family.strip_prefix("vrf/"), keys) {
+            let route = match (family.strip_prefix("vrf/"), found.keys) {
                 (Some(family), [vrf, prefix]) => format!("vrf {vrf} {family} route {prefix}"),
                 (_, keys) => format!("{family} route {}", keys.join(" ")),
             };
@@ -942,19 +969,44 @@ mod tests {
                 ]
             );
         }
-        // One error per route, in order, the VRF named.
+        // Two spellings of one prefix are one route, as the static
+        // config has it; the error names it as it was first written.
         assert_eq!(
             static_discard_exclusive(&[
+                v6("2001:0db8::/32", "blackhole"),
                 v6("2001:db8::/32", "unreachable"),
+            ]),
+            [
+                "router static ipv6 route 2001:0db8::/32: nexthop blackhole cannot be \
+              combined with nexthop unreachable; delete one or the other"
+            ]
+        );
+        // A prefix with host bits is another key there, and here.
+        assert!(
+            static_discard_exclusive(&[
+                v4("10.0.0.0/8", "blackhole"),
+                v4("10.0.0.1/8", "unreachable"),
+            ])
+            .is_empty()
+        );
+        // One error per route, in the order the routes first appear (not
+        // the order of their keys), the VRF named.
+        assert_eq!(
+            static_discard_exclusive(&[
                 vrf("blue", "10.0.0.0/8", "blackhole"),
+                v6("2001:db8::/32", "unreachable"),
                 v4("10.9.0.0/16", "blackhole"),
+                v4("10.1.0.0/16", "unreachable"),
                 v6("2001:db8::/32", "blackhole"),
+                v4("10.1.0.0/16", "blackhole"),
                 vrf("blue", "10.0.0.0/8", "unreachable"),
             ]),
             [
+                "router static vrf blue ipv4 route 10.0.0.0/8: nexthop blackhole cannot be \
+                 combined with nexthop unreachable; delete one or the other",
                 "router static ipv6 route 2001:db8::/32: nexthop blackhole cannot be \
                  combined with nexthop unreachable; delete one or the other",
-                "router static vrf blue ipv4 route 10.0.0.0/8: nexthop blackhole cannot be \
+                "router static ipv4 route 10.1.0.0/16: nexthop blackhole cannot be \
                  combined with nexthop unreachable; delete one or the other",
             ]
         );

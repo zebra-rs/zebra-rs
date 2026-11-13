@@ -3,7 +3,6 @@
 #
 #   ping6_once.sh ADDRESS [SOURCE]
 #
-# For a feature that reads the answer rather than whether there was one:
-# `Time exceeded` from a routing loop, `Destination unreachable`, or
-# nothing at all. It succeeds either way.
-ping -6 -n -c 1 -W 2 ${2:+-I "$2"} "$1" 2>&1 || true
+# The name the IPv6 features know ping_once.sh by: that script takes an
+# address of either family.
+exec "$(dirname "$0")/ping_once.sh" "$@"

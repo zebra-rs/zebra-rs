@@ -5160,10 +5160,13 @@ impl Rib {
                         // are ignored rather than dumped into the default.
                         self.ipv4_route_add_vrf(route.table_id, &prefix, route.entry)
                             .await;
-                    } else {
+                    } else if !route.entry.nexthop.is_unreachable() {
                         // A non-main, non-VRF kernel table: keep it in
                         // the `redistribute table <id>` store and
-                        // notify subscribers.
+                        // notify subscribers. Not an unreachable route:
+                        // one comes this far only as an earlier run's
+                        // leftover, and in a table zebra-rs does not
+                        // manage nothing replaces it or sweeps it.
                         self.table_route_upsert(route.table_id, prefix, &route.entry);
                     }
                 }
@@ -5209,7 +5212,11 @@ impl Rib {
                     route.entry.distance = distance;
                     route.kernel_protocol = None;
                 }
-                // Never taken in (see `NewRoute`): nothing of it to remove.
+                // Not a route the RIB took in under this name (see
+                // `NewRoute`). A delete names no kind, so it must not take
+                // a learned blackhole route of the same priority along. A
+                // static leftover it may be the end of stays until its
+                // owner or the sweep ends it, as a unicast leftover does.
                 if foreign_unreachable(&route) {
                     return;
                 }
@@ -5234,7 +5241,9 @@ impl Rib {
                     } else if self.vrf_tables.contains_key(&route.table_id) {
                         self.ipv4_route_del_vrf(route.table_id, &prefix, route.entry)
                             .await;
-                    } else {
+                    } else if !route.entry.nexthop.is_unreachable() {
+                        // The store holds no unreachable route, and is
+                        // keyed by the prefix alone.
                         self.table_route_remove(route.table_id, prefix);
                     }
                 }

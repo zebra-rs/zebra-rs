@@ -1006,8 +1006,14 @@ impl ConfigManager {
 
         // A static route is a blackhole or an unreachable route, not
         // both. A startup config is only warned about, as above; the
-        // route is then the one that says nothing.
-        let discards = check::static_discard_exclusive(&self.static_discard_entries(&candidate));
+        // route is then the one that says nothing. Only a config with
+        // an unreachable route can have the pair: one without (however
+        // many blackhole routes it has) is not parsed for it.
+        let discards = if candidate.contains(" nexthop unreachable") {
+            check::static_discard_exclusive(&self.static_discard_entries(&candidate))
+        } else {
+            Vec::new()
+        };
         if !discards.is_empty() {
             if !startup {
                 return Err(anyhow::anyhow!(discards.join("\n")));

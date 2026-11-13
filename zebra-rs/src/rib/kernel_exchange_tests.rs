@@ -354,6 +354,18 @@ fn ip(args: &[&str]) -> String {
     String::from_utf8(output.stdout).unwrap()
 }
 
+/// A test that drives a `Rib` outside a namespace of its own counts on
+/// its FIB handle being refused: the installs fail and only the RIB
+/// changes. As root on the host they would succeed, in the host's own
+/// tables. Such a test asks this first and does nothing then.
+fn fib_writes_would_reach_the_host() -> bool {
+    let host = nix::unistd::geteuid().is_root() && ip(&["netns", "identify"]).trim().is_empty();
+    if host {
+        eprintln!("skipped: as root outside a network namespace this would change host routes");
+    }
+    host
+}
+
 fn require_netns() {
     assert!(
         !ip(&["netns", "identify"]).trim().is_empty(),
@@ -2121,6 +2133,9 @@ async fn a_dynamic_address_given_up_takes_its_prefix_route_along() {
 #[tokio::test]
 async fn an_unreachable_route_is_in_the_rib_only_as_a_recorded_leftover() {
     use crate::rib::route_record::{FILE, RouteRecord};
+    if fib_writes_would_reach_the_host() {
+        return;
+    }
     let dir = std::env::temp_dir().join(format!("route-record-unreach-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let path = dir.join(FILE);
@@ -2267,14 +2282,20 @@ async fn an_unreachable_route_is_in_the_rib_only_as_a_recorded_leftover() {
 /// startup dump brings an earlier run's as a stale leftover, which the
 /// static route replaces if it is configured still, and the sweep takes
 /// otherwise. One reported later is not zebra-rs's own doing and stays
-/// out; the echo of its own is nothing.
+/// out. In a table zebra-rs does not manage there is nothing to replace
+/// or sweep it, and it is no route to redistribute: it stays out of the
+/// `redistribute table` store, and its going leaves that store alone.
 #[tokio::test]
 async fn an_unreachable_static_leftover_is_replaced_or_swept() {
     use crate::fib::netlink::route_from_msg_with;
+    if fib_writes_would_reach_the_host() {
+        return;
+    }
+    const UNMANAGED: u32 = 77;
     let kept: Ipv4Net = "198.51.100.0/24".parse().unwrap();
     let dropped: Ipv4Net = "203.0.113.0/24".parse().unwrap();
     let theirs: Ipv4Net = "192.0.2.0/24".parse().unwrap();
-    let unreachable = |prefix: Ipv4Net, dump: bool| {
+    let unreachable = |prefix: Ipv4Net, table: u32, dump: bool| {
         let mut msg = RouteMessage::default();
         msg.header.address_family = AddressFamily::Inet;
         msg.header.destination_prefix_length = prefix.prefix_len();
@@ -2282,7 +2303,7 @@ async fn an_unreachable_static_leftover_is_replaced_or_swept() {
         msg.header.kind = RouteType::Unreachable;
         msg.header.scope = RouteScope::Universe;
         msg.attributes.extend([
-            RouteAttribute::Table(RT_TABLE_MAIN),
+            RouteAttribute::Table(table),
             RouteAttribute::Destination(RouteAddress::Inet(prefix.addr())),
             RouteAttribute::Priority(0),
         ]);
@@ -2302,22 +2323,59 @@ async fn an_unreachable_static_leftover_is_replaced_or_swept() {
 
     let mut rib = Rib::new(false).unwrap();
     for prefix in [kept, dropped] {
-        rib.process_fib_msg(FibMessage::NewRoute(unreachable(prefix, true)))
-            .await;
+        rib.process_fib_msg(FibMessage::NewRoute(unreachable(
+            prefix,
+            RT_TABLE_MAIN,
+            true,
+        )))
+        .await;
         assert_eq!(
             rows(&rib, prefix),
             vec![(RibType::Static, true, Nexthop::unreachable(0))]
         );
     }
-    rib.process_fib_msg(FibMessage::NewRoute(unreachable(theirs, false)))
-        .await;
+    rib.process_fib_msg(FibMessage::NewRoute(unreachable(
+        theirs,
+        RT_TABLE_MAIN,
+        false,
+    )))
+    .await;
     assert!(
         rows(&rib, theirs).is_empty(),
         "not from the dump: stays out"
     );
 
-    // Still configured: the static route takes the leftover's place, and
-    // the kernel's word of it afterwards is its own echo.
+    // A table that is neither main nor a VRF's: a blackhole route there
+    // is one to redistribute, an unreachable route is not, from the dump
+    // or later, and its going does not take the blackhole route's place
+    // in the store, which the prefix alone keys.
+    let stored = |rib: &Rib| {
+        rib.table_routes_v4
+            .get(&UNMANAGED)
+            .map(|routes| routes.keys().copied().collect::<Vec<_>>())
+            .unwrap_or_default()
+    };
+    for dump in [true, false] {
+        rib.process_fib_msg(FibMessage::NewRoute(unreachable(kept, UNMANAGED, dump)))
+            .await;
+        assert!(stored(&rib).is_empty(), "dump: {dump}");
+    }
+    rib.process_fib_msg(FibMessage::NewRoute(kernel_route(
+        IpNet::V4(kept),
+        RouteProtocol::Boot,
+        true,
+        0,
+        UNMANAGED,
+    )))
+    .await;
+    assert_eq!(stored(&rib), [kept]);
+    for dump in [true, false] {
+        rib.process_fib_msg(FibMessage::DelRoute(unreachable(kept, UNMANAGED, dump)))
+            .await;
+        assert_eq!(stored(&rib), [kept], "dump: {dump}");
+    }
+
+    // Still configured: the static route takes the leftover's place.
     let mut entry = RibEntry::new(RibType::Static);
     entry.distance = 1;
     entry.nexthop = Nexthop::unreachable(0);
@@ -2325,17 +2383,6 @@ async fn an_unreachable_static_leftover_is_replaced_or_swept() {
     let held = rows(&rib, kept);
     assert_eq!(held.len(), 1);
     assert!(!held[0].1, "the leftover is replaced: {held:?}");
-    if let Some(entry) = rib.table.get_mut(&kept).and_then(|e| e.first_mut()) {
-        // No kernel here to take the route: as if it had.
-        entry.fib = true;
-        entry.selected = true;
-        entry.valid = true;
-    }
-    rib.process_fib_msg(FibMessage::NewRoute(unreachable(kept, false)))
-        .await;
-    rib.process_fib_msg(FibMessage::DelRoute(unreachable(kept, false)))
-        .await;
-    assert_eq!(rows(&rib, kept).len(), 1);
 
     rib.process_msg(Message::SweepLeftovers, RT_TABLE_MAIN)
         .await;
