@@ -9,11 +9,12 @@ beside the address `ipv6 address dhcpv6` asks for
 server delegates what it sees fit.
 
 A delegated prefix is this router's to hand out, and until it does,
-nothing in it is in use. So each one gets a discard route (RFC 7084
-WPD-5): a packet for an unused part of it must not follow the default
-route back to the router that delegated it, which would send it here
-again. Like `address dhcpv6`, `pd` runs the RA host, for the default
-route.
+nothing in it is in use. So each one gets an unreachable route (RFC
+7084 WPD-5): a packet for an unused part of it must not follow the
+default route back to the router that delegated it, which would send
+it here again. It ends here, and its sender is told so with an ICMPv6
+Destination Unreachable. Like `address dhcpv6`, `pd` runs the RA host,
+for the default route.
 
 Topology: s1 is the ISP side, a router. It runs a small DHCPv6 server
 (tests/scripts/dhcpv6_server.py: dnsmasq delegates no prefix) with one
@@ -24,7 +25,7 @@ zebra-rs with a DHCPv6 WAN and nothing else.
 
 s1 also routes 2001:db8:300::/56 to r1, which the server never
 delegates: r1 holds no route for it, so it shows what becomes of a
-packet for a prefix that has no discard route.
+packet for a prefix that has no such route.
 
 Requires python3 on the host.
 
@@ -38,9 +39,11 @@ Requires python3 on the host.
 |----------|--------|
 | Setup the delegating router and a router that asks for a prefix | |
 | The lease gives the address and the prefix | |
-| The prefix is held by a discard route | |
+| The prefix is held by an unreachable route | |
 | Renew by hand keeps the prefix | |
 | A restart keeps the prefix and its route | |
+| A blackhole route an earlier version left becomes the unreachable one | |
+| A restart that asks for no prefix takes the earlier run's route away | |
 | Another delegation is asked for as a new client | |
 | A prefix without an address | |
 | Deleted configuration gives the prefix back | |

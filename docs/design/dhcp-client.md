@@ -4,7 +4,7 @@
 P2 (the RA host), P3 (the DHCPv6 client for an address and for
 `parameters-only`) and P4 (prefix delegation) are implemented:
 `dhcpv6-options pd <id>` asks for a delegated prefix, which is held,
-saved, shown and given a discard route, and `pd <id> interface <lan>`
+saved, shown and given an unreachable route, and `pd <id> interface <lan>`
 numbers an interface behind the router from it. ND-PIO is implemented
 too: an advertising interface names the /64s of its addresses in its
 Router Advertisements, those of a delegated prefix among them. What
@@ -639,7 +639,7 @@ A config-migration tool only has to move paths. No values change.
 | RA default route | `Ra`, `ra-options default-route-distance`, via the router's link-local | `proto ra` |
 | RA on-link prefix (L=1) | `Ra`, lives as long as the PIO's valid lifetime. Built (P2) as a nexthop with no gateway pinned to the interface, not `Nexthop::Link`, which the RIB does not install for a protocol route; the FIB installs it as `dev <if>` with no nexthop object | `proto ra` |
 | IA_NA address | `AddrDynAdd(Dhcp6)`, /128, `noprefixroute` | IA lifetimes |
-| Delegated prefix | `DhcpClient` discard route at distance 210, in the WAN interface's VRF (WPD-5). Built as `Nexthop::Blackhole`: the RIB has no unreachable form, so the packet is dropped without the ICMPv6 Destination Unreachable that WPD-5(a) asks for (§16). An unreachable form of `Nexthop` is what would send it | `blackhole <prefix> proto dhcp` |
+| Delegated prefix | `DhcpClient` discard route at distance 210, in the WAN interface's VRF (WPD-5). Built as `Nexthop::unreachable`, a `Nexthop::Blackhole` of kind `Unreachable`: the kernel drops the packet and answers it with an ICMPv6 Destination Unreachable, "no route to destination", which is what WPD-5(a) asks for | `unreachable <prefix> proto dhcp` |
 | LAN /64 from a delegation | `AddrDynAdd(Pd)` on the LAN interface, with its prefix route: the /64 is a connected route. When the address is given up, the RIB makes it permanent before it deletes it (`Rib::addr_dyn_del`): the kernel removes an IPv6 address's prefix route with the address only when the address is permanent, and one with a lifetime would leave its /64 on-link until that lifetime ran out. The kernel reports that step as it reports any change to an address, after the address is gone from the RIB; that notification is dropped (`Rib::addr_withdrawing`), or the address would be back for a moment, as a permanent one, and every subscriber told of it | the prefix's lifetimes; `<subnet>/64 dev <lan> proto kernel` |
 
 **Withdrawal** happens on expiry, NAK, Release, a deleted configuration, a
@@ -1134,6 +1134,18 @@ The task's part (`v6/inst.rs`):
   covers a bind, a renewal that brings another prefix, a prefix that
   runs out, a release, deleted configuration and a deleted link without
   a place of its own for each.
+  - It is an unreachable route, not a blackhole: `Nexthop::Blackhole`
+    carries a kind (`BlackholeKind::Null` or `Unreachable`, as FRR's
+    blackhole nexthop carries `Null0` or `reject`), which only the
+    kernel install, the kernel import, FPM and the show commands read.
+    The kernel replaces one kind with the other in place, so the
+    blackhole route an earlier version left becomes the unreachable one
+    when the lease is resumed.
+  - The startup dump takes in an `unreachable` route only under
+    `RTPROT_DHCP`, where it may be an earlier run's (the route record
+    says whether it is). Any other stays out of the RIB as before: a
+    VRF's `unreachable default` at the bottom of its table would come
+    back as a distance-0 kernel default route.
   - The route is in the table of the VRF the WAN interface is in. A VRF
     the task hears of after its member moves the route there.
   - A client on its way out counts while it still holds its lease (one
@@ -1618,7 +1630,7 @@ client, and logs each message, which is what a scenario reads.
 | `ra_host_dns` | against a stand-in for `resolvectl`: RDNSS and DNSSL set with nothing configured but `address autoconf`, the newly heard first and an option in its own order; a lifetime of zero and a lifetime run out take one away; a DHCPv4 lease's server goes ahead and its end leaves the advertised ones; `ra-options no-name-server` takes the advertised ones back and leaves the lease's, what is heard under it is only shown, and deleting it sets what is held; stopping the RA host reverts |
 | `dhcpv6_client` | IA_NA /128 with `noprefixroute`; default route and on-link prefix from the RA, and no SLAAC address unless `autoconf` is set too; renew; `release`; zebra-rs restart keeps the address and confirms it; `parameters-only`; deleted configuration releases |
 | `dhcpv6_client_dns` | against a stand-in for `resolvectl`, and a server whose lease and whose Router Advertisements name different name servers: the lease's servers and search list set with nothing configured but `address dhcpv6`, ahead of the advertised ones and behind a DHCPv4 lease's; reverted on `release` and on setting `dhcpv6-options no-name-server`, which leaves the advertised ones, and set again when that is deleted; nothing set for a lease taken, or resumed after a restart, under `no-name-server`; set again after a restart; what `parameters-only` is given set with no lease and no RA host; deleted configuration reverts |
-| `dhcpv6_client_pd` | As built: the address and the prefix in one exchange, with the hint on the wire; the discard route in the RIB and in the kernel, and that it ends a packet which a routed prefix without one sends round between the two routers; renew; a restart resumes the prefix and its route and verifies them by a Rebind; a second `pd`, and one the server has nothing for; a prefix without an address; `parameters-only` refused beside `pd`; deleted configuration releases and withdraws |
+| `dhcpv6_client_pd` | As built: the address and the prefix in one exchange, with the hint on the wire; the unreachable route in the RIB and in the kernel, and that it ends a packet which a routed prefix without one sends round between the two routers, with a Destination Unreachable to its sender; renew; a restart resumes the prefix and its route and verifies them by a Rebind; an earlier version's blackhole route becomes the unreachable one; a restart that asks for nothing has the leftover sweep take the route; a second `pd`, and one the server has nothing for; a prefix without an address; `parameters-only` refused beside `pd`; deleted configuration releases and withdraws |
 | `dhcpv6_client_pd_lan` | As built: two interfaces numbered from one delegation, one by `address` and one by EUI-64, each with the prefix's lifetime and the route to its /64; a host behind the router reached from the delegating router through the prefix; a link set down and up has its address again; a renewal that brings other lifetimes moves the addresses'; another prefix replaces the discard route and the addresses, and the old /64 is on-link no longer; an `sla-id` moved, one beyond the prefix (no address, and said), two interfaces on one /64 and the upstream interface refused, none of it a new lease; a restart keeps the addresses and removes that of an interface no longer configured; an interface, then the delegation, deleted |
 | `ra_prefix` | As built: a router that numbers an interface from a delegated prefix, has an address of its own on it and advertises there; a host with nothing configured forms an address in both /64s, takes the router for its default and reaches the delegating router; the configured prefix has RFC 4861's lifetimes and the delegated one the lease's; a renewal with longer lifetimes reaches the host without waiting for the periodic advertisement; a renewal with the same lifetimes as before still moves their end; another prefix from the server gives the host a new address, deprecates the old one and takes its on-link route away, and the old one is named for as long as its longest lifetime, though its lease was cut short since; an interface moved to another VRF than its delegation's withdraws the prefix on its hosts, and moved back has it again; a configured address deleted deprecates its prefix, and set again restores it; so does a delegation given back; an interface that stops advertising names nothing |
 | `dhcpv6_pd_insomnia` | a zebra-rs + insomnia router serving PD (insomnia's existing DHCPv6 server) to a zebra-rs client router: both sides of the feature in one topology |
@@ -1637,7 +1649,6 @@ client, and logs each message, which is what a scenario reads.
 | DHCPv4 client identifier | RFC 4361: DUID-based (SHOULD) | none unless configured; the server keys on `chaddr` | dhclient's and VyOS's behaviour, which ISP servers are provisioned for |
 | `temporary` (IA_TA) | VyOS `dhcpv6-options temporary` | not supported | not needed on a router WAN |
 | Prefix exclude | RFC 7084 WPD-8 (SHOULD) | not supported | P5 |
-| Route for a delegated prefix | RFC 7084 WPD-5: discard, and (a) SHOULD answer with ICMPv6 Destination Unreachable | a blackhole route: the packet is dropped and nothing is sent | the RIB has no unreachable nexthop; the loop WPD-5 is there to prevent is prevented either way |
 | Internal address from PD | RFC 7084 WAA-7 | explicit `pd … interface lo` | no implicit interfaces |
 | PIO lifetimes of a delegated prefix | RFC 9096 §3.4 (L-16, SHOULD): at most 45 min preferred and 90 min valid, whatever the lease says | the lease's remaining lifetimes, which is what §3.3 (L-15, MUST) asks: never past them | D14's rule; the caps cost the hosts their addresses when the router is away for 90 minutes, and are for the operator to choose. Not built |
 | A prefix that went while zebra-rs was not running | RFC 9096 §3.5 (SHOULD): record the prefixes advertised on stable storage, and deprecate them after a restart | not advertised as gone: `nd` learns the prefixes from the addresses the interface has when it starts | needs a record on disk, as the routes and the name servers have; the hosts keep such a prefix for what was left of its lifetime |

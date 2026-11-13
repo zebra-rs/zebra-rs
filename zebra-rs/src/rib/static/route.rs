@@ -112,7 +112,7 @@ impl<F: StaticFamily> StaticRoute<F> {
 
         if self.blackhole {
             // A discard route drops matching traffic; no nexthop.
-            entry.nexthop = Nexthop::Blackhole(metric);
+            entry.nexthop = Nexthop::blackhole(metric);
             entry.metric = metric;
             return Some(entry);
         }
@@ -458,7 +458,7 @@ mod tests {
             ..Default::default()
         };
         let entry = r.to_entry().expect("blackhole entry built");
-        assert_eq!(entry.nexthop, Nexthop::Blackhole(50));
+        assert_eq!(entry.nexthop, Nexthop::blackhole(50));
         assert_eq!(entry.metric, 50);
     }
 

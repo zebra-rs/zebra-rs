@@ -107,7 +107,12 @@ fn sequence() -> Vec<(RouteOp, IpNet, RibEntry)> {
         (
             RouteOp::Add,
             p("10.100.4.0/24"),
-            entry(Nexthop::Blackhole(0)),
+            entry(Nexthop::blackhole(0)),
+        ),
+        (
+            RouteOp::Add,
+            p("10.100.5.0/24"),
+            entry(Nexthop::unreachable(0)),
         ),
         (
             RouteOp::Add,
@@ -146,7 +151,7 @@ fn sequence() -> Vec<(RouteOp, IpNet, RibEntry)> {
         (
             RouteOp::Del,
             p("10.100.4.0/24"),
-            entry(Nexthop::Blackhole(0)),
+            entry(Nexthop::blackhole(0)),
         ),
         (
             RouteOp::Del,

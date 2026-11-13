@@ -141,12 +141,59 @@ pub enum Nexthop {
     List(NexthopList),
     Protect(NexthopProtect),
     /// A discard route — packets to the prefix are dropped in the
-    /// forwarding plane (kernel `RTN_BLACKHOLE`) with no gateway or
-    /// nexthop group. Used for aggregate summarization discards
-    /// (OSPF `area range` / BGP `aggregate-address`) so component
-    /// traffic that no more-specific route covers is dropped at the
-    /// aggregator instead of looping. Carries only the route metric.
-    Blackhole(u32),
+    /// forwarding plane with no gateway or nexthop group. Used for
+    /// aggregate summarization discards (OSPF `area range` / BGP
+    /// `aggregate-address`) so component traffic that no more-specific
+    /// route covers is dropped at the aggregator instead of looping.
+    /// Carries the route metric and what the sender hears of the drop
+    /// ([`BlackholeKind`]).
+    Blackhole(Blackhole),
+}
+
+/// A discard route's next hop: its metric, and whether the drop is silent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct Blackhole {
+    pub metric: u32,
+    pub kind: BlackholeKind,
+}
+
+/// What the sender of a packet hears when a discard route drops it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub enum BlackholeKind {
+    /// Nothing (kernel `RTN_BLACKHOLE`, `ip route add blackhole`).
+    Null,
+    /// An ICMP Destination Unreachable, "no route to destination" (kernel
+    /// `RTN_UNREACHABLE`, `ip route add unreachable`). What RFC 7084
+    /// WPD-5 asks for a delegated prefix.
+    Unreachable,
+}
+
+impl BlackholeKind {
+    /// The word `ip route` and the show commands use for it.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Null => "blackhole",
+            Self::Unreachable => "unreachable",
+        }
+    }
+}
+
+impl Nexthop {
+    /// A discard route that drops without a word.
+    pub fn blackhole(metric: u32) -> Self {
+        Self::Blackhole(Blackhole {
+            metric,
+            kind: BlackholeKind::Null,
+        })
+    }
+
+    /// A discard route that answers with ICMP Destination Unreachable.
+    pub fn unreachable(metric: u32) -> Self {
+        Self::Blackhole(Blackhole {
+            metric,
+            kind: BlackholeKind::Unreachable,
+        })
+    }
 }
 
 impl Default for Nexthop {

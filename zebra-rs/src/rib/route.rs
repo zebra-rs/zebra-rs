@@ -2672,7 +2672,7 @@ pub(crate) fn kernel_priorities(entry: &RibEntry, v6: bool) -> Vec<u32> {
         Nexthop::Multi(multi) => vec![multi.metric],
         Nexthop::List(list) => list.nexthops.iter().map(|m| m.metric()).collect(),
         Nexthop::Protect(protect) => vec![protect.primary.metric(), protect.backup.metric()],
-        Nexthop::Blackhole(metric) => vec![*metric],
+        Nexthop::Blackhole(bh) => vec![bh.metric],
         Nexthop::Link(_) => vec![entry.metric],
     };
     path_priorities(&metrics, v6)
@@ -2933,7 +2933,7 @@ fn rib_replace_system(
         }
         // System (kernel) routes are never primary+backup protected.
         Nexthop::Protect(_) => false,
-        Nexthop::Blackhole(m) => *m == entry.metric,
+        Nexthop::Blackhole(bh) => bh.metric == entry.metric,
     };
     if replace {
         return if entry.is_connected() {
@@ -3301,7 +3301,7 @@ fn rib_replace_system_v6(
         }
         // System (kernel) routes are never primary+backup protected.
         Nexthop::Protect(_) => false,
-        Nexthop::Blackhole(m) => *m == entry.metric,
+        Nexthop::Blackhole(bh) => bh.metric == entry.metric,
     };
     if replace {
         return if entry.is_connected() {
@@ -3723,7 +3723,7 @@ mod tests {
         let mut hole = RibEntries::new();
         let mut blackhole = RibEntry::new(RibType::Kernel);
         blackhole.metric = 1024;
-        blackhole.nexthop = Nexthop::Blackhole(1024);
+        blackhole.nexthop = Nexthop::blackhole(1024);
         rib_add_kernel(&mut hole, blackhole.clone());
         assert_eq!(rib_replace_kernel(&mut hole, &blackhole, true).len(), 1);
 
@@ -3764,7 +3764,7 @@ mod tests {
                     metric: 200,
                     ..Default::default()
                 }),
-                Nexthop::Blackhole(200),
+                Nexthop::blackhole(200),
             ] {
                 let mut primary = RibEntry::new(rtype);
                 primary.stale = true;
@@ -3784,7 +3784,7 @@ mod tests {
                 }
                 // A duplicate at the same priority must update its kind
                 // without discarding the other priority.
-                primary.nexthop = Nexthop::Blackhole(100);
+                primary.nexthop = Nexthop::blackhole(100);
                 rib_add_system(&mut table, &v4, primary.clone());
                 rib_add_system_v6(&mut table_v6, &v6, primary);
                 for entries in [table.get(&v4).unwrap(), table_v6.get(&v6).unwrap()] {
@@ -3795,7 +3795,7 @@ mod tests {
                         std::mem::discriminant(&entries[0].nexthop),
                         std::mem::discriminant(&backup)
                     );
-                    assert!(matches!(entries[1].nexthop, Nexthop::Blackhole(100)));
+                    assert_eq!(entries[1].nexthop, Nexthop::blackhole(100));
                 }
                 assert_eq!(rib_replace(&mut table, &v4, rtype).len(), 2);
                 assert_eq!(rib_replace_v6(&mut table_v6, &v6, rtype).len(), 2);

@@ -99,7 +99,9 @@ Each line holds:
    neither and reads `is directly connected, <interface>`.
 4. **The nexthop:** `via <address>, <interface>`. A route with no
    gateway reads `via <interface>`, a discard route
-   `is a discard (blackhole)`, and an SRv6 nexthop
+   `is a discard (blackhole)` or, when the sender of a dropped packet
+   is told with an ICMP Destination Unreachable,
+   `is a discard (unreachable)`, and an SRv6 nexthop
    `via seg6 [<segments>]`.
 5. **The label stack** pushed onto the packet, if any: `label 16003
    15002 16004`, the outermost first.

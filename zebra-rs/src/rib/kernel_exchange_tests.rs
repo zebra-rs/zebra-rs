@@ -2,6 +2,7 @@
 //! state and must be run as root inside an isolated network namespace.
 use super::*;
 use crate::fib::netlink::route_from_msg;
+use crate::rib::BlackholeKind;
 use netlink_packet_route::AddressFamily;
 use netlink_packet_route::route::{
     RouteAddress, RouteAttribute, RouteMessage, RouteProtocol, RouteScope, RouteType,
@@ -108,7 +109,7 @@ async fn installed_protocol_route_echoes_do_not_enter_kernel_rib() {
                 owner.distance = 110;
                 owner.metric = metric;
                 owner.nexthop = if blackhole {
-                    Nexthop::Blackhole(metric)
+                    Nexthop::blackhole(metric)
                 } else {
                     Nexthop::Uni(crate::rib::NexthopUni {
                         metric,
@@ -280,7 +281,7 @@ async fn external_protocol_routes_and_startup_leftovers_are_not_echoes() {
     let event = kernel_route(prefix, RouteProtocol::Zebra, true, 10, RT_TABLE_MAIN);
     assert!(!rib.is_kernel_route_echo(&event));
     let mut owner = RibEntry::new(RibType::Static);
-    owner.nexthop = Nexthop::Blackhole(10);
+    owner.nexthop = Nexthop::blackhole(10);
     owner.valid = true;
     owner.selected = true;
     // An uninstalled candidate does not own the kernel route.
@@ -368,7 +369,7 @@ async fn static_blackhole_echo_keeps_real_kernel_route() {
     let prefix = "203.0.113.0/24".parse().unwrap();
     let mut entry = RibEntry::new(RibType::Static);
     entry.distance = 1;
-    entry.nexthop = Nexthop::Blackhole(0);
+    entry.nexthop = Nexthop::blackhole(0);
     rib.ipv4_route_add(&prefix, entry, RT_TABLE_MAIN).await;
     assert!(
         !ip(&["route", "show", "exact", "203.0.113.0/24"])
@@ -389,6 +390,75 @@ async fn static_blackhole_echo_keeps_real_kernel_route() {
             .trim()
             .is_empty()
     );
+}
+
+/// A discard route goes into the kernel as the kind it is, one kind
+/// replaces the other in place, and each is deleted as what it is: an
+/// IPv4 delete only matches a route of the type it names.
+#[tokio::test]
+#[ignore = "requires root in an isolated network namespace"]
+async fn discard_routes_follow_their_kind_in_the_kernel() {
+    require_netns();
+    let rib = Rib::new(false).unwrap();
+    for (family, prefix) in [("-4", "198.51.100.0/24"), ("-6", "2001:db8:77::/48")] {
+        let prefix: IpNet = prefix.parse().unwrap();
+        let shown = prefix.to_string();
+        let route = || ip(&[family, "route", "show", "exact", &shown]);
+        let entry = |nexthop: Nexthop| {
+            let mut entry = RibEntry::new(RibType::DhcpClient);
+            entry.distance = 210;
+            entry.metric = 20;
+            entry.nexthop = nexthop;
+            entry
+        };
+        let add = async |entry: &RibEntry| match prefix {
+            IpNet::V4(p) => {
+                rib.fib_handle
+                    .route_ipv4_add(&p, entry, RT_TABLE_MAIN)
+                    .await
+            }
+            IpNet::V6(p) => {
+                rib.fib_handle
+                    .route_ipv6_add(&p, entry, RT_TABLE_MAIN)
+                    .await
+            }
+        };
+        let del = async |entry: &RibEntry| match prefix {
+            IpNet::V4(p) => {
+                rib.fib_handle
+                    .route_ipv4_del(&p, entry, RT_TABLE_MAIN)
+                    .await
+            }
+            IpNet::V6(p) => {
+                rib.fib_handle
+                    .route_ipv6_del(&p, entry, RT_TABLE_MAIN)
+                    .await
+            }
+        };
+        let unreachable = entry(Nexthop::unreachable(20));
+        let blackhole = entry(Nexthop::blackhole(20));
+
+        assert!(add(&unreachable).await);
+        assert!(route().starts_with("unreachable "), "{family}: {}", route());
+        assert!(route().contains("proto dhcp metric 20"), "{}", route());
+        // One kind over the other is one route, not two.
+        assert!(add(&blackhole).await);
+        assert!(route().starts_with("blackhole "), "{family}: {}", route());
+        assert_eq!(route().lines().count(), 1, "{}", route());
+        assert!(add(&unreachable).await);
+        assert!(route().starts_with("unreachable "), "{family}: {}", route());
+        assert_eq!(route().lines().count(), 1, "{}", route());
+
+        del(&unreachable).await;
+        assert!(route().trim().is_empty(), "{family}: {}", route());
+
+        // As an earlier run's leftover.
+        assert!(add(&unreachable).await);
+        rib.fib_handle
+            .route_del_leftover(prefix, &unreachable, RT_TABLE_MAIN)
+            .await;
+        assert!(route().trim().is_empty(), "{family}: {}", route());
+    }
 }
 
 #[tokio::test]
@@ -509,16 +579,16 @@ async fn legacy_proto_static_route_is_adopted_only_by_the_same_static() {
         };
         let mut legacy = RibEntry::new(RibType::Kernel);
         legacy.metric = priority;
-        legacy.nexthop = Nexthop::Blackhole(priority);
+        legacy.nexthop = Nexthop::blackhole(priority);
         insert(&mut rib, prefix, RT_TABLE_MAIN, legacy);
         rib.legacy_statics.insert((RT_TABLE_MAIN, prefix, priority));
 
         let mut config = RibEntry::new(RibType::Static);
-        config.nexthop = Nexthop::Blackhole(0);
+        config.nexthop = Nexthop::blackhole(0);
         // Another table, or another priority, is a different route.
         rib.adopt_legacy_static(100, prefix, &config);
         let mut other = config.clone();
-        other.nexthop = Nexthop::Blackhole(20);
+        other.nexthop = Nexthop::blackhole(20);
         rib.adopt_legacy_static(RT_TABLE_MAIN, prefix, &other);
         assert_eq!(entries(&rib, prefix, RT_TABLE_MAIN).len(), 1);
         // Not a static: never adopts.
@@ -1334,6 +1404,7 @@ async fn sweep_keeps_routes_that_replaced_srv6_leftovers() {
                 &blackhole_prefix,
                 &RibEntry::new(RibType::Isis),
                 1024,
+                BlackholeKind::Null,
                 RT_TABLE_MAIN,
                 true
             )

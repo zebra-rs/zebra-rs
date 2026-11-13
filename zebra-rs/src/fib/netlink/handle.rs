@@ -43,7 +43,7 @@ use crate::rib::{
     AddrGenMode, Bridge, Group, GroupTrait, MacAddr, Nexthop, NexthopMulti, NexthopUni, RibType,
     Vxlan, link,
     link::{AddrFlags, AddrScope},
-    nexthop::NexthopMember,
+    nexthop::{Blackhole, BlackholeKind, NexthopMember},
 };
 
 /// Pull the nexthop-object id (`NHA_ID`) out of an inbound
@@ -113,7 +113,7 @@ fn fmt_nexthop_for_trace(nh: &Nexthop) -> String {
             )
         }
         Nexthop::Link(ifindex) => format!("Link(ifindex={ifindex})"),
-        Nexthop::Blackhole(metric) => format!("Blackhole(metric={metric})"),
+        Nexthop::Blackhole(bh) => format!("Blackhole(metric={} kind={})", bh.metric, bh.kind),
     }
 }
 
@@ -369,6 +369,32 @@ pub(crate) fn ilm_leftover_from_msg(
         })
     });
     Some((label, rtype, gateway))
+}
+
+/// The kernel route type of a discard route.
+fn discard_route_type(kind: BlackholeKind) -> RouteType {
+    match kind {
+        BlackholeKind::Null => RouteType::BlackHole,
+        BlackholeKind::Unreachable => RouteType::Unreachable,
+    }
+}
+
+/// The discard kind of a kernel route the RIB keeps. A blackhole route is
+/// kept whatever its protocol. An unreachable route is kept only under
+/// `RTPROT_DHCP`: that is how the DHCP client holds a delegated prefix,
+/// and an earlier run's must be seen to be taken over or swept. Any other
+/// stays out of the RIB, like a prohibit or a throw route: a VRF's
+/// `unreachable default`, put at the bottom of its table so that a lookup
+/// does not go on to the main table, would come back as a distance-0
+/// kernel default route that outranks the VRF's own.
+fn discard_kind(kind: RouteType, protocol: RouteProtocol) -> Option<BlackholeKind> {
+    match kind {
+        RouteType::BlackHole => Some(BlackholeKind::Null),
+        RouteType::Unreachable if protocol == RouteProtocol::Dhcp => {
+            Some(BlackholeKind::Unreachable)
+        }
+        _ => None,
+    }
 }
 
 /// The `rtm_protocol` zebra-rs installs a route of `rtype` with. Static
@@ -1712,22 +1738,26 @@ impl FibHandle {
                     .await;
                 ok
             }
-            Nexthop::Blackhole(metric) => {
-                self.route_ipv4_blackhole(prefix, entry, *metric, table_id, true)
+            Nexthop::Blackhole(bh) => {
+                self.route_ipv4_blackhole(prefix, entry, bh.metric, bh.kind, table_id, true)
                     .await
             }
             _ => true,
         }
     }
 
-    /// Install (or delete) a discard route (`RTN_BLACKHOLE`): kernel
-    /// drops packets to `prefix` with no gateway or nexthop group.
-    /// `add` selects `RTM_NEWROUTE` vs `RTM_DELROUTE`.
+    /// Install (or delete) a discard route (`RTN_BLACKHOLE`, or
+    /// `RTN_UNREACHABLE` by `kind`): kernel drops packets to `prefix` with
+    /// no gateway or nexthop group. `add` selects `RTM_NEWROUTE` vs
+    /// `RTM_DELROUTE`. An install replaces a discard route of the other
+    /// kind at the same priority in place; an IPv4 delete only matches a
+    /// route of the kind it names.
     pub async fn route_ipv4_blackhole(
         &self,
         prefix: &Ipv4Net,
         entry: &RibEntry,
         metric: u32,
+        kind: BlackholeKind,
         table_id: u32,
         add: bool,
     ) -> bool {
@@ -1737,7 +1767,7 @@ impl FibHandle {
         set_route_table(&mut msg, table_id);
         msg.header.protocol = route_protocol(entry.rtype);
         msg.header.scope = RouteScope::Universe;
-        msg.header.kind = RouteType::BlackHole;
+        msg.header.kind = discard_route_type(kind);
         msg.attributes
             .push(RouteAttribute::Destination(RouteAddress::Inet(
                 prefix.addr(),
@@ -1775,7 +1805,7 @@ impl FibHandle {
                 ok = false;
                 if fib_route() {
                     tracing::info!(
-                        "Blackhole {} error: {prefix} {e} table={table_id} rtype={:?}",
+                        "Discard ({kind}) {} error: {prefix} {e} table={table_id} rtype={:?}",
                         if add { "add" } else { "del" },
                         entry.rtype,
                     );
@@ -1928,11 +1958,10 @@ impl FibHandle {
         msg.header.protocol = route_protocol(entry.rtype);
         msg.header.scope = RouteScope::Universe;
         // IPv4 matches the route type on delete: a leftover discard route
-        // is only removed by a blackhole delete.
-        msg.header.kind = if matches!(entry.nexthop, Nexthop::Blackhole(_)) {
-            RouteType::BlackHole
-        } else {
-            RouteType::Unicast
+        // is only removed by a delete of its own kind.
+        msg.header.kind = match &entry.nexthop {
+            Nexthop::Blackhole(bh) => discard_route_type(bh.kind),
+            _ => RouteType::Unicast,
         };
         msg.attributes.push(RouteAttribute::Destination(dst));
 
@@ -2050,9 +2079,9 @@ impl FibHandle {
                         .await;
                 }
             }
-            Nexthop::Blackhole(metric) => {
-                if del(*metric) {
-                    self.route_ipv4_blackhole(prefix, entry, *metric, table_id, false)
+            Nexthop::Blackhole(bh) => {
+                if del(bh.metric) {
+                    self.route_ipv4_blackhole(prefix, entry, bh.metric, bh.kind, table_id, false)
                         .await;
                 }
             }
@@ -2402,8 +2431,8 @@ impl FibHandle {
                     .await;
                 ok
             }
-            Nexthop::Blackhole(metric) => {
-                self.route_ipv6_blackhole(prefix, entry, *metric, table_id, true)
+            Nexthop::Blackhole(bh) => {
+                self.route_ipv6_blackhole(prefix, entry, bh.metric, bh.kind, table_id, true)
                     .await
             }
             _ => true,
@@ -2416,6 +2445,7 @@ impl FibHandle {
         prefix: &Ipv6Net,
         entry: &RibEntry,
         metric: u32,
+        kind: BlackholeKind,
         table_id: u32,
         add: bool,
     ) -> bool {
@@ -2425,7 +2455,7 @@ impl FibHandle {
         set_route_table(&mut msg, table_id);
         msg.header.protocol = route_protocol(entry.rtype);
         msg.header.scope = RouteScope::Universe;
-        msg.header.kind = RouteType::BlackHole;
+        msg.header.kind = discard_route_type(kind);
         msg.attributes
             .push(RouteAttribute::Destination(RouteAddress::Inet6(
                 prefix.addr(),
@@ -2461,7 +2491,7 @@ impl FibHandle {
                 ok = false;
                 if fib_route() {
                     tracing::info!(
-                        "Blackhole {} error: {prefix} {e} table={table_id} rtype={:?}",
+                        "Discard ({kind}) {} error: {prefix} {e} table={table_id} rtype={:?}",
                         if add { "add" } else { "del" },
                         entry.rtype,
                     );
@@ -2713,10 +2743,17 @@ impl FibHandle {
                         .await;
                 }
             }
-            Nexthop::Blackhole(_) => {
+            Nexthop::Blackhole(bh) => {
                 if del(priorities[0]) {
-                    self.route_ipv6_blackhole(prefix, entry, priorities[0], table_id, false)
-                        .await;
+                    self.route_ipv6_blackhole(
+                        prefix,
+                        entry,
+                        priorities[0],
+                        bh.kind,
+                        table_id,
+                        false,
+                    )
+                    .await;
                 }
             }
         }
@@ -6004,11 +6041,11 @@ impl RouteBuilder {
                     uni.metric = self.entry.metric;
                 }
             }
-            Nexthop::Blackhole(metric) => {
+            Nexthop::Blackhole(bh) => {
                 // System-route withdrawal matches the next-hop metric.
                 // In particular, Linux supplies metric 1024 for IPv6
                 // discard routes even when no priority was configured.
-                *metric = self.entry.metric;
+                bh.metric = self.entry.metric;
             }
             _ => {
                 //
@@ -6408,12 +6445,12 @@ pub fn route_from_msg_with(
     }
     // Discard prefixes can be redistributed just like unicast prefixes.
     // Their originating protocol does not identify a particular consumer.
-    let blackhole = msg.header.kind == RouteType::BlackHole;
-    if msg.header.kind != RouteType::Unicast && !blackhole {
+    let discard = discard_kind(msg.header.kind, msg.header.protocol);
+    if msg.header.kind != RouteType::Unicast && discard.is_none() {
         return None;
     }
-    if blackhole {
-        builder = builder.nexthop(Nexthop::Blackhole(0));
+    if let Some(kind) = discard {
+        builder = builder.nexthop(Nexthop::Blackhole(Blackhole { metric: 0, kind }));
     }
     if msg.header.protocol == RouteProtocol::Dhcp {
         builder = builder.rtype(RibType::Dhcp);
@@ -7295,13 +7332,44 @@ mod tests {
                     assert_eq!(route.prefix, prefix);
                     assert_eq!(route.table_id, 100);
                     assert_eq!(route.entry.rtype, RibType::Kernel);
-                    assert!(matches!(route.entry.nexthop, Nexthop::Blackhole(1024)));
+                    assert_eq!(route.entry.nexthop, Nexthop::blackhole(1024));
                 }
             }
-            for kind in [RouteType::Unreachable, RouteType::Prohibit] {
-                msg.header.kind = kind;
-                assert!(route_from_msg(msg.clone()).is_none());
+            // An unreachable route is the DHCP client's when it is under
+            // `RTPROT_DHCP`, and only then enters the RIB: an operator's
+            // (a VRF's `unreachable default`) stays out, as does every
+            // prohibit route.
+            for protocol in [
+                RouteProtocol::Static,
+                RouteProtocol::Boot,
+                RouteProtocol::Kernel,
+                RouteProtocol::Zebra,
+                RouteProtocol::Ra,
+                RouteProtocol::Other(200),
+            ] {
+                msg.header.protocol = protocol;
+                msg.header.kind = RouteType::Unreachable;
+                for dump in [true, false] {
+                    assert!(
+                        route_from_msg_with(msg.clone(), &BTreeMap::new(), dump).is_none(),
+                        "unreachable under {protocol:?}"
+                    );
+                }
             }
+            msg.header.protocol = RouteProtocol::Dhcp;
+            for dump in [true, false] {
+                msg.header.kind = RouteType::Unreachable;
+                let route = route_from_msg_with(msg.clone(), &BTreeMap::new(), dump).unwrap();
+                assert_eq!(route.entry.rtype, RibType::Dhcp);
+                assert_eq!(route.kernel_protocol, Some(RibType::DhcpClient));
+                assert_eq!(route.entry.nexthop, Nexthop::unreachable(1024));
+                msg.header.kind = RouteType::BlackHole;
+                let route = route_from_msg_with(msg.clone(), &BTreeMap::new(), dump).unwrap();
+                assert_eq!(route.entry.nexthop, Nexthop::blackhole(1024));
+                msg.header.kind = RouteType::Prohibit;
+                assert!(route_from_msg_with(msg.clone(), &BTreeMap::new(), dump).is_none());
+            }
+            msg.header.protocol = RouteProtocol::Static;
             msg.header.protocol = RouteProtocol::Bgp;
             msg.header.kind = RouteType::Unicast;
             assert!(

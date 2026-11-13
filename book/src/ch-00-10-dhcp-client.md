@@ -604,13 +604,16 @@ interface wan1 {
 }
 ```
 
-- **The prefix is held by a discard route**, a `D` route at
+- **The prefix is held by an unreachable route**, a `D` route at
   administrative distance 210 in the VRF of the interface. A packet for
   a part of the prefix that nothing uses must not follow the default
   route back to the provider, who routes the whole prefix here and
-  would send it back again. In the kernel it is a `blackhole` route
-  with `proto dhcp`. It stays while the link is down, and goes when the
-  prefix is given back or runs out.
+  would send it back again. It is dropped here, and its sender is told
+  with an ICMPv6 Destination Unreachable ("no route to destination"),
+  so a host behind the router does not wait for an answer that cannot
+  come. In the kernel it is an `unreachable` route with `proto dhcp`.
+  It stays while the link is down, and goes when the prefix is given
+  back or runs out.
 - **The default route** comes from Router Advertisements: `pd` runs the
   RA host like `address dhcpv6` does, without forming a SLAAC address.
 - **What an interface asks for is asked for together.** Adding or
@@ -633,15 +636,22 @@ Interface: wan1
   Renew in:     1200s
   Rebind in:    2400s
 
+router> show ipv6 route 2001:db8:100::/56
+Routing entry for 2001:db8:100::/56
+  Known via "dhcp client", distance 210, metric 0
+  Last update 00:00:12 ago
+  Routing Descriptor Blocks
+    discard (unreachable)
+
 $ ip -6 route show 2001:db8:100::/56
-blackhole 2001:db8:100::/56 dev lo proto dhcp metric 1024 pref medium
+unreachable 2001:db8:100::/56 dev lo proto dhcp metric 1024 pref medium
 ```
 
 A delegation that holds nothing shows as `none (pd <id>)`. In `json`,
 `pd` lists each delegation with its prefixes and, once it holds one,
 its own server and renewal times. After a restart of zebra-rs the lease
-is taken from disk with its prefixes, the discard routes are back at
-once, and the server is asked whether the lease still stands.
+is taken from disk with its prefixes, the unreachable routes are back
+at once, and the server is asked whether the lease still stands.
 
 ### Numbering the interfaces behind the router
 
@@ -678,7 +688,7 @@ and `lan2` an address in `2001:db8:100:2::/64`.
   it, and it goes when the prefix is given back or runs out. `show
   interface` marks it `dhcpv6-pd`.
 - **Its /64 is a connected route** on the interface, which takes that
-  part of the prefix off the discard route. The rest stays there.
+  part of the prefix off the unreachable route. The rest stays there.
 - **Each interface of a delegation needs its own /64.** A commit that
   gives two of them the same `sla-id` is refused, and so is one that
   names the interface the prefix is delegated on.
@@ -733,7 +743,5 @@ interface was taken out of the configuration meanwhile is removed.
 - A delegated prefix that changed while zebra-rs was not running is
   not taken out of use on the hosts behind the router: they keep their
   old addresses until the lifetime they last heard runs out.
-- The discard route of a delegated prefix drops a packet without the
-  ICMPv6 Destination Unreachable that RFC 7084 asks for.
 - The RA host does not advertise the prefixes it learns on other
   interfaces, and does not use stable-privacy or temporary addresses.

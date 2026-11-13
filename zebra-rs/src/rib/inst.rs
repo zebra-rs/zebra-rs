@@ -7773,7 +7773,7 @@ mod local_device_mac_tests {
         for prefix in ["10.20.0.0/24", "2001:db8:20::/64"] {
             let prefix: IpNet = prefix.parse().unwrap();
             let mut entry = RibEntry::new(RibType::Kernel);
-            entry.nexthop = Nexthop::Blackhole(1000);
+            entry.nexthop = Nexthop::blackhole(1000);
             entry.metric = 1000;
             entry.set_valid(true);
             let route = crate::fib::FibRoute {
@@ -8392,7 +8392,7 @@ mod proto_cleanup_ospf_tests {
     fn discard() -> RibEntry {
         let mut rib = RibEntry::new(RibType::Ospf);
         rib.distance = 110;
-        rib.nexthop = Nexthop::Blackhole(10);
+        rib.nexthop = Nexthop::blackhole(10);
         rib
     }
 

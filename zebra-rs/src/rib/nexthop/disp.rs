@@ -1,6 +1,6 @@
 use std::fmt::{Display, Formatter, Result};
 
-use super::{Nexthop, NexthopList, NexthopMulti, NexthopProtect, NexthopUni};
+use super::{BlackholeKind, Nexthop, NexthopList, NexthopMulti, NexthopProtect, NexthopUni};
 
 impl Display for Nexthop {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result {
@@ -20,10 +20,16 @@ impl Display for Nexthop {
             Nexthop::Protect(pro) => {
                 write!(f, "{}", pro)
             }
-            Nexthop::Blackhole(_) => {
-                write!(f, "blackhole")
+            Nexthop::Blackhole(bh) => {
+                write!(f, "{}", bh.kind)
             }
         }
+    }
+}
+
+impl Display for BlackholeKind {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
+        f.write_str(self.as_str())
     }
 }
 

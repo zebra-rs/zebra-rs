@@ -12,7 +12,7 @@ The address has the prefix's lifetimes and follows the lease: a
 renewal moves its lifetimes, another prefix replaces it, and it goes
 when the prefix is given back. Unlike a leased address it brings the
 route to its /64, which is what takes that part of the prefix off the
-discard route the whole of it has (dhcpv6_client_pd.feature).
+unreachable route the whole of it has (dhcpv6_client_pd.feature).
 
 Topology: s1 is the ISP side, a router with the small DHCPv6 server of
 dhcpv6_client_pd.feature, which routes what it delegates to the
