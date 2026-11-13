@@ -4064,15 +4064,14 @@ impl Rib {
                     self.fib_handle.vrf_del(&name).await;
                     return;
                 };
-                // Drop the parked per-VRF routing tables alongside
-                // the kernel VRF master. The per-VRF dispatcher
-                // populates these on install; a follow-up will add
-                // the matching withdraw walk.
-                self.vrf_tables.remove(&vrf.table_id);
+                // The VRF's tables go from the RIB, and what zebra-rs
+                // installed in them from the kernel: the kernel removes
+                // with the device only the routes through the VRF's own
+                // interfaces, and the table id is handed out again.
+                self.vrf_table_withdraw(vrf.table_id).await;
                 self.fib_handle.unregister_vrf_ifindex(vrf.table_id);
-                // The kernel flushes the VRF's routes with the device,
-                // but the FPM mirror would keep them — and every later
-                // reconnect would replay the dead VRF's routes back
+                // The FPM mirror would keep the VRF's routes — and every
+                // later reconnect would replay the dead VRF's routes back
                 // into APPL_DB, possibly keyed to a recycled ifindex.
                 self.fib_handle.fpm_flush_vrf(vrf.ifindex).await;
                 // Nexthops tracked in the dropped table no longer
@@ -4321,6 +4320,22 @@ impl Rib {
                 self.reconcile_egress_mpls_redirects().await;
             }
             Message::Shutdown { tx } => {
+                // The VRF devices this process created go below, and
+                // nothing takes their tables' routes over after a
+                // restart, when the table id may be another VRF's: what
+                // was installed in them is withdrawn, as when a VRF is
+                // deleted. First, while the next-hop objects are there
+                // to be let go by the routes that hold them. An adopted
+                // VRF stays, and its routes with it, as the main table's.
+                let owned: Vec<u32> = self
+                    .vrfs
+                    .values()
+                    .filter(|vrf| vrf.owned)
+                    .map(|vrf| vrf.table_id)
+                    .collect();
+                for table_id in owned {
+                    self.vrf_table_withdraw(table_id).await;
+                }
                 self.nmap.shutdown(&self.fib_handle).await;
                 let ilms = self.ilm.clone();
 

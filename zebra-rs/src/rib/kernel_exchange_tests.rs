@@ -859,6 +859,133 @@ async fn fresh_floating_static_replaces_every_leftover_priority() {
     check_leftover_priorities(true).await;
 }
 
+/// Deleting a VRF takes out of the kernel what zebra-rs installed in its
+/// table. The kernel removes with the device the routes through the VRF's
+/// own interfaces and no others: a discard route, and a route through an
+/// interface outside the VRF (what an imported VPN route is), would stay
+/// for the next VRF given that table id, and the next-hop object of the
+/// second with them. An operator's route in the table is not zebra-rs's
+/// to remove.
+#[tokio::test]
+#[ignore = "requires root in an isolated network namespace"]
+async fn deleting_a_vrf_withdraws_what_was_installed_in_its_table() {
+    require_netns();
+    for (dev, v4, v6) in [
+        ("vdcore", "198.51.100.1/24", "2001:db8:2::1/64"),
+        ("vdin", "192.0.2.1/24", "2001:db8:1::1/64"),
+    ] {
+        ip(&["link", "add", dev, "type", "dummy"]);
+        ip(&["link", "set", dev, "up"]);
+        ip(&["addr", "add", v4, "dev", dev]);
+        ip(&["-6", "addr", "add", v6, "dev", dev, "nodad"]);
+    }
+    let mut rib = Rib::new(false).unwrap();
+    crate::fib::fib_dump(&mut rib).await.unwrap();
+    rib.process_msg(
+        Message::VrfAdd {
+            name: "vdvrf".into(),
+        },
+        RT_TABLE_MAIN,
+    )
+    .await;
+    let table = rib.vrfs["vdvrf"].table_id;
+    let table_arg = table.to_string();
+    // vdin goes into the VRF; its addresses go with it and come back.
+    ip(&["link", "set", "vdin", "master", "vdvrf"]);
+    ip(&["addr", "replace", "192.0.2.1/24", "dev", "vdin"]);
+    pump(&mut rib).await;
+    while let Ok(msg) = rib.rx.try_recv() {
+        rib.process_msg(msg, RT_TABLE_MAIN).await;
+    }
+    let ifindex = |rib: &Rib, name: &str| {
+        rib.links
+            .values()
+            .find(|link| link.name == name)
+            .unwrap()
+            .index
+    };
+    let (core, inside) = (ifindex(&rib, "vdcore"), ifindex(&rib, "vdin"));
+    let uni = |addr: &str, ifindex: u32| {
+        Nexthop::Uni(NexthopUni {
+            addr: addr.parse().unwrap(),
+            ifindex_origin: Some(ifindex),
+            ..Default::default()
+        })
+    };
+    let ours = [
+        ("10.9.9.0/24", RibType::Static, Nexthop::blackhole(0)),
+        ("10.7.0.0/16", RibType::Bgp, uni("198.51.100.2", core)),
+        ("10.8.0.0/16", RibType::Static, uni("192.0.2.2", inside)),
+        ("2001:db8:dead::/48", RibType::Static, Nexthop::blackhole(0)),
+        ("2001:db8:7::/48", RibType::Bgp, uni("2001:db8:2::2", core)),
+    ];
+    for (prefix, rtype, nexthop) in &ours {
+        let mut entry = RibEntry::new(*rtype);
+        entry.distance = 1;
+        entry.nexthop = nexthop.clone();
+        match prefix.parse().unwrap() {
+            IpNet::V4(prefix) => rib.ipv4_route_add_vrf(table, &prefix, entry).await,
+            IpNet::V6(prefix) => rib.ipv6_route_add_vrf(table, &prefix, entry).await,
+        }
+    }
+    ip(&[
+        "route",
+        "add",
+        "10.5.0.0/16",
+        "via",
+        "198.51.100.9",
+        "dev",
+        "vdcore",
+        "table",
+        &table_arg,
+        "proto",
+        "static",
+    ]);
+    let everything =
+        || ip(&["route", "show", "table", "all"]) + &ip(&["-6", "route", "show", "table", "all"]);
+    let in_table = |all: &str, prefix: &str| {
+        all.lines()
+            .any(|line| line.contains(prefix) && line.contains(&format!(" table {table_arg} ")))
+    };
+    let before = everything();
+    for (prefix, ..) in &ours {
+        assert!(in_table(&before, prefix), "{prefix} installed: {before}");
+    }
+    let objects = ip(&["nexthop", "show"]);
+    assert!(objects.contains("via 198.51.100.2 dev vdcore"), "{objects}");
+    assert!(
+        objects.contains("via 2001:db8:2::2 dev vdcore"),
+        "{objects}"
+    );
+
+    rib.process_msg(
+        Message::VrfDel {
+            name: "vdvrf".into(),
+        },
+        RT_TABLE_MAIN,
+    )
+    .await;
+    let after = everything();
+    for (prefix, ..) in &ours {
+        assert!(!in_table(&after, prefix), "{prefix} left behind: {after}");
+    }
+    assert!(
+        in_table(&after, "10.5.0.0/16"),
+        "an operator's stays: {after}"
+    );
+    let objects = ip(&["nexthop", "show"]);
+    assert!(
+        !objects.contains("vdcore"),
+        "next-hop objects let go: {objects}"
+    );
+    assert!(!rib.vrf_tables.contains_key(&table));
+    assert!(!ip(&["-br", "link", "show"]).contains("vdvrf"));
+
+    ip(&["route", "del", "10.5.0.0/16", "table", &table_arg]);
+    ip(&["link", "del", "vdcore"]);
+    ip(&["link", "del", "vdin"]);
+}
+
 /// Apply the kernel's own notifications to the RIB, as the event loop does.
 async fn pump(rib: &mut Rib) {
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;

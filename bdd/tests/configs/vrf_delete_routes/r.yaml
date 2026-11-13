@@ -1,0 +1,33 @@
+# r: VRF blue with lan0 in it. In the VRF, two discard routes, which
+# have no interface, and two routes through lan0.
+vrf:
+- name: blue
+interface:
+- if-name: lan0
+  vrf: blue
+  ipv4:
+    address:
+    - 192.0.2.1/24
+  ipv6:
+    address:
+    - 2001:db8:1::1/64
+router:
+  static:
+    vrf:
+    - name: blue
+      ipv4:
+        route:
+        - prefix: 10.9.9.0/24
+          nexthop:
+          - address: blackhole
+        - prefix: 10.8.0.0/16
+          nexthop:
+          - address: 192.0.2.2
+      ipv6:
+        route:
+        - prefix: 2001:db8:dead::/48
+          nexthop:
+          - address: blackhole
+        - prefix: 2001:db8:8::/48
+          nexthop:
+          - address: 2001:db8:1::2
