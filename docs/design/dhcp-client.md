@@ -1416,8 +1416,9 @@ is given), and Router Advertisements (RDNSS, DNSSL).**
     hazard is refused by the task itself, and the VRF one has the
     leaves.
 - **A task of its own**, `resolver`. A source reports what the host is
-  to use of what it learns on an interface. The task merges an
-  interface's sources and makes resolved hold the result.
+  to use of what it learns on an interface, and says the interface by
+  its index (below). The task merges an interface's sources and makes
+  resolved hold the result.
   - It has no configuration. Whether an interface's name servers are
     reported is its source's to say: each `no-name-server` is its
     source's, as each `no-default-route` is.
@@ -1442,11 +1443,19 @@ is given), and Router Advertisements (RDNSS, DNSSL).**
 - **RA lifetimes** end what they gave like a lease's end does: a
   lifetime of zero at once, another when it has run out. The RA host
   wakes for that also when no route or address times out with it.
-- **Per link, by running `resolvectl`:** `dns <if> …`, `domain <if> …`
-  and `revert <if>`. They are the bus calls `SetLinkDNS`,
+- **Per link, by running `resolvectl`:** `dns <index> …`, `domain
+  <index> …` and `revert <index>`. They are the bus calls `SetLinkDNS`,
   `SetLinkDomains` and `RevertLink`, which is how NetworkManager feeds
   resolved. A command and not a D-Bus library: the calls are the same,
   it adds no dependency, and a stand-in program makes it testable.
+  - **The interface is said by its index, never by its name.**
+    `resolvectl` takes a number in place of a name and passes it on as
+    it is, with no lookup of its own (`rtnl_resolve_interface`; every
+    release since the first, systemd 239, takes one). A name it would
+    look up itself when it comes to run, and a name can be another
+    interface's by then: given up by one that was renamed or deleted,
+    and taken by another. So a command reaches the interface it was
+    started for, or resolved answers that it knows no such link.
 - **What resolved does by itself** (checked on systemd 255). It keeps a
   link's settings while the link exists, across link down and up, and
   saves them in `/run/systemd/resolve/netif/`. It uses them only while
@@ -1469,8 +1478,8 @@ is given), and Router Advertisements (RDNSS, DNSSL).**
   5 min, so a resolved that starts after zebra-rs still gets its
   servers. The wait counts from the end of the command: one that runs
   into its time limit takes longer than the first waits are. A revert
-  that fails is retried while the interface exists; when the interface
-  is gone, so are its settings.
+  that fails is retried while the interface it was for exists; when
+  that interface is gone, so are its settings.
 - **What resolved holds is not always known**, and whatever may be ours
   is reverted once it is no longer wanted. Only a command that could
   not be started is known to have changed nothing. One that ran and did
@@ -1486,22 +1495,140 @@ is given), and Router Advertisements (RDNSS, DNSSL).**
   "something": it is set again if wanted, also with the servers that
   were set last, and reverted if not. The same holds between a `dns`
   that worked and a `domain` that did not.
-- **The settings are an interface's, not a name's.** What was set is
-  noted with the index the name had then. A name that is another
-  interface now, deleted and made again, holds nothing whatever was
-  noted for it. It is set again, also when the lease that comes back on
-  it says nothing new.
-- **A restart of zebra-rs** leaves resolved as it is. The resumed lease
-  is reported and set again.
+- **An interface is its index, from the report to the command.** A
+  source says the index of the interface it runs on: a DHCP client the
+  one its lease is held on, the RA host the one its host runs on. Each
+  has it from the RIB, with the link its sockets, its addresses and its
+  routes are on. The resolver task keeps what is learned and what is
+  held by that index, every command says it, and resolved keeps a
+  link's settings by it. So no name is looked up anywhere on the way,
+  and none can be another interface's by the time it is used. A name is
+  only what the log and the record call an interface: the task asks the
+  system for it when it has something to say.
+  - **Deleted and made again**, a name is another interface, with
+    another index, which holds nothing whatever the one before it held.
+    Its source says so of each: the first has nothing any more, and the
+    second what is learned on it, also when the lease that comes back
+    says nothing new. And nothing is reverted on it that this run did
+    not set: no command ever says an index that was given nothing.
+  - **Gone**, an interface took its settings with it, and there is
+    nothing to say to an index that is nobody's. The task asks whether
+    the interface is there before every command, the first try and each
+    later one, which can be 5 min after the one that failed, and after
+    a command that failed. One that is gone is dropped without a
+    command and without another try: what comes under its name is
+    another interface, and its source reports that one. Only the
+    system's word that no interface has the index makes one gone
+    (`ENXIO`). Where the question itself fails, with no file descriptor
+    left to ask with, the interface is taken to be there: taken for
+    gone, what it holds would be forgotten and never taken back.
+  - **Renamed**, an interface keeps its index, and resolved keeps its
+    settings (it holds its links by index, and only changes the name it
+    shows). It is the same interface to the task and to its source:
+    what is wanted on it, what it holds and whether it is still waited
+    for after a restart need no moving, and nothing is said to it for
+    the change of name. Its name servers stay with the lease they came
+    with. zebra-rs does not follow a rename yet: the RIB goes on
+    calling the link what it was first called, so a DHCP client stays
+    on the renamed interface, lease and all, and so do the name
+    servers. Once it does follow, whether the lease stays is the
+    client's to say, by what is configured for the new name, and the
+    name servers go where the lease goes.
+  - **While a command runs**, a rename, or two interfaces exchanging
+    their names, changes nothing. The command reaches the interface its
+    source reported, whatever that one is called by then, or no
+    interface at all.
+- **A restart of zebra-rs** leaves resolved as it is, as it leaves the
+  lease's routes in the kernel. The resumed lease is reported and set
+  again. What the earlier run set and this one does not learn again is
+  taken back:
+  - **A record** (`<state dir>/resolver.json`, `resolver/record.rs`)
+    names the interfaces that hold something of ours, each with its
+    index, and where it was written: the boot and the network
+    namespace. It does not say what they hold: what is learned again is
+    set again whatever it is. It is kept by index, as everything else
+    is. The name beside an index is for a person who reads the file: the
+    one the interface had when it was last set, or taken over from an
+    earlier run.
+  - **Written ahead.** An interface is named before any command that
+    may give it something is started, and until a revert has worked or
+    the interface is gone. A run ended while `resolvectl` is under way
+    cannot say how that went, and the next one must find the interface
+    named.
+  - **The program is looked for before every command** (`$PATH`, as
+    `execvp` looks; the file found is the one run). With none there is
+    nothing to start: no command is made and nothing is named. So a
+    host without `resolvectl` writes no record at all, where naming an
+    interface ahead and taking it off again would write the file with
+    every try. Whether a command can start is seen by looking, each
+    time, and not taken from how the last one went: a try that can
+    start is on record first, also after one that could not. What is
+    left is a program that is found and cannot be started (no process
+    to be had, or a file the kernel will not run): the interface is
+    named, the failure takes it off again, and that repeats with every
+    try.
+  - **A record that cannot be written** (a full disk, a state directory
+    that is not there yet) does not keep the name servers from the
+    host: they are set all the same. But an interface that is set and
+    not on disk is one the next run would not take back. So the record
+    stays unsaved until a write has worked, also when nothing more
+    changes in it, and the write is tried again like a failed command,
+    5 s later and then at doubling intervals up to 5 min.
+  - **The next run** reads it at startup, before the configuration, and
+    starts the resolver task for it when it names any interface: a
+    configuration with no source of name servers any more (`address
+    dhcp` deleted while zebra-rs was down) spawns none of the tasks the
+    resolver otherwise comes with. Each interface named is noted as
+    holding something unknown. A file that is not there is the ordinary
+    case. One that is there and cannot be read, or is no record, is
+    said in the log: what it named is not taken back.
+  - **A wait for the sources**, `--leftover-sweep-time` (120 s), the
+    time the RIB waits before it sweeps the routes of an earlier run.
+    A lease is resumed at once, but a Router Advertisement has to be
+    heard again. An interface a source has name servers for within it
+    is set and is this run's from then on, also when it loses them
+    again before the wait is over. The others are reverted when it is
+    over: a lease lost, a router gone, or `no-name-server` set, while
+    zebra-rs was down. A time no clock counts to (the largest number,
+    for "never") is a wait without an end: nothing is taken back, and
+    the log says of each interface that it keeps what it holds, where
+    it otherwise says in how many seconds that is taken back. A
+    report that is waiting when the wait ends is heard first, as before
+    every look: the interface it claims is not taken back only to be
+    set again a moment later.
+  - **By index, by boot and by namespace.** An interface whose index
+    is gone (at startup, at the end of the wait, or before a later try
+    of a revert that failed) holds nothing and is dropped without a
+    revert: there is nothing to say to an index that is no interface's,
+    and one made since under that name has another. One that was
+    renamed, while zebra-rs was down or since, is the same interface
+    under another name: it is taken over, and taken back, by its index.
+    A record of another boot names nothing: resolved keeps its links'
+    settings under `/run`, and the indexes of the boot before are other
+    interfaces' now, or the same ones' by chance. Nor does one of
+    another network namespace (`/proc/self/ns/net`), whose indexes are
+    its own. Where the boot or the namespace cannot be read, no record
+    is kept at all.
+  - **Only where resolved is ours to configure.** The state directory
+    is the host's whatever the network namespace, so a second zebra-rs
+    in a namespace finds the first one's record there unless
+    `ZEBRA_DHCP_STATE_DIR` says otherwise. One that is refused (see the
+    hazards below) has set nothing: it takes nothing over and never
+    writes the file, which would lose the other's interfaces. The
+    number that names a namespace can be used again once that one is
+    gone, so it is this, and not the namespace in the record, that
+    keeps the two apart for good.
+  - A run of a version before the record left none: what it set and
+    the next run does not learn stays, as it did.
 
 **Hazards.**
 
-- **Network namespaces.** `resolvectl` turns the interface name into an
-  index where it runs and sends that over the system bus. The bus is
-  one per host; the indexes are one set per namespace. From another
-  namespace the command reads, and would set, whichever host interface
-  has that index (seen: a new namespace's `wanx`, index 2, answered
-  with the host's uplink). So `resolvectl` is run only when
+- **Network namespaces.** `resolvectl` sends an interface index over
+  the system bus. The bus is one per host; the indexes are one set per
+  namespace. From another namespace the command reads, and would set,
+  whichever host interface has that index (seen: a new namespace's
+  `wanx`, index 2, answered with the host's uplink). So `resolvectl` is
+  run only when
   `/proc/self/ns/net` is `/proc/1/ns/net`, and otherwise the task says
   so once and stops. `$ZEBRA_RESOLVECTL` names a program to run in its
   place, without that check: the BDD harness gives every daemon a
@@ -1534,11 +1661,6 @@ is given), and Router Advertisements (RDNSS, DNSSL).**
 
 **Not built yet.**
 
-- **Leftovers.** `no-name-server` set, or a lease lost, while zebra-rs
-  is not running leaves the link's settings in resolved until the link
-  goes or `resolvectl revert`. It needs a record of what was set, as
-  the RIB has for routes (`routes.json`), and a time to wait for the
-  sources after a start.
 - **Without root.** resolved's link calls are polkit actions
   (`org.freedesktop.resolve1.set-dns-servers`, `.set-domains`,
   `.revert`), which ask a caller that is not root for an
@@ -1570,7 +1692,7 @@ is given), and Router Advertisements (RDNSS, DNSSL).**
 | P3 (done) | DHCPv6 IA_NA and `parameters-only`; DUID; `show dhcpv6 client leases`, `renew/release dhcpv6` | P0, P2 |
 | P4 (done) | IA_PD: discard route, LAN assignment, prefix change. The state machine, `dhcpv6-options pd <id> [length]`, the discard route, `pd <id> interface <lan>` with `AddrOrigin::Pd` and the `sla-id` arithmetic, prefixes and the addresses they give in the lease file and in show, `dhcpv6_client_pd`, `dhcpv6_client_pd_lan`. The route is an unreachable one (WPD-5(a)). Left: `dhcpv6_pd_insomnia` | P3 |
 | ND-PIO (done) | `nd` advertises PIOs for LAN /64s with counted-down lifetimes, deprecates removed ones (L-13 as RFC 9096 has it), `RibRx::AddrRenewed` on lifetime change; `ra_prefix` | P1's RIB plumbing; parallel to P2–P4 |
-| Resolver (the three sources done) | The `resolver` task; the name servers of a DHCPv4 lease, of a DHCPv6 server and of Router Advertisements to systemd-resolved by default, `no-name-server` under `dhcp-options`, `dhcpv6-options` and `ra-options` to keep them back (§13). Next: leftovers across a restart | P1; P2 and P3 for their sources |
+| Resolver (the three sources done) | The `resolver` task; the name servers of a DHCPv4 lease, of a DHCPv6 server and of Router Advertisements to systemd-resolved by default, `no-name-server` under `dhcp-options`, `dhcpv6-options` and `ra-options` to keep them back; what an earlier run set and the next does not learn again taken back after `--leftover-sweep-time` (§13) | P1; P2 and P3 for their sources |
 | P5 | MTU options, Reconfigure, IA_TA, prefix exclude, RFC 4191 routes, stable-privacy identifiers, `redistribute dhcp` | as needed |
 
 Each phase is one PR, or a short series, with its own BDD feature.
@@ -1631,7 +1753,7 @@ client, and logs each message, which is what a scenario reads.
 | `dhcp_client` | lease → address and `D>* 0.0.0.0/0 [210/0]`; renew; `release`; server gone → expiry withdraws everything; zebra-rs restart keeps the address and re-verifies |
 | `dhcp_client_vrf` | WAN in VRF `red`; the route is in `red`'s table only |
 | `dhcp_client_dual_wan` | two leases at 210 / 220; link down on the first → the second's default is selected |
-| `dhcp_client_dns` | against a stand-in for `resolvectl`: the lease's servers and domains set with nothing configured but `address dhcp`; reverted on `release` and on setting `no-name-server`, and set again when that is deleted; nothing set for a lease taken, or resumed after a restart, under `no-name-server`; replaced at a renewal; retried after a failure; servers set last are set again after an error that came with the old list already dropped; servers set by a command that got no answer are reverted; an interface deleted and made again is set again; set again after a restart |
+| `dhcp_client_dns` | against a stand-in for `resolvectl`, which keeps an interface's settings by its index as resolved does and refuses a name in its place: the lease's servers and domains set with nothing configured but `address dhcp`; reverted on `release` and on setting `no-name-server`, and set again when that is deleted; nothing set for a lease taken, or resumed after a restart, under `no-name-server`; replaced at a renewal; retried after a failure; servers set last are set again after an error that came with the old list already dropped; servers set by a command that got no answer are reverted; an interface deleted and made again is set again; one renamed under the running daemon keeps its lease's name servers, which `no-name-server` takes back from it and gives it again; set again after a restart; what an earlier run set is kept past the leftover time by a run that resumes the lease, and taken back by one under `no-name-server`, by one with no DHCP client at all, and from an interface renamed while zebra-rs was down, which the stand-in shows with its settings under the new name until then; kept, and said to be kept, by a run told to wait without end |
 | `ra_host` | RA default route `A`, SLAAC with `autoconf`, router lifetime 0 withdraws, `accept_ra` is 0 |
 | `ra_host_dns` | against a stand-in for `resolvectl`: RDNSS and DNSSL set with nothing configured but `address autoconf`, the newly heard first and an option in its own order; a lifetime of zero and a lifetime run out take one away; a DHCPv4 lease's server goes ahead and its end leaves the advertised ones; `ra-options no-name-server` takes the advertised ones back and leaves the lease's, what is heard under it is only shown, and deleting it sets what is held; stopping the RA host reverts |
 | `dhcpv6_client` | IA_NA /128 with `noprefixroute`; default route and on-link prefix from the RA, and no SLAAC address unless `autoconf` is set too; renew; `release`; zebra-rs restart keeps the address and confirms it; `parameters-only`; deleted configuration releases |

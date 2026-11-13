@@ -30,7 +30,7 @@ use super::{ApplyCode, Completion, Config, ConfigRequest, DisplayRequest, ExecCo
 use crate::context::Task;
 use libyang::{Entry, YangStore, to_entry};
 use similar::TextDiff;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -310,6 +310,11 @@ pub struct ConfigManager {
     /// [`super::resolver::spawn_resolver`], which every source's spawn
     /// calls, so a source always gets a live sender. `None` until then.
     pub resolver_tx: RefCell<Option<crate::resolver::ResolverTx>>,
+    /// How long after startup what an earlier run left behind is kept
+    /// for this run to claim (`--leftover-sweep-time`). The RIB has its
+    /// own copy for the routes; this one is the resolver task's, for the
+    /// name servers ([`super::resolver::spawn_resolver`]).
+    pub leftover_sweep_time: Cell<std::time::Duration>,
     /// BGP task inbox sender, captured at `spawn_bgp` time so the IS-IS
     /// task can push BGP Link-State (RFC 9552) producer routes to BGP.
     /// Populated by [`super::bgp::spawn_bgp`]; `None` while no BGP task
@@ -502,6 +507,7 @@ impl ConfigManager {
             stamp_client_tx: RefCell::new(None),
             nd_client_tx: RefCell::new(None),
             resolver_tx: RefCell::new(None),
+            leftover_sweep_time: Cell::new(std::time::Duration::from_secs(120)),
             cradle_port_tx,
             cradle_port_rx: RefCell::new(Some(cradle_port_rx)),
             protocol_tasks: RefCell::new(HashMap::new()),
@@ -3232,6 +3238,43 @@ mod save_config_tests {
         // Another source asking for the sender: the task there is, not
         // a second one.
         assert!(first.same_channel(&spawn_resolver(&cm)));
+    }
+
+    /// At startup the resolver task is spawned without a source when a
+    /// run before this one left name servers set: a configuration with
+    /// no source of them any more must still take them back. With
+    /// nothing left, the task waits for its first source as before.
+    #[tokio::test]
+    async fn the_resolver_task_starts_by_itself_for_what_an_earlier_run_left() {
+        use crate::config::resolver::resume_from;
+        use crate::resolver::record::{Origin, Record};
+
+        let dir =
+            std::env::temp_dir().join(format!("zebra-resolver-resume-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let here = Origin {
+            boot: "this-boot".to_string(),
+            netns: "net:[4026531840]".to_string(),
+        };
+        let record = |name: &str| Record::load(dir.join(name), here.clone());
+
+        let cm = manager_with_config(&temp_path("resolver-resume-nothing"));
+        resume_from(&cm, record("nothing.json"));
+        assert!(cm.resolver_tx.borrow().is_none());
+        assert!(!cm.protocol_tasks.borrow().contains_key("resolver"));
+
+        // An interface there is no such thing as: the task is spawned
+        // for what the record names, and finds by itself that this one
+        // holds nothing.
+        let mut left = record("left.json");
+        left.hold("zrs-no-such-if0", 4242);
+        let cm = manager_with_config(&temp_path("resolver-resume-left"));
+        resume_from(&cm, record("left.json"));
+        assert!(cm.protocol_tasks.borrow().contains_key("resolver"));
+        let tx = cm.resolver_tx.borrow().clone().expect("a sender");
+        // And it is the task the sources then report to.
+        assert!(tx.same_channel(&crate::config::resolver::spawn_resolver(&cm)));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// `parameters-only` beside `address dhcpv6` or `dhcpv6-options pd`

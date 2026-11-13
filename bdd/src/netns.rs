@@ -112,13 +112,60 @@ pub async fn netns_exists(netns: &str) -> Result<bool> {
         .any(|line| line.split_whitespace().next() == Some(netns)))
 }
 
+/// Where a namespace's zebra-rs keeps the DHCP client's state
+/// (`ZEBRA_DHCP_STATE_DIR`): its leases, the RIB's record of their routes
+/// and the resolver's record of the interfaces it gave name servers.
+///
+/// Per namespace, because the default `/var/lib/zebra-rs/dhcp` is the
+/// host's and every file in it is keyed by interface name alone. Stable
+/// for the namespace's life, so a restarted daemon finds its state again.
+/// Under `/run`, where only root makes entries: `create_netns` removes
+/// this directory as root, and in `/tmp` another user could have put a
+/// link at that name first.
+pub fn dhcp_state_dir(netns: &str) -> String {
+    format!("/run/zebra-rs-bdd/dhcp/{netns}")
+}
+
+/// Where the stand-in for `resolvectl` keeps what a namespace's
+/// zebra-rs told it (tests/scripts/resolvectl_stub.sh, which has the
+/// same path).
+pub fn resolvectl_stub_dir(netns: &str) -> String {
+    format!("/run/zebra-rs-bdd/resolvectl/{netns}")
+}
+
 /// Create a network namespace
 pub async fn create_netns(netns: &str) -> Result<()> {
+    // The name becomes a directory name below.
+    if netns.is_empty() || netns.contains('/') || netns.starts_with('.') {
+        bail!("{netns:?} is not a name for a network namespace");
+    }
     run_cmd(
         &["ip", "netns", "add", netns],
         &format!("Failed to create netns {}", netns),
     )
     .await?;
+
+    // A new namespace is a new machine: what a namespace of this name left
+    // in an earlier run is not its own. All of it is read back at startup
+    // as what the run before this one left, a lease to resume and routes
+    // and name servers to take back. And nothing in those files tells the
+    // two namespaces apart: the interface names, their indexes and even
+    // the number that names the namespace (`/proc/self/ns/net`) come out
+    // the same from run to run. A zebra-rs that never wrote its resolver
+    // record passed every restart scenario on the record of the run
+    // before.
+    //
+    // The same goes for what the stand-in for `resolvectl` holds
+    // (tests/scripts/resolvectl_stub.sh): it keeps an interface's
+    // settings by its index, and the indexes of a namespace made anew
+    // are those of the one before it.
+    for state in [dhcp_state_dir(netns), resolvectl_stub_dir(netns)] {
+        run_cmd(
+            &["rm", "-rf", "--", &state],
+            &format!("Failed to remove {state}"),
+        )
+        .await?;
+    }
 
     // Bring up loopback
     exec_in_netns(netns, "ip", &["link", "set", "lo", "up"]).await?;
@@ -431,11 +478,8 @@ pub async fn spawn_in_netns_env(
         assignments.push(format!(
             "ZEBRA_OSPF_CHECKPOINT_DIR=/tmp/zebra-rs-ckpt/{netns}"
         ));
-        // The DHCP client's leases, for the same reason: the default
-        // /var/lib/zebra-rs/dhcp is host-global, and a lease file is keyed
-        // by interface name only. Stable per namespace, so a restarted
-        // daemon finds its lease again.
-        assignments.push(format!("ZEBRA_DHCP_STATE_DIR=/tmp/zebra-rs-dhcp/{netns}"));
+        // The DHCP client's state, for the same reason (`dhcp_state_dir`).
+        assignments.push(format!("ZEBRA_DHCP_STATE_DIR={}", dhcp_state_dir(netns)));
         // `system hostname` with `--feature insomnia` is made the system's
         // host name, and a network namespace shares the HOST's: the real
         // `sethostname(2)` from a BDD daemon would rename the development

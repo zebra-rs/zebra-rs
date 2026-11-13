@@ -10,6 +10,7 @@ pub use manager::ConfigManager;
 pub use manager::RibSubscriber;
 pub use manager::event_loop;
 pub use manager::feature_enabled;
+pub use resolver::resume_resolver;
 
 mod serve;
 pub use serve::Cli;

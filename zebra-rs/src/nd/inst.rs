@@ -209,10 +209,10 @@ impl Nd {
         for action in self.engine.hosts_mut().take_actions() {
             match action {
                 HostAction::DisableKernelRa { ifname } => disable_kernel_ra(&ifname),
-                HostAction::Dns { ifname, dns } => {
+                HostAction::Dns { ifindex, dns } => {
                     if let Some(resolver) = &self.resolver {
                         let _ = resolver.send(Report {
-                            ifname,
+                            ifindex,
                             source: Source::Ra,
                             dns,
                         });
