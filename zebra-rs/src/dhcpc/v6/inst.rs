@@ -359,11 +359,14 @@ fn address_list(lease: &Lease) -> String {
 }
 
 /// The route that holds a delegated prefix: what of it is in use has
-/// more specific routes, and the rest goes nowhere.
+/// more specific routes, and the rest goes nowhere. A packet for the rest
+/// is answered with an ICMPv6 Destination Unreachable, "no route to
+/// destination" (RFC 7084 WPD-5): its sender learns at once that nothing
+/// is there, and the packet does not go back up the default route.
 fn discard() -> RibEntry {
     let mut entry = RibEntry::new(RibType::DhcpClient);
     entry.distance = DEFAULT_DISTANCE;
-    entry.nexthop = Nexthop::Blackhole(0);
+    entry.nexthop = Nexthop::unreachable(0);
     entry
 }
 
@@ -1817,7 +1820,7 @@ mod tests {
     fn route(rib: &RibEntry) -> String {
         assert_eq!(rib.rtype, RibType::DhcpClient);
         let to = match &rib.nexthop {
-            Nexthop::Blackhole(0) => "discard",
+            Nexthop::Blackhole(bh) if bh.metric == 0 => bh.kind.as_str(),
             _ => "elsewhere",
         };
         format!("{to} distance {}", rib.distance)
@@ -2367,7 +2370,7 @@ mod tests {
         // No address to put on the interface: the route is all of it.
         assert_eq!(
             asked(&mut b),
-            [format!("route {PREFIX} discard distance 210")]
+            [format!("route {PREFIX} unreachable distance 210")]
         );
         assert_eq!(state(&b), State::Bound);
         let kept = saved(&b).expect("a lease of prefixes is a lease");
@@ -2474,7 +2477,7 @@ mod tests {
             asked(&mut b),
             [
                 format!("add {ADDRESS}/128 3600/7200"),
-                format!("route {PREFIX} discard distance 210"),
+                format!("route {PREFIX} unreachable distance 210"),
             ]
         );
         // A delegation asked for and not held is shown as that.
@@ -2509,8 +2512,8 @@ mod tests {
             asked(&mut b),
             [
                 format!("add {ADDRESS}/128 0/10"),
-                format!("route {PREFIX} discard distance 210"),
-                format!("route {PREFIX2} discard distance 210"),
+                format!("route {PREFIX} unreachable distance 210"),
+                format!("route {PREFIX2} unreachable distance 210"),
             ]
         );
         // No link to renew on: at the end of its lifetime all of it goes.
@@ -2563,7 +2566,7 @@ mod tests {
             asked(&mut b),
             [
                 format!("add {ADDRESS}/128 3000/6600"),
-                format!("route {PREFIX} discard distance 210"),
+                format!("route {PREFIX} unreachable distance 210"),
             ]
         );
         assert!(saved(&b).is_none());
@@ -2591,7 +2594,7 @@ mod tests {
         commit(&mut b, cfg);
         assert_eq!(
             asked(&mut b),
-            [format!("route {PREFIX} vrf {VRF} discard distance 210")]
+            [format!("route {PREFIX} vrf {VRF} unreachable distance 210")]
         );
         // The link goes (a move to another VRF is that, and a new link):
         // the route goes from the table it was put in.
@@ -2613,7 +2616,7 @@ mod tests {
         commit(&mut b, cfg);
         assert_eq!(
             asked(&mut b),
-            [format!("route {PREFIX} discard distance 210")]
+            [format!("route {PREFIX} unreachable distance 210")]
         );
         enslave(&mut b, true);
         b.dhcpc.link_added6(VRF_IFINDEX, VRF, &[]);
@@ -2621,7 +2624,7 @@ mod tests {
             asked(&mut b),
             [
                 format!("no route {PREFIX}"),
-                format!("route {PREFIX} vrf {VRF} discard distance 210"),
+                format!("route {PREFIX} vrf {VRF} unreachable distance 210"),
             ]
         );
         // And back when the VRF goes.
@@ -2631,7 +2634,7 @@ mod tests {
             asked(&mut b),
             [
                 format!("no route {PREFIX} vrf {VRF}"),
-                format!("route {PREFIX} discard distance 210"),
+                format!("route {PREFIX} unreachable distance 210"),
             ]
         );
     }
@@ -2759,7 +2762,7 @@ mod tests {
         assert_eq!(
             asked(&mut b),
             [
-                format!("route {PREFIX} discard distance 210"),
+                format!("route {PREFIX} unreachable distance 210"),
                 format!("lan0 add {first} 3000/6600"),
                 format!("lan1 add {second} 3000/6600"),
             ]
@@ -2846,8 +2849,8 @@ mod tests {
         assert_eq!(
             asked(&mut b),
             [
-                format!("route {PREFIX} discard distance 210"),
-                format!("route {PREFIX2} discard distance 210"),
+                format!("route {PREFIX} unreachable distance 210"),
+                format!("route {PREFIX2} unreachable distance 210"),
                 format!("lan0 add {first} 3000/6600"),
                 // No longer preferred: for what is still open only.
                 format!("lan1 add {short} 0/10"),
@@ -2891,7 +2894,7 @@ mod tests {
             asked(&mut b),
             [
                 format!("add {ADDRESS}/128 3600/7200"),
-                format!("route {PREFIX} discard distance 210"),
+                format!("route {PREFIX} unreachable distance 210"),
                 format!("lan0 add {first} 3600/7200"),
             ]
         );
@@ -2924,7 +2927,7 @@ mod tests {
         commit(&mut b, cfg);
         assert_eq!(
             asked(&mut b),
-            [format!("route {PREFIX} discard distance 210")]
+            [format!("route {PREFIX} unreachable distance 210")]
         );
         let add = |address: &str| format!("add {address} 3600/7200");
         let del = |address: &str| format!("del {address}");
@@ -3055,7 +3058,7 @@ mod tests {
         commit(&mut b, cfg);
         assert_eq!(
             asked(&mut b),
-            [format!("route {PREFIX} discard distance 210")]
+            [format!("route {PREFIX} unreachable distance 210")]
         );
         let none = |name: &str, reason: &str| format!("    on {name}: none ({reason})\n");
         let text = shown(&b);
@@ -3087,7 +3090,7 @@ mod tests {
             asked(&mut b),
             [
                 format!("no route {PREFIX}"),
-                format!("route {PREFIX} vrf {VRF} discard distance 210"),
+                format!("route {PREFIX} vrf {VRF} unreachable distance 210"),
                 format!("lan0 del {first}"),
             ]
         );
@@ -3117,7 +3120,7 @@ mod tests {
         commit(&mut b, cfg);
         assert_eq!(
             asked(&mut b),
-            [format!("route {PREFIX} discard distance 210")]
+            [format!("route {PREFIX} unreachable distance 210")]
         );
         let reason = "no hardware address: set `address`";
         let text = shown(&b);
@@ -3153,7 +3156,7 @@ mod tests {
         assert_eq!(
             asked(&mut b),
             [
-                format!("route {PREFIX} discard distance 210"),
+                format!("route {PREFIX} unreachable distance 210"),
                 format!("lan1 add {second} 0/1"),
                 format!("lan1 del {second}"),
                 format!("lan0 add {first} 3000/6600"),
@@ -3171,7 +3174,7 @@ mod tests {
         assert_eq!(
             asked(&mut b),
             [
-                format!("route {PREFIX} discard distance 210"),
+                format!("route {PREFIX} unreachable distance 210"),
                 format!("lan0 add {first} 0/1"),
                 format!("lan0 del {first}"),
             ]
@@ -3192,7 +3195,7 @@ mod tests {
         assert_eq!(
             asked(&mut b),
             [
-                format!("route {PREFIX} discard distance 210"),
+                format!("route {PREFIX} unreachable distance 210"),
                 format!("lan0 add {first} 0/1"),
                 format!("lan0 del {first}"),
             ]
@@ -3210,7 +3213,7 @@ mod tests {
         commit(&mut b, cfg);
         assert_eq!(
             asked(&mut b),
-            [format!("route {PREFIX} discard distance 210")]
+            [format!("route {PREFIX} unreachable distance 210")]
         );
     }
 

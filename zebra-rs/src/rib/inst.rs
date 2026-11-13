@@ -969,6 +969,12 @@ impl IlmEntry {
     }
 }
 
+/// A kernel-reported unreachable route the route record has not named as
+/// an earlier run's leftover: another program's.
+fn foreign_unreachable(route: &crate::fib::FibRoute) -> bool {
+    !route.entry.stale && route.entry.nexthop.is_unreachable()
+}
+
 /// Default administrative distance for an ILM entry owned by `rtype`,
 /// following the same FRR/Cisco convention as the IP RIB. BGP uses the
 /// eBGP value (20); VPN decap labels are uniquely owned, so the
@@ -5106,6 +5112,15 @@ impl Rib {
                     route.entry.distance = distance;
                     route.kernel_protocol = None;
                 }
+                // An unreachable route is in the RIB only as such a
+                // leftover. Any other under `RTPROT_DHCP` is another
+                // program's (systemd-networkd holds a delegated prefix
+                // with one): it stays out, as every unreachable route did
+                // before the DHCP client used one, and does not come in
+                // at distance 0 over every protocol's route for the prefix.
+                if foreign_unreachable(&route) {
+                    return;
+                }
                 if route.legacy_static {
                     self.legacy_statics
                         .insert((route.table_id, route.prefix, route.entry.metric));
@@ -5190,6 +5205,10 @@ impl Rib {
                     route.entry.stale = true;
                     route.entry.distance = distance;
                     route.kernel_protocol = None;
+                }
+                // Never taken in (see `NewRoute`): nothing of it to remove.
+                if foreign_unreachable(&route) {
+                    return;
                 }
                 if route.kernel_protocol == Some(RibType::Ra) {
                     self.learned_ra
@@ -7773,7 +7792,7 @@ mod local_device_mac_tests {
         for prefix in ["10.20.0.0/24", "2001:db8:20::/64"] {
             let prefix: IpNet = prefix.parse().unwrap();
             let mut entry = RibEntry::new(RibType::Kernel);
-            entry.nexthop = Nexthop::Blackhole(1000);
+            entry.nexthop = Nexthop::blackhole(1000);
             entry.metric = 1000;
             entry.set_valid(true);
             let route = crate::fib::FibRoute {
@@ -8392,7 +8411,7 @@ mod proto_cleanup_ospf_tests {
     fn discard() -> RibEntry {
         let mut rib = RibEntry::new(RibType::Ospf);
         rib.distance = 110;
-        rib.nexthop = Nexthop::Blackhole(10);
+        rib.nexthop = Nexthop::blackhole(10);
         rib
     }
 

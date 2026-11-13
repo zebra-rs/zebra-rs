@@ -192,12 +192,12 @@ fn rib_entry_to_json(rib: &Rib, prefix: &Ipv4Net, e: &RibEntry) -> RouteEntry {
                 backup: false,
             }]
         }
-        Nexthop::Blackhole(metric) => {
+        Nexthop::Blackhole(bh) => {
             vec![NexthopJson {
                 address: None,
-                interface: "blackhole".to_string(),
+                interface: bh.kind.to_string(),
                 weight: None,
-                metric: Some(*metric),
+                metric: Some(bh.metric),
                 mpls_labels: vec![],
                 backup: false,
             }]
@@ -343,12 +343,12 @@ fn rib_entry_to_json_v6(rib: &Rib, prefix: &Ipv6Net, e: &RibEntry) -> RouteEntry
                 backup: false,
             }]
         }
-        Nexthop::Blackhole(metric) => {
+        Nexthop::Blackhole(bh) => {
             vec![NexthopJson {
                 address: None,
-                interface: "blackhole".to_string(),
+                interface: bh.kind.to_string(),
                 weight: None,
-                metric: Some(*metric),
+                metric: Some(bh.metric),
                 mpls_labels: vec![],
                 backup: false,
             }]
@@ -508,8 +508,8 @@ pub fn rib_entry_show(
                 let iface = rib.link_name(link_ifindex(e, *ifindex));
                 let _ = writeln!(buf, " via {}, {}", iface, uptime);
             }
-            Nexthop::Blackhole(_) => {
-                let _ = writeln!(buf, " is a discard (blackhole), {}", uptime);
+            Nexthop::Blackhole(bh) => {
+                let _ = writeln!(buf, " is a discard ({}), {}", bh.kind, uptime);
             }
             Nexthop::Uni(uni) => {
                 let grp = rib.nmap.get(uni.gid);
@@ -614,8 +614,8 @@ pub fn rib_entry_show_v6(
                 let iface = rib.link_name(link_ifindex(e, *ifindex));
                 let _ = writeln!(buf, " via {}, {}", iface, uptime);
             }
-            Nexthop::Blackhole(_) => {
-                let _ = writeln!(buf, " is a discard (blackhole), {}", uptime);
+            Nexthop::Blackhole(bh) => {
+                let _ = writeln!(buf, " is a discard ({}), {}", bh.kind, uptime);
             }
             Nexthop::Uni(uni) => {
                 let grp = rib.nmap.get(uni.gid);
@@ -1044,8 +1044,8 @@ fn write_nexthop_blocks_v4(buf: &mut String, rib: &Rib, e: &RibEntry) {
             let iface = rib.link_name(link_ifindex(e, *ifindex));
             let _ = writeln!(buf, "    directly attached via {}", iface);
         }
-        Nexthop::Blackhole(_) => {
-            let _ = writeln!(buf, "    discard (blackhole)");
+        Nexthop::Blackhole(bh) => {
+            let _ = writeln!(buf, "    discard ({})", bh.kind);
         }
         Nexthop::Uni(uni) => write_descriptor_block_v4(buf, rib, uni, ""),
         Nexthop::Multi(multi) => {
@@ -1078,8 +1078,8 @@ fn write_nexthop_blocks_v6(buf: &mut String, rib: &Rib, e: &RibEntry) {
             let iface = rib.link_name(link_ifindex(e, *ifindex));
             let _ = writeln!(buf, "    directly attached via {}", iface);
         }
-        Nexthop::Blackhole(_) => {
-            let _ = writeln!(buf, "    discard (blackhole)");
+        Nexthop::Blackhole(bh) => {
+            let _ = writeln!(buf, "    discard ({})", bh.kind);
         }
         Nexthop::Uni(uni) => write_descriptor_block_v6(buf, rib, uni, ""),
         Nexthop::Multi(multi) => {
@@ -3408,6 +3408,43 @@ mod tests {
             SHOW_HEADER.contains("L1/L2 - IS-IS level-1/2, B - BGP"),
             "{SHOW_HEADER}"
         );
+    }
+
+    /// A discard route reads as the kind it is in every view: the route
+    /// list, the detail block and JSON, IPv4 and IPv6.
+    #[tokio::test]
+    async fn discard_routes_show_their_kind() {
+        use crate::rib::RibType;
+        let rib = Rib::new(false).expect("rib");
+        let v4: Ipv4Net = "10.9.0.0/16".parse().unwrap();
+        let v6: Ipv6Net = "2001:db8:100::/56".parse().unwrap();
+        for (nexthop, word) in [
+            (Nexthop::blackhole(0), "blackhole"),
+            (Nexthop::unreachable(0), "unreachable"),
+        ] {
+            let mut e = RibEntry::new(RibType::DhcpClient);
+            e.distance = 210;
+            e.nexthop = nexthop;
+
+            let line = rib_entry_show(&rib, &v4, &e, false).unwrap();
+            let want = format!("10.9.0.0/16 [210/0] is a discard ({word}), ");
+            assert!(line.contains(&want), "{line}");
+            let line = rib_entry_show_v6(&rib, &v6, &e, false).unwrap();
+            let want = format!("2001:db8:100::/56 [210/0] is a discard ({word}), ");
+            assert!(line.contains(&want), "{line}");
+
+            let block = format!("  Routing Descriptor Blocks\n    discard ({word})\n");
+            let detail = rib_entry_show_detail(&rib, &v4, &e);
+            assert!(detail.ends_with(&block), "{detail}");
+            let detail = rib_entry_show_v6_detail(&rib, &v6, &e);
+            assert!(detail.ends_with(&block), "{detail}");
+
+            assert_eq!(rib_entry_to_json(&rib, &v4, &e).nexthops[0].interface, word);
+            assert_eq!(
+                rib_entry_to_json_v6(&rib, &v6, &e).nexthops[0].interface,
+                word
+            );
+        }
     }
 
     /// Every `vrf` view names each route's VRF in JSON. With no name,

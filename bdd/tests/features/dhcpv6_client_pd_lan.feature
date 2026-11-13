@@ -12,7 +12,7 @@ Feature: Interfaces numbered from a delegated prefix (dhcpv6-options pd <id> int
   renewal moves its lifetimes, another prefix replaces it, and it goes
   when the prefix is given back. Unlike a leased address it brings the
   route to its /64, which is what takes that part of the prefix off the
-  discard route the whole of it has (dhcpv6_client_pd.feature).
+  unreachable route the whole of it has (dhcpv6_client_pd.feature).
 
   Topology: s1 is the ISP side, a router with the small DHCPv6 server of
   dhcpv6_client_pd.feature, which routes what it delegates to the
@@ -66,8 +66,8 @@ Feature: Interfaces numbered from a delegated prefix (dhcpv6-options pd <id> int
     And command "ip -6 addr show dev lan1 scope global" in namespace "r1" should eventually contain "inet6 2001:db8:100:2:0:ff:fe00:b1/64 scope global dynamic"
     And command "ip -6 route show 2001:db8:100:1::/64" in namespace "r1" should eventually contain "dev lan0 proto kernel"
     And show command "show ipv6 route" in namespace "r1" should eventually contain "2001:db8:100:1::/64"
-    # The rest of the prefix stays on its discard route.
-    And command "ip -6 route show 2001:db8:100::/56" in namespace "r1" should eventually contain "blackhole 2001:db8:100::/56"
+    # The rest of the prefix stays on its unreachable route.
+    And command "ip -6 route show 2001:db8:100::/56" in namespace "r1" should eventually contain "unreachable 2001:db8:100::/56"
 
   Scenario: A host behind the router is reached through the prefix
     Given the test topology exists
@@ -77,6 +77,11 @@ Feature: Interfaces numbered from a delegated prefix (dhcpv6-options pd <id> int
     Then show command "show ipv6 route" in namespace "r1" should eventually contain "::/0 [210/0] via fe80::1"
     And command "ip -6 route show 2001:db8:100::/56" in namespace "s1" should eventually contain "via fe80::"
     And command "tests/scripts/ping6_once.sh 2001:db8:100:1::10 2001:db8:ffff::1" in namespace "s1" should eventually contain "1 received"
+    # A part of the prefix no interface has: the host hears at once that
+    # nothing is there (RFC 7084 WPD-5), where a packet for anything
+    # outside the prefix takes the default route.
+    And command "tests/scripts/ping6_once.sh 2001:db8:100:ff::1" in namespace "h1" should eventually contain "From 2001:db8:100:1::1 icmp_seq=1 Destination unreachable: No route"
+    And command "tests/scripts/ping6_once.sh 2001:db8:ffff::1" in namespace "h1" should eventually contain "1 received"
 
   Scenario: A link set down and up has its address again
     Given the test topology exists
@@ -109,9 +114,9 @@ Feature: Interfaces numbered from a delegated prefix (dhcpv6-options pd <id> int
     Then show command "renew dhcpv6 interface wan0" in namespace "r1" should contain "Renewing the DHCPv6 lease on wan0"
     And show command "show dhcpv6 client leases" in namespace "r1" should eventually contain "Prefix:       2001:db8:900::/56 preferred"
     And show command "show dhcpv6 client leases" in namespace "r1" should eventually not contain "2001:db8:100::/56"
-    # The discard route and both addresses are the new prefix's.
-    And command "ip -6 route show 2001:db8:900::/56" in namespace "r1" should eventually contain "blackhole 2001:db8:900::/56"
-    And command "ip -6 route show 2001:db8:100::/56" in namespace "r1" should eventually not contain "blackhole"
+    # The unreachable route and both addresses are the new prefix's.
+    And command "ip -6 route show 2001:db8:900::/56" in namespace "r1" should eventually contain "unreachable 2001:db8:900::/56"
+    And kernel route "2001:db8:100::/56" in namespace "r1" should eventually be gone
     And command "ip -6 addr show dev lan0 scope global" in namespace "r1" should eventually contain "inet6 2001:db8:900:1::1/64 scope global dynamic"
     And command "ip -6 addr show dev lan0" in namespace "r1" should eventually not contain "2001:db8:100:1::1"
     And command "ip -6 addr show dev lan1 scope global" in namespace "r1" should eventually contain "inet6 2001:db8:900:2:0:ff:fe00:b1/64 scope global dynamic"
@@ -172,7 +177,7 @@ Feature: Interfaces numbered from a delegated prefix (dhcpv6-options pd <id> int
     When I apply command "delete interface wan0 ipv6 dhcpv6-options pd 1" in namespace "r1"
     Then command "cat /tmp/zebra-bdd-dhcp/dhcpv6_client_pd_lan/server.log" in namespace "s1" should eventually contain "RELEASE ia_na"
     And command "ip -6 addr show dev lan0" in namespace "r1" should eventually not contain "2001:db8:900:1::1"
-    And command "ip -6 route show 2001:db8:900::/56" in namespace "r1" should eventually not contain "blackhole"
+    And kernel route "2001:db8:900::/56" in namespace "r1" should eventually be gone
     And command "ip -6 route show 2001:db8:900:1::/64" in namespace "r1" should eventually not contain "dev lan0"
     And daemon log in namespace "r1" should eventually contain "dhcpv6 client: lan0: 2001:db8:900:1::1/64 withdrawn"
 
