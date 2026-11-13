@@ -378,18 +378,25 @@ fn discard_route_type(kind: BlackholeKind) -> RouteType {
 
 /// The discard kind of a kernel route the RIB is told of. A blackhole
 /// route is passed on whatever its protocol. An unreachable route is
-/// passed on only under `RTPROT_DHCP`: that is how the DHCP client holds
-/// a delegated prefix, and an earlier run's must be seen to be swept. The
-/// RIB keeps it only when the route record names it as such a leftover
-/// (`FibMessage::NewRoute`); another program's stays out. So does every
-/// other unreachable route, like a prohibit or a throw route: a VRF's
-/// `unreachable default`, put at the bottom of its table so that a lookup
-/// does not go on to the main table, would come back as a distance-0
-/// kernel default route that outranks the VRF's own.
+/// passed on only under the two protocols zebra-rs installs one with,
+/// where an earlier run's must be seen to be replaced or swept:
+///
+/// - `RTPROT_DHCP`, how the DHCP client holds a delegated prefix;
+/// - `RTPROT_ZEBRA`, a static route's (`nexthop unreachable`).
+///
+/// The RIB keeps it only as such a leftover (`FibMessage::NewRoute`):
+/// one the startup dump marked stale, or the route record names; another
+/// program's stays out. So does every other unreachable route, like a
+/// prohibit or a throw route: a VRF's `unreachable default`, put at the
+/// bottom of its table so that a lookup does not go on to the main table,
+/// would come back as a distance-0 kernel default route that outranks
+/// the VRF's own.
 fn discard_kind(kind: RouteType, protocol: RouteProtocol) -> Option<BlackholeKind> {
     match kind {
         RouteType::BlackHole => Some(BlackholeKind::Null),
-        RouteType::Unreachable if protocol == RouteProtocol::Dhcp => {
+        RouteType::Unreachable
+            if matches!(protocol, RouteProtocol::Dhcp | RouteProtocol::Zebra) =>
+        {
             Some(BlackholeKind::Unreachable)
         }
         _ => None,
@@ -7334,19 +7341,25 @@ mod tests {
                     assert_eq!(route.entry.nexthop, Nexthop::blackhole(1024));
                 }
             }
-            // An unreachable route may be the DHCP client's when it is
-            // under `RTPROT_DHCP`, and only then reaches the RIB: an
-            // operator's (a VRF's `unreachable default`) stays out, as
-            // does every prohibit and throw route.
+            // An unreachable route may be zebra-rs's own under the two
+            // protocols it installs one with, `RTPROT_DHCP` (a delegated
+            // prefix) and `RTPROT_ZEBRA` (a static route), and only then
+            // reaches the RIB: an operator's (a VRF's `unreachable
+            // default`) stays out, as does every prohibit and throw
+            // route.
             for protocol in [
                 RouteProtocol::Static,
                 RouteProtocol::Boot,
                 RouteProtocol::Kernel,
                 RouteProtocol::Zebra,
+                RouteProtocol::Ospf,
+                RouteProtocol::Isis,
                 RouteProtocol::Ra,
+                RouteProtocol::Dhcp,
                 RouteProtocol::Other(200),
             ] {
                 msg.header.protocol = protocol;
+                let ours = matches!(protocol, RouteProtocol::Zebra | RouteProtocol::Dhcp);
                 for kind in [
                     RouteType::Unreachable,
                     RouteType::Prohibit,
@@ -7354,28 +7367,43 @@ mod tests {
                 ] {
                     msg.header.kind = kind;
                     for dump in [true, false] {
-                        assert!(
-                            route_from_msg_with(msg.clone(), &BTreeMap::new(), dump).is_none(),
+                        let route = route_from_msg_with(msg.clone(), &BTreeMap::new(), dump);
+                        assert_eq!(
+                            route.is_some(),
+                            ours && kind == RouteType::Unreachable,
                             "{kind:?} under {protocol:?}"
                         );
                     }
                 }
             }
+            // The DHCP client's: learned until the route record says it
+            // is an earlier run's, in the dump and afterwards.
             msg.header.protocol = RouteProtocol::Dhcp;
             for dump in [true, false] {
                 msg.header.kind = RouteType::Unreachable;
                 let route = route_from_msg_with(msg.clone(), &BTreeMap::new(), dump).unwrap();
                 assert_eq!(route.entry.rtype, RibType::Dhcp);
+                assert!(!route.entry.stale);
                 assert_eq!(route.kernel_protocol, Some(RibType::DhcpClient));
                 assert_eq!(route.entry.nexthop, Nexthop::unreachable(1024));
                 msg.header.kind = RouteType::BlackHole;
                 let route = route_from_msg_with(msg.clone(), &BTreeMap::new(), dump).unwrap();
                 assert_eq!(route.entry.nexthop, Nexthop::blackhole(1024));
-                for kind in [RouteType::Prohibit, RouteType::Throw] {
-                    msg.header.kind = kind;
-                    assert!(route_from_msg_with(msg.clone(), &BTreeMap::new(), dump).is_none());
-                }
             }
+            // A static route's: in the dump an earlier run's leftover,
+            // stale under its owner's type. Afterwards not marked, which
+            // the RIB reads as another program's.
+            msg.header.protocol = RouteProtocol::Zebra;
+            msg.header.kind = RouteType::Unreachable;
+            let leftover = route_from_msg_with(msg.clone(), &BTreeMap::new(), true).unwrap();
+            assert_eq!(leftover.entry.rtype, RibType::Static);
+            assert!(leftover.entry.stale);
+            assert_eq!(leftover.entry.distance, 1);
+            assert_eq!(leftover.entry.nexthop, Nexthop::unreachable(1024));
+            let later = route_from_msg_with(msg.clone(), &BTreeMap::new(), false).unwrap();
+            assert!(!later.entry.stale);
+            assert_eq!(later.kernel_protocol, Some(RibType::Static));
+            assert!(later.entry.nexthop.is_unreachable());
             msg.header.protocol = RouteProtocol::Bgp;
             msg.header.kind = RouteType::Unicast;
             assert!(

@@ -197,6 +197,11 @@ impl Nexthop {
     }
 
     /// A discard route that answers with ICMP Destination Unreachable.
+    ///
+    /// A protocol that installs one must be among those the startup
+    /// dump passes such a route on for (`fib::netlink`'s
+    /// `discard_kind`), or its leftovers are not seen after a restart
+    /// and are neither replaced nor swept.
     pub fn unreachable(metric: u32) -> Self {
         Self::Blackhole(Blackhole {
             metric,

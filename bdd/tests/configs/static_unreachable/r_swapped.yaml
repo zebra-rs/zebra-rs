@@ -1,0 +1,37 @@
+# r.yaml with the two keywords the other way round: every route changes
+# its kind in one commit.
+vrf:
+- name: blue
+interface:
+- if-name: lan0
+  ipv4:
+    address:
+    - 192.0.2.1/24
+  ipv6:
+    address:
+    - 2001:db8:1::1/64
+router:
+  static:
+    ipv4:
+      route:
+      - prefix: 10.9.9.0/24
+        nexthop:
+        - address: blackhole
+      - prefix: 10.8.8.0/24
+        nexthop:
+        - address: unreachable
+    ipv6:
+      route:
+      - prefix: 2001:db8:dead::/48
+        nexthop:
+        - address: blackhole
+      - prefix: 2001:db8:beef::/48
+        nexthop:
+        - address: unreachable
+    vrf:
+    - name: blue
+      ipv4:
+        route:
+        - prefix: 10.9.9.0/24
+          nexthop:
+          - address: blackhole

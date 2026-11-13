@@ -1,0 +1,11 @@
+# r.yaml without its static routes.
+vrf:
+- name: blue
+interface:
+- if-name: lan0
+  ipv4:
+    address:
+    - 192.0.2.1/24
+  ipv6:
+    address:
+    - 2001:db8:1::1/64

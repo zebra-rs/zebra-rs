@@ -100,17 +100,24 @@ module config-static {
           ext:help "Route nexthop";
           key "address";
           leaf "address" {
-            ext:help "Nexthop address, or blackhole to discard";
+            ext:help "Nexthop address, or blackhole / unreachable to discard";
             type union {
               type inet:ipv4-address;
-              // `blackhole` at the nexthop-key position turns the
-              // route into a discard route (kernel RTN_BLACKHOLE),
+              // `blackhole` or `unreachable` at the nexthop-key
+              // position turns the route into a discard route,
               // satisfying the route's `ext:non-empty "nexthop"`.
+              // `blackhole` drops without a word (kernel
+              // RTN_BLACKHOLE); `unreachable` drops and answers the
+              // sender with an ICMP Destination Unreachable (kernel
+              // RTN_UNREACHABLE). One route takes one of the two.
               type enumeration {
                 enum blackhole;
+                enum unreachable;
               }
             }
-            description "Nexthop address, or `blackhole` to discard";
+            description
+              "Nexthop address, `blackhole` to discard, or `unreachable`
+               to discard and tell the sender";
           }
           leaf metric {
             ext:help "Nexthop metric";
@@ -269,14 +276,19 @@ module config-static {
           ext:help "Route nexthop";
           key "address";
           leaf "address" {
-            ext:help "Nexthop address, or blackhole to discard";
+            ext:help "Nexthop address, or blackhole / unreachable to discard";
             type union {
               type inet:ipv6-address;
+              // As for IPv4: `unreachable` answers the sender with an
+              // ICMPv6 Destination Unreachable, "no route".
               type enumeration {
                 enum blackhole;
+                enum unreachable;
               }
             }
-            description "Nexthop address, or `blackhole` to discard";
+            description
+              "Nexthop address, `blackhole` to discard, or `unreachable`
+               to discard and tell the sender";
           }
           leaf metric {
             ext:help "Nexthop metric";
