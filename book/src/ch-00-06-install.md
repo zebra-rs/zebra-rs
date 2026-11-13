@@ -110,5 +110,13 @@ idle time — refreshed on each command — up to a four-hour hard cap. In confi
 mode you can review the running configuration with `show`, edit it with `set`
 and `delete`, and apply your changes with `commit`.
 
+These commands exist only in configure mode. Typed at the exec prompt, they say
+so instead of running:
+
+``` shell
+ubuntu>set interface eth0 ipv6 address 2001:db8::1/64
+% 'set' is only available in configure mode; type 'configure' first.
+```
+
 See [VTY Access Control](ch-06-00-vty-access.md) for the full role and
 authentication model.

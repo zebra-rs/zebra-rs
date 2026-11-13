@@ -20,7 +20,11 @@ interface enp0s6 {
 | `/interface/<name>/vrf` | leafref `/vrf/name` | Enslave the interface to a VRF master device. |
 | `/interface/<name>/bridge` | leafref `/bridge/name` | Enslave the interface to a bridge master device. See below. |
 | `/interface/<name>/ipv4/address` | list keyed by `inet:ipv4-prefix`, or `dhcp` | IPv4 address(es) with prefix length — one per command, repeatable. See [Multiple IPv4 Addresses](ch-00-09-multi-address.md). `dhcp` leases one instead, and excludes static addresses on the interface: see [DHCP Client](ch-00-10-dhcp-client.md). |
-| `/interface/<name>/ipv6/address` | list keyed by `inet:ipv6-prefix`, or `autoconf` | IPv6 address(es) with prefix length — one per command, repeatable. `autoconf` takes the default route, on-link prefixes and SLAAC addresses from Router Advertisements, beside any configured address: see [DHCP Client](ch-00-10-dhcp-client.md#ipv6-router-advertisements-and-slaac). |
+| `/interface/<name>/ipv4/dhcp-options/…` | container | Options of the DHCP client `address dhcp` starts: the identity it presents, the distance of its routes, `no-default-route`, `no-name-server`. See [DHCP Client](ch-00-10-dhcp-client.md#options). |
+| `/interface/<name>/ipv6/address` | list keyed by `inet:ipv6-prefix`, or `autoconf`, or `dhcpv6` | IPv6 address(es) with prefix length — one per command, repeatable. `autoconf` takes the default route, on-link prefixes and SLAAC addresses from Router Advertisements; `dhcpv6` leases an address from a DHCPv6 server. Both may stand beside configured addresses and beside each other: see [DHCP Client](ch-00-10-dhcp-client.md#ipv6-router-advertisements-and-slaac). |
+| `/interface/<name>/ipv6/ra-options/…` | container | Options for what Router Advertisements give the interface: the distance of the routes, `no-default-route`, `no-name-server`. See [DHCP Client](ch-00-10-dhcp-client.md#ipv6-router-advertisements-and-slaac). |
+| `/interface/<name>/ipv6/dhcpv6-options/…` | container | Options of the DHCPv6 client, and `pd <id>` to have a prefix delegated and number other interfaces from it. See [DHCP Client](ch-00-10-dhcp-client.md#ipv6-dhcpv6). |
+| `/interface/<name>/ipv6/router-advertisements/send-advertisements` | `boolean` | Send Router Advertisements on the interface, naming its prefixes for the hosts on it. See [Router Advertisements](#router-advertisements). |
 
 The list entry itself is not a separate "create interface" operation —
 it just attaches configuration to a kernel device that already exists
@@ -29,6 +33,50 @@ from this block; devices it does own come from their dedicated top-level
 lists ([`bridge`](ch-00-04-bridge-configuration.md),
 [`vxlan`](ch-00-03-vxlan-configuration.md),
 [`vlan`](ch-00-08-vlan-configuration.md), `vrf`).
+
+## Addresses from DHCP and Router Advertisements
+
+An interface can take its addresses from the network instead of from
+the configuration. zebra-rs has its own DHCPv4 client, DHCPv6 client
+and Router Advertisement host for that. They are part of every
+zebra-rs: no `--feature` flag turns them on, and no other DHCP client
+(dhclient, dhcpcd, systemd-networkd, NetworkManager) should manage the
+same interface.
+
+```
+interface wan0 {
+  ipv4 {
+    address dhcp;
+  }
+  ipv6 {
+    address autoconf;
+    address dhcpv6;
+  }
+}
+```
+
+| Configuration | What the interface gets |
+|---|---|
+| `ipv4 address dhcp` | A leased IPv4 address, a default route, and the classless routes the lease names. It is the interface's only IPv4 address entry: a commit with a static address beside it is refused. |
+| `ipv6 address autoconf` | A default route and on-link prefixes from Router Advertisements, and a SLAAC address in each /64 advertised for it. |
+| `ipv6 address dhcpv6` | A leased IPv6 address, as a /128. The default route and the on-link prefixes come from Router Advertisements, as with `autoconf`, without a SLAAC address. |
+| `ipv6 dhcpv6-options pd <id>` | A delegated prefix, to number the interfaces behind the router from. |
+
+- **Name servers come with the address.** The name servers and search
+  domains a lease or a Router Advertisement names become the router's
+  own, with nothing more configured: zebra-rs hands them to
+  systemd-resolved. `no-name-server` under `dhcp-options`,
+  `dhcpv6-options` or `ra-options` keeps them back. See
+  [Name servers](ch-00-10-dhcp-client.md#name-servers).
+- **The routes are ordinary routes**, at administrative distance 210 by
+  default, so a default route from a routing protocol or a static one
+  wins over a leased one.
+- **`show interface` says where an address is from**: `dhcp`, `slaac`,
+  `dhcpv6`, or `dhcpv6-pd` for one from a delegated prefix, with the
+  lifetimes it has left.
+
+The [DHCP Client](ch-00-10-dhcp-client.md) chapter has the options, the
+show commands and what each client does.
 
 ## Bridge and VRF enslavement
 
@@ -157,6 +205,54 @@ the same value:
 If these ever disagree it indicates the notification path was missed —
 they are sourced from one RIB-driven update, not independent reads.
 
+## Router Advertisements
+
+`ipv6 router-advertisements send-advertisements true` makes the
+interface an advertising one (RFC 4861): zebra-rs sends Router
+Advertisements on it, every 200 to 600 seconds and in answer to a
+Router Solicitation, with a router lifetime of 1800 seconds. Hosts on
+the link take the router for their default.
+
+```
+interface lan0 {
+  ipv6 {
+    address 2001:db8:aa::1/64;
+    router-advertisements {
+      send-advertisements true;
+    }
+  }
+}
+```
+
+The advertisements name the interface's prefixes, so that the hosts
+form their own addresses (SLAAC): the /64 of each global address of the
+interface. Nothing more is configured for it.
+
+- **Which prefixes.** An address the configuration gives the interface,
+  and one it has from a delegated prefix
+  ([DHCP Client](ch-00-10-dhcp-client.md#numbering-the-interfaces-behind-the-router)).
+  Only a /64 is named, since that is what a host forms an address from.
+  An interface with link-local addresses alone, as BGP unnumbered uses
+  it, names none.
+- **Lifetimes.** The prefix of a configured address is advertised as
+  valid for 30 days and preferred for 7. The prefix of an address that
+  has lifetimes, a delegated one's, is advertised with what is left of
+  them, so that no host keeps it longer than the router does.
+- **Changes are told at once.** A prefix that comes or goes is
+  advertised within half a second and twice more in the next half
+  minute; a lease that is renewed, once.
+- **A prefix that goes is taken out of use.** When its address is
+  deleted, or the delegated prefix is replaced or given back, the
+  prefix is advertised with both lifetimes 0 (RFC 9096). A host that
+  hears it starts no new connection from its address in the prefix,
+  no longer takes the prefix for on-link, and keeps the address for
+  two hours at most. The prefix is named that way until the longest
+  valid lifetime it was advertised with is over, so that a host that
+  was away hears it too.
+
+`show ipv6 nd interface` lists the prefixes with the lifetimes they
+have at the moment ([below](#show-ipv6-nd-interface-ifname)).
+
 ## Show commands
 
 ### `show interface [brief | <name>]`
@@ -180,6 +276,9 @@ one. Each block holds:
   non-global scope, abnormal address state and finite lifetimes when
   they apply (see
   [Multiple IPv4 Addresses and the Secondary Flag](ch-00-09-multi-address.md)).
+  An address that is leased or learned names where it is from:
+  `dhcp`, `slaac`, `dhcpv6` or `dhcpv6-pd` (see
+  [DHCP Client](ch-00-10-dhcp-client.md)).
 - **The kernel's counters** for the interface.
 
 ```
@@ -249,7 +348,8 @@ JSON: a list of interface objects. The brief view carries `interface`,
 `vrf_binding`, `label_switching`, `inet_addresses` and
 `inet6_addresses`, each address with `address`, `scope` and (IPv4 only)
 `secondary`. Optional fields appear only when they apply: `mac_address`,
-`mtu_error`, an address's `flags`, `valid_lft` and `preferred_lft`, and
+`mtu_error`, an address's `flags`, `dynamic` (where a leased or learned
+address is from), `valid_lft` and `preferred_lft`, and
 a VLAN sub-interface's `vlan_id`, `parent` (the parent's name) and
 `parent_index`. The counters are in the text view only.
 
@@ -293,7 +393,10 @@ One block per interface, or for `<ifname>` only:
   the interval range, router lifetime, hop limit and M/O flags, the
   initial RAs still to send, when the next unsolicited one goes out,
   whether a solicited reply is pending, and when the last multicast RA
-  went. Instead of a countdown, the next unsolicited RA reads
+  went. Then the prefixes the advertisements name
+  ([Router Advertisements](#router-advertisements)), each with the
+  lifetimes it has now; one that went reads `(withdrawn, named for
+  another …)`. Instead of a countdown, the next unsolicited RA reads
   `suspended (link down)` while the link is down, and `held (…)` while
   the interface has no link-local an RA can be sent from:
   `held (link-local not ready)` for the second or two DAD takes after
@@ -319,6 +422,9 @@ Interface r1-r2 (ifindex 2)
     interval 200-600s, lifetime 1800s, hop-limit 64, managed=0 other=0
     initial advertisements remaining 0, next unsolicited in 4m53s
     solicited reply pending: no, last multicast 1m52s ago
+    Prefixes (2):
+      2001:db8:12::/64 valid 720h, preferred 168h
+      2001:db8:100:1::/64 valid 1h58m8s, preferred 58m8s
   Counters (daemon-observed)        Sent  Received
     Router solicitations               -         0
     Router advertisements              3         3
@@ -343,7 +449,9 @@ fields above (`min_interval_secs`, `max_interval_secs`,
 `link_local_hold` (`missing`, `not_ready` or `dad_failed` while held,
 otherwise `null`), `next_unsolicited_in_secs` (`null` while suspended
 or held),
-`solicited_pending`, `last_multicast_secs_ago`); each neighbor has
+`solicited_pending`, `last_multicast_secs_ago`, and `prefixes`, a list
+of `prefix`, `valid_secs`, `preferred_secs`, `withdrawn` and, on a
+withdrawn one, `withdrawn_for_secs`); each neighbor has
 `address`, `first_seen_secs`, `last_seen_secs`, its `rx_*` counts and
 its `last_ra_*` values.
 
@@ -354,6 +462,8 @@ its `last_ra_*` values.
 | `interface <n> mtu <v>` | `mtu <v>` (interface) / `ip link set <n> mtu <v>` |
 | `no interface <n> mtu` | restore original — no direct FRR equivalent (FRR leaves the last value) |
 | `interface <n> ipv4 address <p>` | `ip address <p>` (interface) |
+| `interface <n> ipv4 address dhcp` | no FRR equivalent: an external client (dhclient, dhcpcd, systemd-networkd) |
+| `interface <n> ipv6 address autoconf` | no FRR equivalent: the kernel's own (`accept_ra`, `autoconf` sysctls) |
 | `interface <n> vrf <name>` | `ip link set <n> master <name>` (VRF master) |
 | `interface <n> bridge <name>` | `ip link set <n> master <name>` (bridge master) |
 

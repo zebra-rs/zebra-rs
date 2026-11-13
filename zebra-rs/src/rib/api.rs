@@ -104,6 +104,15 @@ pub enum RibRx {
     /// `LinkDown` (operational down) — `LinkDel` is permanent for
     /// this ifindex.
     LinkDel(u32),
+    /// The `LinkDel` and the `LinkAdd` of this ifindex that follow are
+    /// one link moving to another VRF: the same device on the same
+    /// wire, not an end and a beginning. To `global_links` subscribers
+    /// only, which get both halves. For what a subscriber keeps about
+    /// the link's neighbours rather than about the link (`nd`: what its
+    /// hosts were told of prefixes), which a deleted device takes with
+    /// it and a moved one does not. A link that later has a deleted
+    /// one's index is another link, with other neighbours.
+    LinkMoving(u32),
     /// The MTU of an already-known link changed (operator
     /// `interface X mtu N`, or an external `ip link set`). Protocol
     /// modules cache MTU per interface for packet generation (OSPF DD
@@ -133,6 +142,14 @@ pub enum RibRx {
     },
     AddrAdd(LinkAddr),
     AddrDel(LinkAddr),
+    /// The lifetimes of an address that is known moved, and nothing
+    /// else of it did: a lease was renewed, a Router Advertisement
+    /// heard again. Not an `AddrAdd`, which has a protocol that
+    /// advertises an interface's addresses originate anew: this comes
+    /// with every renewal. It is for whoever counts lifetimes down
+    /// (`nd`, for the prefixes its Router Advertisements name), and
+    /// goes to `global_links` subscribers only.
+    AddrRenewed(LinkAddr),
     RouterIdUpdate(Ipv4Addr),
     /// The running config's `system hostname`, `None` when it has none:
     /// the name a protocol advertises for this router when no hostname of
@@ -451,6 +468,16 @@ impl Rib {
         self.api_link_del_vrf(ifindex, self.ifindex_vrf_id(ifindex));
     }
 
+    /// Tell the `global_links` subscribers that the `LinkDel` and
+    /// `LinkAdd` of `ifindex` they are about to get are a move to
+    /// another VRF (`RibRx::LinkMoving`).
+    pub fn api_link_moving(&self, ifindex: u32) {
+        let subs = self.client_registry.iter_link_subs(0);
+        for (_, sub) in subs.filter(|(_, sub)| sub.global_links) {
+            let _ = sub.rib_rx_tx.send(RibRx::LinkMoving(ifindex));
+        }
+    }
+
     /// Push `LinkDel` to subscribers bound to an explicit `vrf_id`.
     /// Used when an interface leaves a VRF: by the time we notify, the
     /// link's `master` already names the *new* VRF, so the *old* VRF
@@ -476,6 +503,16 @@ impl Rib {
     pub fn api_addr_add_vrf(&self, addr: &LinkAddr, vrf_id: u32) {
         for (_, sub) in self.client_registry.iter_link_subs(vrf_id) {
             let _ = sub.rib_rx_tx.send(RibRx::AddrAdd(addr.clone()));
+        }
+    }
+
+    /// Push `AddrRenewed` to the `global_links` subscribers: the ones
+    /// that follow every interface, whichever VRF it is in.
+    pub fn api_addr_renewed(&self, addr: &LinkAddr) {
+        let vrf_id = self.ifindex_vrf_id(addr.ifindex);
+        let subs = self.client_registry.iter_link_subs(vrf_id);
+        for (_, sub) in subs.filter(|(_, sub)| sub.global_links) {
+            let _ = sub.rib_rx_tx.send(RibRx::AddrRenewed(addr.clone()));
         }
     }
 

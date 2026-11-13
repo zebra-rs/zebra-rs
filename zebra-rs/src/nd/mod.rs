@@ -25,6 +25,7 @@ pub mod engine;
 pub mod host;
 pub mod inst;
 pub mod network;
+pub mod prefix;
 pub mod send;
 pub mod show;
 pub mod socket;

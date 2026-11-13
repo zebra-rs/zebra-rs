@@ -181,6 +181,11 @@ BGP neighbor-group: dynamic
   neighbor's RA, so check `send-advertisements true` on *both* ends,
   and that the `interface-neighbor` name matches the actual interface.
   First discovery can take ~16 seconds (RA timing).
+- **A numbered link also advertises its prefix.** An interface that
+  sends Router Advertisements names the /64 of each of its global
+  addresses in them
+  ([Router Advertisements](ch-00-02-interface-configuration.md#router-advertisements)).
+  An unnumbered link has none, and names nothing.
 - **Peer with `remote-as external` stays down.** Check that the
   neighbor is in a different AS: an OPEN carrying the local AS is
   refused with Bad Peer AS. For a neighbor in the local AS, configure

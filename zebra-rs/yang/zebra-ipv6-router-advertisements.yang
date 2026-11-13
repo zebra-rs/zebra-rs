@@ -52,6 +52,15 @@ module zebra-ipv6-router-advertisements {
            false — send is opt-in to avoid surprising operators of
            routers that haven't explicitly asked for it.
 
+           The advertisements name the interface's prefixes (Prefix
+           Information, on-link and for address autoconfiguration): the
+           /64 of each of its global addresses, a configured one's with
+           RFC 4861's lifetimes and a delegated prefix's
+           (`dhcpv6-options pd <id> interface`) with what is left of
+           the lease's. A prefix that goes is advertised with both
+           lifetimes zero (RFC 9096). An interface with link-local
+           addresses alone names none.
+
            Toggling this off removes the per-interface RA scheduler;
            toggling back on re-runs the initial bring-up burst (3
            unsolicited RAs within MAX_INITIAL_RTR_ADVERT_INTERVAL).";

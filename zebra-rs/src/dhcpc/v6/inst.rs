@@ -11,7 +11,10 @@
 //! - each address as a dynamic /128 that brings no connected route
 //!   (`AddrOrigin::Dhcp6`);
 //! - each delegated prefix as a discard route in the interface's VRF
-//!   ([`Dhcpc::sync_pd_routes`]).
+//!   ([`Dhcpc::sync_pd_routes`]);
+//! - a /64 of a delegated prefix as a dynamic address on each interface
+//!   `pd <id> interface` names (`AddrOrigin::Pd`,
+//!   [`Dhcpc::sync_pd_lan`]), which brings its connected route.
 //!
 //! The default route and the on-link prefixes are the RA host's to
 //! install (`nd`), not this client's.
@@ -32,9 +35,10 @@ use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 use crate::config::Args;
 use crate::dhcpc::ident::{self, DuidStore};
-use crate::dhcpc::inst::{DEFAULT_DISTANCE, Dhcpc, lifetime, report_dns, unix_now};
+use crate::dhcpc::inst::{DEFAULT_DISTANCE, Dhcpc, LinkInfo, lifetime, report_dns, unix_now};
 use crate::dhcpc::lease::Kept6;
 use crate::fib::AddrOpts;
+use crate::nd::host::eui64;
 use crate::resolver::{LinkDns, Source};
 use crate::rib::entry::RibEntry;
 use crate::rib::link::{AddrOrigin, LinkAddr};
@@ -65,7 +69,113 @@ pub struct IfConfig6 {
 pub struct PdConfig {
     /// `length`: the prefix length to hint at.
     pub length: Option<u8>,
+    /// `interface <if>`: the interfaces numbered from the delegation,
+    /// by name. Not part of what the client asks a server for: they
+    /// come and go while the prefix is held.
+    pub interfaces: BTreeMap<String, LanConfig>,
 }
+
+/// `dhcpv6-options pd <id> interface <if> …`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LanConfig {
+    /// `sla-id`: which /64 of the prefix; the first when not set.
+    pub sla_id: Option<u32>,
+    /// `address`: the host part. Not set, it is made from the
+    /// interface's hardware address.
+    pub address: Option<u64>,
+}
+
+/// Why an interface has no address from a delegated prefix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoAddress {
+    /// There is no such interface (yet).
+    NoLink,
+    /// It is the interface the prefix is delegated on, which must not
+    /// be numbered from it (RFC 8415 §6.3).
+    Upstream,
+    /// It is in another VRF than that interface.
+    OtherVrf,
+    /// The prefix is longer than a /64: it holds no /64 to give.
+    NoSubnet,
+    /// `sla-id` needs more bits than the prefix leaves up to the 64th
+    /// (RFC 7084 WPD-3).
+    SlaId,
+    /// No `address`, and no hardware address to make one from.
+    NoHardwareAddress,
+}
+
+impl std::fmt::Display for NoAddress {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            NoAddress::NoLink => "no such interface",
+            NoAddress::Upstream => "the prefix is delegated on this interface",
+            NoAddress::OtherVrf => "in another VRF",
+            NoAddress::NoSubnet => "the prefix is longer than a /64",
+            NoAddress::SlaId => "the prefix has no room for this sla-id",
+            NoAddress::NoHardwareAddress => "no hardware address: set `address`",
+        })
+    }
+}
+
+/// The /64 of `prefix` that `sla_id` numbers: the bits from the prefix's
+/// length up to the 64th.
+pub fn subnet(prefix: Ipv6Net, sla_id: u32) -> Result<Ipv6Net, NoAddress> {
+    let Some(bits) = 64u8.checked_sub(prefix.prefix_len()) else {
+        return Err(NoAddress::NoSubnet);
+    };
+    if u64::from(sla_id).checked_shr(bits.into()).unwrap_or(0) != 0 {
+        return Err(NoAddress::SlaId);
+    }
+    let network = u128::from(prefix.network()) | (u128::from(sla_id) << 64);
+    Ok(Ipv6Net::new_assert(Ipv6Addr::from(network), 64))
+}
+
+/// The address `lan` gives an interface with hardware address `mac` in
+/// `subnet`, a /64.
+fn address_in(
+    subnet: Ipv6Net,
+    lan: &LanConfig,
+    mac: Option<[u8; 6]>,
+) -> Result<Ipv6Net, NoAddress> {
+    let address = match lan.address {
+        Some(host) => Ipv6Addr::from(u128::from(subnet.network()) | u128::from(host)),
+        // A loopback's is all zeros, which names nobody.
+        None => match mac.filter(|mac| mac.iter().any(|octet| *octet != 0)) {
+            Some(mac) => eui64(subnet, mac),
+            None => return Err(NoAddress::NoHardwareAddress),
+        },
+    };
+    Ok(Ipv6Net::new_assert(address, 64))
+}
+
+/// One `pd <id> interface <if>` worked out for one prefix held.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Assignment {
+    /// The delegation, and the prefix of it.
+    pub id: u32,
+    pub prefix: Ipv6Net,
+    /// The interface to number, as configured.
+    pub ifname: String,
+    /// Its link and its address in its /64, or why it has none.
+    pub address: Result<(u32, Ipv6Net), NoAddress>,
+    /// The prefix's lifetimes, which are the address's.
+    pub preferred: u32,
+    pub valid: u32,
+}
+
+/// An address an interface holds from a delegated prefix.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LanAddress {
+    /// The interface the prefix is delegated on: the lease is its.
+    upstream: String,
+    /// The RIB is to be told of it again, though it has been: the
+    /// lease's lifetimes moved, or the link came up and may have lost it.
+    stale: bool,
+}
+
+/// The lifetime an address an earlier run left is claimed with, to be
+/// deleted at once: were the deletion lost, it goes all the same.
+const LEFTOVER_LIFETIME: u32 = 1;
 
 /// The length hinted at when `pd <id> length` is not set (VyOS's
 /// default).
@@ -181,6 +291,18 @@ pub struct V6 {
     /// The discard routes the RIB was last told of: each delegated
     /// prefix, in a VRF's table (`None`: the default one).
     pd_routes: BTreeSet<(Option<String>, Ipv6Net)>,
+    /// The addresses interfaces hold from delegated prefixes, as the RIB
+    /// was last told: by link and address (`sync_pd_lan`).
+    pd_lan: BTreeMap<(u32, Ipv6Net), LanAddress>,
+    /// The `pd <id> interface` entries that give no address, each with
+    /// the reason last said of it: by the interface the prefix is
+    /// delegated on, the delegation, the prefix and the interface.
+    pd_lan_refused: BTreeMap<(String, u32, Ipv6Net, String), NoAddress>,
+    /// Addresses a lease read back from disk had given: the interface
+    /// the lease is of, then the interface each is on, by name. They
+    /// are still in the kernel, and nobody's until the next
+    /// `sync_pd_lan` claims or removes them.
+    pd_lan_left: Vec<(String, String, Ipv6Net)>,
     /// What the resolver task was last told, by interface (`sync_dns6`).
     reported_dns: BTreeMap<String, LinkDns>,
 }
@@ -196,6 +318,9 @@ impl V6 {
             duid: None,
             touched: Vec::new(),
             pd_routes: BTreeSet::new(),
+            pd_lan: BTreeMap::new(),
+            pd_lan_refused: BTreeMap::new(),
+            pd_lan_left: Vec::new(),
             reported_dns: BTreeMap::new(),
         }
     }
@@ -323,14 +448,30 @@ impl Dhcpc {
         self.sync_link6(name);
         self.start_waiting6();
         // The link may be a VRF that a client's interface is in, known
-        // only now: the routes go to its table.
-        self.sync_pd_routes();
+        // only now: the routes go to its table. Or an interface that is
+        // to be numbered from a delegation.
+        self.sync_pd();
     }
 
     /// A link's hardware address changed, or it has one now.
     pub(in crate::dhcpc) fn link_mac6(&mut self, name: &str) {
         self.reconcile6(name);
         self.start_waiting6();
+        // An address made from it is another now.
+        self.sync_pd();
+    }
+
+    /// A link came up. An interface numbered from a delegation may have
+    /// lost its address meanwhile: the kernel takes a link's IPv6
+    /// addresses away when it is set down, and one added to a link that
+    /// is down has no route to its /64. So the RIB is told again.
+    pub(in crate::dhcpc) fn link_up6(&mut self, ifindex: u32) {
+        for ((link, _), held) in self.v6.pd_lan.iter_mut() {
+            if *link == ifindex {
+                held.stale = true;
+            }
+        }
+        self.sync_pd_lan();
     }
 
     /// Look again at the clients that could not start because the system
@@ -362,8 +503,11 @@ impl Dhcpc {
     pub(in crate::dhcpc) fn link_deleted6(&mut self, ifindex: u32, name: &str) {
         self.v6.link_locals.remove(&ifindex);
         let Some(mut iface) = self.v6.ifaces.remove(name) else {
-            // A VRF a client's interface was in, perhaps.
-            self.sync_pd_routes();
+            // A VRF a client's interface was in, perhaps, or an
+            // interface numbered from a delegation. Its address is
+            // taken back like any that is no longer wanted: a link that
+            // only moved to another VRF still has it.
+            self.sync_pd();
             return;
         };
         for slot in SLOTS {
@@ -411,6 +555,14 @@ impl Dhcpc {
             }
             self.sync_link6(&name);
             return;
+        }
+        // An address an interface holds from a delegation: there is
+        // nobody to decline it to, as there is for a leased one, and
+        // the kernel does not use it.
+        if add && addr.flags.dadfailed && self.v6.pd_lan.contains_key(&(addr.ifindex, net)) {
+            tracing::warn!(
+                "dhcpv6 client: {name}: {net} failed duplicate address detection: another node on the link has it; give the interface another `address`"
+            );
         }
         // A leased address is on the interface as a /128. The same
         // address under another length is somebody else's entry.
@@ -575,7 +727,9 @@ impl Dhcpc {
     ) {
         let unix = unix_now();
         let mut resume = None;
-        if let Some(kept) = self.store.load6(name, unix) {
+        let mut left = Vec::new();
+        if let Some(mut kept) = self.store.load6(name, unix) {
+            left = std::mem::take(&mut kept.lan);
             // Ours when it was taken as who the interface is now: the
             // same DUID, asking for the same.
             if kept.duid == duid && kept.asks == asks {
@@ -612,6 +766,22 @@ impl Dhcpc {
         iface.session = Some(session);
         tracing::info!("dhcpv6 client: {name}: started");
         self.carry_out6(name, ifindex, iface, Slot::Current, actions);
+        // The addresses that lease gave interfaces are still in the
+        // kernel, as long as the prefix each is of has not run out
+        // (their lifetimes are the prefix's). Whoever holds the lease
+        // now, `sync_pd_lan` claims the ones still wanted and removes
+        // the rest.
+        let held: Vec<Ipv6Net> = SLOTS
+            .iter()
+            .filter_map(|slot| iface.slot(*slot)?.bound.as_ref())
+            .flat_map(prefixes)
+            .map(|prefix| prefix.prefix)
+            .collect();
+        left.retain(|(_, address)| held.iter().any(|prefix| prefix.contains(&address.addr())));
+        let left = left.into_iter();
+        self.v6
+            .pd_lan_left
+            .extend(left.map(|(ifname, address)| (name.to_string(), ifname, address)));
     }
 
     /// Stop `iface`'s client for good. A lease it holds is withdrawn and
@@ -758,8 +928,15 @@ impl Dhcpc {
             self.v6.ifaces.insert(name.to_string(), iface);
         }
         // Every change to a client or its configuration ends here.
-        self.sync_pd_routes();
+        self.sync_pd();
         self.sync_dns6();
+    }
+
+    /// What follows the delegated prefixes held: their discard routes,
+    /// and the addresses of the interfaces numbered from them.
+    fn sync_pd(&mut self) {
+        self.sync_pd_routes();
+        self.sync_pd_lan();
     }
 
     /// Hand the RIB a discard route for each delegated prefix held, in
@@ -802,6 +979,252 @@ impl Dhcpc {
             });
         }
         self.v6.pd_routes = wanted;
+    }
+
+    /// The link named `name`, if there is one.
+    fn link_named(&self, name: &str) -> Option<(u32, &LinkInfo)> {
+        let mut links = self.links.iter();
+        links
+            .find(|(_, link)| link.name == name)
+            .map(|(ifindex, link)| (*ifindex, link))
+    }
+
+    /// The VRF device `ifindex` is in, or is. A master the task has not
+    /// heard of yet counts as one: a link dump names a member before its
+    /// VRF.
+    fn vrf_device(&self, ifindex: u32) -> Option<u32> {
+        let link = self.links.get(&ifindex)?;
+        if link.is_vrf {
+            return Some(ifindex);
+        }
+        let master = link.master?;
+        match self.links.get(&master) {
+            Some(link) if !link.is_vrf => None,
+            _ => Some(master),
+        }
+    }
+
+    /// The address `lan` gives the interface `ifname` in `prefix`, which
+    /// is delegated on `upstream`, with the link it goes on.
+    fn lan_address(
+        &self,
+        upstream: u32,
+        ifname: &str,
+        lan: &LanConfig,
+        prefix: Ipv6Net,
+    ) -> Result<(u32, Ipv6Net), NoAddress> {
+        let (ifindex, link) = self.link_named(ifname).ok_or(NoAddress::NoLink)?;
+        if ifindex == upstream {
+            return Err(NoAddress::Upstream);
+        }
+        // The prefix is routed to this router in the VRF it was asked
+        // for in, and its discard route is in that table.
+        if self.vrf_device(ifindex) != self.vrf_device(upstream) {
+            return Err(NoAddress::OtherVrf);
+        }
+        let subnet = subnet(prefix, lan.sla_id.unwrap_or(0))?;
+        Ok((ifindex, address_in(subnet, lan, link.mac)?))
+    }
+
+    /// What `iface`'s delegations give the interfaces configured under
+    /// them: one entry for each `pd <id> interface` and each prefix the
+    /// delegation holds, with the prefix's lifetimes as they stand at
+    /// `now`.
+    ///
+    /// By the lease of the current client only. One on its way out holds
+    /// its lease to give it back, and what it was delegated numbers
+    /// nothing any more.
+    pub(in crate::dhcpc) fn assignments6(&self, iface: &Iface6, now: Instant) -> Vec<Assignment> {
+        let mut out = Vec::new();
+        let (Some(upstream), Some(session)) = (iface.ifindex, &iface.session) else {
+            return out;
+        };
+        // What is in the RIB, with the time it has left now.
+        let Some(lease) = session
+            .bound
+            .as_ref()
+            .and_then(|_| session.client.lease(now))
+        else {
+            return out;
+        };
+        for ia in &lease.ia_pd {
+            let Some(pd) = iface.cfg.pd.get(&ia.iaid) else {
+                continue;
+            };
+            for prefix in &ia.prefixes {
+                for (ifname, lan) in &pd.interfaces {
+                    out.push(Assignment {
+                        id: ia.iaid,
+                        prefix: prefix.prefix,
+                        ifname: ifname.clone(),
+                        address: self.lan_address(upstream, ifname, lan, prefix.prefix),
+                        preferred: prefix.preferred,
+                        valid: prefix.valid,
+                    });
+                }
+            }
+        }
+        out
+    }
+
+    /// The addresses `upstream`'s delegations have given, as its lease
+    /// file names them: by the name of the interface each is on.
+    fn lan_record(&self, upstream: &str) -> Vec<(String, Ipv6Net)> {
+        let mut record = Vec::new();
+        for ((ifindex, address), held) in &self.v6.pd_lan {
+            if held.upstream == upstream
+                && let Some(link) = self.links.get(ifindex)
+            {
+                record.push((link.name.clone(), *address));
+            }
+        }
+        record
+    }
+
+    /// Give each interface `pd <id> interface` names its address in a
+    /// /64 of each prefix that delegation holds, and take back the
+    /// addresses of prefixes, of configuration and of links that are no
+    /// more. After every event that may have changed a lease, an
+    /// interface or the configuration.
+    ///
+    /// An address has its prefix's lifetimes, and the kernel counts them
+    /// down: it is handed over again when the lease's times move (a
+    /// renewal), not otherwise. Unlike a leased address it brings its
+    /// connected route. The /64 is this router's to put on the link, and
+    /// that route is what takes its traffic off the prefix's discard
+    /// route.
+    ///
+    /// An address the kernel loses meanwhile (an operator deletes it, or
+    /// sets the link down) comes back with the next renewal, or when the
+    /// link comes up (`link_up6`).
+    pub(in crate::dhcpc) fn sync_pd_lan(&mut self) {
+        let now = Instant::now();
+        let mut wanted: BTreeMap<(u32, Ipv6Net), (String, AddrOpts)> = BTreeMap::new();
+        let mut refused = BTreeMap::new();
+        for (upstream, iface) in &self.v6.ifaces {
+            for assignment in self.assignments6(iface, now) {
+                match assignment.address {
+                    Ok(key) => {
+                        let opts = AddrOpts {
+                            valid_lft: assignment.valid,
+                            preferred_lft: assignment.preferred,
+                            noprefixroute: false,
+                            broadcast: None,
+                        };
+                        wanted.insert(key, (upstream.clone(), opts));
+                    }
+                    Err(reason) => {
+                        let Assignment {
+                            id, prefix, ifname, ..
+                        } = assignment;
+                        refused.insert((upstream.clone(), id, prefix, ifname), reason);
+                    }
+                }
+            }
+        }
+        // Each reason is said once, when it comes to be: here the
+        // operator learns that a line of the configuration does nothing.
+        // (An interface that is not there yet is how a configuration
+        // starts.)
+        for (key, reason) in &refused {
+            if *reason == NoAddress::NoLink || self.v6.pd_lan_refused.get(key) == Some(reason) {
+                continue;
+            }
+            let (upstream, id, prefix, ifname) = key;
+            tracing::warn!(
+                "dhcpv6 client: {upstream}: pd {id} interface {ifname} gets no address from {prefix}: {reason}"
+            );
+        }
+        self.v6.pd_lan_refused = refused;
+
+        // What an earlier run left in the kernel. The RIB read it back
+        // as nobody's: one that is wanted is claimed below like any new
+        // one, and the others are claimed here so that they can be
+        // removed.
+        let mut changed: BTreeSet<String> = BTreeSet::new();
+        for (upstream, ifname, address) in std::mem::take(&mut self.v6.pd_lan_left) {
+            // Whatever becomes of it, the lease file is to name what is
+            // held from here on.
+            changed.insert(upstream);
+            let Some((ifindex, _)) = self.link_named(&ifname) else {
+                continue;
+            };
+            if wanted.contains_key(&(ifindex, address)) {
+                continue;
+            }
+            let _ = self.rib.send(Message::AddrDynAdd {
+                ifindex,
+                addr: IpNet::V6(address),
+                origin: AddrOrigin::Pd,
+                opts: AddrOpts {
+                    valid_lft: LEFTOVER_LIFETIME,
+                    preferred_lft: 0,
+                    noprefixroute: false,
+                    broadcast: None,
+                },
+            });
+            self.withdraw_lan(ifindex, address);
+            tracing::info!("dhcpv6 client: {ifname}: {address} of an earlier lease removed");
+        }
+
+        // The old before the new: a prefix that changed leaves first.
+        for ((ifindex, address), held) in &self.v6.pd_lan {
+            if wanted.contains_key(&(*ifindex, *address)) {
+                continue;
+            }
+            self.withdraw_lan(*ifindex, *address);
+            if let Some(link) = self.links.get(ifindex) {
+                tracing::info!("dhcpv6 client: {}: {address} withdrawn", link.name);
+            }
+            changed.insert(held.upstream.clone());
+        }
+        for ((ifindex, address), (upstream, opts)) in &wanted {
+            let held = self.v6.pd_lan.get(&(*ifindex, *address));
+            if held.is_some_and(|held| !held.stale && held.upstream == *upstream) {
+                continue;
+            }
+            let _ = self.rib.send(Message::AddrDynAdd {
+                ifindex: *ifindex,
+                addr: IpNet::V6(*address),
+                origin: AddrOrigin::Pd,
+                opts: *opts,
+            });
+            if held.is_none() {
+                if let Some(link) = self.links.get(ifindex) {
+                    tracing::info!(
+                        "dhcpv6 client: {}: {address} from the prefix delegated on {upstream}, valid {}",
+                        link.name,
+                        lifetime(opts.valid_lft),
+                    );
+                }
+                changed.insert(upstream.clone());
+            }
+        }
+        self.v6.pd_lan = wanted
+            .into_iter()
+            .map(|(key, (upstream, _))| {
+                let held = LanAddress {
+                    upstream,
+                    stale: false,
+                };
+                (key, held)
+            })
+            .collect();
+        // The lease file names them, for the run after this one.
+        for upstream in changed {
+            let record = self.lan_record(&upstream);
+            if let Err(e) = self.store.set_lan6(&upstream, &record) {
+                tracing::warn!("dhcpv6 client: {upstream}: lease file not updated: {e}");
+            }
+        }
+    }
+
+    fn withdraw_lan(&self, ifindex: u32, address: Ipv6Net) {
+        let _ = self.rib.send(Message::AddrDynDel {
+            ifindex,
+            addr: IpNet::V6(address),
+            origin: AddrOrigin::Pd,
+        });
     }
 
     /// Tell the resolver task what the clients now say of name servers:
@@ -964,16 +1387,24 @@ impl Dhcpc {
         for prefix in old_prefixes.difference(&new_prefixes) {
             tracing::info!("dhcpv6 client: {name}: {prefix} withdrawn");
         }
+        // The lease's times count from now: so do those of the
+        // addresses its prefixes give interfaces (`sync_pd_lan`).
+        for held in self.v6.pd_lan.values_mut() {
+            if held.upstream == name {
+                held.stale = true;
+            }
+        }
         if fresh {
             let obtained = unix_now();
             session.obtained = Some(obtained);
             // Under the identity that took it, which is the client's.
             // What `parameters-only` learns is asked for again instead.
+            let lan = self.lan_record(name);
             if save
                 && lease.has_leases()
-                && let Err(e) = self
-                    .store
-                    .save6(name, session.client.identity(), obtained, &lease)
+                && let Err(e) =
+                    self.store
+                        .save6(name, session.client.identity(), obtained, &lease, &lan)
             {
                 tracing::warn!("dhcpv6 client: {name}: lease not saved: {e}");
             }
@@ -1105,6 +1536,7 @@ mod tests {
     use crate::dhcpc::v6::client::{Ia, IaPd};
     use crate::dhcpc::v6::show::show_leases6;
     use crate::resolver::Report;
+    use crate::rib::api::RibRx;
     use crate::rib::client::{ProtoId, RibClient, RibInbound};
     use crate::rib::link::AddrFlags;
 
@@ -1123,6 +1555,11 @@ mod tests {
     const PREFIX2: &str = "2001:db8:200::/56";
     const VRF: &str = "red";
     const VRF_IFINDEX: u32 = 0x7fff_ffe1;
+    /// Two interfaces behind the router, to number from a delegation.
+    const LAN: &str = "dhcpc6-lan0";
+    const LAN_IFINDEX: u32 = 0x7fff_ffe2;
+    const LAN2: &str = "dhcpc6-lan1";
+    const LAN2_IFINDEX: u32 = 0x7fff_ffe3;
 
     struct Bench {
         dhcpc: Dhcpc,
@@ -1269,7 +1706,7 @@ mod tests {
     fn save_as(b: &Bench, identity: (&[u8], &Asks), age: u64, lease: &Lease) {
         b.dhcpc
             .store
-            .save6(IF, identity, unix_now() - age, lease)
+            .save6(IF, identity, unix_now() - age, lease, &[])
             .unwrap();
     }
 
@@ -1314,8 +1751,32 @@ mod tests {
     /// What the task asked of the RIB since the last call.
     fn asked(b: &mut Bench) -> Vec<String> {
         let mut out = Vec::new();
+        // The interfaces numbered from a delegation, as the tests call
+        // them.
+        let lan = |ifindex: u32| match ifindex {
+            LAN_IFINDEX => "lan0",
+            LAN2_IFINDEX => "lan1",
+            VRF_IFINDEX => VRF,
+            _ => panic!("an address for link {ifindex}"),
+        };
         while let Ok(inbound) = b.rib.try_recv() {
             out.push(match inbound.msg {
+                Message::AddrDynAdd {
+                    ifindex,
+                    addr,
+                    origin: AddrOrigin::Pd,
+                    opts,
+                } => {
+                    // It brings the route to its /64.
+                    assert!(!opts.noprefixroute && opts.broadcast.is_none());
+                    let times = format!("{}/{}", opts.preferred_lft, opts.valid_lft);
+                    format!("{} add {addr} {times}", lan(ifindex))
+                }
+                Message::AddrDynDel {
+                    ifindex,
+                    addr,
+                    origin: AddrOrigin::Pd,
+                } => format!("{} del {addr}", lan(ifindex)),
                 Message::AddrDynAdd {
                     ifindex,
                     addr,
@@ -1962,7 +2423,10 @@ mod tests {
     async fn pd_is_configured_by_its_id() {
         let mut b = bench("pd-config");
         let pd = |b: &Bench| b.dhcpc.v6.ifaces.get(IF).map(|iface| iface.cfg.pd.clone());
-        let hint = |length| PdConfig { length };
+        let hint = |length| PdConfig {
+            length,
+            ..PdConfig::default()
+        };
         config_line(&mut b, "pd", &["7"], ConfigOp::Set);
         assert_eq!(pd(&b), Some(BTreeMap::from([(7, hint(None))])));
         // The delegation alone starts a client, which asks for it.
@@ -2169,6 +2633,584 @@ mod tests {
                 format!("no route {PREFIX} vrf {VRF}"),
                 format!("route {PREFIX} discard distance 210"),
             ]
+        );
+    }
+
+    /// A link behind the router, with a hardware address.
+    fn add_lan(b: &mut Bench, ifindex: u32, name: &str) {
+        b.dhcpc.links.insert(
+            ifindex,
+            LinkInfo {
+                name: name.to_string(),
+                mac: Some([2, 0, 0, 0, 0, ifindex as u8]),
+                mtu: 1500,
+                up: true,
+                master: None,
+                is_vrf: false,
+            },
+        );
+    }
+
+    /// `pd 1`, with `interface <name> sla-id <n>` and its `address` for
+    /// each of `interfaces`.
+    fn lan_config(interfaces: &[(&str, u32, Option<u64>)]) -> IfConfig6 {
+        let mut cfg = pd_config(false, &[1]);
+        let pd = cfg.pd.get_mut(&1).unwrap();
+        for &(name, sla_id, address) in interfaces {
+            let lan = LanConfig {
+                sla_id: Some(sla_id),
+                address,
+            };
+            pd.interfaces.insert(name.to_string(), lan);
+        }
+        cfg
+    }
+
+    /// `lease` on disk, taken `age` seconds ago as `cfg` asks, with the
+    /// addresses it had given other interfaces.
+    fn save_given(b: &Bench, cfg: &IfConfig6, age: u64, lease: &Lease, given: &[(&str, &str)]) {
+        let given: Vec<(String, Ipv6Net)> = given
+            .iter()
+            .map(|(name, address)| (name.to_string(), address.parse().unwrap()))
+            .collect();
+        let identity = (&DUID[..], &cfg.asks(IF));
+        b.dhcpc
+            .store
+            .save6(IF, identity, unix_now() - age, lease, &given)
+            .unwrap();
+    }
+
+    /// The addresses the lease file names as given, by interface.
+    fn given(b: &Bench) -> Vec<(String, String)> {
+        let lan = saved(b).map(|kept| kept.lan).unwrap_or_default();
+        lan.into_iter()
+            .map(|(name, address)| (name, address.to_string()))
+            .collect()
+    }
+
+    fn shown(b: &Bench) -> String {
+        show_leases6(&b.dhcpc, Args(VecDeque::new()), false).unwrap()
+    }
+
+    #[test]
+    fn a_subnet_is_numbered_by_the_bits_up_to_the_64th() {
+        let net = |text: &str| text.parse::<Ipv6Net>().unwrap();
+        for (prefix, sla_id, want) in [
+            ("2001:db8:100::/56", 0, Ok("2001:db8:100::/64")),
+            ("2001:db8:100::/56", 1, Ok("2001:db8:100:1::/64")),
+            ("2001:db8:100::/56", 255, Ok("2001:db8:100:ff::/64")),
+            ("2001:db8:100::/56", 256, Err(NoAddress::SlaId)),
+            ("2001:db8:100::/48", 0xffff, Ok("2001:db8:100:ffff::/64")),
+            ("2001:db8:100::/48", 0x1_0000, Err(NoAddress::SlaId)),
+            // A /64 is its own one subnet.
+            ("2001:db8:100:5::/64", 0, Ok("2001:db8:100:5::/64")),
+            ("2001:db8:100:5::/64", 1, Err(NoAddress::SlaId)),
+            ("2001:db8:100:5::/63", 1, Ok("2001:db8:100:5::/64")),
+            ("2001:db8:100:4::/63", 2, Err(NoAddress::SlaId)),
+            // As many bits as an sla-id has, and more.
+            ("2001:db8::/32", u32::MAX, Ok("2001:db8:ffff:ffff::/64")),
+            ("2001::/16", u32::MAX, Ok("2001:0:ffff:ffff::/64")),
+            ("::/0", 5, Ok("0:0:0:5::/64")),
+            // Nothing to give.
+            ("2001:db8:100:5:8000::/65", 0, Err(NoAddress::NoSubnet)),
+            ("2001:db8:100:5::1/128", 0, Err(NoAddress::NoSubnet)),
+        ] {
+            assert_eq!(
+                subnet(net(prefix), sla_id),
+                want.map(net),
+                "{prefix} {sla_id}"
+            );
+        }
+
+        let subnet = net("2001:db8:100:1::/64");
+        let host = |address| LanConfig {
+            sla_id: None,
+            address,
+        };
+        let mac = Some([0x52, 0x54, 0, 0x12, 0x34, 0x56]);
+        for (address, mac, want) in [
+            (Some(1), mac, Ok("2001:db8:100:1::1/64")),
+            (
+                Some(u64::MAX),
+                None,
+                Ok("2001:db8:100:1:ffff:ffff:ffff:ffff/64"),
+            ),
+            // From the hardware address, unless it says which.
+            (None, mac, Ok("2001:db8:100:1:5054:ff:fe12:3456/64")),
+            (None, None, Err(NoAddress::NoHardwareAddress)),
+            (None, Some([0; 6]), Err(NoAddress::NoHardwareAddress)),
+        ] {
+            let got = address_in(subnet, &host(address), mac);
+            assert_eq!(got, want.map(net), "{address:?} {mac:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_interface_is_numbered_from_a_delegated_prefix() {
+        let mut b = bench("lan");
+        add_lan(&mut b, LAN_IFINDEX, LAN);
+        add_lan(&mut b, LAN2_IFINDEX, LAN2);
+        let cfg = lan_config(&[(LAN, 1, Some(1)), (LAN2, 0xff, None)]);
+        save_given(&b, &cfg, 600, &prefixes_only(&[(1, PREFIX)]), &[]);
+        commit(&mut b, cfg);
+        // Each its /64, with what is left of the prefix's lifetimes.
+        let first = "2001:db8:100:1::1/64";
+        let second = "2001:db8:100:ff:0:ff:fe00:e3/64";
+        assert_eq!(
+            asked(&mut b),
+            [
+                format!("route {PREFIX} discard distance 210"),
+                format!("lan0 add {first} 3000/6600"),
+                format!("lan1 add {second} 3000/6600"),
+            ]
+        );
+        // Shown under the prefix, and named in the lease file.
+        let text = shown(&b);
+        assert!(text.contains(&format!("    on {LAN}: {first}\n")), "{text}");
+        assert!(
+            text.contains(&format!("    on {LAN2}: {second}\n")),
+            "{text}"
+        );
+        let json = show_leases6(&b.dhcpc, Args(VecDeque::new()), true).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            json[0]["pd"][0]["prefixes"][0]["interfaces"],
+            serde_json::json!([
+                {"interface": LAN, "address": first},
+                {"interface": LAN2, "address": second},
+            ])
+        );
+        let both = [
+            (LAN.to_string(), first.to_string()),
+            (LAN2.to_string(), second.to_string()),
+        ];
+        assert_eq!(given(&b), both);
+
+        // The kernel counts the lifetimes down: nothing is said again
+        // while the lease is what it was.
+        make_ready(&mut b);
+        b.dhcpc.sync_pd_lan();
+        assert!(asked(&mut b).is_empty());
+        // A link that comes up may have lost its address: it is told
+        // again, and no other. Going down says nothing.
+        b.dhcpc.process_rib_msg(RibRx::LinkDown(LAN_IFINDEX));
+        assert!(asked(&mut b).is_empty());
+        b.dhcpc.process_rib_msg(RibRx::LinkUp(LAN_IFINDEX));
+        assert_eq!(asked(&mut b), [format!("lan0 add {first} 3000/6600")]);
+
+        // An interface that goes takes its address out of the file, and
+        // one that comes (back) gets its address.
+        b.dhcpc.links.remove(&LAN2_IFINDEX);
+        b.dhcpc.link_deleted6(LAN2_IFINDEX, LAN2);
+        assert_eq!(asked(&mut b), [format!("lan1 del {second}")]);
+        assert_eq!(given(&b), both[..1]);
+        add_lan(&mut b, LAN2_IFINDEX, LAN2);
+        b.dhcpc.link_added6(LAN2_IFINDEX, LAN2, &[]);
+        assert_eq!(asked(&mut b), [format!("lan1 add {second} 3000/6600")]);
+        assert_eq!(given(&b), both);
+
+        // The prefix given back: so are its addresses.
+        b.dhcpc.release6(verb());
+        assert_eq!(
+            asked(&mut b),
+            [
+                format!("no route {PREFIX}"),
+                format!("lan0 del {first}"),
+                format!("lan1 del {second}"),
+            ]
+        );
+        assert!(saved(&b).is_none());
+    }
+
+    #[tokio::test]
+    async fn a_lease_whose_times_move_tells_the_interfaces_again() {
+        let mut b = bench("lan-times");
+        add_lan(&mut b, LAN_IFINDEX, LAN);
+        add_lan(&mut b, LAN2_IFINDEX, LAN2);
+        // Two delegations, the second with ten seconds to live.
+        let mut cfg = lan_config(&[(LAN, 1, Some(1))]);
+        let mut second = PdConfig::default();
+        let lan = LanConfig {
+            sla_id: Some(2),
+            address: Some(1),
+        };
+        second.interfaces.insert(LAN2.to_string(), lan);
+        cfg.pd.insert(2, second);
+        let mut held = prefixes_only(&[(1, PREFIX), (2, PREFIX2)]);
+        held.ia_pd[1].prefixes[0].preferred = 100;
+        held.ia_pd[1].prefixes[0].valid = 610;
+        save_given(&b, &cfg, 600, &held, &[]);
+        commit(&mut b, cfg);
+        let first = "2001:db8:100:1::1/64";
+        let short = "2001:db8:200:2::1/64";
+        assert_eq!(
+            asked(&mut b),
+            [
+                format!("route {PREFIX} discard distance 210"),
+                format!("route {PREFIX2} discard distance 210"),
+                format!("lan0 add {first} 3000/6600"),
+                // No longer preferred: for what is still open only.
+                format!("lan1 add {short} 0/10"),
+            ]
+        );
+        // The second runs out. Its address goes before anything else,
+        // and the lease, which is another now, is said again with the
+        // times it has: the other address's count from here.
+        run_timers(&mut b, Duration::from_secs(20));
+        assert_eq!(
+            asked(&mut b),
+            [
+                format!("no route {PREFIX2}"),
+                format!("lan1 del {short}"),
+                format!("lan0 add {first} 2990/6590"),
+            ]
+        );
+        assert_eq!(given(&b), [(LAN.to_string(), first.to_string())]);
+
+        // The link the prefix is delegated on goes: the binding is
+        // dropped, and what it gave with it.
+        b.dhcpc.links.remove(&IFINDEX);
+        b.dhcpc.link_deleted6(IFINDEX, IF);
+        assert_eq!(
+            asked(&mut b),
+            [format!("no route {PREFIX}"), format!("lan0 del {first}")]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_lease_written_again_still_names_what_it_gave() {
+        let mut b = bench("lan-rewritten");
+        add_lan(&mut b, LAN_IFINDEX, LAN);
+        let mut cfg = lan_config(&[(LAN, 1, Some(1))]);
+        cfg.address = true;
+        let held = delegated(lease(&[ADDRESS]), &[(1, PREFIX)]);
+        save_given(&b, &cfg, 0, &held, &[]);
+        commit(&mut b, cfg);
+        let first = "2001:db8:100:1::1/64";
+        assert_eq!(
+            asked(&mut b),
+            [
+                format!("add {ADDRESS}/128 3600/7200"),
+                format!("route {PREFIX} discard distance 210"),
+                format!("lan0 add {first} 3600/7200"),
+            ]
+        );
+        let named = [(LAN.to_string(), first.to_string())];
+        assert_eq!(given(&b), named);
+        // The kernel drops the leased address: the lease is another,
+        // and written again. What its prefix gave is as it was, in the
+        // file too, and is told again as the lease is.
+        b.dhcpc
+            .addr_event6(&kernel(ADDRESS, 128, AddrFlags::default()), false);
+        assert_eq!(
+            asked(&mut b),
+            [
+                format!("del {ADDRESS}/128"),
+                format!("lan0 add {first} 3600/7200"),
+            ]
+        );
+        let kept = saved(&b).expect("the prefix is still leased");
+        assert!(addresses(&kept.lease).is_empty());
+        assert_eq!(given(&b), named);
+    }
+
+    #[tokio::test]
+    async fn the_interfaces_of_a_delegation_follow_the_configuration() {
+        let mut b = bench("lan-config");
+        add_lan(&mut b, LAN_IFINDEX, LAN);
+        add_lan(&mut b, LAN2_IFINDEX, LAN2);
+        let cfg = pd_config(false, &[1]);
+        save_given(&b, &cfg, 0, &prefixes_only(&[(1, PREFIX)]), &[]);
+        commit(&mut b, cfg);
+        assert_eq!(
+            asked(&mut b),
+            [format!("route {PREFIX} discard distance 210")]
+        );
+        let add = |address: &str| format!("add {address} 3600/7200");
+        let del = |address: &str| format!("del {address}");
+
+        // An interface is one line: the first /64, and an address made
+        // from its hardware address.
+        config_line(&mut b, "pd/interface", &["1", LAN], ConfigOp::Set);
+        let made = "2001:db8:100::ff:fe00:e2/64";
+        assert_eq!(asked(&mut b), [format!("lan0 {}", add(made))]);
+        // Its leaves come with it or after, and each moves the address.
+        config_line(
+            &mut b,
+            "pd/interface/address",
+            &["1", LAN, "1"],
+            ConfigOp::Set,
+        );
+        let host = "2001:db8:100::1/64";
+        assert_eq!(
+            asked(&mut b),
+            [format!("lan0 {}", del(made)), format!("lan0 {}", add(host))]
+        );
+        config_line(
+            &mut b,
+            "pd/interface/sla-id",
+            &["1", LAN, "16"],
+            ConfigOp::Set,
+        );
+        let numbered = "2001:db8:100:10::1/64";
+        assert_eq!(
+            asked(&mut b),
+            [
+                format!("lan0 {}", del(host)),
+                format!("lan0 {}", add(numbered))
+            ]
+        );
+        // A leaf alone makes its entry.
+        config_line(
+            &mut b,
+            "pd/interface/sla-id",
+            &["1", LAN2, "17"],
+            ConfigOp::Set,
+        );
+        let other = "2001:db8:100:11:0:ff:fe00:e3/64";
+        assert_eq!(asked(&mut b), [format!("lan1 {}", add(other))]);
+        // None of it is asked of a server: the client is who it was.
+        assert_eq!(state(&b), State::Bound);
+        assert_eq!(retiring(&b), None);
+        assert_eq!(given(&b).len(), 2);
+
+        // A leaf deleted is its default again.
+        config_line(&mut b, "pd/interface/sla-id", &["1", LAN], ConfigOp::Delete);
+        assert_eq!(
+            asked(&mut b),
+            [
+                format!("lan0 {}", del(numbered)),
+                format!("lan0 {}", add(host))
+            ]
+        );
+        config_line(
+            &mut b,
+            "pd/interface/address",
+            &["1", LAN],
+            ConfigOp::Delete,
+        );
+        assert_eq!(
+            asked(&mut b),
+            [format!("lan0 {}", del(host)), format!("lan0 {}", add(made))]
+        );
+        config_line(
+            &mut b,
+            "pd/interface/address",
+            &["1", LAN, "1"],
+            ConfigOp::Set,
+        );
+        assert_eq!(
+            asked(&mut b),
+            [format!("lan0 {}", del(made)), format!("lan0 {}", add(host))]
+        );
+        // A deleted entry is gone whichever of its lines comes last.
+        config_line(&mut b, "pd/interface", &["1", LAN2], ConfigOp::Delete);
+        assert_eq!(asked(&mut b), [format!("lan1 {}", del(other))]);
+        config_line(
+            &mut b,
+            "pd/interface/sla-id",
+            &["1", LAN2],
+            ConfigOp::Delete,
+        );
+        config_line(
+            &mut b,
+            "pd/interface/address",
+            &["1", LAN2],
+            ConfigOp::Delete,
+        );
+        assert!(asked(&mut b).is_empty());
+        let interfaces = |b: &Bench| {
+            let pd = &b.dhcpc.v6.ifaces[IF].cfg.pd[&1];
+            pd.interfaces.keys().cloned().collect::<Vec<_>>()
+        };
+        assert_eq!(interfaces(&b), [LAN]);
+        assert_eq!(given(&b), [(LAN.to_string(), host.to_string())]);
+
+        // So is a deleted delegation, with its interfaces: the prefix is
+        // given back, and the lines of its interfaces bring nothing
+        // back.
+        config_line(&mut b, "pd", &["1"], ConfigOp::Delete);
+        assert_eq!(
+            asked(&mut b),
+            [format!("no route {PREFIX}"), format!("lan0 {}", del(host))]
+        );
+        config_line(&mut b, "pd/interface", &["1", LAN], ConfigOp::Delete);
+        config_line(
+            &mut b,
+            "pd/interface/address",
+            &["1", LAN],
+            ConfigOp::Delete,
+        );
+        assert!(asked(&mut b).is_empty());
+        assert!(b.dhcpc.v6.ifaces[IF].cfg.pd.is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_interface_that_cannot_be_numbered_is_said_and_left_alone() {
+        let mut b = bench("lan-refused");
+        // Neither interface is there yet; one entry names the interface
+        // the prefix is delegated on, and one a /64 a /56 does not have.
+        let cfg = lan_config(&[(LAN, 1, Some(1)), (LAN2, 256, Some(1)), (IF, 2, Some(1))]);
+        save_given(&b, &cfg, 0, &prefixes_only(&[(1, PREFIX)]), &[]);
+        commit(&mut b, cfg);
+        assert_eq!(
+            asked(&mut b),
+            [format!("route {PREFIX} discard distance 210")]
+        );
+        let none = |name: &str, reason: &str| format!("    on {name}: none ({reason})\n");
+        let text = shown(&b);
+        assert!(text.contains(&none(LAN, "no such interface")), "{text}");
+        assert!(text.contains(&none(LAN2, "no such interface")), "{text}");
+        let upstream = "the prefix is delegated on this interface";
+        assert!(text.contains(&none(IF, upstream)), "{text}");
+
+        // The interfaces appear: one is numbered, the other still not.
+        add_lan(&mut b, LAN_IFINDEX, LAN);
+        b.dhcpc.link_added6(LAN_IFINDEX, LAN, &[]);
+        let first = "2001:db8:100:1::1/64";
+        assert_eq!(asked(&mut b), [format!("lan0 add {first} 3600/7200")]);
+        add_lan(&mut b, LAN2_IFINDEX, LAN2);
+        b.dhcpc.link_added6(LAN2_IFINDEX, LAN2, &[]);
+        assert!(asked(&mut b).is_empty());
+        let text = shown(&b);
+        let no_room = "the prefix has no room for this sla-id";
+        assert!(text.contains(&none(LAN2, no_room)), "{text}");
+        assert!(text.contains(&format!("    on {LAN}: {first}\n")), "{text}");
+        let refused: Vec<NoAddress> = b.dhcpc.v6.pd_lan_refused.values().copied().collect();
+        assert_eq!(refused, [NoAddress::SlaId, NoAddress::Upstream]);
+
+        // The prefix is in the table of the VRF it is delegated in, and
+        // numbers no interface outside it.
+        enslave(&mut b, true);
+        b.dhcpc.link_added6(VRF_IFINDEX, VRF, &[]);
+        assert_eq!(
+            asked(&mut b),
+            [
+                format!("no route {PREFIX}"),
+                format!("route {PREFIX} vrf {VRF} discard distance 210"),
+                format!("lan0 del {first}"),
+            ]
+        );
+        assert!(shown(&b).contains(&none(LAN, "in another VRF")));
+        // One that joins it is numbered, and so is the VRF's own device.
+        b.dhcpc.links.get_mut(&LAN_IFINDEX).unwrap().master = Some(VRF_IFINDEX);
+        b.dhcpc.link_added6(LAN_IFINDEX, LAN, &[]);
+        assert_eq!(asked(&mut b), [format!("lan0 add {first} 3600/7200")]);
+        let mut cfg = b.dhcpc.v6.ifaces[IF].cfg.clone();
+        let lan = LanConfig {
+            sla_id: Some(3),
+            address: Some(1),
+        };
+        let pd = cfg.pd.get_mut(&1).unwrap();
+        pd.interfaces.insert(VRF.to_string(), lan);
+        commit(&mut b, cfg);
+        assert_eq!(asked(&mut b), ["red add 2001:db8:100:3::1/64 3600/7200"]);
+    }
+
+    #[tokio::test]
+    async fn an_address_made_from_the_hardware_address_follows_it() {
+        let mut b = bench("lan-mac");
+        add_lan(&mut b, LAN_IFINDEX, LAN);
+        b.dhcpc.links.get_mut(&LAN_IFINDEX).unwrap().mac = None;
+        let cfg = lan_config(&[(LAN, 1, None)]);
+        save_given(&b, &cfg, 0, &prefixes_only(&[(1, PREFIX)]), &[]);
+        commit(&mut b, cfg);
+        assert_eq!(
+            asked(&mut b),
+            [format!("route {PREFIX} discard distance 210")]
+        );
+        let reason = "no hardware address: set `address`";
+        let text = shown(&b);
+        assert!(
+            text.contains(&format!("    on {LAN}: none ({reason})\n")),
+            "{text}"
+        );
+        // It has one now, and then another.
+        for (last, made) in [(0xe2, "e2"), (0xe9, "e9")] {
+            b.dhcpc.links.get_mut(&LAN_IFINDEX).unwrap().mac = Some([2, 0, 0, 0, 0, last]);
+            b.dhcpc.link_mac6(LAN);
+            let asked_now = asked(&mut b);
+            let add = format!("lan0 add 2001:db8:100:1:0:ff:fe00:{made}/64 3600/7200");
+            assert_eq!(asked_now.last(), Some(&add), "{asked_now:?}");
+            assert_eq!(asked_now.len(), if last == 0xe2 { 1 } else { 2 });
+        }
+    }
+
+    #[tokio::test]
+    async fn what_an_earlier_run_gave_is_claimed_or_removed() {
+        let first = "2001:db8:100:1::1/64";
+        let second = "2001:db8:100:2::1/64";
+        // The lease is resumed, and one of the two interfaces it had
+        // numbered is no longer configured: that address is claimed to
+        // be removed, and the other with the times it has now.
+        let mut b = bench("lan-left");
+        add_lan(&mut b, LAN_IFINDEX, LAN);
+        add_lan(&mut b, LAN2_IFINDEX, LAN2);
+        let cfg = lan_config(&[(LAN, 1, Some(1))]);
+        let held = prefixes_only(&[(1, PREFIX)]);
+        save_given(&b, &cfg, 600, &held, &[(LAN, first), (LAN2, second)]);
+        commit(&mut b, cfg);
+        assert_eq!(
+            asked(&mut b),
+            [
+                format!("route {PREFIX} discard distance 210"),
+                format!("lan1 add {second} 0/1"),
+                format!("lan1 del {second}"),
+                format!("lan0 add {first} 3000/6600"),
+            ]
+        );
+        assert_eq!(given(&b), [(LAN.to_string(), first.to_string())]);
+
+        // No interface is configured any more: the file names none
+        // either, or the next run would remove them once more.
+        let mut b = bench("lan-left-all");
+        add_lan(&mut b, LAN_IFINDEX, LAN);
+        let cfg = pd_config(false, &[1]);
+        save_given(&b, &cfg, 600, &held, &[(LAN, first), ("gone0", second)]);
+        commit(&mut b, cfg);
+        assert_eq!(
+            asked(&mut b),
+            [
+                format!("route {PREFIX} discard distance 210"),
+                format!("lan0 add {first} 0/1"),
+                format!("lan0 del {first}"),
+            ]
+        );
+        assert!(saved(&b).is_some());
+        assert!(given(&b).is_empty());
+
+        // The lease was taken as somebody else and is given back: what
+        // it gave goes at once, though the interface is still
+        // configured. The next lease numbers it.
+        let mut b = bench("lan-left-retired");
+        add_lan(&mut b, LAN_IFINDEX, LAN);
+        let cfg = lan_config(&[(LAN, 1, Some(1))]);
+        save_given(&b, &cfg, 600, &held, &[(LAN, first)]);
+        let mut hinted = cfg.clone();
+        hinted.pd.get_mut(&1).unwrap().length = Some(56);
+        commit(&mut b, hinted);
+        assert_eq!(
+            asked(&mut b),
+            [
+                format!("route {PREFIX} discard distance 210"),
+                format!("lan0 add {first} 0/1"),
+                format!("lan0 del {first}"),
+            ]
+        );
+        assert_eq!(retiring(&b), Some(State::Bound));
+
+        // A prefix that ran out while nobody looked took its addresses
+        // with it: the kernel has none to remove.
+        let mut b = bench("lan-left-expired");
+        add_lan(&mut b, LAN_IFINDEX, LAN);
+        let cfg = pd_config(false, &[1, 2]);
+        let mut held = prefixes_only(&[(1, PREFIX), (2, PREFIX2)]);
+        held.ia_pd[1].prefixes[0].valid = 610;
+        save_given(&b, &cfg, 700, &held, &[(LAN, "2001:db8:200:1::1/64")]);
+        commit(&mut b, cfg);
+        assert_eq!(
+            asked(&mut b),
+            [format!("route {PREFIX} discard distance 210")]
         );
     }
 

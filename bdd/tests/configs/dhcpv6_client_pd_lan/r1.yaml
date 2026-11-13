@@ -1,0 +1,19 @@
+# r1: a DHCPv6 WAN that asks for an address and for one delegated
+# prefix, hinting at a /56, and numbers two interfaces from it: lan0
+# with the second /64 and the host part 1, lan1 with the third and an
+# address made from its hardware address.
+interface:
+- if-name: wan0
+  ipv6:
+    address:
+    - dhcpv6
+    dhcpv6-options:
+      pd:
+      - id: 1
+        length: 56
+        interface:
+        - if-name: lan0
+          sla-id: 1
+          address: 1
+        - if-name: lan1
+          sla-id: 2

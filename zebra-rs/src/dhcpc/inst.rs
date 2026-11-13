@@ -371,7 +371,7 @@ impl Dhcpc {
         }
     }
 
-    fn process_rib_msg(&mut self, msg: RibRx) {
+    pub(super) fn process_rib_msg(&mut self, msg: RibRx) {
         match msg {
             RibRx::LinkAdd(link) => {
                 let name = link.name.clone();
@@ -393,6 +393,9 @@ impl Dhcpc {
                 link.up = up;
                 let name = link.name.clone();
                 self.sync_link6(&name);
+                if up {
+                    self.link_up6(ifindex);
+                }
                 if self.is_releasing(&name) {
                     // The old identity's client only has a RELEASE left
                     // to send, which the link coming up may now allow.

@@ -24,6 +24,19 @@ pub struct AddressView {
     pub valid_in: u32,
 }
 
+/// One interface numbered from a delegated prefix (`dhcpv6-options pd
+/// <id> interface`).
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct LanView {
+    pub interface: String,
+    /// Its address in its /64 of the prefix.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub address: Option<String>,
+    /// Why it has none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
 /// One delegated prefix.
 #[derive(Debug, Serialize, PartialEq, Eq)]
 pub struct PrefixView {
@@ -31,6 +44,10 @@ pub struct PrefixView {
     /// Seconds left; `u32::MAX` never ends.
     pub preferred_in: u32,
     pub valid_in: u32,
+    /// The interfaces configured to be numbered from it, in the order
+    /// of their names.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub interfaces: Vec<LanView>,
 }
 
 /// One delegation asked for (`dhcpv6-options pd <id>`), with what is
@@ -160,11 +177,30 @@ fn view(dhcpc: &Dhcpc, name: &str, iface: &Iface6, now: Instant) -> LeaseView6 {
                 prefix: p.prefix.to_string(),
                 preferred_in: p.preferred,
                 valid_in: p.valid,
+                interfaces: vec![],
             })
             .collect();
         pd.server_duid = Some(format_duid(&ia.server_id));
         pd.renew_in = (ia.t1 != u32::MAX).then_some(ia.t1);
         pd.rebind_in = (ia.t2 != u32::MAX).then_some(ia.t2);
+    }
+    // What each prefix gives the interfaces configured under its
+    // delegation.
+    for assignment in dhcpc.assignments6(iface, now) {
+        let prefix = assignment.prefix.to_string();
+        let pd = view.pd.iter_mut().find(|pd| pd.id == assignment.id);
+        let held = pd.and_then(|pd| pd.prefixes.iter_mut().find(|p| p.prefix == prefix));
+        let Some(held) = held else {
+            continue;
+        };
+        held.interfaces.push(LanView {
+            interface: assignment.ifname,
+            address: assignment
+                .address
+                .ok()
+                .map(|(_, address)| address.to_string()),
+            reason: assignment.address.err().map(|reason| reason.to_string()),
+        });
     }
     // The next Renew, and the next Rebind, of anything leased: each
     // identity association has its own times.
@@ -238,6 +274,14 @@ fn render(view: &LeaseView6, out: &mut String) -> std::fmt::Result {
                 pd.id,
             )?;
             label = "";
+            for lan in &prefix.interfaces {
+                let on = format!("on {}:", lan.interface);
+                match (&lan.address, &lan.reason) {
+                    (Some(address), _) => writeln!(out, "    {on:<11} {address}")?,
+                    (None, Some(reason)) => writeln!(out, "    {on:<11} none ({reason})")?,
+                    (None, None) => {}
+                }
+            }
         }
         if pd.prefixes.is_empty() {
             writeln!(out, "  {label:<13} none (pd {})", pd.id)?;
@@ -398,11 +442,24 @@ mod tests {
                     prefix: "2001:db8:100::/56".into(),
                     preferred_in: 3000,
                     valid_in: 6600,
+                    interfaces: vec![
+                        LanView {
+                            interface: "lan0".into(),
+                            address: Some("2001:db8:100:1::1/64".into()),
+                            reason: None,
+                        },
+                        LanView {
+                            interface: "a-long-name-1".into(),
+                            address: None,
+                            reason: Some("in another VRF".into()),
+                        },
+                    ],
                 },
                 PrefixView {
                     prefix: "2001:db8:200::/56".into(),
                     preferred_in: u32::MAX,
                     valid_in: u32::MAX,
+                    interfaces: vec![],
                 },
             ],
             server_duid: Some("00:03:00:01:02:00:00:00:00:fd".into()),
@@ -431,6 +488,8 @@ mod tests {
              \x20 Server:       fe80::1\n\
              \x20 Server DUID:  00:03:00:01:02:00:00:00:00:fe\n\
              \x20 Prefix:       2001:db8:100::/56 preferred 3000s valid 6600s (pd 1)\n\
+             \x20   on lan0:    2001:db8:100:1::1/64\n\
+             \x20   on a-long-name-1: none (in another VRF)\n\
              \x20               2001:db8:200::/56 preferred forever valid forever (pd 1)\n\
              \x20               none (pd 7)\n\
              \x20 Renew in:     1200s\n\
@@ -443,7 +502,15 @@ mod tests {
                 {
                     "id": 1,
                     "prefixes": [
-                        {"prefix": "2001:db8:100::/56", "preferred_in": 3000, "valid_in": 6600},
+                        {
+                            "prefix": "2001:db8:100::/56",
+                            "preferred_in": 3000,
+                            "valid_in": 6600,
+                            "interfaces": [
+                                {"interface": "lan0", "address": "2001:db8:100:1::1/64"},
+                                {"interface": "a-long-name-1", "reason": "in another VRF"},
+                            ],
+                        },
                         {
                             "prefix": "2001:db8:200::/56",
                             "preferred_in": u32::MAX,
