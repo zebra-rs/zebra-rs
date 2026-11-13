@@ -1,0 +1,3 @@
+# r.yaml without the VRF and everything that was in it.
+interface:
+- if-name: lan0
