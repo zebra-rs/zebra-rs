@@ -580,7 +580,7 @@ impl SystemHostname {
             },
         };
         if let Err(reason) = &store {
-            tracing::info!("system hostname is not applied to the system: {reason}");
+            tracing::debug!("system hostname is not applied to the system: {reason}");
         }
         Self::new(store)
     }
