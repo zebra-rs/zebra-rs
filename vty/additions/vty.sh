@@ -400,9 +400,43 @@ _cli_register_first_level_command ()
   IFS=${OOIFS}
   if (( registered > 0 )); then
     _cli_first_level_registered=1
+    [[ ${CLI_MODE} == "exec" ]] && _cli_register_configure_only_commands
   else
     _cli_first_level_registered=0
   fi
+}
+
+# Configure-mode commands typed in exec mode used to fall through to
+# bash. `set` is a bash builtin, so `set interface ... address ...` was
+# taken without a word (it set the shell's positional parameters) and
+# the operator, finding nothing in running-config, could not tell why;
+# `commit`, `delete` and the rest said only "command not found". Alias
+# each first-level configure command that exec mode lacks to a message
+# naming the mode it belongs to. Only the whole word is aliased, and
+# only when exec mode has no alias for it yet: a prefix such as `s` or
+# `c` may be an exec command's. `exit` stays bash's, which is how exec
+# mode leaves the vty.
+_cli_register_configure_only_commands ()
+{
+  local cmd input
+  input=$(${cli_command} -f -m configure 2>/dev/null)
+  while read -r cmd; do
+    [[ -z ${cmd} || ${cmd} == "exit" ]] && continue
+    alias "${cmd}" >/dev/null 2>&1 && continue
+    alias "${cmd}=_cli_configure_only ${cmd}"
+  done <<<"${input}"
+}
+
+_cli_configure_only ()
+{
+  # A bare `clear` still clears the screen, as in any shell; `clear
+  # isis neighbor` and the like are configure-mode commands.
+  if [[ $1 == "clear" && $# -eq 1 ]]; then
+    command clear
+    return
+  fi
+  echo "% '$1' is only available in configure mode; type 'configure' first."
+  return 1
 }
 
 # Re-attempt first-level registration if the initial attempt at vty
