@@ -35,6 +35,11 @@ use super::{LinkDns, Report, ResolverTx, Source};
 const RETRY_MIN: Duration = Duration::from_secs(5);
 const RETRY_MAX: Duration = Duration::from_secs(300);
 
+/// Why a command that worked is tried again: when it was over, the name
+/// it said was not the interface's it was started for, and which of the
+/// two it found is not known.
+const CHANGED_HANDS: &str = "the name changed hands while the command ran";
+
 /// One change to the system resolver's configuration of an interface.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Op {
@@ -303,12 +308,74 @@ impl<B: Backend> Resolver<B> {
         }
     }
 
-    /// Note what the interface called `name` holds now. What was noted
-    /// under that name for another interface, renamed since and still
-    /// there, stays noted, under the name it has.
-    fn note(&mut self, name: &str, held: Held) {
+    /// Note what a command that said `name` has left: `held`, on the
+    /// interface that had the name when the command was started. True
+    /// when that could be noted as it is.
+    ///
+    /// The name may have changed hands while the command ran, and what
+    /// is noted is an interface's, by its index, not a name's:
+    ///
+    /// - The interface has another name now. What it holds is noted
+    ///   under that name, and as not known: which of the two the
+    ///   command found is not.
+    /// - Another interface has the name now, with something noted for
+    ///   it. That stays noted, and as not known for the same reason.
+    ///   Noted in its place, `held` would be the end of that interface
+    ///   here and on record, with its settings still in.
+    ///
+    /// Either way the caller has something to try again: what is not
+    /// known is looked at again, and not left for the next change to
+    /// bring.
+    fn note(&mut self, name: &str, held: Held) -> bool {
         self.follow_renames();
+        // The interface the command was started for, where it is now.
+        let own = held
+            .ifindex
+            .and_then(|ifindex| self.backend.ifname(ifindex));
+        if let Some(now) = own
+            && now != name
+        {
+            // It is this run's, whatever was waited for under the name.
+            self.waiting.remove(&now);
+            let moved = Held {
+                ifindex: held.ifindex,
+                dns: None,
+            };
+            self.applied.insert(now, moved);
+            if let Some(other) = self.applied.get_mut(name) {
+                other.dns = None;
+            }
+            return false;
+        }
+        // Still under the name, or not there: not seen when the command
+        // was started, or gone since. What is noted under the name for
+        // an interface that is there, and is not that one, is another's
+        // that took the name in the meantime.
+        if let Some(other) = self.applied.get_mut(name)
+            && other.ifindex != held.ifindex
+            && let Some(theirs) = other.ifindex
+            && self.backend.ifname(theirs).is_some()
+        {
+            other.dns = None;
+            return false;
+        }
         self.applied.insert(name.to_string(), held);
+        true
+    }
+
+    /// What the interface that has `name` now holds is no longer known:
+    /// a command said the name while it changed hands, and may have
+    /// found that interface. It is noted wherever that interface is,
+    /// which is under the name it had before until the next look.
+    fn doubt(&mut self, name: &str) {
+        let Some(ifindex) = self.backend.ifindex(name) else {
+            return;
+        };
+        for held in self.applied.values_mut() {
+            if held.ifindex == Some(ifindex) {
+                held.dns = None;
+            }
+        }
     }
 
     /// Nothing is held under `name` any more.
@@ -471,6 +538,15 @@ impl<B: Backend> Resolver<B> {
                 continue;
             };
             let failure = match self.run(Op::Revert(link.clone()), None).await {
+                // The name the command said is not this interface's
+                // any more: renamed while the command ran, it may not
+                // be the one that was found. It is asked again under
+                // the name it has, and whatever has the name the
+                // command said may have lost what is noted for it.
+                Ok(()) if self.link(&name).is_some_and(|now| now != link) => {
+                    self.doubt(&link);
+                    Failure::Uncertain(CHANGED_HANDS.to_string())
+                }
                 Ok(()) => {
                     tracing::info!("resolver: {link}: name servers withdrawn");
                     self.forget(&name);
@@ -548,13 +624,19 @@ impl<B: Backend> Resolver<B> {
     /// - the servers in and the domains not: something of ours that is
     ///   not `dns`;
     /// - both in: `dns`.
+    ///
+    /// All of that is the interface's the name was when the servers'
+    /// command was started. A name that is another's when a command is
+    /// over ends the attempt (`note`): the commands say names, and the
+    /// next one would be for whatever has the name now, which the next
+    /// look sets from the start.
     async fn set(
         &mut self,
         name: &str,
         ifindex: Option<u32>,
         dns: &LinkDns,
     ) -> Result<(), Failure> {
-        let unknown = Held { ifindex, dns: None };
+        let unknown = || Held { ifindex, dns: None };
         // On record before the command is started (`run`). A record
         // that cannot be written does not keep the servers from the
         // host: it is tried again with the look that follows
@@ -565,20 +647,32 @@ impl<B: Backend> Resolver<B> {
             Ok(()) => {}
             Err(failure) => {
                 if matches!(failure, Failure::Uncertain(_)) {
-                    self.note(name, unknown);
+                    self.note(name, unknown());
                 }
                 return Err(failure);
             }
         }
-        self.note(name, unknown);
+        if !self.note(name, unknown()) {
+            return Err(Failure::Uncertain(CHANGED_HANDS.to_string()));
+        }
         // The interface is on record from the servers' command.
-        self.run(Op::Domains(name.to_string(), dns.domains.clone()), None)
-            .await?;
+        let domains = Op::Domains(name.to_string(), dns.domains.clone());
+        if let Err(failure) = self.run(domains, None).await {
+            // Still "something", which is noted already. But noted
+            // again where the command was started, for a name that
+            // changed hands while it ran.
+            if matches!(failure, Failure::Uncertain(_)) {
+                self.note(name, unknown());
+            }
+            return Err(failure);
+        }
         let held = Held {
             ifindex,
             dns: Some(dns.clone()),
         };
-        self.note(name, held);
+        if !self.note(name, held) {
+            return Err(Failure::Uncertain(CHANGED_HANDS.to_string()));
+        }
         Ok(())
     }
 
@@ -688,6 +782,8 @@ mod tests {
         /// Interfaces that are renamed while the next command runs: the
         /// name each has, and the one it is given.
         renaming: Vec<(String, String)>,
+        /// How many commands run before the one the renames come with.
+        renaming_after: usize,
         /// The index of the interfaces that do. One not said here is
         /// given an index of its own when it is first asked for.
         index: BTreeMap<String, u32>,
@@ -755,8 +851,12 @@ mod tests {
             }
             let leaving = std::mem::take(&mut script.leaving);
             script.missing.extend(leaving);
-            for (old, new) in std::mem::take(&mut script.renaming) {
-                script.rename(&old, &new);
+            if script.renaming_after > 0 {
+                script.renaming_after -= 1;
+            } else {
+                for (old, new) in std::mem::take(&mut script.renaming) {
+                    script.rename(&old, &new);
+                }
             }
             script.answers.pop_front().unwrap_or(Ok(()))
         }
@@ -902,6 +1002,23 @@ mod tests {
             self.index(old);
             let mut script = self.mock.0.lock().unwrap();
             script.renaming.push((old.to_string(), new.to_string()));
+        }
+
+        /// Two interfaces take each other's names while the next command
+        /// runs.
+        fn exchange_at_the_next_command(&mut self, one: &str, other: &str) {
+            self.index(one);
+            self.index(other);
+            let mut script = self.mock.0.lock().unwrap();
+            for (old, new) in [(one, "spare"), (other, one), ("spare", other)] {
+                script.renaming.push((old.to_string(), new.to_string()));
+            }
+        }
+
+        /// The same, while the command after the next one runs.
+        fn exchange_at_the_command_after_next(&mut self, one: &str, other: &str) {
+            self.exchange_at_the_next_command(one, other);
+            self.mock.0.lock().unwrap().renaming_after = 1;
         }
 
         /// The index of an interface that is there.
@@ -1369,6 +1486,400 @@ mod tests {
         b.sweep().await;
         assert_eq!(b.ran(), revert("wan1"));
         assert_eq!(b.record(), links(&[(WAN, 8)]));
+    }
+
+    /// Two interfaces take each other's names while a command for one of
+    /// them runs. What the command leaves is noted for the interface it
+    /// was started for, under the name that one has by then, and not in
+    /// the place of the other's: both stay on record, in that pass and
+    /// after it. Which of the two the command found is not known, so
+    /// neither is taken to hold what it did, and the name is set again
+    /// at the next try, which is not left for a change to bring.
+    #[tokio::test]
+    async fn interfaces_that_exchange_their_names_in_mid_command_both_stay_on_record() {
+        // The command works, or it was started and did not.
+        for (leg, answer) in [("worked", Ok(())), ("failed", failed())] {
+            let mut b = Bench::after(&format!("exchanged-in-mid-command-{leg}"), &[], None);
+            b.resume();
+            {
+                let mut script = b.mock.0.lock().unwrap();
+                script.index.insert(WAN.to_string(), 7);
+                script.index.insert("wan1".to_string(), 8);
+            }
+            b.report(WAN, Some(dns(&["198.51.100.53"], &[]))).await;
+            b.report("wan1", Some(dns(&["203.0.113.53"], &[]))).await;
+            b.ran();
+            b.recorded();
+
+            b.exchange_at_the_next_command(WAN, "wan1");
+            b.answer(&[answer]);
+            b.report(WAN, Some(dns(&["198.51.100.54"], &[]))).await;
+            assert_eq!((b.index(WAN), b.index("wan1")), (8, 7), "{leg}");
+            // The servers' command, and no more for a name that is
+            // another interface's now. Then the interface the command
+            // was started for, wanted under the name it has.
+            assert_eq!(
+                b.ran(),
+                [
+                    set(WAN, &["198.51.100.54"], &[])[..1].to_vec(),
+                    set("wan1", &["203.0.113.53"], &[])
+                ]
+                .concat(),
+                "{leg}"
+            );
+            for at_command in b.recorded() {
+                let mut indexes: Vec<u32> = at_command.iter().map(|(_, index)| *index).collect();
+                indexes.sort();
+                assert_eq!(indexes, [7, 8], "{leg}: {at_command:?}");
+            }
+            assert_eq!(b.record(), links(&[(WAN, 8), ("wan1", 7)]), "{leg}");
+            assert!(b.resolver.retry.is_some(), "{leg}");
+
+            b.sync().await;
+            assert_eq!(b.ran(), set(WAN, &["198.51.100.54"], &[]), "{leg}");
+            assert_eq!(b.record(), links(&[(WAN, 8), ("wan1", 7)]), "{leg}");
+            assert!(b.resolver.retry.is_none(), "{leg}");
+            b.sync().await;
+            assert_eq!(b.ran(), [], "{leg}");
+        }
+    }
+
+    /// The same exchange while the domains' command runs, the servers'
+    /// being in. Neither interface is taken to hold what the commands
+    /// said, though both are wanted with that very thing: which of them
+    /// the last command found is not known, and both are set again.
+    #[tokio::test]
+    async fn interfaces_that_exchange_their_names_in_mid_command_are_both_set_again() {
+        let same = || Some(dns(&["203.0.113.53"], &["example.net"]));
+        let mut b = Bench::after("exchanged-at-the-domains", &[], None);
+        b.resume();
+        {
+            let mut script = b.mock.0.lock().unwrap();
+            script.index.insert(WAN.to_string(), 7);
+            script.index.insert("wan1".to_string(), 8);
+        }
+        b.report(WAN, Some(dns(&["198.51.100.53"], &[]))).await;
+        b.report("wan1", same()).await;
+        b.ran();
+
+        b.exchange_at_the_command_after_next(WAN, "wan1");
+        b.report(WAN, same()).await;
+        assert_eq!((b.index(WAN), b.index("wan1")), (8, 7));
+        assert_eq!(
+            b.ran(),
+            [
+                set(WAN, &["203.0.113.53"], &["example.net"]),
+                set("wan1", &["203.0.113.53"], &["example.net"])
+            ]
+            .concat()
+        );
+        assert_eq!(b.record(), links(&[(WAN, 8), ("wan1", 7)]));
+        assert!(b.resolver.retry.is_some());
+
+        b.sync().await;
+        assert_eq!(b.ran(), set(WAN, &["203.0.113.53"], &["example.net"]));
+        assert!(b.resolver.retry.is_none());
+        b.sync().await;
+        assert_eq!(b.ran(), []);
+    }
+
+    /// The same exchange while a domains' command runs that is started
+    /// and does not succeed. It may have reached the interface that has
+    /// the name now, and what was noted for that one is not taken for
+    /// held: wanted under the name by the next try, it is set.
+    #[tokio::test]
+    async fn interfaces_that_exchange_their_names_in_a_command_that_fails_are_both_set_again() {
+        let mut b = Bench::after("exchanged-at-the-failed-domains", &[], None);
+        b.resume();
+        {
+            let mut script = b.mock.0.lock().unwrap();
+            script.index.insert(WAN.to_string(), 7);
+            script.index.insert("wan1".to_string(), 8);
+        }
+        b.report(WAN, Some(dns(&["198.51.100.53"], &[]))).await;
+        b.report("wan1", Some(dns(&["203.0.113.53"], &[]))).await;
+        b.ran();
+
+        b.exchange_at_the_command_after_next(WAN, "wan1");
+        b.answer(&[Ok(()), failed()]);
+        b.report(WAN, Some(dns(&["198.51.100.54"], &["example.net"])))
+            .await;
+        assert_eq!((b.index(WAN), b.index("wan1")), (8, 7));
+        assert_eq!(
+            b.ran(),
+            [
+                set(WAN, &["198.51.100.54"], &["example.net"]),
+                set("wan1", &["203.0.113.53"], &[])
+            ]
+            .concat()
+        );
+        assert_eq!(b.record(), links(&[(WAN, 8), ("wan1", 7)]));
+
+        // The name wants what its new interface held before the
+        // command.
+        b.report(WAN, Some(dns(&["203.0.113.53"], &[]))).await;
+        assert_eq!(b.ran(), set(WAN, &["203.0.113.53"], &[]));
+        assert_eq!(b.record(), links(&[(WAN, 8), ("wan1", 7)]));
+        b.sync().await;
+        assert_eq!(b.ran(), []);
+    }
+
+    /// Two interfaces that are both to be taken back exchange their
+    /// names while the first withdrawal runs. That one may have found
+    /// either, and the second says the same name: the interface the
+    /// first was started for is not taken for withdrawn. It stays noted
+    /// and on record, and is taken back at the next try under the name
+    /// it has.
+    #[tokio::test]
+    async fn interfaces_that_exchange_their_names_in_mid_withdrawal_are_both_taken_back() {
+        let mut b = Bench::after("exchanged-in-mid-withdrawal", &[], None);
+        b.resume();
+        {
+            let mut script = b.mock.0.lock().unwrap();
+            script.index.insert(WAN.to_string(), 7);
+            script.index.insert("wan1".to_string(), 8);
+        }
+        b.report(WAN, Some(dns(&["198.51.100.53"], &[]))).await;
+        b.report("wan1", Some(dns(&["203.0.113.53"], &[]))).await;
+        b.ran();
+
+        b.exchange_at_the_next_command(WAN, "wan1");
+        b.learn(WAN, None);
+        b.learn("wan1", None);
+        b.sync().await;
+        assert_eq!((b.index(WAN), b.index("wan1")), (8, 7));
+        // Both say the name that 8 has now.
+        assert_eq!(b.ran(), [revert(WAN), revert(WAN)].concat());
+        let on_record: Vec<u32> = b.record().iter().map(|(_, index)| *index).collect();
+        assert_eq!(on_record, [7]);
+        assert!(b.resolver.retry.is_some());
+
+        b.sync().await;
+        assert_eq!(b.ran(), revert("wan1"));
+        assert_eq!(b.record(), []);
+        assert!(b.resolver.applied.is_empty());
+        assert!(b.resolver.retry.is_none());
+    }
+
+    /// The same exchange while one interface is taken back and the
+    /// other keeps what it holds. The withdrawal may have found the one
+    /// that keeps it: what is noted for that one is not taken for held,
+    /// and it is set when the name it has now wants that very thing.
+    #[tokio::test]
+    async fn a_withdrawal_that_may_have_found_another_interface_leaves_nothing_taken_for_held() {
+        let mut b = Bench::after("withdrawal-found-another", &[], None);
+        b.resume();
+        {
+            let mut script = b.mock.0.lock().unwrap();
+            script.index.insert(WAN.to_string(), 7);
+            script.index.insert("wan1".to_string(), 8);
+        }
+        b.report(WAN, Some(dns(&["198.51.100.53"], &[]))).await;
+        b.report("wan1", Some(dns(&["203.0.113.53"], &[]))).await;
+        b.ran();
+
+        b.exchange_at_the_next_command(WAN, "wan1");
+        b.report(WAN, None).await;
+        assert_eq!((b.index(WAN), b.index("wan1")), (8, 7));
+        // What the other name wants goes to the interface that has it
+        // now.
+        assert_eq!(
+            b.ran(),
+            [revert(WAN), set("wan1", &["203.0.113.53"], &[])].concat()
+        );
+        assert_eq!(b.record(), links(&[(WAN, 8), ("wan1", 7)]));
+        assert!(b.resolver.retry.is_some());
+
+        b.report(WAN, Some(dns(&["203.0.113.53"], &[]))).await;
+        assert_eq!(b.ran(), set(WAN, &["203.0.113.53"], &[]));
+        assert_eq!(b.record(), links(&[(WAN, 8), ("wan1", 7)]));
+        b.sync().await;
+        assert_eq!(b.ran(), []);
+    }
+
+    /// An interface is renamed while its own withdrawal runs, and
+    /// nobody takes the name. It is asked again under the name it has.
+    #[tokio::test]
+    async fn an_interface_renamed_in_mid_withdrawal_is_taken_back_under_its_new_name() {
+        let mut b = Bench::after("renamed-in-mid-withdrawal", &[], None);
+        b.resume();
+        b.report(WAN, Some(dns(&["198.51.100.53"], &[]))).await;
+        b.ran();
+        let index = b.index(WAN);
+
+        b.rename_at_the_next_command(WAN, "wanx");
+        b.report(WAN, None).await;
+        assert_eq!(b.ran(), revert(WAN));
+        let on_record: Vec<u32> = b.record().iter().map(|(_, index)| *index).collect();
+        assert_eq!(on_record, [index]);
+        assert!(b.resolver.retry.is_some());
+
+        b.sync().await;
+        assert_eq!(b.ran(), revert("wanx"));
+        assert_eq!(b.record(), []);
+        assert!(b.resolver.retry.is_none());
+    }
+
+    /// An interface is renamed while its own command runs, and nobody
+    /// takes the name. What it holds is noted under the name it has, as
+    /// not known, and nothing more is said to the old name in that
+    /// attempt. The next try, which comes by itself, takes it back under
+    /// the new name: nobody wants it there.
+    #[tokio::test]
+    async fn an_interface_renamed_in_mid_command_is_noted_under_its_new_name() {
+        let mut b = Bench::after("renamed-in-mid-command", &[], None);
+        b.resume();
+        b.report(WAN, Some(dns(&["198.51.100.53"], &[]))).await;
+        b.ran();
+        let index = b.index(WAN);
+
+        b.rename_at_the_next_command(WAN, "wanx");
+        b.report(WAN, Some(dns(&["198.51.100.54"], &["example.net"])))
+            .await;
+        assert_eq!(
+            b.ran(),
+            set(WAN, &["198.51.100.54"], &["example.net"])[..1].to_vec()
+        );
+        assert_eq!(b.record(), links(&[("wanx", index)]));
+        let noted: Vec<&String> = b.resolver.applied.keys().collect();
+        assert_eq!(noted, ["wanx"]);
+        assert!(b.resolver.retry.is_some());
+
+        // The old name is nobody's: its command fails.
+        b.answer(&[Ok(()), failed()]);
+        b.sync().await;
+        assert_eq!(
+            b.ran(),
+            [
+                revert("wanx"),
+                set(WAN, &["198.51.100.54"], &["example.net"])[..1].to_vec()
+            ]
+            .concat()
+        );
+        assert_eq!(b.record(), []);
+    }
+
+    /// A command says a name no interface has when it is started, and
+    /// while it runs an interface that holds something of ours is given
+    /// that name. What is noted for the name does not take the place of
+    /// what is noted for that interface: it stays on record, and is set
+    /// at the next try as what the name wants.
+    #[tokio::test]
+    async fn a_name_taken_in_mid_command_by_an_interface_that_holds_something_keeps_it_on_record() {
+        let mut b = Bench::after("name-taken-in-mid-command", &[], None);
+        b.resume();
+        b.report("wan1", Some(dns(&["203.0.113.53"], &[]))).await;
+        b.ran();
+        let index = b.index("wan1");
+        b.mock.0.lock().unwrap().missing.push(WAN.to_string());
+
+        b.rename_at_the_next_command("wan1", WAN);
+        // The second command says the name that interface had.
+        b.answer(&[Ok(()), failed()]);
+        b.report(WAN, Some(dns(&["198.51.100.53"], &[]))).await;
+        assert_eq!(
+            b.ran(),
+            [
+                set(WAN, &["198.51.100.53"], &[])[..1].to_vec(),
+                set("wan1", &["203.0.113.53"], &[])[..1].to_vec()
+            ]
+            .concat()
+        );
+        assert_eq!(b.record(), links(&[(WAN, index)]));
+        assert!(b.resolver.retry.is_some());
+
+        // What that interface holds is not known either: the command
+        // may have found it. By the next try the name wants what was
+        // noted for the interface before, and that is set, not taken
+        // for held.
+        b.learn(WAN, Some(dns(&["203.0.113.53"], &[])));
+        b.answer(&[Ok(()), Ok(()), failed()]);
+        b.sync().await;
+        assert_eq!(
+            b.ran(),
+            [
+                set(WAN, &["203.0.113.53"], &[]),
+                set("wan1", &["203.0.113.53"], &[])[..1].to_vec()
+            ]
+            .concat()
+        );
+        assert_eq!(b.record(), links(&[(WAN, index)]));
+    }
+
+    /// The same, when the name was an interface's that went while its
+    /// command ran: deleted, and another that holds something of ours
+    /// renamed to it. That one stays on record.
+    #[tokio::test]
+    async fn a_name_passed_on_in_mid_command_keeps_its_new_interface_on_record() {
+        let mut b = Bench::after("name-passed-on-in-mid-command", &[], None);
+        b.resume();
+        b.report(WAN, Some(dns(&["198.51.100.53"], &[]))).await;
+        b.report("wan1", Some(dns(&["203.0.113.53"], &[]))).await;
+        b.ran();
+        let (gone, stays) = (b.index(WAN), b.index("wan1"));
+
+        b.mock.0.lock().unwrap().leaving.push(WAN.to_string());
+        b.rename_at_the_next_command("wan1", WAN);
+        b.answer(&[Ok(()), failed()]);
+        b.report(WAN, Some(dns(&["198.51.100.54"], &[]))).await;
+        assert_eq!(b.index(WAN), stays);
+        assert_eq!(b.mock.ifname(gone), None);
+        assert_eq!(
+            b.ran(),
+            [
+                set(WAN, &["198.51.100.54"], &[])[..1].to_vec(),
+                set("wan1", &["203.0.113.53"], &[])[..1].to_vec()
+            ]
+            .concat()
+        );
+        assert_eq!(b.record(), links(&[(WAN, stays)]));
+        assert!(b.resolver.retry.is_some());
+
+        b.answer(&[Ok(()), Ok(()), failed()]);
+        b.sync().await;
+        assert_eq!(
+            b.ran(),
+            [
+                set(WAN, &["198.51.100.54"], &[]),
+                set("wan1", &["203.0.113.53"], &[])[..1].to_vec()
+            ]
+            .concat()
+        );
+        assert_eq!(b.record(), links(&[(WAN, stays)]));
+    }
+
+    /// An interface this run sets for the first time is renamed while
+    /// the command runs, to a name an earlier run's interface was still
+    /// waited for under, which is gone. It is this run's, and not waited
+    /// for: nobody wants it under that name, and the next try takes it
+    /// back.
+    #[tokio::test]
+    async fn an_interface_renamed_in_mid_command_is_not_waited_for_because_its_new_name_was() {
+        let mut b = Bench::after(
+            "mid-command-name-was-waited-for",
+            &[("wan1", 8)],
+            Some(&[(WAN, 7), ("wan1", 8)]),
+        );
+        b.resume();
+        b.mock.0.lock().unwrap().missing.push("wan1".to_string());
+
+        b.rename_at_the_next_command(WAN, "wan1");
+        b.report(WAN, Some(dns(&["198.51.100.53"], &[]))).await;
+        assert_eq!(b.ran(), set(WAN, &["198.51.100.53"], &[])[..1].to_vec());
+        assert_eq!(b.record(), links(&[("wan1", 7)]));
+        assert!(b.resolver.retry.is_some());
+
+        b.answer(&[Ok(()), failed()]);
+        b.sync().await;
+        assert_eq!(
+            b.ran(),
+            [
+                revert("wan1"),
+                set(WAN, &["198.51.100.53"], &[])[..1].to_vec()
+            ]
+            .concat()
+        );
+        assert_eq!(b.record(), []);
     }
 
     /// Whether an interface is waited for is the interface's, not its

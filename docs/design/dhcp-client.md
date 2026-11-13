@@ -1487,6 +1487,22 @@ is given), and Router Advertisements (RDNSS, DNSSL).**
     reporting the old name, under which nothing can be set: renaming an
     interface under a running zebra-rs takes its name servers from the
     host.
+  - **Renamed while its command runs**, an interface is not the one of
+    that name any more when the command is over: the name is nobody's,
+    or another interface's (two exchanging theirs, or one renamed to a
+    name just given up). The commands say names, and which interface
+    the command found is not known. So what it left is noted for the
+    interface it was started for, by its index and under the name that
+    one has by then, as "something". What is noted for an interface
+    that has taken the name stays noted, as "something" too: noted in
+    its place, the outcome of the command would take that interface off
+    the record with its settings still in. Nothing more is said to the
+    name in that attempt, and the next try comes as after a command
+    that failed, 5 s later, when every name is set from the start on
+    the interface that has it. A revert that worked is not taken for
+    this interface's either: it stays noted and is reverted again under
+    the name it has, and what is noted for the interface that has the
+    name the revert said is "something" from then on.
   - So the index is turned into the name the interface has at that
     moment before every revert, the first try and each later one, which
     can be 5 min after the one that failed. An index that is gone ends
@@ -1550,9 +1566,8 @@ is given), and Router Advertisements (RDNSS, DNSSL).**
     interface made since under that name. One that was renamed, while
     zebra-rs was down or since, is the same interface under another
     name: it is taken over, and taken back, under the name it has. A
-    record
-    of another boot names nothing: resolved keeps its links' settings
-    under `/run`, and the indexes of the boot before are other
+    record of another boot names nothing: resolved keeps its links'
+    settings under `/run`, and the indexes of the boot before are other
     interfaces' now, or the same ones' by chance. Nor does one of
     another network namespace (`/proc/self/ns/net`), whose indexes are
     its own. Where the boot or the namespace cannot be read, no record
