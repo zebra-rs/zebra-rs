@@ -115,6 +115,12 @@ pub trait Backend: Send + 'static {
     /// system resolver keeps a renamed interface's settings. It keeps
     /// them for as long as that interface exists: one deleted and made
     /// again under the same name has another index, and none of them.
+    ///
+    /// `None` is the end of what the interface held: it is forgotten
+    /// with no command and no further try. So `None` only where it is
+    /// known that no interface has the index. Where that cannot be
+    /// found out, the interface is there, under whatever name can be
+    /// given it.
     fn ifname(&self, ifindex: u32) -> Option<String>;
 }
 
@@ -230,7 +236,11 @@ impl<B: Backend> Resolver<B> {
             self.waiting.insert(ifindex);
         }
         if !self.waiting.is_empty() {
-            self.sweep = Some(Instant::now() + wait);
+            // A wait too long for the clock to count (the largest
+            // number there is, for "never") has no end: nothing is
+            // taken back, as the RIB under the same flag sweeps
+            // nothing.
+            self.sweep = Instant::now().checked_add(wait);
         }
         // Without the ones that have gone.
         self.record.note(self.held_links());
@@ -629,6 +639,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
+    use crate::resolver::record::tests::Scratch;
 
     const WAN: &str = "wan0";
 
@@ -806,6 +817,9 @@ mod tests {
         resolver: Resolver<Mock>,
         mock: Mock,
         now: Instant,
+        /// Where a bench that keeps a record keeps it: gone when the
+        /// bench is.
+        _scratch: Option<Scratch>,
     }
 
     impl Bench {
@@ -815,6 +829,7 @@ mod tests {
                 resolver: Resolver::new(mock.clone()),
                 mock,
                 now: Instant::now(),
+                _scratch: None,
             }
         }
 
@@ -942,12 +957,14 @@ mod tests {
         /// that left `left` there. `index` says which interfaces there
         /// are now, when not all of `left` as they were.
         fn after(test: &str, left: &[(&str, u32)], index: Option<&[(&str, u32)]>) -> Bench {
-            let path = crate::resolver::record::tests::scratch(test);
+            let scratch = Scratch::new(test);
+            let path = scratch.path();
             let mut earlier = Record::load(path.clone(), here());
             for (name, ifindex) in left {
                 earlier.hold(name, *ifindex);
             }
-            let b = Bench::new();
+            let mut b = Bench::new();
+            b._scratch = Some(scratch);
             {
                 let mut script = b.mock.0.lock().unwrap();
                 for (name, ifindex) in index.unwrap_or(left) {
@@ -1047,6 +1064,25 @@ mod tests {
         assert_eq!(b.ran(), revert(WAN));
         b.sweep().await;
         assert_eq!(b.ran(), []);
+    }
+
+    /// `--leftover-sweep-time` can be given a number of seconds no
+    /// clock counts to, for "never". The wait then has no end, and is
+    /// not a time the task cannot start for: nothing is taken back, and
+    /// what is learned again is set as ever.
+    #[tokio::test]
+    async fn a_wait_too_long_to_count_has_no_end() {
+        let mut b = Bench::after("endless-wait", &[(WAN, 7), ("wan1", 8)], None);
+        let record = Record::load(b.path(), here());
+        b.resolver.resume(record, Duration::from_secs(u64::MAX));
+        assert_eq!(b.resolver.sweep, None);
+        b.sync().await;
+        assert_eq!(b.ran(), []);
+        assert_eq!(b.record(), links(&[(WAN, 7), ("wan1", 8)]));
+        b.report(WAN, Some(dns(&["198.51.100.53"], &[]))).await;
+        assert_eq!(b.ran(), set(WAN, &["198.51.100.53"], &[]));
+        assert_eq!(b.record(), links(&[(WAN, 7), ("wan1", 8)]));
+        assert_eq!(b.resolver.retry, None);
     }
 
     /// One interface's source being heard is no word about another's:

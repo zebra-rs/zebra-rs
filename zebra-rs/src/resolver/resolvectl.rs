@@ -109,11 +109,49 @@ impl Backend for Resolvectl {
     }
 
     fn ifname(&self, ifindex: u32) -> Option<String> {
-        let name = nix::net::if_::if_indextoname(ifindex).ok()?;
-        // nix 0.31 takes the null pointer that says "no such interface"
-        // for success, and hands back the empty name its buffer began
-        // with. No interface has that name.
-        name.into_string().ok().filter(|name| !name.is_empty())
+        known_name(ifindex, ask_name(ifindex))
+    }
+}
+
+/// What the system says the interface of that index is called, or the
+/// error (`errno`) the question ended with.
+///
+/// Asked of libc itself. nix 0.31 takes the null pointer that says
+/// "no name" for success and hands back an empty one, whatever the
+/// reason was: no such interface, or no file descriptor left to ask
+/// with.
+fn ask_name(ifindex: u32) -> Result<String, i32> {
+    let mut buf = [0 as libc::c_char; libc::IF_NAMESIZE];
+    // SAFETY: `if_indextoname` writes at most `IF_NAMESIZE` bytes, the
+    // closing nul among them, to the buffer it is given, which is that
+    // long.
+    let name = unsafe { libc::if_indextoname(ifindex, buf.as_mut_ptr()) };
+    if name.is_null() {
+        return Err(std::io::Error::last_os_error().raw_os_error().unwrap_or(0));
+    }
+    // SAFETY: not null, so the buffer holds a name and its closing nul.
+    let name = unsafe { std::ffi::CStr::from_ptr(buf.as_ptr()) };
+    // A name is any bytes to the kernel. One that is not text is an
+    // interface all the same.
+    Ok(name.to_string_lossy().into_owned())
+}
+
+/// What the resolver task is told of an interface index
+/// ([`Backend::ifname`]): `None` only where the system has said that
+/// no interface has it (`ENXIO`, as POSIX has it; `ENODEV` is the
+/// kernel's own word for the same).
+///
+/// Any other error is the question failing, not its answer: no file
+/// descriptor or no memory to ask with. The interface is then taken to
+/// be there, under a name that says only its index. To take it for gone
+/// would be to forget what it holds, for good: nothing would ever be
+/// taken back from it. Taken to be there, its command is made, and one
+/// that fails is tried again.
+fn known_name(ifindex: u32, asked: Result<String, i32>) -> Option<String> {
+    match asked {
+        Ok(name) => Some(name),
+        Err(libc::ENXIO | libc::ENODEV) => None,
+        Err(_) => Some(format!("link {ifindex}")),
     }
 }
 
@@ -628,6 +666,32 @@ mod tests {
         let backend = Resolvectl::new(None);
         assert_eq!(backend.ifname(1), Some("lo".to_string()));
         assert_eq!(backend.ifname(u32::MAX), None);
+        // "None" is the system's word, and this is how it says it.
+        assert_eq!(ask_name(1), Ok("lo".to_string()));
+        assert_eq!(ask_name(u32::MAX), Err(libc::ENXIO));
+    }
+
+    /// Only the system's word that there is no such interface makes one
+    /// gone. A question that could not be asked (no file descriptor
+    /// left, no memory, a socket that may not be opened) says nothing of
+    /// the interface: it is taken to be there, or what it holds would
+    /// be forgotten and never taken back.
+    #[test]
+    fn an_interface_that_cannot_be_asked_about_is_not_taken_for_gone() {
+        assert_eq!(
+            known_name(7, Ok("wan0".to_string())),
+            Some("wan0".to_string())
+        );
+        for gone in [libc::ENXIO, libc::ENODEV] {
+            assert_eq!(known_name(7, Err(gone)), None, "{gone}");
+        }
+        for failed in [libc::EMFILE, libc::ENFILE, libc::ENOMEM, libc::EACCES, 0] {
+            assert_eq!(
+                known_name(7, Err(failed)),
+                Some("link 7".to_string()),
+                "{failed}"
+            );
+        }
     }
 
     /// Against the real `resolvectl` and a running systemd-resolved,

@@ -380,8 +380,9 @@ packaged service):
 |---|---|
 | `resolver: wan0: name servers 198.51.100.53, search example.com` | Set. |
 | `resolver: wan0: name servers withdrawn` | Taken back: what named them ended, or `no-name-server` was set. |
-| `resolver: wan0: name servers not set: resolvectl: No such file or directory …` | `resolvectl` is not installed. Install systemd-resolved; zebra-rs tries again by itself. |
-| `resolver: wan0: name servers not set: resolvectl: … Link wan0 is managed.` | systemd-networkd manages the interface. Take it out of the netplan or networkd configuration. |
+| `resolver: wan0: name servers not set: resolvectl: no such program` | `resolvectl` is not installed, or not in a directory of zebra-rs's `PATH`. Install systemd-resolved; zebra-rs tries again by itself. |
+| `resolver: wan0: name servers not set: /usr/bin/resolvectl: … Link wan0 is managed.` | systemd-networkd manages the interface. Take it out of the netplan or networkd configuration. |
+| `resolver: wan0: name servers not set: /usr/bin/resolvectl: …` | Any other answer of `resolvectl`, after the file that was run: its own first line of error, or `no answer in 10 s`. zebra-rs tries again by itself. |
 | `resolver: this is not the host's network namespace: the system resolver is left alone` | zebra-rs runs in another network namespace, and sets nothing until it is started in the host's. |
 | `resolver: cannot tell whether this is the host's network namespace (…; zebra-rs is not root): the system resolver is left alone` | zebra-rs is not root, and sets nothing until it is started as root. |
 

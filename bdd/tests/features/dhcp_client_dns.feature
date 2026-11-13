@@ -161,15 +161,14 @@ Feature: A DHCP lease's name servers for the host
   Scenario: An interface made again is given its name servers again
     Given the test topology exists
     # wan0 is deleted and made again: another interface under the same
-    # name, which holds none of the settings the first was given. The
-    # lease it gets is the same as before, so nothing a lease says has
-    # changed.
-    #
-    # The withdrawal for the old interface fails, and only after 8
-    # seconds, when the new interface is there, so that something is
-    # still noted for the name when the lease comes back. Whatever it
-    # is, this interface holds nothing and must be given the servers.
-    When I execute "tests/scripts/resolvectl_stub.sh break 8" in namespace "r1"
+    # name, with another index, which holds none of the settings the
+    # first was given. The lease it gets is the same as before, so
+    # nothing a lease says has changed. But the DHCP client reports it
+    # for the interface it is held on now, and that one must be given
+    # the servers. Nothing is said to the one that is gone, which took
+    # its settings with it: the stand-in would write `#` and its index
+    # into its history for a command that said it.
+    When I execute "tests/scripts/resolvectl_stub.sh reset" in namespace "r1"
     And I execute "ip link del wan0" in namespace "r1"
     # Made under its own name. The harness's step makes a link under a
     # temporary name and renames it, and the running daemon would know
@@ -178,11 +177,12 @@ Feature: A DHCP lease's name servers for the host
     And I execute "ip link set wan0 up" in namespace "r1"
     And I execute "tests/scripts/dhcp_server.sh dhcp_client_dns stop" in namespace "s1"
     And I execute "env DHCP_BDD_DNS=198.51.100.54 tests/scripts/dhcp_server.sh dhcp_client_dns start srv0 192.0.2.1/24 192.0.2.100 192.0.2.100 120" in namespace "s1"
-    And I execute "tests/scripts/resolvectl_stub.sh mend" in namespace "r1"
     Then show command "show dhcp client leases" in namespace "r1" should eventually contain "State:        bound"
     And show command "show dhcp client leases" in namespace "r1" should contain "DNS servers:  198.51.100.54"
     And command "tests/scripts/resolvectl_stub.sh status" in namespace "r1" should eventually contain "wan0 dns 198.51.100.54"
     And command "tests/scripts/resolvectl_stub.sh status" in namespace "r1" should eventually contain "wan0 domain example.com"
+    And command "tests/scripts/resolvectl_stub.sh history" in namespace "r1" should eventually contain "dns wan0 198.51.100.54"
+    And command "tests/scripts/resolvectl_stub.sh history" in namespace "r1" should eventually not contain "#"
 
   Scenario: An interface renamed under the running daemon keeps its lease's name servers
     Given the test topology exists

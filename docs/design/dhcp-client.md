@@ -1499,7 +1499,11 @@ is given), and Router Advertisements (RDNSS, DNSSL).**
     later one, which can be 5 min after the one that failed, and after
     a command that failed. One that is gone is dropped without a
     command and without another try: what comes under its name is
-    another interface, and its source reports that one.
+    another interface, and its source reports that one. Only the
+    system's word that no interface has the index makes one gone
+    (`ENXIO`). Where the question itself fails, with no file descriptor
+    left to ask with, the interface is taken to be there: taken for
+    gone, what it holds would be forgotten and never taken back.
   - **Renamed**, an interface keeps its index, and resolved keeps its
     settings (it holds its links by index, and only changes the name it
     shows). It is the same interface to the task and to its source:
@@ -1565,7 +1569,8 @@ is given), and Router Advertisements (RDNSS, DNSSL).**
     is set and is this run's from then on, also when it loses them
     again before the wait is over. The others are reverted when it is
     over: a lease lost, a router gone, or `no-name-server` set, while
-    zebra-rs was down.
+    zebra-rs was down. A time no clock counts to (the largest number,
+    for "never") is a wait without an end: nothing is taken back.
   - **By index, by boot and by namespace.** An interface whose index
     is gone (at startup, at the end of the wait, or before a later try
     of a revert that failed) holds nothing and is dropped without a

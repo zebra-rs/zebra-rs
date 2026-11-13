@@ -231,14 +231,32 @@ pub fn origin() -> Option<Origin> {
 pub(super) mod tests {
     use super::*;
 
-    /// A place for one test's record, emptied first.
-    pub fn scratch(test: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "zebra-resolver-record-{}-{test}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        dir.join(FILE)
+    /// A place for one test's record: emptied first, and gone when the
+    /// test is.
+    pub struct Scratch(PathBuf);
+
+    impl Scratch {
+        pub fn new(test: &str) -> Scratch {
+            let dir = std::env::temp_dir().join(format!(
+                "zebra-resolver-record-{}-{test}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            Scratch(dir)
+        }
+
+        /// Where the record is kept there.
+        pub fn path(&self) -> PathBuf {
+            self.0.join(FILE)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            // The directory, or the file a test has put in its way.
+            let _ = std::fs::remove_dir_all(&self.0);
+            let _ = std::fs::remove_file(&self.0);
+        }
     }
 
     /// A boot, in the one network namespace the tests here are in.
@@ -256,9 +274,29 @@ pub(super) mod tests {
             .collect()
     }
 
+    /// The tests here and the resolver task's run by the thousand over
+    /// a day, each with a directory of its own.
+    #[test]
+    fn a_test_s_record_is_gone_with_the_test() {
+        let scratch = Scratch::new("gone-with-the-test");
+        let path = scratch.path();
+        Record::load(path.clone(), at("boot-a")).hold("wan0", 5);
+        assert!(path.exists());
+        let dir = path.parent().unwrap().to_path_buf();
+        drop(scratch);
+        assert!(!dir.exists());
+
+        // And the file a test left in the directory's way.
+        let scratch = Scratch::new("gone-with-the-test");
+        std::fs::write(&dir, b"").unwrap();
+        drop(scratch);
+        assert!(!dir.exists());
+    }
+
     #[test]
     fn the_record_names_its_interfaces_to_the_next_run() {
-        let path = scratch("next-run");
+        let scratch = Scratch::new("next-run");
+        let path = scratch.path();
         let mut record = Record::load(path.clone(), at("boot-a"));
         assert_eq!(record.links(), &links(&[]));
         record.hold("wan0", 5);
@@ -282,7 +320,8 @@ pub(super) mod tests {
     /// indexes name other interfaces now, or the same ones by chance.
     #[test]
     fn a_record_of_another_boot_names_nothing() {
-        let path = scratch("another-boot");
+        let scratch = Scratch::new("another-boot");
+        let path = scratch.path();
         Record::load(path.clone(), at("boot-a")).hold("wan0", 5);
         let mut rebooted = Record::load(path.clone(), at("boot-b"));
         assert_eq!(rebooted.links(), &links(&[]));
@@ -300,7 +339,8 @@ pub(super) mod tests {
     /// those names and numbers, and none of them holds what is named.
     #[test]
     fn a_record_of_another_network_namespace_names_nothing() {
-        let path = scratch("another-netns");
+        let scratch = Scratch::new("another-netns");
+        let path = scratch.path();
         Record::load(path.clone(), at("boot-a")).hold("wan0", 5);
         let elsewhere = Origin {
             netns: "net:[4026532528]".to_string(),
@@ -317,7 +357,8 @@ pub(super) mod tests {
     /// against `/proc`.
     #[test]
     fn the_file_names_where_it_was_written() {
-        let path = scratch("file");
+        let scratch = Scratch::new("file");
+        let path = scratch.path();
         Record::load(path.clone(), at("boot-a")).hold("wan0", 5);
         let file: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
@@ -337,7 +378,8 @@ pub(super) mod tests {
     /// a run that is ended now must leave word of both.
     #[test]
     fn an_interface_stays_on_record_when_its_name_is_noted_for_another() {
-        let path = scratch("name-for-another");
+        let scratch = Scratch::new("name-for-another");
+        let path = scratch.path();
         let mut record = Record::load(path.clone(), at("boot-a"));
         record.hold("wan0", 7);
         record.hold("wan1", 8);
@@ -354,7 +396,8 @@ pub(super) mod tests {
 
     #[test]
     fn a_file_that_is_not_a_record_is_an_empty_one() {
-        let path = scratch("not-a-record");
+        let scratch = Scratch::new("not-a-record");
+        let path = scratch.path();
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, b"{ not json").unwrap();
         let mut record = Record::load(path.clone(), at("boot-a"));
@@ -371,7 +414,8 @@ pub(super) mod tests {
     /// is no reason to touch the disk.
     #[test]
     fn what_the_record_already_says_is_not_written_again() {
-        let path = scratch("not-again");
+        let scratch = Scratch::new("not-again");
+        let path = scratch.path();
         let mut record = Record::load(path.clone(), at("boot-a"));
         record.hold("wan0", 5);
         std::fs::remove_file(&path).unwrap();
@@ -389,7 +433,8 @@ pub(super) mod tests {
     #[test]
     fn what_could_not_be_written_is_written_when_it_can_be() {
         for again in ["hold", "note"] {
-            let path = scratch(&format!("written-later-{again}"));
+            let scratch = Scratch::new(&format!("written-later-{again}"));
+            let path = scratch.path();
             // In the way of the record's directory: a file.
             let dir = path.parent().unwrap();
             std::fs::write(dir, b"").unwrap();
