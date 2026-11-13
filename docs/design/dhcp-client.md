@@ -1489,20 +1489,27 @@ is given), and Router Advertisements (RDNSS, DNSSL).**
     host.
   - **Renamed while its command runs**, an interface is not the one of
     that name any more when the command is over: the name is nobody's,
-    or another interface's (two exchanging theirs, or one renamed to a
-    name just given up). The commands say names, and which interface
-    the command found is not known. So what it left is noted for the
-    interface it was started for, by its index and under the name that
-    one has by then, as "something". What is noted for an interface
-    that has taken the name stays noted, as "something" too: noted in
-    its place, the outcome of the command would take that interface off
-    the record with its settings still in. Nothing more is said to the
-    name in that attempt, and the next try comes as after a command
-    that failed, 5 s later, when every name is set from the start on
-    the interface that has it. A revert that worked is not taken for
-    this interface's either: it stays noted and is reverted again under
-    the name it has, and what is noted for the interface that has the
-    name the revert said is "something" from then on.
+    or another interface's (two exchanging theirs, one renamed to a
+    name just given up, or one made under the name of one just
+    deleted). The commands say names, and which interface the command
+    found is not known. So every interface it may have found is noted
+    as holding "something", by its index: the one the command was
+    started for, under the name it has by then, and the one that has
+    the name now, also when nothing was noted for it before. Not noted,
+    that one would keep what the command gave it: nothing would revert
+    it, in this run or after a restart. And what was noted for it
+    before is not replaced by the outcome of the command, which would
+    take it off the record with its settings still in. Both are written
+    to the record at once, not when the pass is over. Nothing more is
+    said to the name in that attempt, and the next try comes as after a
+    command that failed, 5 s later, when every name is set from the
+    start on the interface that has it.
+  - **A revert has the same question.** One that was started, whether
+    it worked or not, may have found the interface that has the name
+    now: what is noted for that one is "something" from then on, and it
+    is set again when wanted. One that worked is not taken for its
+    interface's when the name is not that one's any more: the interface
+    stays noted and is reverted again under the name it has.
   - So the index is turned into the name the interface has at that
     moment before every revert, the first try and each later one, which
     can be 5 min after the one that failed. An index that is gone ends
