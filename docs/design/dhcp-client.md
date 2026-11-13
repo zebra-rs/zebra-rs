@@ -1561,7 +1561,9 @@ is given), and Router Advertisements (RDNSS, DNSSL).**
     configuration with no source of name servers any more (`address
     dhcp` deleted while zebra-rs was down) spawns none of the tasks the
     resolver otherwise comes with. Each interface named is noted as
-    holding something unknown.
+    holding something unknown. A file that is not there is the ordinary
+    case. One that is there and cannot be read, or is no record, is
+    said in the log: what it named is not taken back.
   - **A wait for the sources**, `--leftover-sweep-time` (120 s), the
     time the RIB waits before it sweeps the routes of an earlier run.
     A lease is resumed at once, but a Router Advertisement has to be
@@ -1570,7 +1572,12 @@ is given), and Router Advertisements (RDNSS, DNSSL).**
     again before the wait is over. The others are reverted when it is
     over: a lease lost, a router gone, or `no-name-server` set, while
     zebra-rs was down. A time no clock counts to (the largest number,
-    for "never") is a wait without an end: nothing is taken back.
+    for "never") is a wait without an end: nothing is taken back, and
+    the log says of each interface that it keeps what it holds, where
+    it otherwise says in how many seconds that is taken back. A
+    report that is waiting when the wait ends is heard first, as before
+    every look: the interface it claims is not taken back only to be
+    set again a moment later.
   - **By index, by boot and by namespace.** An interface whose index
     is gone (at startup, at the end of the wait, or before a later try
     of a revert that failed) holds nothing and is dropped without a
@@ -1728,7 +1735,7 @@ client, and logs each message, which is what a scenario reads.
 | `dhcp_client` | lease → address and `D>* 0.0.0.0/0 [210/0]`; renew; `release`; server gone → expiry withdraws everything; zebra-rs restart keeps the address and re-verifies |
 | `dhcp_client_vrf` | WAN in VRF `red`; the route is in `red`'s table only |
 | `dhcp_client_dual_wan` | two leases at 210 / 220; link down on the first → the second's default is selected |
-| `dhcp_client_dns` | against a stand-in for `resolvectl`, which keeps an interface's settings by its index as resolved does and refuses a name in its place: the lease's servers and domains set with nothing configured but `address dhcp`; reverted on `release` and on setting `no-name-server`, and set again when that is deleted; nothing set for a lease taken, or resumed after a restart, under `no-name-server`; replaced at a renewal; retried after a failure; servers set last are set again after an error that came with the old list already dropped; servers set by a command that got no answer are reverted; an interface deleted and made again is set again; one renamed under the running daemon keeps its lease's name servers, which `no-name-server` takes back from it and gives it again; set again after a restart; what an earlier run set is kept past the leftover time by a run that resumes the lease, and taken back by one under `no-name-server`, by one with no DHCP client at all, and from an interface renamed while zebra-rs was down, which the stand-in shows with its settings under the new name until then |
+| `dhcp_client_dns` | against a stand-in for `resolvectl`, which keeps an interface's settings by its index as resolved does and refuses a name in its place: the lease's servers and domains set with nothing configured but `address dhcp`; reverted on `release` and on setting `no-name-server`, and set again when that is deleted; nothing set for a lease taken, or resumed after a restart, under `no-name-server`; replaced at a renewal; retried after a failure; servers set last are set again after an error that came with the old list already dropped; servers set by a command that got no answer are reverted; an interface deleted and made again is set again; one renamed under the running daemon keeps its lease's name servers, which `no-name-server` takes back from it and gives it again; set again after a restart; what an earlier run set is kept past the leftover time by a run that resumes the lease, and taken back by one under `no-name-server`, by one with no DHCP client at all, and from an interface renamed while zebra-rs was down, which the stand-in shows with its settings under the new name until then; kept, and said to be kept, by a run told to wait without end |
 | `ra_host` | RA default route `A`, SLAAC with `autoconf`, router lifetime 0 withdraws, `accept_ra` is 0 |
 | `ra_host_dns` | against a stand-in for `resolvectl`: RDNSS and DNSSL set with nothing configured but `address autoconf`, the newly heard first and an option in its own order; a lifetime of zero and a lifetime run out take one away; a DHCPv4 lease's server goes ahead and its end leaves the advertised ones; `ra-options no-name-server` takes the advertised ones back and leaves the lease's, what is heard under it is only shown, and deleting it sets what is held; stopping the RA host reverts |
 | `dhcpv6_client` | IA_NA /128 with `noprefixroute`; default route and on-link prefix from the RA, and no SLAAC address unless `autoconf` is set too; renew; `release`; zebra-rs restart keeps the address and confirms it; `parameters-only`; deleted configuration releases |

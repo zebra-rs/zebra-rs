@@ -43,7 +43,7 @@
 //! not there is anything new to say by then.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -97,13 +97,10 @@ impl Record {
     /// it was written at this `origin`. A missing or unreadable file, or
     /// one of another boot or network namespace, is an empty record.
     pub fn load(path: PathBuf, origin: Origin) -> Record {
-        let stored: Stored = match std::fs::read(&path) {
-            Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|e| {
-                tracing::warn!("{}: unreadable, ignored: {e}", path.display());
-                Stored::default()
-            }),
-            Err(_) => Stored::default(),
-        };
+        let (stored, complaint) = read(&path);
+        if let Some(why) = complaint {
+            tracing::warn!("{}: {why}", path.display());
+        }
         let links = if stored.origin == origin {
             stored
                 .links
@@ -227,6 +224,29 @@ pub fn origin() -> Option<Origin> {
     (!origin.boot.is_empty() && !origin.netns.is_empty()).then_some(origin)
 }
 
+/// What the file at `path` says, and what there is to say of one that
+/// could not be taken in.
+///
+/// A file that is not there is the ordinary case and nothing to speak
+/// of: a first run, or a run before this one that set nothing. Any other
+/// failure is said. The run before may have left interfaces set, and
+/// with its record taken for empty they are not taken back.
+fn read(path: &Path) -> (Stored, Option<String>) {
+    match std::fs::read(path) {
+        Ok(bytes) => match serde_json::from_slice(&bytes) {
+            Ok(stored) => (stored, None),
+            Err(e) => (Stored::default(), Some(format!("unreadable, ignored: {e}"))),
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => (Stored::default(), None),
+        Err(e) => (
+            Stored::default(),
+            Some(format!(
+                "cannot be read ({e}): what an earlier run left set is not known, and not taken back"
+            )),
+        ),
+    }
+}
+
 #[cfg(test)]
 pub(super) mod tests {
     use super::*;
@@ -291,6 +311,43 @@ pub(super) mod tests {
         std::fs::write(&dir, b"").unwrap();
         drop(scratch);
         assert!(!dir.exists());
+    }
+
+    /// A record that is not there is the ordinary case, and nothing is
+    /// said. One that is there and cannot be read is another matter: it
+    /// may name interfaces that are then never taken back, and that is
+    /// said, as a file that is no record is.
+    #[test]
+    fn a_record_that_cannot_be_read_is_said_and_a_missing_one_is_not() {
+        let scratch = Scratch::new("cannot-be-read");
+        let path = scratch.path();
+        assert_eq!(read(&path).1, None);
+
+        // In its place, something that cannot be read as a file.
+        std::fs::create_dir_all(&path).unwrap();
+        let (stored, complaint) = read(&path);
+        assert!(stored.links.is_empty());
+        let complaint = complaint.expect("a complaint");
+        assert!(complaint.starts_with("cannot be read ("), "{complaint}");
+        assert_eq!(
+            Record::load(path.clone(), at("boot-a")).links(),
+            &links(&[])
+        );
+
+        std::fs::remove_dir(&path).unwrap();
+        std::fs::write(&path, b"{ not json").unwrap();
+        let complaint = read(&path).1.expect("a complaint");
+        assert!(
+            complaint.starts_with("unreadable, ignored: "),
+            "{complaint}"
+        );
+
+        // A record, and nothing to say.
+        std::fs::remove_file(&path).unwrap();
+        Record::load(path.clone(), at("boot-a")).hold("wan0", 5);
+        let (stored, complaint) = read(&path);
+        assert_eq!(complaint, None);
+        assert_eq!(stored.links.len(), 1);
     }
 
     #[test]

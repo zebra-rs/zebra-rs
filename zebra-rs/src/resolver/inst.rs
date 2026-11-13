@@ -215,19 +215,15 @@ impl<B: Backend> Resolver<B> {
             return;
         }
         self.record = record;
+        // A wait too long for the clock to count (the largest number
+        // there is, for "never") has no end: nothing is taken back, as
+        // the RIB under the same flag sweeps nothing.
+        let ends = Instant::now().checked_add(wait);
         for (ifindex, name) in self.record.links().clone() {
             let Some(link) = self.backend.ifname(ifindex) else {
                 continue;
             };
-            let was = if link == name {
-                String::new()
-            } else {
-                format!(" (as {name})")
-            };
-            tracing::info!(
-                "resolver: {link}: holds name servers of an earlier run{was}, taken back in {} s unless learned again",
-                wait.as_secs()
-            );
+            tracing::info!("resolver: {}", taken_over(&link, &name, ends.map(|_| wait)));
             let held = Held {
                 name: link,
                 dns: None,
@@ -236,11 +232,7 @@ impl<B: Backend> Resolver<B> {
             self.waiting.insert(ifindex);
         }
         if !self.waiting.is_empty() {
-            // A wait too long for the clock to count (the largest
-            // number there is, for "never") has no end: nothing is
-            // taken back, as the RIB under the same flag sweeps
-            // nothing.
-            self.sweep = Instant::now().checked_add(wait);
+            self.sweep = ends;
         }
         // Without the ones that have gone.
         self.record.note(self.held_links());
@@ -293,21 +285,35 @@ impl<B: Backend> Resolver<B> {
             tokio::select! {
                 Some(report) = self.rx.recv() => {
                     self.learn(report);
-                    // Several at once (a lease replaced by another, a
-                    // commit that touched several interfaces) are one
-                    // change.
-                    while let Ok(report) = self.rx.try_recv() {
-                        self.learn(report);
-                    }
-                    self.sync().await;
+                    self.look(false).await;
                 }
-                _ = sleep_until_opt(self.retry) => self.sync().await,
-                _ = sleep_until_opt(self.sweep) => {
-                    self.swept();
-                    self.sync().await;
-                }
+                _ = sleep_until_opt(self.retry) => self.look(false).await,
+                _ = sleep_until_opt(self.sweep) => self.look(true).await,
             }
         }
+    }
+
+    /// What every event of the task ends in: a look at what is wanted,
+    /// with the system resolver made to hold it ([`Resolver::sync`]).
+    /// `wait_over` when the event is the end of the wait for the sources
+    /// ([`Resolver::swept`]).
+    ///
+    /// The reports that are waiting are taken in first, whatever the
+    /// event was. Several at once (a lease replaced by another, a commit
+    /// that touched several interfaces) are one change. And a time that
+    /// comes due beside a report must not act on what that report is
+    /// about to change. The end of the wait would take back from an
+    /// interface what the report claims for it, and set it again a
+    /// moment later, with no name servers in between. A try that comes
+    /// due would set what has just been lost.
+    async fn look(&mut self, wait_over: bool) {
+        while let Ok(report) = self.rx.try_recv() {
+            self.learn(report);
+        }
+        if wait_over {
+            self.swept();
+        }
+        self.sync().await;
     }
 
     fn learn(&mut self, report: Report) {
@@ -606,6 +612,24 @@ fn usable_domain(domain: &str) -> Option<&str> {
             && !label.ends_with('-')
     };
     (domain.len() <= 253 && domain.split('.').all(label)).then_some(domain)
+}
+
+/// What is said of an interface taken over from an earlier run: what it
+/// is called now, as what it is on record where that is another name,
+/// and what becomes of what it holds. `wait` is the time its sources
+/// have to claim it, and `None` where that time has no end: no time is
+/// promised that never comes.
+fn taken_over(link: &str, noted: &str, wait: Option<Duration>) -> String {
+    let was = if link == noted {
+        String::new()
+    } else {
+        format!(" (as {noted})")
+    };
+    let then = match wait {
+        Some(wait) => format!("taken back in {} s unless learned again", wait.as_secs()),
+        None => "and keeps them: the wait for the sources has no end".to_string(),
+    };
+    format!("{link}: holds name servers of an earlier run{was}, {then}")
 }
 
 fn describe(dns: &LinkDns) -> String {
@@ -1082,6 +1106,49 @@ mod tests {
         b.report(WAN, Some(dns(&["198.51.100.53"], &[]))).await;
         assert_eq!(b.ran(), set(WAN, &["198.51.100.53"], &[]));
         assert_eq!(b.record(), links(&[(WAN, 7), ("wan1", 8)]));
+        assert_eq!(b.resolver.retry, None);
+    }
+
+    /// A report that is waiting when the wait ends is heard before
+    /// anything is taken back. The interface it claims is set, and not
+    /// taken back first and set again after, with no name servers in
+    /// between. The one nobody claims is taken back.
+    #[tokio::test]
+    async fn a_report_waiting_when_the_wait_ends_is_heard_first() {
+        let mut b = Bench::after("claimed-at-the-end", &[(WAN, 7), ("wan1", 8)], None);
+        b.resume();
+        let claim = Report {
+            ifindex: 7,
+            source: Source::Dhcp4,
+            dns: Some(dns(&["198.51.100.53"], &[])),
+        };
+        b.resolver.tx().send(claim).unwrap();
+        b.resolver.look(true).await;
+        assert_eq!(
+            b.ran(),
+            [revert("wan1"), set(WAN, &["198.51.100.53"], &[])].concat()
+        );
+        assert_eq!(b.record(), links(&[(WAN, 7)]));
+    }
+
+    /// The same for a try that comes due: what is tried is what is
+    /// wanted by then. A lease lost while its servers waited for another
+    /// try is not set, to be taken back a moment later.
+    #[tokio::test]
+    async fn a_report_waiting_when_a_try_comes_due_is_heard_first() {
+        let mut b = Bench::new();
+        b.answer(&[not_run()]);
+        b.report(WAN, Some(dns(&["198.51.100.53"], &[]))).await;
+        b.ran();
+        assert!(b.resolver.retry.is_some());
+        let lost = Report {
+            ifindex: b.index(WAN),
+            source: Source::Dhcp4,
+            dns: None,
+        };
+        b.resolver.tx().send(lost).unwrap();
+        b.resolver.look(false).await;
+        assert_eq!(b.ran(), []);
         assert_eq!(b.resolver.retry, None);
     }
 
@@ -2431,6 +2498,24 @@ mod tests {
             assert_eq!(usable_domain(bad), None, "{bad:?}");
         }
         assert_eq!(long_name.len(), 255);
+    }
+
+    /// No time is promised that never comes: where the wait has no
+    /// end, the interface is said to keep what it holds.
+    #[test]
+    fn what_is_said_of_a_leftover_is_what_becomes_of_it() {
+        assert_eq!(
+            taken_over("wan0", "wan0", Some(Duration::from_secs(120))),
+            "wan0: holds name servers of an earlier run, taken back in 120 s unless learned again"
+        );
+        assert_eq!(
+            taken_over("wanx", "wan0", Some(Duration::from_secs(5))),
+            "wanx: holds name servers of an earlier run (as wan0), taken back in 5 s unless learned again"
+        );
+        assert_eq!(
+            taken_over("wan0", "wan0", None),
+            "wan0: holds name servers of an earlier run, and keeps them: the wait for the sources has no end"
+        );
     }
 
     #[test]

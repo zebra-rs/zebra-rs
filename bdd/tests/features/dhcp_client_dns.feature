@@ -194,7 +194,15 @@ Feature: A DHCP lease's name servers for the host
     # lease's address is. (Renamed while it is up, which Linux allows
     # from 6.2 on.)
     When I execute "ip link set wan0 name wany" in namespace "r1"
-    Then command "tests/scripts/resolvectl_stub.sh status" in namespace "r1" should eventually contain "wany dns 198.51.100.54"
+    # The stand-in knows the interface by its index, and shows what it
+    # holds under the new name by itself, before zebra-rs has done or
+    # left undone anything. So first the time for a daemon that took the
+    # rename for the end of the interface to say so. Then the stand-in's
+    # history, which the scenario before this one emptied and which has
+    # had no revert since: nothing was taken back.
+    And I wait 3 seconds
+    Then command "tests/scripts/resolvectl_stub.sh history" in namespace "r1" should eventually not contain "revert"
+    And command "tests/scripts/resolvectl_stub.sh status" in namespace "r1" should eventually contain "wany dns 198.51.100.54"
     And show command "show dhcp client leases" in namespace "r1" should contain "State:        bound"
     # Taken back and given again, by what is configured for the name
     # zebra-rs knows. Each time it is the interface the lease is on that
@@ -277,7 +285,7 @@ Feature: A DHCP lease's name servers for the host
     When I stop zebra-rs in namespace "r1"
     And I start zebra-rs in namespace "r1" sweeping leftovers after 5 seconds
     And I apply config "r1.yaml" to namespace "r1"
-    Then daemon log in namespace "r1" should eventually contain "wan0: holds name servers of an earlier run"
+    Then daemon log in namespace "r1" should eventually contain "wan0: holds name servers of an earlier run, taken back in 5 s unless learned again"
     And daemon log in namespace "r1" should eventually contain "wan0: resumed 192.0.2.100/24"
     When I wait 8 seconds
     Then command "tests/scripts/resolvectl_stub.sh status" in namespace "r1" should eventually contain "wan0 dns 198.51.100.54"
@@ -315,6 +323,21 @@ Feature: A DHCP lease's name servers for the host
     And command "tests/scripts/resolvectl_stub.sh status" in namespace "r1" should eventually not contain "wan0"
     And daemon log in namespace "r1" should eventually contain "resolver: wan0: name servers withdrawn"
 
+  Scenario: A restart told to wait without end says so, and keeps what the earlier run set
+    Given the test topology exists
+    # A run that sets them.
+    When I apply config "r1.yaml" to namespace "r1"
+    Then command "tests/scripts/resolvectl_stub.sh status" in namespace "r1" should eventually contain "wan0 dns 198.51.100.54"
+    # The next one is given no configuration, so nothing claims them, and
+    # the longest wait there is: more seconds than the clock can count,
+    # which is a wait without an end. What is said of the interface is
+    # what becomes of it: no time is promised, and nothing is taken back.
+    When I stop zebra-rs in namespace "r1"
+    And I start zebra-rs in namespace "r1" sweeping leftovers after 18446744073709551615 seconds
+    Then daemon log in namespace "r1" should eventually contain "wan0: holds name servers of an earlier run, and keeps them: the wait for the sources has no end"
+    When I wait 3 seconds
+    Then command "tests/scripts/resolvectl_stub.sh status" in namespace "r1" should eventually contain "wan0 dns 198.51.100.54"
+
   Scenario: A restart takes back what the earlier run set on an interface renamed since
     Given the test topology exists
     # A run that sets them.
@@ -332,7 +355,7 @@ Feature: A DHCP lease's name servers for the host
     And I execute "ip link set wanx up" in namespace "r1"
     Then command "tests/scripts/resolvectl_stub.sh status" in namespace "r1" should eventually contain "wanx dns 198.51.100.54"
     When I start zebra-rs in namespace "r1" sweeping leftovers after 5 seconds
-    Then daemon log in namespace "r1" should eventually contain "wanx: holds name servers of an earlier run (as wan0)"
+    Then daemon log in namespace "r1" should eventually contain "wanx: holds name servers of an earlier run (as wan0), taken back in 5 s unless learned again"
     And command "tests/scripts/resolvectl_stub.sh history" in namespace "r1" should eventually contain "revert wanx"
     And command "tests/scripts/resolvectl_stub.sh status" in namespace "r1" should eventually not contain "wanx"
     And daemon log in namespace "r1" should eventually contain "resolver: wanx: name servers withdrawn"
