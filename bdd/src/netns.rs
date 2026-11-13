@@ -126,6 +126,13 @@ pub fn dhcp_state_dir(netns: &str) -> String {
     format!("/run/zebra-rs-bdd/dhcp/{netns}")
 }
 
+/// Where the stand-in for `resolvectl` keeps what a namespace's
+/// zebra-rs told it (tests/scripts/resolvectl_stub.sh, which has the
+/// same path).
+pub fn resolvectl_stub_dir(netns: &str) -> String {
+    format!("/run/zebra-rs-bdd/resolvectl/{netns}")
+}
+
 /// Create a network namespace
 pub async fn create_netns(netns: &str) -> Result<()> {
     // The name becomes a directory name below.
@@ -147,12 +154,18 @@ pub async fn create_netns(netns: &str) -> Result<()> {
     // the same from run to run. A zebra-rs that never wrote its resolver
     // record passed every restart scenario on the record of the run
     // before.
-    let state = dhcp_state_dir(netns);
-    run_cmd(
-        &["rm", "-rf", "--", &state],
-        &format!("Failed to remove {state}"),
-    )
-    .await?;
+    //
+    // The same goes for what the stand-in for `resolvectl` holds
+    // (tests/scripts/resolvectl_stub.sh): it keeps an interface's
+    // settings by its index, and the indexes of a namespace made anew
+    // are those of the one before it.
+    for state in [dhcp_state_dir(netns), resolvectl_stub_dir(netns)] {
+        run_cmd(
+            &["rm", "-rf", "--", &state],
+            &format!("Failed to remove {state}"),
+        )
+        .await?;
+    }
 
     // Bring up loopback
     exec_in_netns(netns, "ip", &["link", "set", "lo", "up"]).await?;

@@ -25,11 +25,13 @@ Feature: A DHCP lease's name servers for the host
   a stand-in to each daemon (ZEBRA_RESOLVECTL,
   tests/scripts/resolvectl_stub.sh). It keeps what it is told, per
   namespace, and `status` prints it: `wan0 dns …`, `wan0 domain …`. Like
-  resolved it holds an interface's settings, not a name's: one deleted
-  and made again under the same name holds nothing. It can also be told
-  to fail (`break`), at once or after some seconds, to do what it is
-  asked and give no answer (`stall`), or to fail after dropping the list
-  it was to replace, as resolved does (`spoil`).
+  resolved it holds an interface's settings by the interface's index,
+  which is what zebra-rs says to it, and takes no name in its place: one
+  deleted and made again under the same name holds nothing, and one
+  renamed is shown with what it holds under its new name. It can also
+  be told to fail (`break`), at once or after some seconds, to do what
+  it is asked and give no answer (`stall`), or to fail after dropping
+  the list it was to replace, as resolved does (`spoil`).
 
   Topology: s1 is the ISP side, a dnsmasq with one address to lease. Its
   lease names 198.51.100.53 as name server, example.com as domain name
@@ -288,16 +290,19 @@ Feature: A DHCP lease's name servers for the host
     Then command "tests/scripts/resolvectl_stub.sh status" in namespace "r1" should eventually contain "wan0 dns 198.51.100.54"
     # The interface is given another name while zebra-rs is not running.
     # It is the same interface, with the same index, and the system
-    # resolver keeps its settings. The record names `wan0`, which is no
-    # interface any more: the next run finds the interface by its index
-    # and takes the settings back under the name it has now.
+    # resolver keeps its settings: the stand-in shows them under the new
+    # name. The record names `wan0`, which is no interface any more: the
+    # next run finds the interface by its index, and takes the settings
+    # back by saying that index.
     When I stop zebra-rs in namespace "r1"
     And I execute "ip link set wan0 down" in namespace "r1"
     And I execute "ip link set wan0 name wanx" in namespace "r1"
     And I execute "ip link set wanx up" in namespace "r1"
-    And I start zebra-rs in namespace "r1" sweeping leftovers after 5 seconds
+    Then command "tests/scripts/resolvectl_stub.sh status" in namespace "r1" should eventually contain "wanx dns 198.51.100.54"
+    When I start zebra-rs in namespace "r1" sweeping leftovers after 5 seconds
     Then daemon log in namespace "r1" should eventually contain "wanx: holds name servers of an earlier run (as wan0)"
     And command "tests/scripts/resolvectl_stub.sh history" in namespace "r1" should eventually contain "revert wanx"
+    And command "tests/scripts/resolvectl_stub.sh status" in namespace "r1" should eventually not contain "wanx"
     And daemon log in namespace "r1" should eventually contain "resolver: wanx: name servers withdrawn"
 
   Scenario: Teardown topology

@@ -9,11 +9,18 @@
 //! and come out when it ends, and a link that loses its carrier in
 //! between needs nothing from us.
 //!
-//! **The network namespace.** `resolvectl` takes an interface name,
-//! turns it into an index where it runs, and sends that index over the
-//! system bus. The bus is one per host, the indexes one set per network
-//! namespace: run from another namespace, the command configures
-//! whichever host interface happens to have that index. So it is only
+//! **The interface is said by its index.** `resolvectl` takes a number
+//! in place of a name and sends it over the system bus as it is, with
+//! no lookup of its own (every release since the first, systemd 239). A
+//! name it would look up itself, when it comes to run, and the name can
+//! be another interface's by then. The index is what resolved keeps a
+//! link's settings by, also through a change of name: a command reaches
+//! the interface it was started for, or resolved says that it knows no
+//! such link.
+//!
+//! **The network namespace.** The bus is one per host, the indexes one
+//! set per network namespace: sent from another namespace, an index is
+//! whichever host interface happens to have it. So `resolvectl` is only
 //! run in the namespace of PID 1, where resolved is.
 //!
 //! `$ZEBRA_RESOLVECTL` names a program to run in `resolvectl`'s place,
@@ -171,8 +178,9 @@ fn unreadable(path: &Path, error: &std::io::Error, root: bool) -> String {
     )
 }
 
-/// `resolvectl`'s arguments for `op`, after a `--` that keeps an
-/// interface named like an option from being read as one.
+/// `resolvectl`'s arguments for `op`: the verb, the interface by its
+/// index, and the list. Nothing after the `--` is read as an option,
+/// whatever it is.
 fn argv(op: &Op) -> Vec<String> {
     // One empty argument is how a list is cleared.
     let list = |items: Vec<String>| {
@@ -182,16 +190,16 @@ fn argv(op: &Op) -> Vec<String> {
             items
         }
     };
-    let (verb, name, values) = match op {
-        Op::Dns(name, servers) => (
+    let (verb, ifindex, values) = match op {
+        Op::Dns(ifindex, servers) => (
             "dns",
-            name,
+            ifindex,
             list(servers.iter().map(ToString::to_string).collect()),
         ),
-        Op::Domains(name, domains) => ("domain", name, list(domains.clone())),
-        Op::Revert(name) => ("revert", name, Vec::new()),
+        Op::Domains(ifindex, domains) => ("domain", ifindex, list(domains.clone())),
+        Op::Revert(ifindex) => ("revert", ifindex, Vec::new()),
     };
-    let mut argv = vec!["--".to_string(), verb.to_string(), name.clone()];
+    let mut argv = vec!["--".to_string(), verb.to_string(), ifindex.to_string()];
     argv.extend(values);
     argv
 }
@@ -298,33 +306,25 @@ mod tests {
             "198.51.100.53".parse().unwrap(),
             "2001:db8::53".parse().unwrap(),
         ];
+        // The interface is a number: its index, and never its name.
         assert_eq!(
-            argv(&Op::Dns("wan0".into(), servers)),
-            strings(&["--", "dns", "wan0", "198.51.100.53", "2001:db8::53"])
+            argv(&Op::Dns(7, servers)),
+            strings(&["--", "dns", "7", "198.51.100.53", "2001:db8::53"])
         );
         assert_eq!(
-            argv(&Op::Domains(
-                "wan0".into(),
-                strings(&["example.com", "example.net"])
-            )),
-            strings(&["--", "domain", "wan0", "example.com", "example.net"])
+            argv(&Op::Domains(7, strings(&["example.com", "example.net"]))),
+            strings(&["--", "domain", "7", "example.com", "example.net"])
         );
-        assert_eq!(
-            argv(&Op::Revert("wan0".into())),
-            strings(&["--", "revert", "wan0"])
-        );
+        assert_eq!(argv(&Op::Revert(4021)), strings(&["--", "revert", "4021"]));
     }
 
     #[test]
     fn an_empty_list_is_one_empty_argument() {
         assert_eq!(
-            argv(&Op::Domains("wan0".into(), vec![])),
-            strings(&["--", "domain", "wan0", ""])
+            argv(&Op::Domains(7, vec![])),
+            strings(&["--", "domain", "7", ""])
         );
-        assert_eq!(
-            argv(&Op::Dns("wan0".into(), vec![])),
-            strings(&["--", "dns", "wan0", ""])
-        );
+        assert_eq!(argv(&Op::Dns(7, vec![])), strings(&["--", "dns", "7", ""]));
     }
 
     #[test]
@@ -415,7 +415,7 @@ mod tests {
         let mut system = Resolvectl::new(None);
         system.host = Some(Err("this is not the host's network namespace".to_string()));
         assert_eq!(
-            run(&mut system, Op::Revert("wan0".into())).await,
+            run(&mut system, Op::Revert(7)).await,
             Err(Failure::Refused(
                 "this is not the host's network namespace".to_string()
             ))
@@ -521,7 +521,7 @@ mod tests {
         // It comes, and the next look finds it.
         let there = dir.script("absent", "exit 0");
         assert_eq!(backend.program(), Ok(PathBuf::from(&there)));
-        assert_eq!(run(&mut backend, Op::Revert("wan0".into())).await, Ok(()));
+        assert_eq!(run(&mut backend, Op::Revert(7)).await, Ok(()));
     }
 
     #[tokio::test]
@@ -534,16 +534,12 @@ mod tests {
         );
         let mut backend = Resolvectl::new(Some(record));
         assert_eq!(
-            run(
-                &mut backend,
-                Op::Domains("wan0".into(), strings(&["example.com"]))
-            )
-            .await,
+            run(&mut backend, Op::Domains(7, strings(&["example.com"]))).await,
             Ok(())
         );
         assert_eq!(
             std::fs::read_to_string(&seen).unwrap(),
-            "--\ndomain\nwan0\nexample.com\n"
+            "--\ndomain\n7\nexample.com\n"
         );
 
         // An error says what went wrong, not what the interface holds
@@ -551,7 +547,7 @@ mod tests {
         let refuse = dir.script("refuse", "echo; echo 'Failed to set: no' >&2; exit 1");
         let mut backend = Resolvectl::new(Some(refuse.clone()));
         assert_eq!(
-            run(&mut backend, Op::Revert("wan0".into())).await,
+            run(&mut backend, Op::Revert(7)).await,
             Err(Failure::Uncertain(format!(
                 "{}: Failed to set: no",
                 refuse.to_string_lossy()
@@ -603,7 +599,7 @@ mod tests {
         backend.timeout = Duration::from_millis(300);
         // What it did before the limit is not known.
         assert_eq!(
-            run(&mut backend, Op::Revert("wan0".into())).await,
+            run(&mut backend, Op::Revert(7)).await,
             Err(Failure::Uncertain(format!(
                 "{}: no answer in 0.3 s",
                 slow.to_string_lossy()
@@ -643,8 +639,8 @@ mod tests {
 
     /// Against the real `resolvectl` and a running systemd-resolved,
     /// which no other test reaches. It needs root and the host's network
-    /// namespace, and makes and removes a dummy interface (left down, so
-    /// resolved never asks the servers it is given):
+    /// namespace, and makes, renames and removes a dummy interface (left
+    /// down, so resolved never asks the servers it is given):
     ///
     /// ```text
     /// sudo target/debug/deps/zebra_rs-<hash> --ignored --exact \
@@ -667,18 +663,22 @@ mod tests {
                 ip(&["link", "del", IF]);
             }
         }
-        /// `resolvectl dns|domain IF`: `Link N (IF): …`.
-        fn held(what: &str) -> String {
+        /// `resolvectl dns|domain LINK`: `Link N (NAME): …`. The name
+        /// that resolved shows, and what it holds for the link.
+        fn held(what: &str, link: &str) -> (String, String) {
             let output = std::process::Command::new("resolvectl")
-                .args([what, IF])
+                .args([what, link])
                 .output()
                 .unwrap();
             let text = String::from_utf8_lossy(&output.stdout);
-            let (_, values) = text.trim().split_once("):").expect("a link line");
-            values.trim().to_string()
+            let (link, values) = text.trim().split_once("):").expect("a link line");
+            let (_, name) = link.split_once('(').expect("a name");
+            (name.to_string(), values.trim().to_string())
         }
+        const RENAMED: &str = "zrsvtest1";
 
         ip(&["link", "del", IF]);
+        ip(&["link", "del", RENAMED]);
         assert!(ip(&["link", "add", IF, "type", "dummy"]), "needs root");
         let link = Link;
         // No stand-in: the program is `resolvectl`, and this is the host.
@@ -686,44 +686,63 @@ mod tests {
         assert_eq!(backend.name(), Ok(OsString::from("resolvectl")));
         let index = backend.ifindex(IF).expect("the dummy interface");
 
+        // Every command says the index, and resolved takes it for the
+        // interface.
         let servers = vec![
             "198.51.100.53".parse().unwrap(),
             "2001:db8::53".parse().unwrap(),
         ];
-        assert_eq!(run(&mut backend, Op::Dns(IF.into(), servers)).await, Ok(()));
+        assert_eq!(run(&mut backend, Op::Dns(index, servers)).await, Ok(()));
         let domains = strings(&["example.com", "corp.example"]);
-        assert_eq!(
-            run(&mut backend, Op::Domains(IF.into(), domains)).await,
-            Ok(())
-        );
-        assert_eq!(held("dns"), "198.51.100.53 2001:db8::53");
-        assert_eq!(held("domain"), "example.com corp.example");
+        assert_eq!(run(&mut backend, Op::Domains(index, domains)).await, Ok(()));
+        let is = |values: &str| (IF.to_string(), values.to_string());
+        assert_eq!(held("dns", IF), is("198.51.100.53 2001:db8::53"));
+        assert_eq!(held("domain", IF), is("example.com corp.example"));
 
         // No domains clears them and leaves the servers.
-        assert_eq!(
-            run(&mut backend, Op::Domains(IF.into(), vec![])).await,
-            Ok(())
-        );
-        assert_eq!(held("domain"), "");
-        assert_eq!(held("dns"), "198.51.100.53 2001:db8::53");
+        assert_eq!(run(&mut backend, Op::Domains(index, vec![])).await, Ok(()));
+        assert_eq!(held("domain", IF), is(""));
+        assert_eq!(held("dns", IF), is("198.51.100.53 2001:db8::53"));
 
-        assert_eq!(run(&mut backend, Op::Revert(IF.into())).await, Ok(()));
-        assert_eq!(held("dns"), "");
+        // Renamed, it is the same link to resolved, with what it held,
+        // and the index reaches it as before. The old name does not.
+        assert!(ip(&["link", "set", IF, "name", RENAMED]));
+        assert_eq!(backend.ifindex(RENAMED), Some(index));
+        assert_eq!(backend.ifname(index), Some(RENAMED.to_string()));
+        let renamed = |values: &str| (RENAMED.to_string(), values.to_string());
+        assert_eq!(held("dns", RENAMED), renamed("198.51.100.53 2001:db8::53"));
+        let other = vec!["198.51.100.54".parse().unwrap()];
+        assert_eq!(run(&mut backend, Op::Dns(index, other)).await, Ok(()));
+        assert_eq!(held("dns", RENAMED), renamed("198.51.100.54"));
+        assert_eq!(run(&mut backend, Op::Revert(index)).await, Ok(()));
+        assert_eq!(held("dns", RENAMED), renamed(""));
+        assert!(ip(&["link", "set", RENAMED, "name", IF]));
 
-        // An interface that is gone: the command says no, and there is
-        // nothing left to take back.
+        // An interface that is gone: resolved knows no such link, and
+        // there is nothing left to take back.
         drop(link);
-        assert!(matches!(
-            run(&mut backend, Op::Revert(IF.into())).await,
-            Err(Failure::Uncertain(_))
-        ));
-        assert_eq!(backend.ifindex(IF), None);
+        assert_eq!(backend.ifname(index), None);
+        match run(&mut backend, Op::Revert(index)).await {
+            Err(Failure::Uncertain(why)) => assert!(why.contains("not known"), "{why}"),
+            other => panic!("a link that is gone: {other:?}"),
+        }
 
         // Made again under the same name it is another interface, and
-        // resolved holds nothing for it.
+        // resolved holds nothing for it. The index of the one that is
+        // gone does not reach it.
         assert!(ip(&["link", "add", IF, "type", "dummy"]));
         let _link = Link;
-        assert_ne!(backend.ifindex(IF), Some(index));
-        assert_eq!(held("dns"), "");
+        let again = backend.ifindex(IF).expect("the dummy interface");
+        assert_ne!(again, index);
+        assert_eq!(held("dns", IF), is(""));
+        assert!(matches!(
+            run(
+                &mut backend,
+                Op::Dns(index, vec!["198.51.100.53".parse().unwrap()])
+            )
+            .await,
+            Err(Failure::Uncertain(_))
+        ));
+        assert_eq!(held("dns", IF), is(""));
     }
 }

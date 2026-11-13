@@ -25,11 +25,13 @@ would configure some other interface of the host. The harness names
 a stand-in to each daemon (ZEBRA_RESOLVECTL,
 tests/scripts/resolvectl_stub.sh). It keeps what it is told, per
 namespace, and `status` prints it: `wan0 dns …`, `wan0 domain …`. Like
-resolved it holds an interface's settings, not a name's: one deleted
-and made again under the same name holds nothing. It can also be told
-to fail (`break`), at once or after some seconds, to do what it is
-asked and give no answer (`stall`), or to fail after dropping the list
-it was to replace, as resolved does (`spoil`).
+resolved it holds an interface's settings by the interface's index,
+which is what zebra-rs says to it, and takes no name in its place: one
+deleted and made again under the same name holds nothing, and one
+renamed is shown with what it holds under its new name. It can also
+be told to fail (`break`), at once or after some seconds, to do what
+it is asked and give no answer (`stall`), or to fail after dropping
+the list it was to replace, as resolved does (`spoil`).
 
 Topology: s1 is the ISP side, a dnsmasq with one address to lease. Its
 lease names 198.51.100.53 as name server, example.com as domain name
