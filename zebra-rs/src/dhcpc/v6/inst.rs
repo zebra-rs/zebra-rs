@@ -303,8 +303,9 @@ pub struct V6 {
     /// are still in the kernel, and nobody's until the next
     /// `sync_pd_lan` claims or removes them.
     pd_lan_left: Vec<(String, String, Ipv6Net)>,
-    /// What the resolver task was last told, by interface (`sync_dns6`).
-    reported_dns: BTreeMap<String, LinkDns>,
+    /// What the resolver task was last told, by interface index
+    /// (`sync_dns6`).
+    reported_dns: BTreeMap<u32, LinkDns>,
 }
 
 impl V6 {
@@ -1241,13 +1242,18 @@ impl Dhcpc {
             return;
         };
         let mut now = BTreeMap::new();
-        for (name, iface) in &self.v6.ifaces {
+        for iface in self.v6.ifaces.values() {
             if iface.cfg.no_name_server {
                 continue;
             }
+            // Of the link the client runs on, by its index. A client is
+            // on a link or there is none (`link_deleted6`).
+            let Some(ifindex) = iface.ifindex else {
+                continue;
+            };
             let held = iface.session.as_ref().and_then(|s| s.bound.as_ref());
             if let Some(dns) = held.and_then(lease_dns6) {
-                now.insert(name.clone(), dns);
+                now.insert(ifindex, dns);
             }
         }
         report_dns(resolver, Source::Dhcp6, &mut self.v6.reported_dns, now);
@@ -3318,7 +3324,7 @@ mod tests {
     fn reported(rx: &mut UnboundedReceiver<Report>) -> Vec<Option<LinkDns>> {
         let mut out = Vec::new();
         while let Ok(report) = rx.try_recv() {
-            assert_eq!((report.ifname.as_str(), report.source), (IF, Source::Dhcp6));
+            assert_eq!((report.ifindex, report.source), (IFINDEX, Source::Dhcp6));
             out.push(report.dns);
         }
         out
@@ -3369,6 +3375,38 @@ mod tests {
         reported(&mut rx);
         b.dhcpc.link_deleted6(IFINDEX, IF);
         assert_eq!(reported(&mut rx), [None]);
+    }
+
+    /// The name servers are said of the link the client runs on, by its
+    /// index. A link deleted and made again under its name is another
+    /// link: the first has nothing any more, and the lease taken on the
+    /// second is said of that one.
+    #[tokio::test]
+    async fn name_servers_are_reported_for_the_link_the_client_is_on() {
+        const AGAIN: u32 = IFINDEX + 0x100;
+        let mut b = bench("dns-index");
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        b.dhcpc.set_resolver(tx);
+        let mut said = move || {
+            let mut out = Vec::new();
+            while let Ok(report) = rx.try_recv() {
+                assert_eq!(report.source, Source::Dhcp6);
+                out.push((report.ifindex, report.dns));
+            }
+            out
+        };
+        save(&b, &DUID, 0, &lease_with_dns(&[ADDRESS]));
+        configure(&mut b, &DUID);
+        assert_eq!(said(), [(IFINDEX, Some(its_dns()))]);
+
+        let link = b.dhcpc.links.remove(&IFINDEX).unwrap();
+        b.dhcpc.link_deleted6(IFINDEX, IF);
+        assert_eq!(said(), [(IFINDEX, None)]);
+        b.dhcpc.links.insert(AGAIN, link);
+        save(&b, &DUID, 0, &lease_with_dns(&[ADDRESS]));
+        b.dhcpc.reconcile6(IF);
+        assert_eq!(b.dhcpc.v6.ifaces[IF].ifindex, Some(AGAIN));
+        assert_eq!(said(), [(AGAIN, Some(its_dns()))]);
     }
 
     /// One `dhcpv6-options` leaf of `IF` set or deleted, as the

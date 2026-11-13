@@ -19,6 +19,11 @@ dhcp` deleted, while zebra-rs was not running. An interface renamed in
 that time is still the same interface, and is taken back under the
 name it has.
 
+An interface is its index all the way: the DHCP client says the index
+of the interface the lease is on, and so does every command. One
+renamed while zebra-rs runs keeps the name servers of the lease it
+holds.
+
 No resolver is running here, and none must be reached: every daemon
 of the suite runs in a network namespace, from which `resolvectl`
 would configure some other interface of the host. The harness names
@@ -57,6 +62,7 @@ Requires dnsmasq and nft on the host (tests/scripts/dhcp_server.sh).
 | An error after the old name servers are gone does not leave them taken for held | |
 | Name servers set by a command that got no answer are still taken back | |
 | An interface made again is given its name servers again | |
+| An interface renamed under the running daemon keeps its lease's name servers | |
 | no-name-server takes them back and leaves the lease | |
 | A lease taken under no-name-server is only shown | |
 | Deleting no-name-server hands the held lease's name servers over | |

@@ -19,6 +19,11 @@ Feature: A DHCP lease's name servers for the host
   that time is still the same interface, and is taken back under the
   name it has.
 
+  An interface is its index all the way: the DHCP client says the index
+  of the interface the lease is on, and so does every command. One
+  renamed while zebra-rs runs keeps the name servers of the lease it
+  holds.
+
   No resolver is running here, and none must be reached: every daemon
   of the suite runs in a network namespace, from which `resolvectl`
   would configure some other interface of the host. The harness names
@@ -178,6 +183,33 @@ Feature: A DHCP lease's name servers for the host
     And show command "show dhcp client leases" in namespace "r1" should contain "DNS servers:  198.51.100.54"
     And command "tests/scripts/resolvectl_stub.sh status" in namespace "r1" should eventually contain "wan0 dns 198.51.100.54"
     And command "tests/scripts/resolvectl_stub.sh status" in namespace "r1" should eventually contain "wan0 domain example.com"
+
+  Scenario: An interface renamed under the running daemon keeps its lease's name servers
+    Given the test topology exists
+    # The lease is held on an interface, and the DHCP client says that
+    # interface to the resolver task by its index, as the task says it
+    # to `resolvectl`. A change of name is nothing to either. zebra-rs
+    # itself does not follow a rename yet and goes on calling the
+    # interface wan0, lease and all, so the name servers stay where the
+    # lease's address is. (Renamed while it is up, which Linux allows
+    # from 6.2 on.)
+    When I execute "ip link set wan0 name wany" in namespace "r1"
+    Then command "tests/scripts/resolvectl_stub.sh status" in namespace "r1" should eventually contain "wany dns 198.51.100.54"
+    And show command "show dhcp client leases" in namespace "r1" should contain "State:        bound"
+    # Taken back and given again, by what is configured for the name
+    # zebra-rs knows. Each time it is the interface the lease is on that
+    # is told. A daemon that asked for an interface called wan0 would
+    # find none, and give the servers to nobody.
+    When I apply command "set interface wan0 ipv4 dhcp-options no-name-server" in namespace "r1"
+    Then command "tests/scripts/resolvectl_stub.sh status" in namespace "r1" should eventually not contain "wany"
+    And daemon log in namespace "r1" should eventually contain "resolver: wany: name servers withdrawn"
+    When I apply command "delete interface wan0 ipv4 dhcp-options no-name-server" in namespace "r1"
+    Then command "tests/scripts/resolvectl_stub.sh status" in namespace "r1" should eventually contain "wany dns 198.51.100.54"
+    And daemon log in namespace "r1" should eventually contain "resolver: wany: name servers 198.51.100.54"
+    And show command "show dhcp client leases" in namespace "r1" should contain "State:        bound"
+    # Under its own name again, for the scenarios that follow.
+    When I execute "ip link set wany name wan0" in namespace "r1"
+    Then command "tests/scripts/resolvectl_stub.sh status" in namespace "r1" should eventually contain "wan0 dns 198.51.100.54"
 
   Scenario: no-name-server takes them back and leaves the lease
     Given the test topology exists

@@ -108,10 +108,6 @@ impl Backend for Resolvectl {
         self.name().map(|_| ())
     }
 
-    fn ifindex(&self, ifname: &str) -> Option<u32> {
-        nix::net::if_::if_nametoindex(ifname).ok()
-    }
-
     fn ifname(&self, ifindex: u32) -> Option<String> {
         let name = nix::net::if_::if_indextoname(ifindex).ok()?;
         // nix 0.31 takes the null pointer that says "no such interface"
@@ -628,11 +624,8 @@ mod tests {
     }
 
     #[test]
-    fn an_interface_has_an_index_or_is_not_there() {
+    fn an_index_has_an_interface_with_a_name_or_none() {
         let backend = Resolvectl::new(None);
-        assert_eq!(backend.ifindex("lo"), Some(1));
-        assert_eq!(backend.ifindex("zebra-absent0"), None);
-        // And an index has an interface, with a name, or none.
         assert_eq!(backend.ifname(1), Some("lo".to_string()));
         assert_eq!(backend.ifname(u32::MAX), None);
     }
@@ -676,6 +669,10 @@ mod tests {
             (name.to_string(), values.trim().to_string())
         }
         const RENAMED: &str = "zrsvtest1";
+        /// As a source has it from the RIB.
+        fn index_of(name: &str) -> Option<u32> {
+            nix::net::if_::if_nametoindex(name).ok()
+        }
 
         ip(&["link", "del", IF]);
         ip(&["link", "del", RENAMED]);
@@ -684,7 +681,7 @@ mod tests {
         // No stand-in: the program is `resolvectl`, and this is the host.
         let mut backend = Resolvectl::new(None);
         assert_eq!(backend.name(), Ok(OsString::from("resolvectl")));
-        let index = backend.ifindex(IF).expect("the dummy interface");
+        let index = index_of(IF).expect("the dummy interface");
 
         // Every command says the index, and resolved takes it for the
         // interface.
@@ -707,7 +704,7 @@ mod tests {
         // Renamed, it is the same link to resolved, with what it held,
         // and the index reaches it as before. The old name does not.
         assert!(ip(&["link", "set", IF, "name", RENAMED]));
-        assert_eq!(backend.ifindex(RENAMED), Some(index));
+        assert_eq!(index_of(RENAMED), Some(index));
         assert_eq!(backend.ifname(index), Some(RENAMED.to_string()));
         let renamed = |values: &str| (RENAMED.to_string(), values.to_string());
         assert_eq!(held("dns", RENAMED), renamed("198.51.100.53 2001:db8::53"));
@@ -732,7 +729,7 @@ mod tests {
         // gone does not reach it.
         assert!(ip(&["link", "add", IF, "type", "dummy"]));
         let _link = Link;
-        let again = backend.ifindex(IF).expect("the dummy interface");
+        let again = index_of(IF).expect("the dummy interface");
         assert_ne!(again, index);
         assert_eq!(held("dns", IF), is(""));
         assert!(matches!(

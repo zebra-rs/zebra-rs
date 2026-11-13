@@ -43,11 +43,18 @@ pub enum Source {
     Ra,
 }
 
-/// What `source` now has on `ifname` for the host to use: `None` when
-/// that is nothing (any more).
+/// What `source` now has for the host to use on the interface of that
+/// index: `None` when that is nothing (any more).
+///
+/// A source says the interface it runs on, not what that is called. It
+/// has the index from the RIB, with the link its sockets, its address
+/// and its routes are on, and the system resolver keeps an interface's
+/// settings by that index. So the name servers stay with the lease they
+/// came with through a change of name, and no name is looked up between
+/// here and the command.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Report {
-    pub ifname: String,
+    pub ifindex: u32,
     pub source: Source,
     pub dns: Option<LinkDns>,
 }
