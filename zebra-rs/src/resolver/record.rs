@@ -10,8 +10,14 @@
 //! interface holds anything, and its settings stay until it goes.
 //!
 //! The record names each interface that holds something of ours, with
-//! its index: the settings are an interface's, not a name's. It does not
-//! say what they are. The next run sets whatever it learns anew, and
+//! its index: the settings are an interface's, not a name's. And it is
+//! kept by index. A name can pass from one interface to another, by a
+//! rename or an exchange of names, and what is written for the name's
+//! new interface must not be the end of the word on its old one. The
+//! name beside an index is the one the interface had when it was
+//! noted, for whoever reads the file.
+//!
+//! It does not say what the settings are. The next run sets whatever it learns anew, and
 //! takes back what it has not learned when its wait for the sources is
 //! over (`--leftover-sweep-time`, as the RIB waits before it sweeps the
 //! routes of an earlier run).
@@ -73,8 +79,9 @@ pub struct Record {
     /// Where the record is kept; `None` keeps it in memory only (tests).
     path: Option<PathBuf>,
     origin: Origin,
-    /// The interfaces named, each with its index.
-    links: BTreeMap<String, u32>,
+    /// The interfaces named, by index, each with the name it was noted
+    /// under.
+    links: BTreeMap<u32, String>,
     /// The file does not say what `links` says: it has changed since the
     /// last write that worked. Every [`Record::hold`] and
     /// [`Record::note`] tries the write again until one does, also when
@@ -101,7 +108,7 @@ impl Record {
             stored
                 .links
                 .into_iter()
-                .map(|link| (link.interface, link.ifindex))
+                .map(|link| (link.ifindex, link.interface))
                 .collect()
         } else {
             BTreeMap::new()
@@ -115,22 +122,26 @@ impl Record {
         }
     }
 
-    pub fn links(&self) -> &BTreeMap<String, u32> {
+    /// The interfaces named: the index of each, and the name it was
+    /// noted under. The index says which interface it is. The name may
+    /// be another interface's by now.
+    pub fn links(&self) -> &BTreeMap<u32, String> {
         &self.links
     }
 
-    /// The interface of that name and index holds something of ours, or
-    /// is about to.
+    /// The interface of that index, called that now, holds something of
+    /// ours, or is about to. Whatever else is on record stays: also an
+    /// interface that was noted under this name, and has another now.
     pub fn hold(&mut self, ifname: &str, ifindex: u32) {
-        if self.links.get(ifname) != Some(&ifindex) {
-            self.links.insert(ifname.to_string(), ifindex);
+        if self.links.get(&ifindex).map(String::as_str) != Some(ifname) {
+            self.links.insert(ifindex, ifname.to_string());
             self.unsaved = true;
         }
         self.save();
     }
 
     /// These interfaces hold something of ours, and no other does.
-    pub fn note(&mut self, links: BTreeMap<String, u32>) {
+    pub fn note(&mut self, links: BTreeMap<u32, String>) {
         if self.links != links {
             self.links = links;
             self.unsaved = true;
@@ -164,7 +175,7 @@ impl Record {
             links: self
                 .links
                 .iter()
-                .map(|(interface, ifindex)| StoredLink {
+                .map(|(ifindex, interface)| StoredLink {
                     interface: interface.clone(),
                     ifindex: *ifindex,
                 })
@@ -238,10 +249,10 @@ pub(super) mod tests {
         }
     }
 
-    fn links(items: &[(&str, u32)]) -> BTreeMap<String, u32> {
+    fn links(items: &[(&str, u32)]) -> BTreeMap<u32, String> {
         items
             .iter()
-            .map(|(name, index)| (name.to_string(), *index))
+            .map(|(name, index)| (*index, name.to_string()))
             .collect()
     }
 
@@ -317,6 +328,27 @@ pub(super) mod tests {
                 "netns": "net:[4026531840]",
                 "links": [{ "interface": "wan0", "ifindex": 5 }],
             })
+        );
+    }
+
+    /// Two interfaces exchange their names, and the first to be given
+    /// something under its new name is written. The other one, whose
+    /// name that was, stays on record: it still holds what it held, and
+    /// a run that is ended now must leave word of both.
+    #[test]
+    fn an_interface_stays_on_record_when_its_name_is_noted_for_another() {
+        let path = scratch("name-for-another");
+        let mut record = Record::load(path.clone(), at("boot-a"));
+        record.hold("wan0", 7);
+        record.hold("wan1", 8);
+        record.hold("wan0", 8);
+        let read = Record::load(path.clone(), at("boot-a"));
+        assert_eq!(read.links(), &links(&[("wan0", 7), ("wan0", 8)]));
+        // Until the record is put right as a whole.
+        record.note(links(&[("wan1", 7), ("wan0", 8)]));
+        assert_eq!(
+            Record::load(path, at("boot-a")).links(),
+            &links(&[("wan1", 7), ("wan0", 8)])
         );
     }
 

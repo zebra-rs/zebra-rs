@@ -1346,7 +1346,8 @@ is given), and Router Advertisements (RDNSS, DNSSL).**
   - **Renamed**, an interface keeps its index, and resolved keeps its
     settings (it holds its links by index, and only changes the name it
     shows). What was noted follows the interface to the name it has
-    now. The sources say names: what none of them reports under the new
+    now, and so does whether it is still waited for after a restart.
+    The sources say names: what none of them reports under the new
     name is no longer wanted and is reverted, under the new name. Left
     under the old one it would be lost with it, the settings still in.
     Until zebra-rs follows a rename itself, a DHCP client goes on
@@ -1365,7 +1366,12 @@ is given), and Router Advertisements (RDNSS, DNSSL).**
     names the interfaces that hold something of ours, each with its
     index, and where it was written: the boot and the network
     namespace. It does not say what they hold: what is learned again is
-    set again whatever it is.
+    set again whatever it is. It is kept by index. A name can pass from
+    one interface to another (a rename, two interfaces exchanging
+    theirs), and writing the name's new interface ahead of its command
+    must not take the old one off the record: that one still holds what
+    it held. The name beside an index is the one the interface had when
+    it was noted.
   - **Written ahead.** An interface is named before any command that
     may give it something is started, and until a revert has worked or
     the interface is gone. A run ended while `resolvectl` is under way

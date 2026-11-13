@@ -192,7 +192,7 @@ impl<B: Backend> Resolver<B> {
             return;
         }
         self.record = record;
-        for (name, ifindex) in self.record.links().clone() {
+        for (ifindex, name) in self.record.links().clone() {
             let Some(link) = self.backend.ifname(ifindex) else {
                 continue;
             };
@@ -272,18 +272,26 @@ impl<B: Backend> Resolver<B> {
             })
             .collect();
         // All of them out before any goes in again: two interfaces may
-        // have taken each other's names.
+        // have taken each other's names. That an interface is still
+        // waited for goes with it, and out and in the same way: moved
+        // one at a time, two that exchanged names would leave one name
+        // waited for, and the other taken back before its time.
         let mut moved = Vec::new();
         for (old, new) in renamed {
             if let Some(held) = self.applied.remove(&old) {
-                moved.push((old, new, held));
+                let waited = self.waiting.remove(&old);
+                self.complained.remove(&old);
+                moved.push((old, new, held, waited));
             }
         }
-        for (old, new, held) in moved {
+        for (old, new, held, waited) in moved {
             tracing::info!("resolver: {old}: is {new} now");
-            self.complained.remove(&old);
-            if self.waiting.remove(&old) {
+            // Waited for or not is the interface's, not the name's:
+            // not what an interface that had the name before was.
+            if waited {
                 self.waiting.insert(new.clone());
+            } else {
+                self.waiting.remove(&new);
             }
             // What is still noted under the new name is not this
             // interface's: it was for one that is gone, or for a command
@@ -310,12 +318,12 @@ impl<B: Backend> Resolver<B> {
     }
 
     /// The interfaces that hold something of ours, as the record names
-    /// them. One that was not there when it was to be set has no index
-    /// and holds nothing.
-    fn held_links(&self) -> BTreeMap<String, u32> {
+    /// them: by index. One that was not there when it was to be set has
+    /// no index and holds nothing.
+    fn held_links(&self) -> BTreeMap<u32, String> {
         self.applied
             .iter()
-            .filter_map(|(name, held)| Some((name.clone(), held.ifindex?)))
+            .filter_map(|(name, held)| Some((held.ifindex?, name.clone())))
             .collect()
     }
 
@@ -704,11 +712,13 @@ mod tests {
 
     /// What the record at `path` names.
     fn on_record(path: &std::path::Path) -> Vec<(String, u32)> {
-        Record::load(path.to_path_buf(), here())
+        let mut named: Vec<(String, u32)> = Record::load(path.to_path_buf(), here())
             .links()
             .iter()
-            .map(|(name, index)| (name.clone(), *index))
-            .collect()
+            .map(|(index, name)| (name.clone(), *index))
+            .collect();
+        named.sort();
+        named
     }
 
     fn links(items: &[(&str, u32)]) -> Vec<(String, u32)> {
@@ -1294,6 +1304,88 @@ mod tests {
         );
         b.sync().await;
         assert_eq!(b.ran(), []);
+    }
+
+    /// The same exchange, as the record sees it. The first command of
+    /// the pass says a name that is on record with the other interface's
+    /// index. Both interfaces are on record while it runs, and while
+    /// every one after it runs: a run ended in any of them has left word
+    /// of both, and the next takes both back.
+    #[tokio::test]
+    async fn interfaces_that_exchanged_their_names_both_stay_on_record() {
+        let mut b = Bench::after("exchanged-record", &[], None);
+        b.resume();
+        {
+            let mut script = b.mock.0.lock().unwrap();
+            script.index.insert(WAN.to_string(), 7);
+            script.index.insert("wan1".to_string(), 8);
+        }
+        b.report(WAN, Some(dns(&["198.51.100.53"], &[]))).await;
+        b.report("wan1", Some(dns(&["203.0.113.53"], &[]))).await;
+        b.ran();
+        b.recorded();
+        b.rename(WAN, "spare");
+        b.rename("wan1", WAN);
+        b.rename("spare", "wan1");
+
+        b.sync().await;
+        assert_eq!(b.ran().len(), 4);
+        let recorded = b.recorded();
+        for at_command in &recorded {
+            let mut indexes: Vec<u32> = at_command.iter().map(|(_, index)| *index).collect();
+            indexes.sort();
+            assert_eq!(indexes, [7, 8], "{at_command:?}");
+        }
+        assert_eq!(b.record(), links(&[(WAN, 8), ("wan1", 7)]));
+
+        // Ended in the first of those commands: what the record said
+        // then is all the next run has.
+        let left: Vec<(&str, u32)> = recorded[0].iter().map(|(n, i)| (n.as_str(), *i)).collect();
+        let now = [(WAN, 8), ("wan1", 7)];
+        let mut next = Bench::after("exchanged-record", &left, Some(&now));
+        next.resume();
+        next.sweep().await;
+        assert_eq!(next.ran(), [revert(WAN), revert("wan1")].concat());
+    }
+
+    /// Two interfaces an earlier run left, both still waited for,
+    /// exchange their names during the wait. Both are still waited for:
+    /// neither is taken back before the wait is over, and both are when
+    /// it is.
+    #[tokio::test]
+    async fn interfaces_that_exchanged_their_names_are_both_still_waited_for() {
+        let mut b = Bench::after("exchanged-waiting", &[(WAN, 7), ("wan1", 8)], None);
+        b.resume();
+        b.rename(WAN, "spare");
+        b.rename("wan1", WAN);
+        b.rename("spare", "wan1");
+        b.sync().await;
+        assert_eq!(b.ran(), []);
+        assert_eq!(b.record(), links(&[(WAN, 8), ("wan1", 7)]));
+        // One of them is claimed under the name it has now, and the
+        // other is still waited for.
+        b.report(WAN, Some(dns(&["198.51.100.53"], &[]))).await;
+        assert_eq!(b.ran(), set(WAN, &["198.51.100.53"], &[]));
+        b.sweep().await;
+        assert_eq!(b.ran(), revert("wan1"));
+        assert_eq!(b.record(), links(&[(WAN, 8)]));
+    }
+
+    /// Whether an interface is waited for is the interface's, not its
+    /// name's. One that this run has claimed takes the name of one that
+    /// was still waited for and is gone: it is this run's all the same,
+    /// and taken back at once when it is no longer wanted.
+    #[tokio::test]
+    async fn an_interface_is_not_waited_for_because_its_new_name_was() {
+        let mut b = Bench::after("name-was-waited-for", &[(WAN, 7), ("wan1", 8)], None);
+        b.resume();
+        b.report(WAN, Some(dns(&["198.51.100.53"], &[]))).await;
+        b.ran();
+        b.mock.0.lock().unwrap().missing.push("wan1".to_string());
+        b.rename(WAN, "wan1");
+        b.report(WAN, None).await;
+        assert_eq!(b.ran(), revert("wan1"));
+        assert_eq!(b.record(), []);
     }
 
     /// An interface is renamed while another's command runs, after the
