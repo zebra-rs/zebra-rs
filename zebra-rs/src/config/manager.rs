@@ -881,6 +881,13 @@ impl ConfigManager {
         self.checked_lines(text, check::dhcpv6_pd_line)
     }
 
+    /// The discard keywords of the static routes among config `text`'s
+    /// lines (`check::static_discard_exclusive`), as callback paths and
+    /// arguments.
+    fn static_discard_entries(&self, text: &str) -> Vec<(String, Vec<String>)> {
+        self.checked_lines(text, check::static_discard_line)
+    }
+
     /// Commit the candidate. Refuses it, dispatching nothing, when it
     /// fails validation: mandatory nodes, the leaf value checks, or a label
     /// check it would newly break.
@@ -994,6 +1001,19 @@ impl ConfigManager {
                 if !before.warnings.contains(warning) {
                     tracing::warn!("{warning}");
                 }
+            }
+        }
+
+        // A static route is a blackhole or an unreachable route, not
+        // both. A startup config is only warned about, as above; the
+        // route is then the one that says nothing.
+        let discards = check::static_discard_exclusive(&self.static_discard_entries(&candidate));
+        if !discards.is_empty() {
+            if !startup {
+                return Err(anyhow::anyhow!(discards.join("\n")));
+            }
+            for error in &discards {
+                tracing::warn!("startup config: {error}; the route is a blackhole");
             }
         }
 
@@ -2984,6 +3004,52 @@ mod save_config_tests {
             let (code, output, _) = cm.execute(mode, &format!("delete {cradle}"));
             assert_eq!(code, ExecCode::Show, "delete rejected: {output:?}");
         }
+    }
+
+    /// `nexthop blackhole` and `nexthop unreachable` on one static route
+    /// are refused at commit (`check::static_discard_exclusive`), and the
+    /// refused commit leaves the running config alone. One replaces the
+    /// other in a single commit.
+    #[test]
+    fn a_static_route_with_both_discard_keywords_fails_the_commit() {
+        let cm = manager_with_config(&temp_path("static-discard"));
+        let mode = cm.modes.get("configure").expect("configure mode");
+        let edit = |line: &str| {
+            let (code, output, _) = cm.execute(mode, line);
+            assert_eq!(code, ExecCode::Show, "`{line}` rejected: {output:?}");
+        };
+        let running = || {
+            let mut running = String::new();
+            cm.store.running.borrow().list(&mut running);
+            running
+        };
+        let refused = "router static ipv4 route 10.9.9.0/24: nexthop blackhole cannot be \
+                       combined with nexthop unreachable; delete one or the other";
+
+        edit("set router static ipv4 route 10.9.9.0/24 nexthop blackhole");
+        edit("set router static ipv6 route 2001:db8:dead::/48 nexthop unreachable");
+        edit("set router static vrf blue ipv4 route 10.9.9.0/24 nexthop unreachable");
+        cm.commit_config().expect("one keyword a route commits");
+        let committed = running();
+        assert!(
+            committed.contains("router static ipv6 route 2001:db8:dead::/48 nexthop unreachable"),
+            "{committed}"
+        );
+
+        edit("set router static ipv4 route 10.9.9.0/24 nexthop unreachable");
+        let err = cm.commit_config().expect_err("both on one route");
+        assert_eq!(err.to_string(), refused);
+        assert_eq!(running(), committed, "a refused commit changes nothing");
+
+        // The other keyword in the blackhole's place, in one commit.
+        edit("delete router static ipv4 route 10.9.9.0/24 nexthop blackhole");
+        cm.commit_config().expect("replaced");
+        let replaced = running();
+        assert!(
+            replaced.contains("router static ipv4 route 10.9.9.0/24 nexthop unreachable"),
+            "{replaced}"
+        );
+        assert!(!replaced.contains("nexthop blackhole"), "{replaced}");
     }
 
     /// `interface <name> ipv4 address dhcp` and a static address on the

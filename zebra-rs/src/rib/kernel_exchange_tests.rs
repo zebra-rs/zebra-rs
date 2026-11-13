@@ -603,6 +603,21 @@ async fn legacy_proto_static_route_is_adopted_only_by_the_same_static() {
     }
 }
 
+/// The two routes of each leftover case, at priorities 100 and 200. The
+/// first pair is two unicast routes: `check_leftover_priorities` merges
+/// it into a floating route.
+const LEFTOVER_KINDS: [[&str; 2]; 9] = [
+    ["unicast", "unicast"],
+    ["ecmp", "ecmp"],
+    ["blackhole", "blackhole"],
+    ["unicast", "blackhole"],
+    ["blackhole", "ecmp"],
+    ["ecmp", "unicast"],
+    ["unreachable", "unreachable"],
+    ["unicast", "unreachable"],
+    ["unreachable", "blackhole"],
+];
+
 async fn check_leftover_priorities(replace: bool) {
     require_netns();
     ip(&["link", "add", "leftvrf", "type", "vrf", "table", "100"]);
@@ -635,14 +650,7 @@ async fn check_leftover_priorities(replace: bool) {
                 (_, "-4") => ("lefttenant", ["198.51.100.1", "198.51.100.3"]),
                 _ => ("lefttenant", ["2001:db8:20::1", "2001:db8:20::3"]),
             };
-            for kinds in [
-                ["unicast", "unicast"],
-                ["ecmp", "ecmp"],
-                ["blackhole", "blackhole"],
-                ["unicast", "blackhole"],
-                ["blackhole", "ecmp"],
-                ["ecmp", "unicast"],
-            ] {
+            for kinds in LEFTOVER_KINDS {
                 let serial = cases.len() + 1;
                 let prefix = if family == "-4" {
                     format!("10.240.{serial}.0/24")
@@ -652,8 +660,8 @@ async fn check_leftover_priorities(replace: bool) {
                 for (index, kind) in kinds.into_iter().enumerate() {
                     let priority = ["100", "200"][index];
                     let mut args = vec![family, "route", "add"];
-                    if kind == "blackhole" {
-                        args.push("blackhole");
+                    if matches!(kind, "blackhole" | "unreachable") {
+                        args.push(kind);
                     }
                     args.extend([
                         &prefix, "table", &table_arg, "proto", "zebra", "metric", priority,
@@ -749,7 +757,7 @@ async fn check_leftover_priorities(replace: bool) {
     } else {
         // Also exercise deletion of the list form of a floating leftover.
         // Keep other cases separate so mixed and ECMP kinds retain coverage.
-        for (table, _, prefix, _) in cases.iter().step_by(6) {
+        for (table, _, prefix, _) in cases.iter().step_by(LEFTOVER_KINDS.len()) {
             let prefix: IpNet = prefix.parse().unwrap();
             let rows = entries(&rib, prefix, *table);
             let mut merged = rows[0].clone();
@@ -2253,6 +2261,89 @@ async fn an_unreachable_route_is_in_the_rib_only_as_a_recorded_leftover() {
         .await;
     assert!(rows(&rib, given_up).is_empty());
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// An unreachable route under `RTPROT_ZEBRA` is a static route's. The
+/// startup dump brings an earlier run's as a stale leftover, which the
+/// static route replaces if it is configured still, and the sweep takes
+/// otherwise. One reported later is not zebra-rs's own doing and stays
+/// out; the echo of its own is nothing.
+#[tokio::test]
+async fn an_unreachable_static_leftover_is_replaced_or_swept() {
+    use crate::fib::netlink::route_from_msg_with;
+    let kept: Ipv4Net = "198.51.100.0/24".parse().unwrap();
+    let dropped: Ipv4Net = "203.0.113.0/24".parse().unwrap();
+    let theirs: Ipv4Net = "192.0.2.0/24".parse().unwrap();
+    let unreachable = |prefix: Ipv4Net, dump: bool| {
+        let mut msg = RouteMessage::default();
+        msg.header.address_family = AddressFamily::Inet;
+        msg.header.destination_prefix_length = prefix.prefix_len();
+        msg.header.protocol = RouteProtocol::Zebra;
+        msg.header.kind = RouteType::Unreachable;
+        msg.header.scope = RouteScope::Universe;
+        msg.attributes.extend([
+            RouteAttribute::Table(RT_TABLE_MAIN),
+            RouteAttribute::Destination(RouteAddress::Inet(prefix.addr())),
+            RouteAttribute::Priority(0),
+        ]);
+        route_from_msg_with(msg, &std::collections::BTreeMap::new(), dump).unwrap()
+    };
+    let rows = |rib: &Rib, prefix: Ipv4Net| {
+        rib.table
+            .get(&prefix)
+            .map(|entries| {
+                entries
+                    .iter()
+                    .map(|e| (e.rtype, e.stale, e.nexthop.clone()))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    };
+
+    let mut rib = Rib::new(false).unwrap();
+    for prefix in [kept, dropped] {
+        rib.process_fib_msg(FibMessage::NewRoute(unreachable(prefix, true)))
+            .await;
+        assert_eq!(
+            rows(&rib, prefix),
+            vec![(RibType::Static, true, Nexthop::unreachable(0))]
+        );
+    }
+    rib.process_fib_msg(FibMessage::NewRoute(unreachable(theirs, false)))
+        .await;
+    assert!(
+        rows(&rib, theirs).is_empty(),
+        "not from the dump: stays out"
+    );
+
+    // Still configured: the static route takes the leftover's place, and
+    // the kernel's word of it afterwards is its own echo.
+    let mut entry = RibEntry::new(RibType::Static);
+    entry.distance = 1;
+    entry.nexthop = Nexthop::unreachable(0);
+    rib.ipv4_route_add(&kept, entry, RT_TABLE_MAIN).await;
+    let held = rows(&rib, kept);
+    assert_eq!(held.len(), 1);
+    assert!(!held[0].1, "the leftover is replaced: {held:?}");
+    if let Some(entry) = rib.table.get_mut(&kept).and_then(|e| e.first_mut()) {
+        // No kernel here to take the route: as if it had.
+        entry.fib = true;
+        entry.selected = true;
+        entry.valid = true;
+    }
+    rib.process_fib_msg(FibMessage::NewRoute(unreachable(kept, false)))
+        .await;
+    rib.process_fib_msg(FibMessage::DelRoute(unreachable(kept, false)))
+        .await;
+    assert_eq!(rows(&rib, kept).len(), 1);
+
+    rib.process_msg(Message::SweepLeftovers, RT_TABLE_MAIN)
+        .await;
+    assert!(
+        rows(&rib, dropped).is_empty(),
+        "configured no longer: swept"
+    );
+    assert_eq!(rows(&rib, kept).len(), 1);
 }
 
 /// A restart with a route record from the earlier run: the DHCP client's

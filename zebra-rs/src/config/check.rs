@@ -309,6 +309,69 @@ pub fn dhcpv6_pd_interfaces(entries: &[(String, Vec<String>)]) -> PdFindings {
 /// A leaf value check: `Err` holds the reason, shown after the line.
 pub type ValueCheck = fn(&str) -> Result<(), String>;
 
+/// Whether a config line can carry an entry [`static_discard_exclusive`]
+/// reads.
+pub fn static_discard_line(line: &str) -> bool {
+    line.starts_with("router static ")
+        && (line.contains(" nexthop blackhole") || line.contains(" nexthop unreachable"))
+}
+
+/// `router static [vrf <name>] ipv4|ipv6 route <prefix> nexthop
+/// blackhole` and `nexthop unreachable` each make the route a discard
+/// route, of one kind: silent, or answered with an ICMP Destination
+/// Unreachable. A route is one or the other, so the two on one route
+/// are refused. They are two entries of one list, which the schema
+/// cannot hold apart. `entries` are a whole config's
+/// [`static_discard_line`]s as (callback path, arguments); the result is
+/// one error per route that has both, in the order the routes first
+/// appear.
+pub fn static_discard_exclusive(entries: &[(String, Vec<String>)]) -> Vec<String> {
+    // The route (callback path and its keys), and which keywords it has.
+    let mut routes: Vec<((&str, &[String]), bool, bool)> = Vec::new();
+    for (path, args) in entries {
+        let Some(family) = path
+            .strip_prefix("/router/static/")
+            .and_then(|rest| rest.strip_suffix("/route/nexthop"))
+        else {
+            continue;
+        };
+        if !matches!(family, "ipv4" | "ipv6" | "vrf/ipv4" | "vrf/ipv6") {
+            continue;
+        }
+        let Some((nexthop, keys)) = args.split_last() else {
+            continue;
+        };
+        let (blackhole, unreachable) = match nexthop.as_str() {
+            "blackhole" => (true, false),
+            "unreachable" => (false, true),
+            _ => continue,
+        };
+        let key = (family, keys);
+        match routes.iter_mut().find(|(k, ..)| *k == key) {
+            Some((_, b, u)) => {
+                *b |= blackhole;
+                *u |= unreachable;
+            }
+            None => routes.push((key, blackhole, unreachable)),
+        }
+    }
+    routes
+        .into_iter()
+        .filter(|(_, blackhole, unreachable)| *blackhole && *unreachable)
+        .map(|((family, keys), ..)| {
+            // `vrf/ipv4` with keys [vrf, prefix]; `ipv4` with [prefix].
+            let route = match (family.strip_prefix("vrf/"), keys) {
+                (Some(family), [vrf, prefix]) => format!("vrf {vrf} {family} route {prefix}"),
+                (_, keys) => format!("{family} route {}", keys.join(" ")),
+            };
+            format!(
+                "router static {route}: nexthop blackhole cannot be combined with nexthop \
+                 unreachable; delete one or the other"
+            )
+        })
+        .collect()
+}
+
 /// `interface <name> ipv6 dhcpv6-options duid`: 3 to 130 octets (RFC 8415
 /// §11.1). The schema's pattern says what an octet looks like and that
 /// there are three; it cannot count to 130.
@@ -801,6 +864,111 @@ mod tests {
         assert!(!ipv4_address_line(
             "interface eth0 ipv4 dhcp-options host-name edge1"
         ));
+    }
+
+    /// A static route is a blackhole or an unreachable route, not both:
+    /// per route, per family and per VRF. A discard keyword beside an
+    /// address is not this check's business.
+    #[test]
+    fn a_static_route_takes_one_discard_keyword() {
+        let v4 = |prefix: &str, nexthop: &str| {
+            leaf("/router/static/ipv4/route/nexthop", &[prefix, nexthop])
+        };
+        let v6 = |prefix: &str, nexthop: &str| {
+            leaf("/router/static/ipv6/route/nexthop", &[prefix, nexthop])
+        };
+        let vrf = |name: &str, prefix: &str, nexthop: &str| {
+            leaf(
+                "/router/static/vrf/ipv4/route/nexthop",
+                &[name, prefix, nexthop],
+            )
+        };
+
+        // Either alone, each on its own route, and beside an address.
+        assert!(static_discard_exclusive(&[v4("10.0.0.0/8", "blackhole")]).is_empty());
+        assert!(static_discard_exclusive(&[v4("10.0.0.0/8", "unreachable")]).is_empty());
+        assert!(
+            static_discard_exclusive(&[
+                v4("10.0.0.0/8", "blackhole"),
+                v4("10.1.0.0/16", "unreachable"),
+                v4("10.1.0.0/16", "192.0.2.1"),
+            ])
+            .is_empty()
+        );
+        // The same prefix in another family, another VRF or the default
+        // one is another route. So is a label's nexthop.
+        assert!(
+            static_discard_exclusive(&[
+                vrf("blue", "10.0.0.0/8", "blackhole"),
+                vrf("red", "10.0.0.0/8", "unreachable"),
+                v4("10.0.0.0/8", "unreachable"),
+                leaf(
+                    "/router/static/vrf/ipv6/route/nexthop",
+                    &["blue", "10.0.0.0/8", "unreachable"]
+                ),
+                leaf("/router/static/mpls/label/nexthop", &["100", "blackhole"]),
+                leaf("/router/static/mpls/label/nexthop", &["100", "unreachable"]),
+            ])
+            .is_empty()
+        );
+        // Nor a leaf below the entry.
+        assert!(
+            static_discard_exclusive(&[
+                v4("10.0.0.0/8", "blackhole"),
+                leaf(
+                    "/router/static/ipv4/route/nexthop/metric",
+                    &["10.0.0.0/8", "unreachable"]
+                ),
+            ])
+            .is_empty()
+        );
+
+        // Both on one route, in either order.
+        for entries in [
+            vec![
+                v4("10.0.0.0/8", "blackhole"),
+                v4("10.0.0.0/8", "unreachable"),
+            ],
+            vec![
+                v4("10.0.0.0/8", "unreachable"),
+                v4("10.0.0.0/8", "blackhole"),
+            ],
+        ] {
+            assert_eq!(
+                static_discard_exclusive(&entries),
+                [
+                    "router static ipv4 route 10.0.0.0/8: nexthop blackhole cannot be \
+                  combined with nexthop unreachable; delete one or the other"
+                ]
+            );
+        }
+        // One error per route, in order, the VRF named.
+        assert_eq!(
+            static_discard_exclusive(&[
+                v6("2001:db8::/32", "unreachable"),
+                vrf("blue", "10.0.0.0/8", "blackhole"),
+                v4("10.9.0.0/16", "blackhole"),
+                v6("2001:db8::/32", "blackhole"),
+                vrf("blue", "10.0.0.0/8", "unreachable"),
+            ]),
+            [
+                "router static ipv6 route 2001:db8::/32: nexthop blackhole cannot be \
+                 combined with nexthop unreachable; delete one or the other",
+                "router static vrf blue ipv4 route 10.0.0.0/8: nexthop blackhole cannot be \
+                 combined with nexthop unreachable; delete one or the other",
+            ]
+        );
+
+        assert!(static_discard_line(
+            "router static ipv4 route 10.0.0.0/8 nexthop blackhole"
+        ));
+        assert!(static_discard_line(
+            "router static vrf blue ipv6 route 2001:db8::/32 nexthop unreachable"
+        ));
+        assert!(!static_discard_line(
+            "router static ipv4 route 10.0.0.0/8 nexthop 192.0.2.1"
+        ));
+        assert!(!static_discard_line("router bgp 65000 neighbor 192.0.2.1"));
     }
 
     /// `system hostname` is a name the kernel would take. Only the startup

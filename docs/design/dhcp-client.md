@@ -1141,7 +1141,9 @@ The task's part (`v6/inst.rs`):
   - A kernel `unreachable` route is in the RIB only as an earlier run's
     leftover: one under `RTPROT_DHCP` that the route record names, at
     startup or afterwards. It is deleted when the client's route takes
-    its place, or swept. Any other stays out of the RIB, as every
+    its place, or swept. (A static route's `nexthop unreachable` is the
+    other one zebra-rs installs: under `RTPROT_ZEBRA`, a leftover when
+    the startup dump finds it.) Any other stays out of the RIB, as every
     unreachable route did before: another program's under `RTPROT_DHCP`
     (systemd-networkd holds a delegated prefix with one) would come in
     at distance 0 over every protocol's route for the prefix, and a
