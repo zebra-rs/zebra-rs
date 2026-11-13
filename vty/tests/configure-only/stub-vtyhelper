@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# Stub `vtyhelper` for the configure-only command tests.
+#
+# vty.sh calls the helper by bare name (`cli_command=vtyhelper`), so
+# putting this first on PATH stands in for the daemon. It answers `-f`
+# with each mode's first-level commands as the daemon lists them, enters
+# and leaves configure mode the way the daemon's replies do, and answers
+# everything else with an empty `Show` reply.
+#
+#   STUB_LOG   file every invocation is appended to, one line of
+#              arguments per call (the harness asserts on what reached
+#              the daemon)
+set -u
+
+[[ -n ${STUB_LOG:-} ]] && printf '%s\n' "$*" >>"${STUB_LOG}"
+
+mode="exec"
+first=0
+args=()
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    -m) mode=$2; shift 2 ;;
+    -f|--first) first=1; shift ;;
+    -H|--hostname) echo "teststub"; exit 0 ;;
+    -l|--logout) exit 0 ;;
+    -u|--uncommitted) exit 1 ;;
+    -c|--completion|-t|--trailing) exit 0 ;;
+    -e|--enable|-d|--disable) exit 0 ;;
+    -j|--json) shift ;;
+    *) args+=("$1"); shift ;;
+  esac
+done
+
+if (( first )); then
+  # `vtyhelper -f -m <mode>` against the daemon (2026-11).
+  case ${mode} in
+    exec) printf '%s\n' cli configure help release renew show ;;
+    configure) printf '%s\n' clear cli commit delete discard exit help load run save set show ;;
+  esac
+  exit 0
+fi
+
+case "${mode}:${args[0]:-}" in
+  exec:configure)
+    printf 'SuccessExec\nCLI_MODE=configure;CLI_MODE_STR=Configure;CLI_MODE_PROMPT=;CLI_PRIVILEGE=15;_cli_refresh\n'
+    ;;
+  configure:exit)
+    printf 'SuccessExec\nCLI_MODE=exec;CLI_MODE_PROMPT=;CLI_PRIVILEGE=1;_cli_refresh\n'
+    ;;
+  *)
+    echo "Show"
+    ;;
+esac
+exit 0
