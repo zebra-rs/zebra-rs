@@ -124,7 +124,7 @@ back to exec mode by itself, with a one-line notice. It does so the moment the
 role lapses, even with a line half typed; type `configure` to continue:
 
 ``` shell
-ubuntu#set inter
+ubuntu#
 % Configuration session timed out; back to exec mode.
 ubuntu>set inter
 ```

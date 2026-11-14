@@ -433,16 +433,19 @@ impl SessionTable {
     /// [`Self::require_admin`] it does not slide the idle deadline (asking
     /// is not activity) and does not downgrade a lapsed session.
     pub fn admin_lease(&self, key: &SessionKey) -> AdminLease {
-        let Some(s) = self.sessions.get(key) else {
-            return AdminLease::None;
-        };
+        match self.sessions.get(key) {
+            Some(s) => Self::lease_of(&s, Instant::now()),
+            None => AdminLease::None,
+        }
+    }
+
+    fn lease_of(s: &Session, now: Instant) -> AdminLease {
         if !s.enabled {
             return AdminLease::None;
         }
         match (s.enable_expires, s.enable_hard_deadline) {
             (Some(expires), Some(hard)) => {
                 let deadline = expires.min(hard);
-                let now = Instant::now();
                 if now >= deadline {
                     AdminLease::None
                 } else {
@@ -458,8 +461,15 @@ impl SessionTable {
     /// Sweep stale sessions in a single pass.
     ///
     /// A session is dropped if either:
-    /// - its `last_active` is older than `idle_ttl`, or
+    /// - its `last_active` is older than `idle_ttl` and it holds no live
+    ///   time-bounded admin role, or
     /// - `/proc/{bash_pid}` no longer exists (parent shell has died).
+    ///
+    /// The admin role is promised for [`ENABLE_IDLE_TTL`] (15 min) past
+    /// the last admin command; the sweep's shorter `idle_ttl` (10 min)
+    /// must not take it away early along with the session. Once the role
+    /// lapses, the idle rule applies again. A dead shell's session goes
+    /// either way.
     ///
     /// Returns counts useful for logging/metrics.
     pub fn gc_once<P: ProcStatusReader>(&self, reader: &P, idle_ttl: Duration) -> GcStats {
@@ -467,7 +477,8 @@ impl SessionTable {
         let mut removed_idle = 0usize;
         let mut removed_gone = 0usize;
         self.sessions.retain(|_key, session| {
-            if now.saturating_duration_since(session.last_active) > idle_ttl {
+            let leased = matches!(Self::lease_of(session, now), AdminLease::Remaining(_));
+            if !leased && now.saturating_duration_since(session.last_active) > idle_ttl {
                 removed_idle += 1;
                 return false;
             }
@@ -1306,6 +1317,40 @@ mod tests {
         assert_eq!(table.admin_lease(&(1000, 999)), AdminLease::None);
         // Still enabled: the downgrade is require_admin's to make.
         assert!(table.get(&(1000, 999)).unwrap().enabled);
+    }
+
+    #[test]
+    fn gc_keeps_idle_session_while_admin_role_lives() {
+        let table = SessionTable::new();
+        let reader = StubReader::default();
+        let old = Instant::now() - Duration::from_secs(700);
+        table.insert_for_test((1000, 999), old);
+        table.promote_to_admin(
+            &(1000, 999),
+            Duration::from_secs(900),
+            Duration::from_secs(4 * 3600),
+        );
+        // Idle past the sweep's TTL, but the role has time left.
+        let stats = table.gc_once(&reader, Duration::from_secs(600));
+        assert_eq!(stats.removed_idle, 0);
+        assert!(table.contains(&(1000, 999)));
+    }
+
+    #[test]
+    fn gc_drops_idle_session_once_admin_role_lapsed() {
+        let table = SessionTable::new();
+        let reader = StubReader::default();
+        let old = Instant::now() - Duration::from_secs(700);
+        table.insert_for_test((1000, 999), old);
+        table.promote_to_admin(
+            &(1000, 999),
+            Duration::from_millis(1),
+            Duration::from_secs(4 * 3600),
+        );
+        std::thread::sleep(Duration::from_millis(20));
+        let stats = table.gc_once(&reader, Duration::from_secs(600));
+        assert_eq!(stats.removed_idle, 1);
+        assert!(!table.contains(&(1000, 999)));
     }
 
     #[test]

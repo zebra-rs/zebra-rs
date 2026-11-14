@@ -22,6 +22,7 @@ while [[ $# -gt 0 ]]; do
     -m) mode=$2; shift 2 ;;
     -f|--first) first=1; shift ;;
     -H|--hostname) echo "teststub"; exit 0 ;;
+    -S|--state) printf '%s\n\n' "teststub"; exit 0 ;;
     -l|--logout) exit 0 ;;
     -u|--uncommitted) exit 1 ;;
     -c|--completion|-t|--trailing) exit 0 ;;

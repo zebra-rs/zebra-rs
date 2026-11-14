@@ -15,6 +15,10 @@
 #                  unreachable (warning on stderr, exit 3)
 #   STUB_TTL       seconds `-e` grants (default 3)
 #   STUB_NO_TIMER  when set, `--timer` exits at once without signalling
+#   STUB_OLD       when set, a daemon from before ExecReply.admin: `-a`
+#                  cannot say (exit 5) and `-S` gives no second answer
+#
+# `-e` refuses the password "wrong" (exit 1), as PAM would.
 set -u
 
 [[ -n ${STUB_LOG:-} ]] && printf '%s\n' "$*" >>"${STUB_LOG}"
@@ -66,10 +70,20 @@ while [[ $# -gt 0 ]]; do
     -m) mode=$2; shift 2 ;;
     -f|--first) first=1; shift ;;
     -H|--hostname) echo "teststub"; exit 0 ;;
-    -a|--admin-left) left; exit 0 ;;
+    -S|--state)
+      echo "teststub"
+      if [[ -n ${STUB_OLD:-} ]]; then echo; else left; fi
+      exit 0 ;;
+    -a|--admin-left)
+      [[ -n ${STUB_OLD:-} ]] && exit 5
+      left; exit 0 ;;
     -u|--uncommitted) exit 1 ;;
     -c|--completion|-t|--trailing) exit 0 ;;
     -e|--enable)
+      if [[ ${CLI_ENABLE_PASSWORD:-} == "wrong" ]]; then
+        echo "% Enable failed: authentication failed"
+        exit 1
+      fi
       echo $(( now_ms + ${STUB_TTL:-3} * 1000 )) >"${state}/deadline"
       echo "% Enabled (admin role active for ${STUB_TTL:-3} seconds)"
       exit 0 ;;
@@ -94,8 +108,8 @@ case "${mode}:${args[0]:-}" in
     printf "${enter_configure}"
     ;;
   exec:co|exec:con|exec:conf|exec:confi|exec:config|exec:configu|exec:configur)
-    # The daemon's gate matches the whole word only: an abbreviation
-    # enters configure mode without the role.
+    # Gated on what the line resolves to, as the daemon does.
+    need_admin
     printf "${enter_configure}"
     ;;
   configure:exit)

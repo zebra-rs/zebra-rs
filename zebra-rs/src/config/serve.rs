@@ -22,6 +22,7 @@ use super::api::{
 };
 use super::show_provider::{ShowProviderBridge, ShowProviderServiceServer};
 use super::subscribe::{ConfigServiceServer, ConfigSubscribeService};
+use super::vty;
 use super::vty::apply_server::{Apply, ApplyServer};
 use super::vty::clear_server::{Clear, ClearServer};
 use super::vty::exec_server::{Exec, ExecServer};
@@ -48,11 +49,16 @@ fn enforce_admin<T>(
     sessions: &SessionTable,
     request: &tonic::Request<T>,
 ) -> Result<(), tonic::Status> {
-    let key = request
-        .extensions()
-        .get::<SessionContext>()
-        .map(|c| c.key)
-        .ok_or_else(|| tonic::Status::unauthenticated("no session"))?;
+    let key = request.extensions().get::<SessionContext>().map(|c| c.key);
+    enforce_admin_key(sessions, key)
+}
+
+/// [`enforce_admin`] for a session key already taken from the request.
+fn enforce_admin_key(
+    sessions: &SessionTable,
+    key: Option<SessionKey>,
+) -> Result<(), tonic::Status> {
+    let key = key.ok_or_else(|| tonic::Status::unauthenticated("no session"))?;
     match sessions.require_admin(&key) {
         Ok(()) => Ok(()),
         Err(AuthzError::NoSession) => Err(tonic::Status::unauthenticated("no session")),
@@ -65,20 +71,29 @@ fn enforce_admin<T>(
     }
 }
 
-/// [`ExecReply::admin_secs`] for the caller's session: 0 when not admin,
-/// -1 when the role never lapses, else the seconds left, rounded up so
-/// that a role with a fraction of a second left is not reported lapsed
-/// (the shell asks again when that second is up).
-fn admin_secs(sessions: &SessionTable, key: Option<SessionKey>) -> i32 {
+/// [`ExecReply::admin`] for the caller's session: 0 seconds when not
+/// admin, -1 when the role never lapses, else the seconds left, rounded
+/// up so that a role with a fraction of a second left is not reported
+/// lapsed (the shell asks again when that second is up).
+fn admin_lease(sessions: &SessionTable, key: Option<SessionKey>) -> vty::AdminLease {
     let lease = key.map_or(AdminLease::None, |key| sessions.admin_lease(&key));
-    match lease {
+    let secs = match lease {
         AdminLease::None => 0,
         AdminLease::Permanent => -1,
         AdminLease::Remaining(left) => {
             let secs = left.as_secs() + u64::from(left.subsec_nanos() > 0);
             i32::try_from(secs).unwrap_or(i32::MAX)
         }
-    }
+    };
+    vty::AdminLease { secs }
+}
+
+/// Does this exec-mode line enter configure mode? Asked of what the line
+/// resolved to, so that an abbreviation (`conf`) counts as the whole
+/// word does.
+fn enters_configure(resp: &ExecuteResponse) -> bool {
+    resp.code == ExecCode::Success
+        && matches!(resp.paths.as_slice(), [path] if path.name == "configure")
 }
 
 /// Resolve the path to the `vtypam` helper.
@@ -143,7 +158,7 @@ impl ExecService {
             port: 2666,
             paths: Vec::new(),
             hostname: String::new(),
-            admin_secs: 0,
+            admin: None,
         };
         Ok(Response::new(reply))
     }
@@ -154,7 +169,7 @@ impl ExecService {
         lines: String,
         paths: Vec<CommandPath>,
         hostname: String,
-        admin_secs: i32,
+        admin: vty::AdminLease,
     ) -> Result<Response<ExecReply>, tonic::Status> {
         let reply = ExecReply {
             code: code as i32,
@@ -163,7 +178,7 @@ impl ExecService {
             port: 2666,
             paths,
             hostname,
-            admin_secs,
+            admin: Some(admin),
         };
         Ok(Response::new(reply))
     }
@@ -185,21 +200,18 @@ impl Exec for ExecService {
         //       privileged) mode requires admin. This is the strict
         //       check that prevents a client from setting mode=configure
         //       directly to bypass the entry gate.
-        //   (b) mode == "exec" && first_word == "configure"
+        //   (b) mode == "exec" and the line resolves to `configure`
         //       Block the mode-entry command itself so vty users get an
         //       immediate "admin required" instead of a successful mode
-        //       flip followed by every command failing.
+        //       flip followed by every command failing. Checked on what
+        //       the line resolved to, below, since an abbreviation
+        //       (`conf`) enters configure mode too. Running the line
+        //       first is safe: `configure` only answers the mode switch.
         //
         // The configure-mode lock is intentionally deferred (see D11);
         // multiple admins can still enter configure simultaneously.
-        if request.get_ref().r#type == ExecType::Exec as i32 {
-            let req = request.get_ref();
-            let mode = req.mode.as_str();
-            let first_word = req.line.split_whitespace().next().unwrap_or("");
-            let needs_admin = mode != "exec" || first_word == "configure";
-            if needs_admin {
-                enforce_admin(&self.sessions, &request)?;
-            }
+        if request.get_ref().r#type == ExecType::Exec as i32 && request.get_ref().mode != "exec" {
+            enforce_admin(&self.sessions, &request)?;
         }
 
         let key = request.extensions().get::<SessionContext>().map(|c| c.key);
@@ -207,11 +219,22 @@ impl Exec for ExecService {
         match request.r#type {
             x if x == ExecType::Exec as i32 => {
                 let resp = self.execute_request(&request.mode, &request.line).await;
+                if request.mode == "exec" && enters_configure(&resp) {
+                    enforce_admin_key(&self.sessions, key)?;
+                }
                 let hostname = resp.hostname.clone().unwrap_or_default();
                 let (code, output, paths) = exec_commands(&resp);
-                let admin_secs = admin_secs(&self.sessions, key);
-                self.reply_exec(code, output, paths, hostname, admin_secs)
+                let admin = admin_lease(&self.sessions, key);
+                self.reply_exec(code, output, paths, hostname, admin)
             }
+            // The session table alone: the vty asks this from a timer
+            // while the operator may be typing, so it must not queue
+            // behind the configuration's work.
+            x if x == ExecType::AdminLeft as i32 => Ok(Response::new(ExecReply {
+                code: ExecCode::Success as i32,
+                admin: Some(admin_lease(&self.sessions, key)),
+                ..Default::default()
+            })),
             x if x == ExecType::CompleteFirstCommands as i32 => {
                 let resp = self
                     .completion_request(&request.mode, &request.line, request.interactive)

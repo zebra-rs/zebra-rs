@@ -191,18 +191,33 @@ cli_execute_startup_string()
    and leaves a one-line notice in _cli_notice; without this the
    operator would see neither until their next Enter, and would type the
    next line after the configure-mode prompt still shown.  Print the
-   notice under the line being typed and redraw that line after the new
+   notice under the prompt and redraw the half-typed line after the new
    prompt.  Outside readline the notice waits for PROMPT_COMMAND
    (_cli_notice_flush) instead. */
 void
 cli_signal_event_hook (void)
 {
 #if defined (READLINE)
-  char *notice, *ps1, *prompt;
+  char *notice, *ps1, *prompt, *typed;
+  int point;
 
   notice = get_string_value ("_cli_notice");
   if (notice == NULL || *notice == '\0')
     return;
+
+  /* A search, a numeric argument or a completion question has saved the
+     prompt and would put the old one back when it ends; leave the
+     notice for the next prompt then. */
+  if (RL_ISSTATE (RL_STATE_ISEARCH | RL_STATE_NSEARCH | RL_STATE_NUMERICARG
+		  | RL_STATE_COMPLETING | RL_STATE_MOREINPUT))
+    return;
+
+  /* Take the typed text off the screen first, so that a line wrapped
+     over several rows leaves none of them behind under the notice. */
+  typed = rl_copy_text (0, rl_end);
+  point = rl_point;
+  rl_replace_line ("", 0);
+  rl_redisplay ();
 
   rl_crlf ();
   fputs (notice, rl_outstream);
@@ -215,6 +230,10 @@ cli_signal_event_hook (void)
   prompt = decode_prompt_string (ps1 ? ps1 : "", 1);
   rl_set_prompt (prompt ? prompt : "");
   free (prompt);
+
+  rl_replace_line (typed ? typed : "", 0);
+  rl_point = point <= rl_end ? point : rl_end;
+  free (typed);
   rl_forced_update_display ();
 #endif
 }

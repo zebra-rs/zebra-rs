@@ -87,6 +87,15 @@ struct Cli {
     admin_left: bool,
 
     #[arg(
+        short = 'S',
+        long = "state",
+        help = "Print the daemon's configured `system hostname` and, on a second line, \
+                what -a prints (empty when the daemon cannot say); the vty shell's \
+                after-command refresh"
+    )]
+    state: bool,
+
+    #[arg(
         long,
         value_name = "SECS",
         help = "Sleep SECS seconds, then send SIGUSR1 to the parent (the vty shell, which \
@@ -129,6 +138,21 @@ const EXIT_UNREACHABLE: i32 = 3;
 /// The daemon refused the command: it needs the admin role, which the
 /// session does not hold (never enabled, or lapsed). Nothing printed.
 const EXIT_DENIED: i32 = 4;
+/// `-a`: the daemon does not say how long the role has left (it
+/// predates `ExecReply.admin`). Nothing printed.
+const EXIT_UNKNOWN: i32 = 5;
+
+/// The daemon answered `-a` without the admin role's time.
+#[derive(Debug)]
+struct NoLease;
+
+impl std::fmt::Display for NoLease {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "the daemon does not report the admin role")
+    }
+}
+
+impl std::error::Error for NoLease {}
 
 /// The daemon could not be reached. Its Display is the one-line warning
 /// the vty shell shows in place of the command's output.
@@ -139,6 +163,9 @@ struct Unreachable {
     /// Nothing is listening (refused, no such socket): most likely
     /// zebra-rs is not running, or runs in another network namespace.
     not_running: bool,
+    /// Lost while `show` output was streaming: what was printed is cut
+    /// short.
+    midway: bool,
 }
 
 impl Unreachable {
@@ -166,12 +193,30 @@ impl Unreachable {
             uri: uri.to_string(),
             reason,
             not_running,
+            midway: false,
+        }
+    }
+
+    /// Lost the daemon after connecting.
+    fn lost(uri: &str, status: &tonic::Status, midway: bool) -> Self {
+        Self {
+            uri: uri.to_string(),
+            reason: status.message().to_string(),
+            not_running: false,
+            midway,
         }
     }
 }
 
 impl std::fmt::Display for Unreachable {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.midway {
+            return write!(
+                f,
+                "% Output cut short: lost zebra-rs at {}: {}",
+                self.uri, self.reason
+            );
+        }
         write!(
             f,
             "% Cannot connect to zebra-rs at {}: {}",
@@ -247,7 +292,8 @@ fn exec_request(exec_type: i32, mode: &String, commands: &Vec<String>) -> ExecRe
 
 async fn show(cli: Cli, port: Option<u32>, paths: Vec<CommandPath>) -> Result<()> {
     let port = port.unwrap_or(cli.port);
-    let channel = dial(&endpoint_uri(&cli.base, port)).await?;
+    let uri = endpoint_uri(&cli.base, port);
+    let channel = dial(&uri).await?;
     let mut client = ShowClient::new(channel);
 
     let commands = commands_trim_run(&cli.commands);
@@ -261,8 +307,14 @@ async fn show(cli: Cli, port: Option<u32>, paths: Vec<CommandPath>) -> Result<()
     let mut stream = client.show(request).await?.into_inner();
     println!("Show");
     while let Some(reply) = stream.next().await {
-        let Ok(reply) = reply else {
-            return Ok(());
+        let reply = match reply {
+            Ok(reply) => reply,
+            // What was printed is all the operator gets: say it is cut
+            // short rather than pass it off as the whole answer.
+            Err(status) => {
+                stdout.flush().await?;
+                return Err(Unreachable::lost(&uri, &status, true).into());
+            }
         };
         stdout.write_all(reply.str.as_bytes()).await?;
     }
@@ -317,11 +369,32 @@ async fn hostname_fetch(cli: Cli) -> Result<()> {
 }
 
 /// Print how many seconds the session's admin role has left (see
-/// `ExecReply.admin_secs`). Invoked as `vtyhelper -a` by the vty shell,
-/// which leaves configure mode when the answer is 0.
+/// `ExecReply.admin`). Invoked as `vtyhelper -a` by the vty shell, which
+/// leaves configure mode when the answer is 0. Asked with ADMIN_LEFT,
+/// which the daemon answers from its session table alone.
 async fn admin_left(cli: Cli) -> Result<()> {
+    let channel = dial(&endpoint_uri(&cli.base, cli.port)).await?;
+    let mut client = ExecClient::new(channel);
+    let request = tonic::Request::new(exec_request(
+        ExecType::AdminLeft as i32,
+        &String::from("exec"),
+        &Vec::new(),
+    ));
+    let reply = client.do_exec(request).await?.into_inner();
+    let lease = reply.admin.ok_or(NoLease)?;
+    println!("{}", lease.secs);
+    Ok(())
+}
+
+/// `-S`: the host name and the admin role's time from one reply, for the
+/// vty shell's refresh after every command.
+async fn state(cli: Cli) -> Result<()> {
     let reply = probe(&cli).await?;
-    println!("{}", reply.admin_secs);
+    println!("{}", reply.hostname);
+    match reply.admin {
+        Some(lease) => println!("{}", lease.secs),
+        None => println!(),
+    }
     Ok(())
 }
 
@@ -342,10 +415,13 @@ async fn probe(cli: &Cli) -> Result<ExecReply> {
 ///
 /// Sleeps, then sends SIGUSR1 to the parent, whose trap asks the daemon
 /// (`-a`) and either re-arms for the time left or leaves configure mode.
-/// The timer must not outlive the shell: a shell that died leaves its pid
-/// free for reuse, and SIGUSR1 kills a process that does not catch it. So
-/// it dies with the shell (PR_SET_PDEATHSIG) and checks the parent is
-/// still the one it started with before signalling.
+/// The signal must reach the vty and nothing else: SIGUSR1 kills a
+/// process that does not catch it. A shell that died leaves its pid free
+/// for reuse, so the timer dies with it (PR_SET_PDEATHSIG) and checks the
+/// parent is still the one it started with. A shell that ran `exec ssh
+/// host` keeps its pid but is now another program, which the death
+/// signal does not cover: the parent's executable must also be the one
+/// it was.
 fn timer(secs: u64) -> i32 {
     // SAFETY: getppid, prctl and kill are plain syscalls on integers.
     let parent = unsafe { libc::getppid() };
@@ -357,13 +433,29 @@ fn timer(secs: u64) -> i32 {
     if parent <= 1 || unsafe { libc::getppid() } != parent {
         return 0;
     }
+    // Unknown means it cannot be checked later: do not signal at all.
+    // Read now, while the parent is still the shell that started us: the
+    // vty starts a timer and goes back to its prompt, so an `exec` can
+    // only come later.
+    let Some(program) = executable(parent) else {
+        return 0;
+    };
     std::thread::sleep(Duration::from_secs(secs));
-    if unsafe { libc::getppid() } == parent {
+    if unsafe { libc::getppid() } == parent && executable(parent).as_deref() == Some(&program) {
         unsafe {
             libc::kill(parent, libc::SIGUSR1);
         }
     }
     0
+}
+
+/// The program `pid` runs, as /proc names it. A binary replaced on disk
+/// (a package upgrade) reads "PATH (deleted)"; that is still the same
+/// program.
+fn executable(pid: libc::pid_t) -> Option<String> {
+    let path = std::fs::read_link(format!("/proc/{pid}/exe")).ok()?;
+    let path = path.to_string_lossy();
+    Some(path.strip_suffix(" (deleted)").unwrap_or(&path).to_string())
 }
 
 async fn exec(cli: Cli) -> Result<()> {
@@ -546,6 +638,8 @@ async fn run(cli: Cli) -> Result<()> {
         hostname_fetch(cli).await?;
     } else if cli.admin_left {
         admin_left(cli).await?;
+    } else if cli.state {
+        state(cli).await?;
     } else if cli.show {
         show(cli, None, Vec::new()).await?;
     } else if cli.completion || cli.trailing || cli.first {
@@ -564,17 +658,19 @@ fn failure_code(uri: &str, err: &anyhow::Error) -> i32 {
         eprintln!("{unreachable}");
         return EXIT_UNREACHABLE;
     }
+    if err.downcast_ref::<NoLease>().is_some() {
+        return EXIT_UNKNOWN;
+    }
     if let Some(status) = err.downcast_ref::<tonic::Status>() {
         match status.code() {
-            tonic::Code::PermissionDenied | tonic::Code::Unauthenticated => return EXIT_DENIED,
+            // Only a refusal for want of the role: the shell takes it as
+            // the role having lapsed. Unauthenticated means no session
+            // at all (a TCP endpoint carries no peer credentials), which
+            // no role would cure.
+            tonic::Code::PermissionDenied => return EXIT_DENIED,
             // Connected, then lost the daemon (stopped mid-call).
             tonic::Code::Unavailable => {
-                let unreachable = Unreachable {
-                    uri: uri.to_string(),
-                    reason: status.message().to_string(),
-                    not_running: false,
-                };
-                eprintln!("{unreachable}");
+                eprintln!("{}", Unreachable::lost(uri, status, false));
                 return EXIT_UNREACHABLE;
             }
             _ => {}
@@ -624,7 +720,11 @@ fn main() -> Result<()> {
         std::process::exit(timer(secs));
     }
 
-    let runtime = tokio::runtime::Runtime::new()?;
+    // One request per run: a thread pool would only cost start-up time,
+    // which the vty pays on every command.
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
     let code = runtime.block_on(dispatch(cli));
     // Let the runtime finish any write to stdout before exiting.
     drop(runtime);
@@ -632,4 +732,61 @@ fn main() -> Result<()> {
         std::process::exit(code);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const URI: &str = "unix:zebra-rs/vty";
+
+    fn code_of(err: impl Into<anyhow::Error>) -> i32 {
+        failure_code(URI, &err.into())
+    }
+
+    #[test]
+    fn only_permission_denied_is_a_refusal() {
+        assert_eq!(code_of(tonic::Status::permission_denied("x")), EXIT_DENIED);
+        // No session (a TCP endpoint has no peer credentials): no role
+        // would cure that, so the shell must not take it for a lapse.
+        assert_eq!(code_of(tonic::Status::unauthenticated("x")), EXIT_FAILURE);
+    }
+
+    #[test]
+    fn lost_daemon_is_unreachable() {
+        assert_eq!(code_of(tonic::Status::unavailable("x")), EXIT_UNREACHABLE);
+        let refused =
+            anyhow::Error::new(std::io::Error::from(std::io::ErrorKind::ConnectionRefused));
+        assert_eq!(code_of(Unreachable::new(URI, &refused)), EXIT_UNREACHABLE);
+    }
+
+    #[test]
+    fn missing_lease_is_unknown() {
+        assert_eq!(code_of(NoLease), EXIT_UNKNOWN);
+    }
+
+    #[test]
+    fn unreachable_says_why() {
+        let refused = anyhow::Error::new(std::io::Error::from_raw_os_error(libc::ECONNREFUSED))
+            .context("connect unix:zebra-rs/vty");
+        assert_eq!(
+            Unreachable::new(URI, &refused).to_string(),
+            "% Cannot connect to zebra-rs at unix:zebra-rs/vty: Connection refused; \
+             is zebra-rs running?"
+        );
+        let status = tonic::Status::unavailable("connection reset");
+        assert_eq!(
+            Unreachable::lost(URI, &status, true).to_string(),
+            "% Output cut short: lost zebra-rs at unix:zebra-rs/vty: connection reset"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn executable_names_the_running_program() {
+        // SAFETY: getpid is a plain syscall.
+        let me = unsafe { libc::getpid() };
+        let exe = std::env::current_exe().unwrap();
+        assert_eq!(executable(me).as_deref(), exe.to_str());
+    }
 }

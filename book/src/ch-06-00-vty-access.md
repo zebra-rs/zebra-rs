@@ -347,11 +347,13 @@ host(configure)#
 
 Users who still hold the Admin role — an earlier `enable` or
 `configure` within its TTL — enter configure mode with no prompt. The
-shell asks the daemon whether the role is held (the `admin_secs` field
-of an empty exec-mode reply, which does not slide the TTL) rather than
-trusting its own prompt: `exit` drops the `#` while the role lives on,
-and a lapse or a daemon restart takes the role away under a prompt that
-still shows it.
+shell asks the daemon whether the role is held (`vtyhelper -a`, which
+does not slide the TTL) rather than trusting its own prompt: `exit`
+drops the `#` while the role lives on, and a lapse or a daemon restart
+takes the role away under a prompt that still shows it. A daemon from
+before that question cannot answer it; the shell then tries
+`configure` and takes the role only if refused. With the daemon
+unreachable, `configure` says so and asks for no password.
 
 #### When the Admin role lapses
 
@@ -366,8 +368,9 @@ host>
 ```
 
 A timer the shell starts when it takes the role (`vtyhelper --timer`, a
-child that dies with the shell) wakes it with `SIGUSR1` when the role may
-have lapsed. The shell then asks how long the role has left
+child that dies with the shell, and signals nothing once the shell has
+`exec`ed another program) wakes it with `SIGUSR1` when the role may have
+lapsed. The shell then asks how long the role has left
 (`vtyhelper -a`) and either waits again — every configure-mode command
 slides the TTL — or goes back to exec mode. The vty's bash patch runs
 that trap while readline waits for input and redraws the half-typed line

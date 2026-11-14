@@ -186,7 +186,8 @@ at the first existing session, at init (pid ≤ 1), or after
             - Parent bash death (pidfd, immediate; /proc poll on
               kernels < 5.3, D31); for a parent-less client (D30),
               the client's own death
-            - Idle TTL expiry (~10 min, periodic sweep)
+            - Idle TTL expiry (~10 min, periodic sweep), unless the
+              session holds an admin role with time left
             - Explicit Logout RPC (bash EXIT trap)
             - Daemon shutdown
 ```
@@ -281,6 +282,18 @@ Successful `enable` sets two timestamps on the session:
   pushes it forward by 15 min.
 - `enable_hard_deadline`: absolute deadline (4 h from the original
   `enable`). Not extended by activity.
+
+The idle-session sweep (D19, 10 min) leaves a session alone while its
+admin role has time left; otherwise the sweep would take the role away
+at about 10 minutes, under the 15 the role promises. Once the role
+lapses, the sweep's rule applies again.
+
+The vty shell asks how long the role has left with
+`ExecType::ADMIN_LEFT`, answered from the session table alone (not
+the configuration manager) and without sliding the deadline; every
+`EXEC` reply carries the same `ExecReply.admin`. The shell leaves
+configure mode when the answer is 0 (see
+[VTY Access Control](ch-06-00-vty-access.md)).
 
 The session drops back to unprivileged when either deadline is
 reached, or on explicit `disable`. There is no persistence across
@@ -407,7 +420,7 @@ Each phase is intended to ship as an independent PR.
 | D19 | Default idle session TTL is **600 s** with a 60 s sweep interval (Cisco IOS `exec-timeout 10 0` convention). Configurable later if a deployment needs it. |
 | D20 | **Root (uid=0) is implicitly Admin.** New sessions for uid=0 are created with `role=Admin` / `enabled=true` / no deadlines; the `enable` RPC short-circuits to success without spawning vtypam. |
 | D22 | **Initial admin gates: Apply and Clear RPCs.** `SessionTable::require_admin` checks `enabled`, enforces sliding TTL + hard cap (with auto-downgrade on expiry), and slides the idle deadline on each authorized call. |
-| D23 | **Configure-mode admin gate** on `DoExec`. For `ExecType::Exec` only (completion paths remain free): admin is required when `mode != "exec"` (catches a client that sets `mode=configure` directly) and when `mode == "exec" && first_word == "configure"` (UX courtesy — block at entry so the prompt doesn't flip uselessly). Configure-mode mutex/lock is deliberately NOT included; multiple admins can enter configure simultaneously (D11 still deferred). |
+| D23 | **Configure-mode admin gate** on `DoExec`. For `ExecType::Exec` only (completion paths remain free): admin is required when `mode != "exec"` (catches a client that sets `mode=configure` directly) and when an exec-mode line resolves to `configure` (UX courtesy — block at entry so the prompt doesn't flip uselessly). The second check is on what the line resolved to, so an abbreviation (`conf`) is gated like the whole word. Configure-mode mutex/lock is deliberately NOT included; multiple admins can enter configure simultaneously (D11 still deferred). |
 | D24 | **Auto-elevate on `configure`**. When a non-admin user types `configure`, root (uid 0) and group members send a passwordless `Enable` RPC; non-members are prompted for **Root password:** immediately (no configure probe). |
 | D26 | **Root peers bypass the parent-uid check.** `resolve_session_key` skips Guard 2 when `peer_uid == 0`. Rationale: the strict match rejected the common `sudo <cmd>` pattern, where the outer `sudo` process retains the invoking user's ruid while the client itself runs as uid 0. Risk surface: any uid-0 connector is trusted regardless of ancestry, but `SO_PEERCRED`'s effective-uid attestation already implies that — a process running as root can already do anything on the host. The remaining guards (D12 cross-PID-namespace, ParentVanished) still fire for root peers. Non-root peers are unaffected — the parent-uid match is still enforced, so a setuid escalation to a non-zero uid is still refused. |
 | D27 | **`zebra-rs` Linux group for passwordless enable.** Package postinstall creates the group. Supplementary membership is checked on `enable` via `getgrouplist`; members are promoted without PAM. Group name overridable with `ZEBRA_VTY_CONFIG_GROUP`. Missing group → PAM-only fallback. |

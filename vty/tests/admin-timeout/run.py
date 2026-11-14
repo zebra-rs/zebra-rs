@@ -77,7 +77,7 @@ class Result:
         return self.output[self.marks[mark]:]
 
 
-def run(steps, ttl=3, timer=True, group=True, down=False, vty=False, timeout=30.0):
+def run(steps, ttl=3, timer=True, group=True, down=False, vty=False, old=False, timeout=30.0):
     """Drive an interactive shell through `steps`: a string is typed as a
     line; ("sleep", s) waits; ("raw", s) types without Enter;
     ("down",) makes the daemon unreachable; ("mark", name) remembers
@@ -97,6 +97,8 @@ def run(steps, ttl=3, timer=True, group=True, down=False, vty=False, timeout=30.
     env["STUB_TTL"] = str(ttl)
     if not timer:
         env["STUB_NO_TIMER"] = "1"
+    if old:
+        env["STUB_OLD"] = "1"
     env["CLI_PAGER"] = "cat"
     env["CLI_EXIT_PROMPT_TIMEOUT"] = "2"
     env["TERM"] = "dumb"
@@ -203,9 +205,12 @@ def case_refused_command():
 def case_exit_after_lapse():
     # `exit` in configure mode is refused too; it must not leave the
     # operator stuck there.
-    r = run(["configure", ("sleep", 2.5), "exit", "echo still-here", "exit"], ttl=1, timer=False)
+    # The echo's answer is built at run time: the terminal echoes the
+    # typed line, which must not contain it.
+    r = run(["configure", ("sleep", 2.5), "exit", "echo still-$((40 + 2))", "exit"],
+            ttl=1, timer=False)
     check("exit after lapse: notice shown", NOTICE in r.output, r.output)
-    check("exit after lapse: in exec mode, shell still up", "still-here" in r.output, r.output)
+    check("exit after lapse: in exec mode, shell still up", "still-42" in r.output, r.output)
     check("exit after lapse: second exit leaves", not r.timed_out)
 
 
@@ -256,9 +261,68 @@ def case_activity_keeps_role():
     check("activity: lapses once idle", NOTICE in r.output, r.output)
 
 
+# Prints whether a timer runs as a child of the shell. Asked in the
+# shell itself, so that `pgrep -P $$` lists the shell's own children.
+# The answer is built at run time: the terminal echoes the typed line,
+# which must not contain it.
+TIMER_PROBE = ("if pgrep -P $$ -f -- '--timer' >/dev/null; then s=ALIVE; else s=GONE; fi; "
+               "echo \"timer:${s}:\"")
+
+
 def case_disable_stops_timer():
-    r = run(["enable", "disable", ("sleep", 3), "", "exit"], ttl=2)
-    check("disable: no timeout notice", "timed out" not in r.output, r.output)
+    r = run(["enable", ("mark", "enabled"), TIMER_PROBE, "disable", ("mark", "disabled"),
+             TIMER_PROBE, "exit"], ttl=30)
+    between = r.output[r.marks["enabled"]:r.marks["disabled"]]
+    check("disable: a timer ran while enabled", "timer:ALIVE:" in between, r.output)
+    check("disable: the timer is stopped", "timer:GONE:" in r.since("disabled"), r.output)
+
+
+def case_failed_reenable_keeps_timer():
+    # A second `enable` that fails leaves the first one's role, which
+    # must still time out.
+    r = run(["enable", "secret", "enable", "wrong", ("sleep", 3.5), "", "exit"],
+            ttl=2, group=False)
+    check("failed re-enable: refused", "authentication failed" in r.output, r.output)
+    check("failed re-enable: role still times out", "% Admin role timed out." in r.output, r.output)
+
+
+def case_configure_unreachable_no_password():
+    # Not in the group: no root password asked for a daemon that is
+    # not there.
+    r = run([("mark", "typed"), "configure", "exit"], down=True, group=False)
+    after = r.since("typed")
+    check("down, no group: no password prompt", "Root password:" not in r.output, r.output)
+    check("down, no group: warned once", after.count(UNREACHABLE) == 1, r.output)
+
+
+def case_old_daemon_no_second_password():
+    # A daemon from before the question cannot say whether the role is
+    # held: one password, and none again on re-entry while it lives.
+    r = run(["configure", "secret", "exit", "configure", "set b", "exit", "exit"],
+            ttl=30, group=False, old=True)
+    check("old daemon: one password prompt", r.output.count("Root password:") == 1, r.output)
+    check("old daemon: in configure mode again", r.called("-m configure set b"), str(r.calls))
+    check("old daemon: no timer it cannot feed", not r.called("--timer"), str(r.calls))
+
+
+def case_script_warns_once():
+    # Not interactive: the command says the daemon is down; startup does
+    # not say it first.
+    state = Path(tempfile.mkdtemp(prefix="vty-admin-state-"))
+    (state / "down").touch()
+    script = state / "script.sh"
+    script.write_text(f"source {VTY_SH}\nshow version\n")
+    env = dict(os.environ)
+    env.pop("CLI_SERVER_URL", None)
+    env["PATH"] = f"{shim_dir(True)}:{env['PATH']}"
+    env["STUB_STATE"] = str(state)
+    proc = subprocess.run(["bash", str(script)], stdout=subprocess.PIPE,
+                          stderr=subprocess.STDOUT, env=env, timeout=20)
+    shutil.rmtree(state, ignore_errors=True)
+    text = proc.stdout.decode("utf-8", "replace")
+    if VERBOSE:
+        print(f"--- script output ---\n{text}")
+    check("script: warned once", text.count(UNREACHABLE) == 1, text)
 
 
 def case_unreachable_at_start():
@@ -313,6 +377,10 @@ def main():
     case_piped_refusal()
     case_activity_keeps_role()
     case_disable_stops_timer()
+    case_failed_reenable_keeps_timer()
+    case_configure_unreachable_no_password()
+    case_old_daemon_no_second_password()
+    case_script_warns_once()
     case_unreachable_at_start()
     case_unreachable_later()
     case_unreachable_completion_quiet()

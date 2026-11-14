@@ -26,6 +26,7 @@ while [[ $# -gt 0 ]]; do
     -u|--uncommitted) exit "${STUB_UNCOMMITTED:-1}" ;;
     -l|--logout) exit 0 ;;
     -H|--hostname) echo "teststub"; exit 0 ;;
+    -S|--state) printf '%s\n\n' "teststub"; exit 0 ;;
     -f|--first)
       # One command name per line — _cli_register_first_level_command
       # reads whole lines and aliases every prefix of each.
