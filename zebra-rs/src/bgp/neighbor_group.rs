@@ -570,12 +570,16 @@ fn config_neighbor_group_maximum_prefix(
     } else {
         bgp.neighbor_groups.get_mut(&name)?
     };
+    let had_block = !group.max_prefix.is_empty();
     let mut block = group.max_prefix.get(&family).copied().unwrap_or_default();
     set(&mut block, op, &mut args)?;
     if block == Default::default() {
         group.max_prefix.remove(&family);
     } else {
         group.max_prefix.insert(family, block);
+    }
+    if !had_block && !group.max_prefix.is_empty() {
+        super::max_prefix::warn_vrf_members(bgp, &name);
     }
     sweep_members(bgp, &name, |groups, peer| {
         super::max_prefix::refresh(groups, peer);

@@ -648,21 +648,6 @@ pub(super) fn resolve_vrf_peer_config(
     for fam in addpath_families {
         super::super::neighbor_group::apply_resolved_add_path(groups, &mut config, fam);
     }
-    // A CE peer has no `maximum-prefix`: `clear bgp` does not reach its task,
-    // so a held peer could not be cleared. Say so rather than let a group's
-    // limit look applied.
-    if config
-        .neighbor_group
-        .as_deref()
-        .and_then(|name| groups.get(name))
-        .is_some_and(|group| !group.max_prefix.is_empty())
-    {
-        tracing::warn!(
-            group = config.neighbor_group.as_deref(),
-            "bgp: a neighbor-group's maximum-prefix does not apply to a VRF neighbor",
-        );
-    }
-
     // Resolve the inheritable session knobs (passive, ebgp-multihop,
     // ttl-security, …) the same way the global neighbor does, layering
     // the referenced neighbor-group under the peer's own explicit
@@ -2218,6 +2203,30 @@ mod tests {
         assert_eq!(diff.reconfigures[0].remote_as, 65002);
         assert!(diff.adds.is_empty());
         assert!(diff.removes.is_empty());
+    }
+
+    /// Resolving runs for both sides at every CommitEnd, so it must not log
+    /// the VRF warning about a group's `maximum-prefix`.
+    #[test]
+    fn neighbor_diff_does_not_warn_about_a_group_block() {
+        let mut group = NeighborGroup::default();
+        group.max_prefix.insert(
+            bgp_packet::AfiSafi::new(bgp_packet::Afi::Ip, bgp_packet::Safi::Unicast),
+            crate::bgp::max_prefix::MaxPrefixConfig {
+                limit: Some(10),
+                ..Default::default()
+            },
+        );
+        let mut groups = BTreeMap::new();
+        groups.insert("G".to_string(), group);
+        let mut m = BTreeMap::new();
+        let mut n = nbr(Some(65001));
+        n.config.neighbor_group = Some("G".to_string());
+        m.insert(diff_addr("192.0.2.1"), n);
+        let logged = crate::bgp::max_prefix::warnings_during(|| {
+            compute_vrf_neighbor_diff(&m, &groups, &m.clone(), &groups);
+        });
+        assert!(logged.is_empty(), "{logged}");
     }
 
     /// An identical neighbor map yields no work.

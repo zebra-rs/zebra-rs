@@ -135,6 +135,68 @@ pub fn warn_unsupported(family: AfiSafi) {
     );
 }
 
+/// A CE peer has no `maximum-prefix`: `clear bgp` does not reach its task, so a
+/// held peer could not be cleared. Said once, where a VRF neighbor and a group
+/// with a block meet, rather than let the group's limit look applied.
+fn warn_vrf_neighbor(vrf: &str, addr: std::net::IpAddr, group: &str) {
+    tracing::warn!(
+        vrf,
+        neighbor = %addr,
+        group,
+        "bgp: a neighbor-group's maximum-prefix does not apply to a VRF neighbor",
+    );
+}
+
+/// [`warn_vrf_neighbor`] for each VRF neighbor of `group`, which has just got
+/// its first block.
+pub fn warn_vrf_members(bgp: &Bgp, group: &str) {
+    for (vrf, cfg) in &bgp.vrfs {
+        for (addr, nbr) in &cfg.neighbors {
+            if nbr.config.neighbor_group.as_deref() == Some(group) {
+                warn_vrf_neighbor(vrf, *addr, group);
+            }
+        }
+    }
+}
+
+/// [`warn_vrf_neighbor`] when a VRF neighbor joins a group that has a block.
+pub fn warn_vrf_join(bgp: &Bgp, vrf: &str, addr: std::net::IpAddr, group: &str) {
+    if bgp
+        .neighbor_groups
+        .get(group)
+        .is_some_and(|g| !g.max_prefix.is_empty())
+    {
+        warn_vrf_neighbor(vrf, addr, group);
+    }
+}
+
+/// The WARN lines `f` logs, for tests of log-once behavior.
+#[cfg(test)]
+pub fn warnings_during(f: impl FnOnce()) -> String {
+    use std::sync::{Arc, Mutex};
+    #[derive(Clone)]
+    struct Sink(Arc<Mutex<Vec<u8>>>);
+    impl std::io::Write for Sink {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let sink = Sink(Arc::default());
+    let writer = sink.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::WARN)
+        .with_ansi(false)
+        .with_writer(move || writer.clone())
+        .finish();
+    tracing::subscriber::with_default(subscriber, f);
+    let out = sink.0.lock().unwrap().clone();
+    String::from_utf8(out).unwrap()
+}
+
 /// Record one leaf of the neighbor's own block. The effective value is the
 /// caller's to re-resolve, since it may come from the group.
 pub fn stage_leaf(

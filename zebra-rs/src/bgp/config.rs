@@ -10795,6 +10795,91 @@ mod neighbor_group_wiring_tests {
         assert!(held(&bgp));
     }
 
+    /// The VRF warning is logged once where a VRF neighbor and a group with a
+    /// block meet, and names the VRF and the neighbor.
+    #[tokio::test]
+    async fn the_vrf_warning_is_logged_once_where_group_and_neighbor_meet() {
+        use super::super::max_prefix::warnings_during;
+        use super::super::neighbor_group::{
+            config_neighbor_group_maximum_prefix_limit,
+            config_neighbor_group_maximum_prefix_warning_threshold,
+        };
+        use super::super::vrf_config::config_vrf_neighbor_neighbor_group;
+
+        let mut bgp = fresh_bgp();
+        let logged = warnings_during(|| {
+            config_neighbor_group_maximum_prefix_limit(
+                &mut bgp,
+                arg_words(&["G", "ipv4", "10"]),
+                ConfigOp::Set,
+            )
+            .unwrap();
+        });
+        assert!(logged.is_empty(), "no VRF neighbor yet: {logged}");
+
+        let logged = warnings_during(|| {
+            config_vrf_neighbor_neighbor_group(
+                &mut bgp,
+                arg_words(&["V", "192.0.2.1", "G"]),
+                ConfigOp::Set,
+            )
+            .unwrap();
+        });
+        assert_eq!(
+            logged.matches("does not apply to a VRF neighbor").count(),
+            1
+        );
+        assert!(
+            logged.contains("vrf=\"V\"") || logged.contains("vrf=V"),
+            "{logged}"
+        );
+        assert!(logged.contains("192.0.2.1"), "{logged}");
+
+        let logged = warnings_during(|| {
+            config_neighbor_group_maximum_prefix_warning_threshold(
+                &mut bgp,
+                arg_words(&["G", "ipv4", "80"]),
+                ConfigOp::Set,
+            )
+            .unwrap();
+        });
+        assert!(logged.is_empty(), "the group had a block already: {logged}");
+    }
+
+    /// The other order: the group gets its first block after the VRF neighbor
+    /// joined it.
+    #[tokio::test]
+    async fn the_vrf_warning_is_logged_when_the_group_gets_its_first_block() {
+        use super::super::max_prefix::warnings_during;
+        use super::super::neighbor_group::config_neighbor_group_maximum_prefix_limit;
+        use super::super::vrf_config::config_vrf_neighbor_neighbor_group;
+
+        let mut bgp = fresh_bgp();
+        config_neighbor_group_remote_as(&mut bgp, arg_words(&["G", "65000"]), ConfigOp::Set)
+            .unwrap();
+        let logged = warnings_during(|| {
+            config_vrf_neighbor_neighbor_group(
+                &mut bgp,
+                arg_words(&["V", "192.0.2.1", "G"]),
+                ConfigOp::Set,
+            )
+            .unwrap();
+        });
+        assert!(logged.is_empty(), "{logged}");
+        let logged = warnings_during(|| {
+            config_neighbor_group_maximum_prefix_limit(
+                &mut bgp,
+                arg_words(&["G", "ipv4", "10"]),
+                ConfigOp::Set,
+            )
+            .unwrap();
+        });
+        assert_eq!(
+            logged.matches("does not apply to a VRF neighbor").count(),
+            1
+        );
+    }
+
     /// Leaf deletes can land after the group's own delete.
     #[tokio::test]
     async fn group_maximum_prefix_delete_does_not_make_the_group_again() {
