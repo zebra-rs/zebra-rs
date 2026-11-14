@@ -12,7 +12,10 @@
 #              the daemon)
 set -u
 
-[[ -n ${STUB_LOG:-} ]] && printf '%s\n' "$*" >>"${STUB_LOG}"
+# The vty passes `--` before the operator's words; logged without it.
+logargs=()
+for a in "$@"; do [[ ${a} == "--" ]] || logargs+=("${a}"); done
+[[ -n ${STUB_LOG:-} ]] && printf '%s\n' "${logargs[*]}" >>"${STUB_LOG}"
 
 mode="exec"
 first=0
@@ -22,11 +25,13 @@ while [[ $# -gt 0 ]]; do
     -m) mode=$2; shift 2 ;;
     -f|--first) first=1; shift ;;
     -H|--hostname) echo "teststub"; exit 0 ;;
+    -S|--state) printf '%s\n\n' "teststub"; exit 0 ;;
     -l|--logout) exit 0 ;;
     -u|--uncommitted) exit 1 ;;
     -c|--completion|-t|--trailing) exit 0 ;;
     -e|--enable|-d|--disable) exit 0 ;;
     -j|--json) shift ;;
+    --) shift; args+=("$@"); break ;;
     *) args+=("$1"); shift ;;
   esac
 done

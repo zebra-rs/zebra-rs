@@ -61,6 +61,10 @@ enum ExecType {
   COMPLETE_TRAILING_SPACE = 2;
   COMPLETE_FIRST_COMMANDS = 3;
   COMPLETE_DYNAMIC = 4;
+  // What is left of the caller's admin role, in ExecReply.admin.
+  // Answered from the session table alone, without the configuration;
+  // a daemon that predates it answers with no `admin`.
+  ADMIN_LEFT = 5;
 }
 
 // The request message containing user input string.
@@ -96,6 +100,19 @@ message ExecReply {
   // the prompt renders the configured name (falling back to the OS
   // hostname when empty).
   string hostname = 6;
+  // The caller's admin role, on EXEC and ADMIN_LEFT replies, read
+  // without sliding its idle deadline. The vty shell asks so that it can
+  // leave configure mode when the role lapses. Absent from a daemon that
+  // predates it, which the shell takes as "cannot say".
+  AdminLease admin = 7;
+}
+
+// What is left of a session's admin role.
+message AdminLease {
+  // Seconds before the role lapses, rounded up; 0 when the session is
+  // not admin (never enabled, disabled, or lapsed); -1 when it never
+  // lapses (root).
+  int32 secs = 1;
 }
 
 // The Command register.

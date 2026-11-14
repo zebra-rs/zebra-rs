@@ -1,5 +1,10 @@
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
+use std::time::Duration;
 use tonic::transport::{Channel, Endpoint};
+
+/// How long a TCP connect may take. Without a bound, an unreachable host
+/// (a black-holed route) holds every command and TAB for minutes.
+const TCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Connect to the zebra-rs VTY gRPC server.
 ///
@@ -9,6 +14,9 @@ use tonic::transport::{Channel, Endpoint};
 /// - `unix:NAME` — Linux abstract Unix socket (e.g. `unix:zebra-rs/vty`)
 /// - `unix:/PATH` — filesystem Unix socket (e.g. `unix:/tmp/zebra-rs`)
 /// - `unix:@NAME` — explicitly abstract, even when NAME starts with `/`
+///
+/// A failed connect keeps its cause chain (down to the `io::Error`), so the
+/// caller can say why: refused, no such socket, permission denied.
 pub async fn connect(uri: &str) -> Result<Channel> {
     #[cfg(target_os = "linux")]
     if let Some(name) = uri.strip_prefix("unix:") {
@@ -25,9 +33,10 @@ pub async fn connect(uri: &str) -> Result<Channel> {
     };
     Endpoint::try_from(normalized.clone())
         .map_err(|e| anyhow!("invalid endpoint {normalized:?}: {e}"))?
+        .connect_timeout(TCP_CONNECT_TIMEOUT)
         .connect()
         .await
-        .map_err(|e| anyhow!("connect {normalized}: {e}"))
+        .with_context(|| format!("connect {normalized}"))
 }
 
 #[cfg(target_os = "linux")]
@@ -67,5 +76,5 @@ async fn connect_unix(name: &str) -> Result<Channel> {
             }
         }))
         .await
-        .map_err(|e| anyhow!("connect unix:{name_for_err}: {e}"))
+        .with_context(|| format!("connect unix:{name_for_err}"))
 }

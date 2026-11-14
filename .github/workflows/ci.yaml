@@ -75,6 +75,12 @@ jobs:
       # too, so the same stock-bash, stubbed-helper approach covers them.
       - name: Configure-only commands in exec mode
         run: python3 vty/tests/configure-only/run.py
+      # Leaving configure mode when the admin role lapses, and the
+      # warning when the daemon cannot be reached: vty.sh again, with a
+      # stub that keeps the daemon's admin rule on a clock of seconds.
+      # The case for the vty patch's redraw skips (vty is not built here).
+      - name: Admin-role timeout and unreachable daemon
+        run: python3 vty/tests/admin-timeout/run.py
 
   test:
     name: cargo test

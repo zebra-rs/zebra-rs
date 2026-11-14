@@ -16,7 +16,10 @@
 #   STUB_FIRST         newline-separated first-level commands for `-f`
 set -u
 
-[[ -n ${STUB_LOG:-} ]] && printf '%s\n' "$*" >>"${STUB_LOG}"
+# The vty passes `--` before the operator's words; logged without it.
+logargs=()
+for a in "$@"; do [[ ${a} == "--" ]] || logargs+=("${a}"); done
+[[ -n ${STUB_LOG:-} ]] && printf '%s\n' "${logargs[*]}" >>"${STUB_LOG}"
 
 mode=""
 args=()
@@ -26,6 +29,7 @@ while [[ $# -gt 0 ]]; do
     -u|--uncommitted) exit "${STUB_UNCOMMITTED:-1}" ;;
     -l|--logout) exit 0 ;;
     -H|--hostname) echo "teststub"; exit 0 ;;
+    -S|--state) printf '%s\n\n' "teststub"; exit 0 ;;
     -f|--first)
       # One command name per line — _cli_register_first_level_command
       # reads whole lines and aliases every prefix of each.
@@ -34,6 +38,7 @@ while [[ $# -gt 0 ]]; do
     -c|--completion|-t|--trailing) exit 0 ;;
     -e|--enable|-d|--disable) exit 0 ;;
     -j|--json) shift ;;
+    --) shift; args+=("$@"); break ;;
     *) args+=("$1"); shift ;;
   esac
 done

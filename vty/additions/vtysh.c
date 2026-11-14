@@ -30,6 +30,10 @@
 #include "builtins/common.h"
 #include "bashhist.h"
 
+#if defined (READLINE)
+#  include <readline/readline.h>
+#endif
+
 /* xxd -i vty.sh >vty.c */
 #include "vty.c"
 
@@ -179,4 +183,54 @@ cli_execute_startup_string()
 
   bash_history_enable();
   enable_history_list = 1;
+}
+
+/* Called from bash_event_hook after the traps a signal made pending
+   have run, while readline waits for input.  When the admin role
+   lapses, the timer trap in vty.sh switches the vty back to exec mode
+   and leaves a one-line notice in _cli_notice; without this the
+   operator would see neither until their next Enter, and would finish
+   the line under a configure-mode prompt still shown.  Print the notice
+   under the line and start a fresh one after the new prompt.  The
+   half-typed text stays on screen above but is not carried over: typed
+   for configure mode, it may mean something else in exec mode (`exit`
+   there leaves the vty).  Outside readline the notice waits for
+   PROMPT_COMMAND (_cli_notice_flush) instead. */
+void
+cli_signal_event_hook (void)
+{
+#if defined (READLINE)
+  char *notice, *ps1, *prompt;
+
+  notice = get_string_value ("_cli_notice");
+  if (notice == NULL || *notice == '\0')
+    return;
+
+  /* A search, a numeric argument or a completion question has saved the
+     prompt and would put the old one back when it ends; leave the
+     notice for the next prompt then. */
+  if (RL_ISSTATE (RL_STATE_ISEARCH | RL_STATE_NSEARCH | RL_STATE_NUMERICARG
+		  | RL_STATE_COMPLETING | RL_STATE_MOREINPUT))
+    return;
+
+  /* Below the typed text's last row, so that a line wrapped over
+     several rows keeps them all. */
+  rl_point = rl_end;
+  rl_redisplay ();
+  rl_crlf ();
+  fputs (notice, rl_outstream);
+  rl_crlf ();
+  fflush (rl_outstream);
+  /* Frees the value NOTICE points at. */
+  bind_variable ("_cli_notice", "", 0);
+
+  ps1 = get_string_value ("PS1");
+  prompt = decode_prompt_string (ps1 ? ps1 : "", 1);
+  rl_set_prompt (prompt ? prompt : "");
+  free (prompt);
+
+  rl_replace_line ("", 1);
+  rl_point = 0;
+  rl_forced_update_display ();
+#endif
 }

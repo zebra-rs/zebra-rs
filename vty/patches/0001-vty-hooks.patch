@@ -84,6 +84,17 @@ diff -ruN '--exclude=vty' '--exclude=vty.c' '--exclude=vty.sh' '--exclude=vtysh.
    /* New posix-style command substitution or variable name? */
    if (*text == '$')
      {
+@@ -5017,6 +5038,10 @@
+     }
+ 
+   check_signals_and_traps ();	/* XXX */
++
++  /* A trap that just ran may have changed the vty's mode (vtysh.c). */
++  if (cli_mode ())
++    cli_signal_event_hook ();
+   return 0;
+ }
+ 
 diff -ruN '--exclude=vty' '--exclude=vty.c' '--exclude=vty.sh' '--exclude=vtysh.c' '--exclude=vtysh.h' '--exclude=y.tab.c' '--exclude=y.tab.h' bash-5.3/Makefile.in vty/Makefile.in
 --- bash-5.3/Makefile.in	2025-05-16 11:56:31.000000000 -0700
 +++ vty/Makefile.in	2026-05-09 14:26:40.339000442 -0700
@@ -297,3 +308,20 @@ diff -ruN '--exclude=vty' '--exclude=vty.c' '--exclude=vty.sh' '--exclude=vtysh.
        /* sh */
        else if (act_like_sh && privileged_mode == 0 && sourced_env++ == 0)
  	execute_env_file (get_string_value ("ENV"));
+diff -ruN '--exclude=vty' '--exclude=vty.c' '--exclude=vty.sh' '--exclude=vtysh.c' '--exclude=vtysh.h' '--exclude=y.tab.c' '--exclude=y.tab.h' bash-5.3/trap.c vty/trap.c
+--- bash-5.3/trap.c	2025-11-07 11:23:31.000000000 -0800
++++ vty/trap.c	2026-11-14 08:00:00.000000000 +0900
+@@ -614,7 +614,12 @@
+ 	 finish executing, so if this interrupted character input we can get
+ 	 quick response. */
+ #if 1
+-      if (RL_ISSTATE (RL_STATE_SIGHANDLER))
++      /* vty: and SIGUSR1 while readline waits for a key.  The vty's
++	 admin-role timer (vty.sh) sends it; its trap may leave configure
++	 mode, and cli_signal_event_hook (vtysh.c) shows that at once
++	 rather than at the operator's next Enter. */
++      if (RL_ISSTATE (RL_STATE_SIGHANDLER)
++	  || (sig == SIGUSR1 && RL_ISSTATE (RL_STATE_READCMD)))
+ #else
+       if (RL_ISSTATE (RL_STATE_SIGHANDLER) || RL_ISSTATE (RL_STATE_TERMPREPPED))
+ #endif

@@ -11,9 +11,9 @@ use tonic::transport::Server;
 use crate::config::api::DeployRequest;
 use crate::config::enable_rate::EnableRateLimiter;
 use crate::config::session::{
-    AuthzError, DEFAULT_GC_INTERVAL, DEFAULT_IDLE_TTL, ENABLE_HARD_CAP, ENABLE_IDLE_TTL,
-    ENABLE_PAM_USER, ProcfsReader, SessionContext, SessionError, SessionTable, run_gc,
-    watch_bash_death,
+    AdminLease, AuthzError, DEFAULT_GC_INTERVAL, DEFAULT_IDLE_TTL, ENABLE_HARD_CAP,
+    ENABLE_IDLE_TTL, ENABLE_PAM_USER, ProcfsReader, SessionContext, SessionError, SessionKey,
+    SessionTable, run_gc, watch_bash_death,
 };
 
 use super::api::{
@@ -22,6 +22,7 @@ use super::api::{
 };
 use super::show_provider::{ShowProviderBridge, ShowProviderServiceServer};
 use super::subscribe::{ConfigServiceServer, ConfigSubscribeService};
+use super::vty;
 use super::vty::apply_server::{Apply, ApplyServer};
 use super::vty::clear_server::{Clear, ClearServer};
 use super::vty::exec_server::{Exec, ExecServer};
@@ -48,11 +49,16 @@ fn enforce_admin<T>(
     sessions: &SessionTable,
     request: &tonic::Request<T>,
 ) -> Result<(), tonic::Status> {
-    let key = request
-        .extensions()
-        .get::<SessionContext>()
-        .map(|c| c.key)
-        .ok_or_else(|| tonic::Status::unauthenticated("no session"))?;
+    let key = request.extensions().get::<SessionContext>().map(|c| c.key);
+    enforce_admin_key(sessions, key)
+}
+
+/// [`enforce_admin`] for a session key already taken from the request.
+fn enforce_admin_key(
+    sessions: &SessionTable,
+    key: Option<SessionKey>,
+) -> Result<(), tonic::Status> {
+    let key = key.ok_or_else(|| tonic::Status::unauthenticated("no session"))?;
     match sessions.require_admin(&key) {
         Ok(()) => Ok(()),
         Err(AuthzError::NoSession) => Err(tonic::Status::unauthenticated("no session")),
@@ -63,6 +69,44 @@ fn enforce_admin<T>(
             "enable session expired; run 'enable' again",
         )),
     }
+}
+
+/// [`ExecReply::admin`] for the caller's session: 0 seconds when not
+/// admin, -1 when the role never lapses, else the seconds left, rounded
+/// up so that a role with a fraction of a second left is not reported
+/// lapsed (the shell asks again when that second is up).
+fn admin_lease(sessions: &SessionTable, key: Option<SessionKey>) -> vty::AdminLease {
+    let lease = key.map_or(AdminLease::None, |key| sessions.admin_lease(&key));
+    let secs = match lease {
+        AdminLease::None => 0,
+        AdminLease::Permanent => -1,
+        AdminLease::Remaining(left) => {
+            let secs = left.as_secs() + u64::from(left.subsec_nanos() > 0);
+            i32::try_from(secs).unwrap_or(i32::MAX)
+        }
+    };
+    vty::AdminLease { secs }
+}
+
+/// Configure-mode lines that need no admin role: `exit` and `help`, or a
+/// prefix of either, alone on the line. Decided on the words, before
+/// anything runs, since other configure-mode commands change the
+/// candidate when they run. A prefix that the parser finds ambiguous runs
+/// nothing either.
+fn ungated_in_configure(line: &str) -> bool {
+    let mut words = line.split_whitespace();
+    match (words.next(), words.next()) {
+        (Some(word), None) => "exit".starts_with(word) || "help".starts_with(word),
+        _ => false,
+    }
+}
+
+/// Does this exec-mode line enter configure mode? Asked of what the line
+/// resolved to, so that an abbreviation (`conf`) counts as the whole
+/// word does.
+fn enters_configure(resp: &ExecuteResponse) -> bool {
+    resp.code == ExecCode::Success
+        && matches!(resp.paths.as_slice(), [path] if path.name == "configure")
 }
 
 /// Resolve the path to the `vtypam` helper.
@@ -127,6 +171,7 @@ impl ExecService {
             port: 2666,
             paths: Vec::new(),
             hostname: String::new(),
+            admin: None,
         };
         Ok(Response::new(reply))
     }
@@ -137,6 +182,7 @@ impl ExecService {
         lines: String,
         paths: Vec<CommandPath>,
         hostname: String,
+        admin: vty::AdminLease,
     ) -> Result<Response<ExecReply>, tonic::Status> {
         let reply = ExecReply {
             code: code as i32,
@@ -145,6 +191,7 @@ impl ExecService {
             port: 2666,
             paths,
             hostname,
+            admin: Some(admin),
         };
         Ok(Response::new(reply))
     }
@@ -166,31 +213,49 @@ impl Exec for ExecService {
         //       privileged) mode requires admin. This is the strict
         //       check that prevents a client from setting mode=configure
         //       directly to bypass the entry gate.
-        //   (b) mode == "exec" && first_word == "configure"
+        //   (b) mode == "exec" and the line resolves to `configure`
         //       Block the mode-entry command itself so vty users get an
         //       immediate "admin required" instead of a successful mode
-        //       flip followed by every command failing.
+        //       flip followed by every command failing. Checked on what
+        //       the line resolved to, below, since an abbreviation
+        //       (`conf`) enters configure mode too. Running the line
+        //       first is safe: `configure` only answers the mode switch.
+        //
+        //
+        // `exit` and `help` in configure mode pass without the role:
+        // leaving configure mode is the client's own mode switch, so a
+        // session whose role lapsed must still be able to leave.
         //
         // The configure-mode lock is intentionally deferred (see D11);
         // multiple admins can still enter configure simultaneously.
-        if request.get_ref().r#type == ExecType::Exec as i32 {
-            let req = request.get_ref();
-            let mode = req.mode.as_str();
-            let first_word = req.line.split_whitespace().next().unwrap_or("");
-            let needs_admin = mode != "exec" || first_word == "configure";
-            if needs_admin {
-                enforce_admin(&self.sessions, &request)?;
-            }
+        if request.get_ref().r#type == ExecType::Exec as i32
+            && request.get_ref().mode != "exec"
+            && !ungated_in_configure(&request.get_ref().line)
+        {
+            enforce_admin(&self.sessions, &request)?;
         }
 
+        let key = request.extensions().get::<SessionContext>().map(|c| c.key);
         let request = request.get_ref();
         match request.r#type {
             x if x == ExecType::Exec as i32 => {
                 let resp = self.execute_request(&request.mode, &request.line).await;
+                if request.mode == "exec" && enters_configure(&resp) {
+                    enforce_admin_key(&self.sessions, key)?;
+                }
                 let hostname = resp.hostname.clone().unwrap_or_default();
                 let (code, output, paths) = exec_commands(&resp);
-                self.reply_exec(code, output, paths, hostname)
+                let admin = admin_lease(&self.sessions, key);
+                self.reply_exec(code, output, paths, hostname, admin)
             }
+            // The session table alone: the vty asks this from a timer
+            // while the operator may be typing, so it must not queue
+            // behind the configuration's work.
+            x if x == ExecType::AdminLeft as i32 => Ok(Response::new(ExecReply {
+                code: ExecCode::Success as i32,
+                admin: Some(admin_lease(&self.sessions, key)),
+                ..Default::default()
+            })),
             x if x == ExecType::CompleteFirstCommands as i32 => {
                 let resp = self
                     .completion_request(&request.mode, &request.line, request.interactive)
@@ -642,6 +707,10 @@ struct VtyPeerInterceptor {
     sessions: Arc<SessionTable>,
 }
 
+/// Metadata key on a VTY refusal that is not for want of the admin role
+/// (value `peer`: the uid is not on `ZEBRA_VTY_ALLOW_UIDS`).
+const DENIED_KEY: &str = "zebra-rs-denied";
+
 /// Parse the `ZEBRA_VTY_ALLOW_UIDS` env allow-list shared by both
 /// interceptors. `None` when unset or empty (allow-list disabled).
 fn allow_uids_from_env() -> Option<Arc<HashSet<u32>>> {
@@ -724,9 +793,17 @@ impl tonic::service::Interceptor for VtyPeerInterceptor {
                 && !allowed.contains(&uid)
             {
                 tracing::warn!(uid, gid, pid, "vty rpc denied: uid not in allow-list");
-                return Err(tonic::Status::permission_denied(format!(
+                // Marked, so that vtyhelper does not take it for the
+                // admin role lapsing: it refuses every command, `show`
+                // included, and no role would cure it.
+                let mut status = tonic::Status::permission_denied(format!(
                     "uid {uid} is not permitted to use the VTY"
-                )));
+                ));
+                status.metadata_mut().insert(
+                    DENIED_KEY,
+                    tonic::metadata::MetadataValue::from_static("peer"),
+                );
+                return Err(status);
             }
 
             match self.sessions.resolve(&ProcfsReader, uid, pid) {
@@ -1018,5 +1095,32 @@ mod tests {
         assert_eq!(status.code(), tonic::Code::NotFound);
         assert!(status.message().contains("show nosuch"));
         assert!(rx.recv().await.is_none());
+    }
+}
+
+#[cfg(test)]
+mod gate_tests {
+    use super::ungated_in_configure;
+
+    #[test]
+    fn exit_and_help_pass_without_the_role() {
+        for line in ["exit", "ex", "e", " exit ", "help", "he"] {
+            assert!(ungated_in_configure(line), "{line:?}");
+        }
+    }
+
+    #[test]
+    fn everything_else_is_gated() {
+        for line in [
+            "",
+            "set system hostname x",
+            "exit now",
+            "show",
+            "commit",
+            "exits",
+            "s",
+        ] {
+            assert!(!ungated_in_configure(line), "{line:?}");
+        }
     }
 }

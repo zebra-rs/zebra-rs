@@ -70,6 +70,37 @@ declare -i _cli_first_level_registered=0
 # "admin role required" answer, rather than silently walking away.
 declare -i _cli_entered_configure=0
 
+# The admin-role timer's pid, empty when none runs (see
+# _cli_admin_check).
+_cli_admin_timer_pid=""
+
+# A one-line notice a trap left for the operator. The vty's
+# cli_signal_event_hook (vtysh.c) prints it at once when readline is
+# waiting for input; _cli_notice_flush prints it before the next prompt
+# otherwise.
+_cli_notice=""
+
+# vtyhelper's warning from the last first-level registration that could
+# not reach the daemon; empty when it could.
+_cli_unreachable_msg=""
+
+# Seconds the admin role had left at the last question (_cli_admin_left,
+# or the refresh after a command): 0 none, -1 never lapses, empty when
+# the daemon could not say.
+_cli_admin_secs=""
+
+# $SECONDS when the role's time, as last asked, runs out; 0 when no timer
+# waits for it.
+declare -i _cli_admin_deadline=0
+
+# Seconds before asking again when the daemon could not be asked
+# (CLI_ADMIN_RETRY lets the tests wait less).
+_cli_admin_retry=${CLI_ADMIN_RETRY:-60}
+
+# Set (local) while _cli_exec retries a refused line with the role just
+# taken, which is not retried again.
+_cli_retrying=""
+
 COMP_WORDBREAKS=${COMP_WORDBREAKS//:/}
 
 _cli_prompt_setup ()
@@ -202,10 +233,12 @@ _cli_set_completions ()
   completions2=()
   OIFS=${IFS}
 
+  # Quiet when the daemon cannot be reached: a warning printed here
+  # would land in the middle of the line being completed.
   if [[ -z "$current" ]];then
-    IFS='' input=$(${cli_command} -t -m ${CLI_MODE} ${COMP_WORDS[@]})
+    IFS='' input=$(${cli_command} -t -m ${CLI_MODE} -- ${COMP_WORDS[@]} 2>/dev/null)
   else
-    IFS='' input=$(${cli_command} -c -m ${CLI_MODE} ${COMP_WORDS[@]})
+    IFS='' input=$(${cli_command} -c -m ${CLI_MODE} -- ${COMP_WORDS[@]} 2>/dev/null)
   fi
   declare -i first=1
   while read line; do
@@ -294,6 +327,10 @@ _cli_completion ()
 _cli_exec ()
 {
   declare -i first=1
+  local -i rc entered=0
+  # The mode the command runs in: the USR1 trap may change CLI_MODE
+  # while it does.
+  local mode=${CLI_MODE}
 
   if [[ ${CLI_FORMAT} == "json" ]];then
     JSON_FLAG="-j"
@@ -302,7 +339,11 @@ _cli_exec ()
   fi
 
   OIFS=${IFS}
-  IFS='' input=$(${cli_command} ${JSON_FLAG} -m ${CLI_MODE} $@)
+  # vtyhelper's stderr is not captured: when the daemon cannot be
+  # reached, its one-line warning is what the operator sees. `--` keeps
+  # the operator's words theirs: `description -a` is not a helper option.
+  IFS='' input=$(${cli_command} ${JSON_FLAG} -m ${mode} -- $@)
+  rc=$?
   IFS=${OIFS}
   while read line; do
     if [[ ${first} -eq 1 ]];then
@@ -334,32 +375,77 @@ _cli_exec ()
       else
         eval "$line"
         # Note the entry into configure mode here rather than in the
-        # `configure` shell function: _cli_refresh runs `unalias -a`
-        # and re-registers a `configure` alias that shadows that
-        # function, so a second entry never reaches it. Keying off the
-        # mode the daemon just handed us catches every path in.
-        [[ ${CLI_MODE} == "configure" ]] && _cli_entered_configure=1
+        # `configure` shell function: keying off the mode the daemon
+        # just handed us catches every path in.
+        if [[ ${CLI_MODE} == "configure" ]]; then
+          _cli_entered_configure=1
+          entered=1
+        fi
       fi ;;
   esac
+
+  # Refused for want of the admin role.
+  if (( rc == 4 )); then
+    if [[ ${mode} == "configure" ]]; then
+      # The role lapsed, or the daemon restarted and forgot it. Only
+      # `exit` and `help` run without it, so leave configure mode. In a
+      # pipeline this runs in a subshell, which cannot change the shell's
+      # mode; the shell's USR1 trap does. The trap may also have left
+      # configure mode already, while the command ran.
+      if (( BASHPID != $$ )); then
+        [[ ${interactive} ]] && kill -USR1 $$ 2>/dev/null
+      elif [[ ${CLI_MODE} == "configure" ]]; then
+        _cli_admin_lapsed
+        _cli_notice_flush
+      fi
+    elif [[ ${EUID} -ne 0 && -z ${_cli_retrying} ]] && (( BASHPID == $$ )); then
+      # In exec mode only entering configure mode is gated, whether
+      # typed whole or abbreviated (`conf`): take the role, then try
+      # again, once.
+      _cli_take_admin || return 1
+      local _cli_retrying=1
+      _cli_exec "$@"
+      return
+    else
+      echo "% Configuration access denied"
+    fi
+  fi
 
   # A committed `set/delete system hostname` (possibly by another
   # session) must show on the next prompt; config commands come back
   # as silent Show replies with nothing eval-able, so re-ask the
   # daemon after every executed command.
   _cli_hostname_refresh
+  # The admin role that entering configure mode needed is watched from
+  # here on, so that the shell leaves configure mode when it lapses. The
+  # refresh has just said how long it has.
+  (( entered )) && _cli_admin_watch "${_cli_admin_secs}"
+  return ${rc}
 }
 
 # Sync CLI_HOSTNAME (and the prompt) with the daemon's running-config
-# `system hostname`. A failed query (daemon down) leaves the current
-# value untouched.
+# `system hostname`, and note in _cli_admin_secs how long the admin role
+# has left: one question (`vtyhelper -S`) for both. A failed query
+# (daemon down) leaves the host name untouched.
 _cli_hostname_refresh ()
 {
-  local name
-  if name=$(${cli_command} -H 2>/dev/null); then
-    if [[ ${name} != "${CLI_HOSTNAME}" ]]; then
-      CLI_HOSTNAME=${name}
-      _cli_prompt_setup
-    fi
+  local out name secs
+  local -i rc
+  _cli_admin_secs=""
+  out=$(${cli_command} -S 2>/dev/null)
+  rc=$?
+  # 2: a vtyhelper from before -S (a vty rebuilt, the helper not
+  # reinstalled), whose option parser refuses it. The host name alone.
+  if (( rc == 2 )); then
+    out=$(${cli_command} -H 2>/dev/null)
+    rc=$?
+  fi
+  (( rc == 0 )) || return 0
+  { IFS= read -r name; IFS= read -r secs; } <<<"${out}"
+  [[ ${secs} =~ ^-?[0-9]+$ ]] && _cli_admin_secs=${secs}
+  if [[ ${name} != "${CLI_HOSTNAME}" ]]; then
+    CLI_HOSTNAME=${name}
+    _cli_prompt_setup
   fi
 }
 
@@ -371,10 +457,16 @@ _cli_hostname_refresh ()
 command_not_found_handle ()
 {
   if (( _cli_first_level_registered == 0 )); then
-    _cli_register_first_level_command
+    _cli_register_first_level_command loud
     if (( _cli_first_level_registered == 1 )) && alias "$1" >/dev/null 2>&1; then
       _cli_exec "$@"
       return $?
+    fi
+    # Not "command not found": with the daemon out of reach, the word
+    # may well be one of its commands.
+    if [[ -n ${_cli_unreachable_msg} ]]; then
+      printf '%s\n' "${_cli_unreachable_msg}" >&2
+      return 127
     fi
   fi
   echo "$1: command not found" >&2
@@ -386,7 +478,20 @@ _cli_register_first_level_command ()
   shopt -s expand_aliases
   unalias -a
   OOIFS=${IFS}
-  IFS=''  input=$(${cli_command} -f -m ${CLI_MODE})
+  # Only the command list is read: it is eval'ed into aliases below, so
+  # nothing else may reach it. $1 `loud` (startup, a typed command) also
+  # asks again, when the daemon cannot be reached, for the warning that
+  # those callers print; completion retries this on every TAB and stays
+  # at one attempt.
+  IFS=''  input=$(${cli_command} -f -m ${CLI_MODE} 2>/dev/null)
+  local -i rc=$?
+  _cli_unreachable_msg=""
+  if (( rc != 0 )); then
+    input=""
+    if (( rc == 3 )) && [[ $1 == "loud" ]]; then
+      _cli_unreachable_msg=$(${cli_command} -f -m ${CLI_MODE} 2>&1 >/dev/null)
+    fi
+  fi
   local -i registered=0
   while read cmd; do
     [[ -z "${cmd}" ]] && continue
@@ -404,6 +509,13 @@ _cli_register_first_level_command ()
   else
     _cli_first_level_registered=0
   fi
+  # `enable`, `disable` and `configure` are shell functions below: they
+  # read the password without echo and take the admin role before
+  # configure mode. The daemon's aliases for those names must not shadow
+  # them after any registration, not just the first, or a `configure`
+  # typed after leaving configure mode would skip taking the role.
+  unalias enable disable configure 2>/dev/null
+  return ${rc}
 }
 
 # Configure-mode commands typed in exec mode used to fall through to
@@ -477,86 +589,260 @@ _cli_refresh ()
   _cli_prompt_setup
 }
 
+# The admin role lapses. The daemon gives a non-root session the role
+# for 900 seconds past its last admin command (4 hours at most), then
+# refuses every configure-mode command but `exit` and `help`: an
+# operator left in configure mode could do nothing there. A timer
+# (`vtyhelper --timer`, a child that dies with this shell) wakes the
+# shell with SIGUSR1 when the role may have lapsed; the trap asks the
+# daemon how long the role has left (`vtyhelper -a`, which does not
+# extend it) and either waits that long again or, once the role is gone,
+# goes back to exec mode with a one-line notice. Root's role never
+# lapses.
+
+# Is $1 our timer, still running? It may have exited and its pid been
+# reused, by anyone. /proc/PID/stat reads "PID (COMM) STATE PPID ...",
+# and COMM is whatever the process's owner named it: spaces, brackets,
+# `$(...)`. So split after its last ')', and compare as text, never in
+# arithmetic, which would evaluate it.
+_cli_admin_timer_alive ()
+{
+  local stat comm state ppid
+  [[ $1 =~ ^[0-9]+$ ]] || return 1
+  { IFS= read -r stat; } 2>/dev/null </proc/$1/stat || return 1
+  [[ ${stat} == *") "* ]] || return 1
+  comm=${stat#*(}
+  comm=${comm%)*}
+  read -r state ppid _ <<<"${stat##*) }"
+  [[ ${comm} == "vtyhelper" && ${ppid} == "$$" ]]
+}
+
+_cli_admin_timer_cancel ()
+{
+  _cli_admin_timer_alive "${_cli_admin_timer_pid}" \
+    && kill "${_cli_admin_timer_pid}" 2>/dev/null
+  _cli_admin_timer_pid=""
+  return 0
+}
+
+_cli_admin_timer_arm ()
+{
+  _cli_admin_timer_cancel
+  # The braces' redirection keeps job control's "[1] PID" off the
+  # terminal, and disown keeps its "Done" off too. The timer signals
+  # only this shell, named by its pid.
+  { ${cli_command} --timer "$1" --parent $$ & } 2>/dev/null
+  _cli_admin_timer_pid=$!
+  disown "${_cli_admin_timer_pid}" 2>/dev/null
+  return 0
+}
+
+# Wait for the role's time, $1 seconds: noted, so that a lapse can be
+# told from a role taken away.
+_cli_admin_timer_arm_role ()
+{
+  _cli_admin_timer_arm "$1"
+  _cli_admin_deadline=$(( SECONDS + $1 ))
+}
+
+# How long the session's admin role has left, asked of the daemon
+# (`vtyhelper -a`, which does not extend it), into _cli_admin_secs.
+# Status 0 when it answered; 5 when it cannot (a daemon from before the
+# question); anything else when it could not be asked now (3
+# unreachable, 1 another failure).
+_cli_admin_left ()
+{
+  local out
+  local -i rc
+  _cli_admin_secs=""
+  out=$(${cli_command} -a 2>/dev/null)
+  rc=$?
+  if (( rc == 0 )) && [[ ${out} =~ ^-?[0-9]+$ ]]; then
+    _cli_admin_secs=${out}
+    return 0
+  fi
+  (( rc == 0 )) && return 1
+  return ${rc}
+}
+
+# Watch the admin role the session holds, unless it cannot lapse or a
+# timer already runs (it asks again when it goes off). $1, when given,
+# is how long the role has left, just learnt; otherwise ask.
+_cli_admin_watch ()
+{
+  [[ ${interactive} ]] || return 0
+  [[ ${EUID} -eq 0 ]] && return 0
+  _cli_admin_timer_alive "${_cli_admin_timer_pid}" && return 0
+  if [[ $1 =~ ^-?[0-9]+$ ]]; then
+    _cli_admin_secs=$1
+  else
+    _cli_admin_left
+    case $? in
+      0) ;;
+      # It cannot say: nothing to watch by.
+      5) return 0 ;;
+      # It could not be asked now: ask again later.
+      *) _cli_admin_timer_arm "${_cli_admin_retry}"; return 0 ;;
+    esac
+  fi
+  (( _cli_admin_secs > 0 )) && _cli_admin_timer_arm_role "${_cli_admin_secs}"
+  return 0
+}
+
+# Ask the daemon how long the admin role has left and act on it: wait
+# again, or, once the role is gone, leave configure mode and the `#`
+# prompt. The USR1 trap: the timer went off, or a refused command in a
+# pipeline sent it.
+_cli_admin_check ()
+{
+  # Exec mode without the admin prompt has nothing to leave.
+  if [[ ${CLI_MODE} != "configure" ]] && (( CLI_PRIVILEGE < 15 )); then
+    _cli_admin_timer_cancel
+    return 0
+  fi
+  _cli_admin_left
+  case $? in
+    0) ;;
+    # It cannot say: nothing to go by.
+    5) _cli_admin_timer_cancel; return 0 ;;
+    # It could not be asked now (restarting, unreachable): ask again
+    # later.
+    *) _cli_admin_timer_arm "${_cli_admin_retry}"; return 0 ;;
+  esac
+  if (( _cli_admin_secs > 0 )); then
+    _cli_admin_timer_arm_role "${_cli_admin_secs}"
+  elif (( _cli_admin_secs == 0 )); then
+    _cli_admin_lapsed
+  else
+    _cli_admin_timer_cancel
+  fi
+  return 0
+}
+
+# The admin role is gone: leave configure mode, where only `exit` and
+# `help` run without it, and leave the operator a notice. It timed out
+# when the time the timer waited for has passed; otherwise it was taken
+# (a daemon restart, say), and the notice must not blame the clock.
+_cli_admin_lapsed ()
+{
+  local -i timed_out=0
+  (( _cli_admin_deadline > 0 && SECONDS + 1 >= _cli_admin_deadline )) && timed_out=1
+  _cli_admin_timer_cancel
+  _cli_admin_secs=0
+  _cli_admin_deadline=0
+  if [[ ${CLI_MODE} == "configure" ]]; then
+    CLI_PRIVILEGE=1
+    _cli_ctrl_caret
+    if (( timed_out )); then
+      _cli_notice="% Configuration session timed out; back to exec mode."
+    else
+      _cli_notice="% Admin role no longer held; back to exec mode."
+    fi
+  elif (( CLI_PRIVILEGE >= 15 )); then
+    CLI_PRIVILEGE=1
+    _cli_prompt_setup
+    if (( timed_out )); then
+      _cli_notice="% Admin role timed out."
+    else
+      _cli_notice="% Admin role no longer held."
+    fi
+  fi
+  return 0
+}
+
+# PROMPT_COMMAND: print a notice a trap left while no input was being
+# read (the vty prints one left during input itself).
+_cli_notice_flush ()
+{
+  [[ -n ${_cli_notice} ]] || return 0
+  printf '%s\n' "${_cli_notice}"
+  _cli_notice=""
+}
+
+# Ask the daemon for the admin role: root and zebra-rs group members
+# without a password, everyone else with the root password, read here
+# without echo. The status is vtyhelper's: 0 granted, 3 unreachable.
+# When granted, the reply's "% Enabled (admin role active for N
+# seconds)" is how long the role has, noted for the timer.
+_cli_enable_rpc ()
+{
+  local out
+  local -i rc
+  _cli_admin_secs=""
+  # A timer going off in the middle of the password prompt would cut it
+  # short; the callers watch the role again afterwards.
+  _cli_admin_timer_cancel
+  if [[ ${EUID} -eq 0 ]] || _cli_in_config_group; then
+    out=$(${cli_command} -e -m ${CLI_MODE})
+    rc=$?
+  else
+    local pw
+    if [[ -t 0 ]]; then
+      stty -echo
+      read -r -p "Root password: " pw
+      stty echo
+      echo
+    else
+      IFS= read -r pw
+    fi
+    out=$(CLI_ENABLE_PASSWORD="${pw}" ${cli_command} -e -m ${CLI_MODE})
+    rc=$?
+    pw=""
+    unset pw
+  fi
+  [[ -n ${out} ]] && printf '%s\n' "${out}"
+  if (( rc == 0 )) && [[ ${out} =~ active\ for\ ([0-9]+)\ seconds ]]; then
+    _cli_admin_secs=${BASH_REMATCH[1]}
+  fi
+  return ${rc}
+}
+
 enable ()
 {
   if [[ ${CLI_MODE} != "exec" ]]; then
     echo "% 'enable' is only available in exec mode."
     return 1
   fi
-  if [[ ${EUID} -eq 0 ]] || _cli_in_config_group; then
-    ${cli_command} -e -m ${CLI_MODE}
-    local rc=$?
-    if [[ ${rc} -eq 0 ]]; then
-      CLI_PRIVILEGE=15
-      _cli_prompt_setup
-    fi
-    return ${rc}
-  fi
-  local pw
-  if [[ -t 0 ]]; then
-    stty -echo
-    read -r -p "Root password: " pw
-    stty echo
-    echo
-  else
-    IFS= read -r pw
-  fi
-  CLI_ENABLE_PASSWORD="${pw}" ${cli_command} -e -m ${CLI_MODE}
-  local rc=$?
-  pw=""
-  unset pw
-  if [[ ${rc} -eq 0 ]]; then
+  _cli_enable_rpc
+  local -i rc=$?
+  if (( rc == 0 )); then
     CLI_PRIVILEGE=15
     _cli_prompt_setup
+    _cli_admin_watch "${_cli_admin_secs}"
+  else
+    # A failed second `enable` leaves the first one's role, if any, to
+    # watch; a `#` prompt whose role is gone drops.
+    _cli_admin_check
   fi
   return ${rc}
 }
 
-# `configure` with auto-elevate: root enters silently (already admin
-# server-side); group members run passwordless enable; everyone else is
-# prompted for the root password immediately (no probe).
+# Take the admin role for configure mode, which then watches it.
+_cli_take_admin ()
+{
+  _cli_enable_rpc
+  local -i rc=$?
+  (( rc == 0 )) && return 0
+  # 3: the daemon could not be reached, and the helper has said so.
+  (( rc == 3 )) || echo "% Configuration access denied"
+  # The timer was stopped for the password: watch what role is left,
+  # and drop a `#` prompt whose role is gone.
+  _cli_admin_check
+  return 1
+}
+
+# `configure` is a function so that it is told apart in configure mode;
+# taking the admin role when the daemon refuses it is _cli_exec's, for
+# the whole word and its abbreviations alike. No question first: the
+# refusal is the answer, and a daemon from before the question gives it
+# too.
 configure ()
 {
   if [[ ${CLI_MODE} != "exec" ]]; then
     echo "% 'configure' is only available in exec mode."
     return 1
   fi
-
-  # Root is admin server-side, so `_cli_exec configure` below enters
-  # configure mode on its own — skip the enable RPC so no "% Enabled"
-  # line is printed.
-  if (( CLI_PRIVILEGE < 15 )) && [[ ${EUID} -ne 0 ]]; then
-    if _cli_in_config_group; then
-      ${cli_command} -e -m ${CLI_MODE}
-      local rc=$?
-      if [[ ${rc} -ne 0 ]]; then
-        echo "% Configuration access denied"
-        return 1
-      fi
-    else
-      local pw
-      if [[ -t 0 ]]; then
-        stty -echo
-        read -r -p "Root password: " pw
-        stty echo
-        echo
-      else
-        IFS= read -r pw
-      fi
-      CLI_ENABLE_PASSWORD="${pw}" ${cli_command} -e -m ${CLI_MODE}
-      local rc=$?
-      pw=""
-      unset pw
-      if [[ ${rc} -ne 0 ]]; then
-        echo "% Configuration access denied"
-        return 1
-      fi
-    fi
-  fi
-
   _cli_exec configure
-  CLI_PRIVILEGE=15
-  _cli_prompt_setup
 }
 
 disable ()
@@ -564,8 +850,16 @@ disable ()
   ${cli_command} -d -m ${CLI_MODE}
   local rc=$?
   if [[ ${rc} -eq 0 ]]; then
+    _cli_admin_timer_cancel
+    _cli_admin_secs=0
+    _cli_admin_deadline=0
     CLI_PRIVILEGE=1
-    _cli_prompt_setup
+    # Configure mode without the role runs nothing but `exit` and `help`.
+    if [[ ${CLI_MODE} == "configure" ]]; then
+      _cli_ctrl_caret
+    else
+      _cli_prompt_setup
+    fi
   fi
   return ${rc}
 }
@@ -580,12 +874,16 @@ disable ()
 _cli_exit_config_cmd ()
 {
   local out rc
-  out=$(${cli_command} -m configure "$1" 2>&1)
+  out=$(${cli_command} -m configure -- "$1" 2>&1)
   rc=$?
   # vtyhelper prints a bare `Show` marker line ahead of the reply body;
   # a successful commit/discard has nothing after it.
   out=${out#Show}
-  if [[ ${rc} -ne 0 ]]; then
+  if [[ ${rc} -eq 3 ]]; then
+    # The daemon could not be reached: the helper's warning says so.
+    printf '%s\n' "${out}" >&2
+    echo "% ${1} not done; changes left uncommitted." >&2
+  elif [[ ${rc} -ne 0 ]]; then
     echo "% ${1} failed (admin role required — run 'enable'); changes left uncommitted." >&2
   elif [[ -n ${out//[[:space:]]/} ]]; then
     # Validation errors from commit land here; the candidate is intact.
@@ -604,6 +902,10 @@ _cli_exit_config_cmd ()
 # shell's real exit status is lost.
 _cli_exit_hook ()
 {
+  # The timer must not cut the question below short. It dies with the
+  # shell anyway; this only makes it go first.
+  _cli_admin_timer_cancel
+
   # Gate before the RPC: nothing to ask a shell that never configured.
   # -t 2 matters as much as -t 0 — `read -p` writes the prompt to
   # stderr, so with stderr redirected the user would face an invisible
@@ -652,18 +954,21 @@ if [[ $interactive ]]; then
   CLI_HOSTNAME=$(${cli_command} -H 2>/dev/null)
   _cli_prompt_setup
   trap _cli_exit_hook EXIT
+  trap _cli_admin_check USR1
+  PROMPT_COMMAND="_cli_notice_flush${PROMPT_COMMAND:+;${PROMPT_COMMAND}}"
 else
   CLI_PAGER="cat"
 fi
-_cli_register_first_level_command
-# If the daemon registers 'enable'/'disable'/'configure' as
-# first-level commands, strip the aliases so our shell functions
-# above take precedence — they need to read the password locally
-# with stty -echo and/or run an auto-elevate flow that the plain
-# _cli_exec path cannot handle.
-unalias enable 2>/dev/null || true
-unalias disable 2>/dev/null || true
-unalias configure 2>/dev/null || true
+_cli_register_first_level_command loud
+# Say so at once when the daemon cannot be reached: until it can, no
+# vty command works. (Registration is retried on the next TAB or
+# command, and keeps the shell functions for enable/disable/configure
+# ahead of the daemon's aliases.)
+# (Not in a script: its first command says so itself, and once is
+# enough.)
+if [[ ${interactive} && -n ${_cli_unreachable_msg} ]]; then
+  printf '%s\n' "${_cli_unreachable_msg}" >&2
+fi
 
 # Local variables:
 # mode: shell-script

@@ -13,6 +13,7 @@ while [[ $# -gt 0 ]]; do
     -u|--uncommitted) exit 1 ;;              # clean: no exit prompt
     -l|--logout) exit 0 ;;
     -H|--hostname) echo "sockstub"; exit 0 ;;
+    -S|--state) printf '%s\n\n' "sockstub"; exit 0 ;;
     -f|--first) echo "configure"; exit 0 ;;
     *) shift ;;
   esac
