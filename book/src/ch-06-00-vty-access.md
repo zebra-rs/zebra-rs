@@ -328,9 +328,9 @@ Package lifecycle (Debian/Ubuntu `.deb`):
 
 #### `configure` auto-elevate
 
-When a non-admin user types `configure`, root and group members run
-passwordless `enable` first. Everyone else is prompted for the **root
-password** immediately — there is no passwordless probe:
+When a user without the Admin role types `configure` (or an
+abbreviation such as `conf`), group members run passwordless `enable`
+first. Everyone else is prompted for the **root password**:
 
 ```text
 host> configure
@@ -345,8 +345,37 @@ host> configure
 host(configure)#
 ```
 
-Users who already ran `enable` within the current TTL enter configure
-mode with no prompt.
+Users who still hold the Admin role — an earlier `enable` or
+`configure` within its TTL — enter configure mode with no prompt. The
+shell asks the daemon whether the role is held (the `admin_secs` field
+of an empty exec-mode reply, which does not slide the TTL) rather than
+trusting its own prompt: `exit` drops the `#` while the role lives on,
+and a lapse or a daemon restart takes the role away under a prompt that
+still shows it.
+
+#### When the Admin role lapses
+
+Once the role lapses (15 minutes idle, or the 4-hour cap), the daemon
+refuses every configure-mode command, `exit` included. The vty shell
+therefore leaves configure mode by itself and prints one line:
+
+```text
+host#
+% Configuration session timed out; back to exec mode.
+host>
+```
+
+A timer the shell starts when it takes the role (`vtyhelper --timer`, a
+child that dies with the shell) wakes it with `SIGUSR1` when the role may
+have lapsed. The shell then asks how long the role has left
+(`vtyhelper -a`) and either waits again — every configure-mode command
+slides the TTL — or goes back to exec mode. The vty's bash patch runs
+that trap while readline waits for input and redraws the half-typed line
+after the exec-mode prompt, so the notice appears at once. A command the
+daemon refuses for want of the role brings the shell back the same way,
+which also covers a daemon restart. An `enable`d exec prompt (`#`) drops
+to `>` with `% Admin role timed out.` Uncommitted changes stay in the
+candidate configuration. Root's role never lapses.
 
 `configure` combines `enable` + mode entry for one-shot
 configuration sessions; `enable` is for operators who want to hold

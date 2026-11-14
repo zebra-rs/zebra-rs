@@ -128,6 +128,19 @@ impl Session {
     }
 }
 
+/// What is left of a session's admin role. See
+/// [`SessionTable::admin_lease`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdminLease {
+    /// Not admin: never enabled, disabled, lapsed, or no session at all.
+    None,
+    /// Admin with no deadline (root).
+    Permanent,
+    /// Admin until this much more time passes: the nearer of the sliding
+    /// idle deadline and the hard cap.
+    Remaining(Duration),
+}
+
 /// Errors returned by [`SessionTable::require_admin`].
 ///
 /// Mapped to `tonic::Status` codes by the handler. Kept separate from
@@ -410,6 +423,36 @@ impl SessionTable {
             }
         }
         Ok(())
+    }
+
+    /// How long the session's admin role has left.
+    ///
+    /// A peek for the vty shell, which asks so that it can leave configure
+    /// mode when the role lapses instead of leaving the operator at a
+    /// prompt where every command is refused. Unlike
+    /// [`Self::require_admin`] it does not slide the idle deadline (asking
+    /// is not activity) and does not downgrade a lapsed session.
+    pub fn admin_lease(&self, key: &SessionKey) -> AdminLease {
+        let Some(s) = self.sessions.get(key) else {
+            return AdminLease::None;
+        };
+        if !s.enabled {
+            return AdminLease::None;
+        }
+        match (s.enable_expires, s.enable_hard_deadline) {
+            (Some(expires), Some(hard)) => {
+                let deadline = expires.min(hard);
+                let now = Instant::now();
+                if now >= deadline {
+                    AdminLease::None
+                } else {
+                    AdminLease::Remaining(deadline - now)
+                }
+            }
+            (None, None) => AdminLease::Permanent,
+            // A half-set pair is expired to require_admin; agree with it.
+            _ => AdminLease::None,
+        }
     }
 
     /// Sweep stale sessions in a single pass.
@@ -1220,6 +1263,59 @@ mod tests {
             table.require_admin(&(1000, 999)).unwrap_err(),
             AuthzError::EnableExpired
         );
+    }
+
+    #[test]
+    fn admin_lease_none_for_unknown_and_view_sessions() {
+        let table = SessionTable::new();
+        assert_eq!(table.admin_lease(&(1000, 999)), AdminLease::None);
+        table.insert_for_test((1000, 999), Instant::now());
+        assert_eq!(table.admin_lease(&(1000, 999)), AdminLease::None);
+    }
+
+    #[test]
+    fn admin_lease_reports_nearer_deadline_without_sliding() {
+        let table = SessionTable::new();
+        table.insert_for_test((1000, 999), Instant::now());
+        // The hard cap is nearer than the idle deadline here.
+        table.promote_to_admin(
+            &(1000, 999),
+            Duration::from_secs(900),
+            Duration::from_secs(60),
+        );
+        let before = table.get(&(1000, 999)).unwrap().enable_expires.unwrap();
+        let AdminLease::Remaining(left) = table.admin_lease(&(1000, 999)) else {
+            panic!("an enabled session has a lease");
+        };
+        assert!(left <= Duration::from_secs(60));
+        assert!(left > Duration::from_secs(59));
+        let after = table.get(&(1000, 999)).unwrap().enable_expires.unwrap();
+        assert_eq!(before, after, "asking must not slide the idle deadline");
+    }
+
+    #[test]
+    fn admin_lease_none_once_lapsed_and_session_left_alone() {
+        let table = SessionTable::new();
+        table.insert_for_test((1000, 999), Instant::now());
+        table.promote_to_admin(
+            &(1000, 999),
+            Duration::from_millis(1),
+            Duration::from_secs(60),
+        );
+        std::thread::sleep(Duration::from_millis(20));
+        assert_eq!(table.admin_lease(&(1000, 999)), AdminLease::None);
+        // Still enabled: the downgrade is require_admin's to make.
+        assert!(table.get(&(1000, 999)).unwrap().enabled);
+    }
+
+    #[test]
+    fn admin_lease_permanent_for_root() {
+        let table = SessionTable::new();
+        let reader = StubReader::default();
+        reader.set_ppid(1234, 999);
+        reader.set_ruid(999, 0);
+        table.resolve(&reader, 0, 1234).unwrap();
+        assert_eq!(table.admin_lease(&(0, 999)), AdminLease::Permanent);
     }
 
     #[test]

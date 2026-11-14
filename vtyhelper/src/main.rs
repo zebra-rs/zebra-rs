@@ -1,8 +1,10 @@
 use anyhow::Result;
 use clap::Parser;
 use std::env;
+use std::time::Duration;
 use tokio::io::{self, AsyncWriteExt};
 use tokio_stream::StreamExt;
+use tonic::transport::Channel;
 use vty::exec_client::ExecClient;
 use vty::show_client::ShowClient;
 use vty::{
@@ -77,6 +79,22 @@ struct Cli {
     hostname: bool,
 
     #[arg(
+        short = 'a',
+        long = "admin-left",
+        help = "Print how many seconds the session's admin role has left: 0 when not admin, \
+                -1 when it never lapses (root). Asking does not extend it."
+    )]
+    admin_left: bool,
+
+    #[arg(
+        long,
+        value_name = "SECS",
+        help = "Sleep SECS seconds, then send SIGUSR1 to the parent (the vty shell, which \
+                then asks whether its admin role lapsed). Dies with the parent."
+    )]
+    timer: Option<u64>,
+
+    #[arg(
         long,
         help = "Deprecated and ignored; the daemon always authenticates enable against root."
     )]
@@ -99,6 +117,80 @@ fn privilege_get() -> u32 {
         Ok(val) => val.parse::<u32>().unwrap_or(1),
         Err(_) => 1,
     }
+}
+
+/// Exit statuses of the command paths, which the vty shell tells apart.
+/// Enable, disable and `--uncommitted` keep their own documented codes,
+/// except that enable and disable also exit `EXIT_UNREACHABLE` when the
+/// daemon cannot be reached.
+const EXIT_FAILURE: i32 = 1;
+/// The daemon could not be reached; the warning went to stderr.
+const EXIT_UNREACHABLE: i32 = 3;
+/// The daemon refused the command: it needs the admin role, which the
+/// session does not hold (never enabled, or lapsed). Nothing printed.
+const EXIT_DENIED: i32 = 4;
+
+/// The daemon could not be reached. Its Display is the one-line warning
+/// the vty shell shows in place of the command's output.
+#[derive(Debug)]
+struct Unreachable {
+    uri: String,
+    reason: String,
+    /// Nothing is listening (refused, no such socket): most likely
+    /// zebra-rs is not running, or runs in another network namespace.
+    not_running: bool,
+}
+
+impl Unreachable {
+    fn new(uri: &str, err: &anyhow::Error) -> Self {
+        // tonic's own layers say only "transport error"; the io::Error at
+        // the bottom of the chain says why.
+        let io = err.chain().find_map(|e| e.downcast_ref::<std::io::Error>());
+        let reason = match io {
+            Some(io) => {
+                let text = io.to_string();
+                match text.find(" (os error ") {
+                    Some(at) => text[..at].to_string(),
+                    None => text,
+                }
+            }
+            None => err.root_cause().to_string(),
+        };
+        let not_running = io.is_some_and(|io| {
+            matches!(
+                io.kind(),
+                std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound
+            )
+        });
+        Self {
+            uri: uri.to_string(),
+            reason,
+            not_running,
+        }
+    }
+}
+
+impl std::fmt::Display for Unreachable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "% Cannot connect to zebra-rs at {}: {}",
+            self.uri, self.reason
+        )?;
+        if self.not_running {
+            write!(f, "; is zebra-rs running?")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for Unreachable {}
+
+/// Connect to the daemon, turning a failure into [`Unreachable`].
+async fn dial(uri: &str) -> Result<Channel> {
+    endpoint::connect(uri)
+        .await
+        .map_err(|err| Unreachable::new(uri, &err).into())
 }
 
 /// Build the endpoint URI from the parsed CLI.
@@ -155,7 +247,7 @@ fn exec_request(exec_type: i32, mode: &String, commands: &Vec<String>) -> ExecRe
 
 async fn show(cli: Cli, port: Option<u32>, paths: Vec<CommandPath>) -> Result<()> {
     let port = port.unwrap_or(cli.port);
-    let channel = endpoint::connect(&endpoint_uri(&cli.base, port)).await?;
+    let channel = dial(&endpoint_uri(&cli.base, port)).await?;
     let mut client = ShowClient::new(channel);
 
     let commands = commands_trim_run(&cli.commands);
@@ -174,12 +266,13 @@ async fn show(cli: Cli, port: Option<u32>, paths: Vec<CommandPath>) -> Result<()
         };
         stdout.write_all(reply.str.as_bytes()).await?;
     }
+    stdout.flush().await?;
 
     Ok(())
 }
 
 async fn completion(cli: Cli) -> Result<()> {
-    let channel = endpoint::connect(&endpoint_uri(&cli.base, cli.port)).await?;
+    let channel = dial(&endpoint_uri(&cli.base, cli.port)).await?;
     let mut client = ExecClient::new(channel);
 
     let exec_type: i32 = if cli.completion {
@@ -200,7 +293,7 @@ async fn completion(cli: Cli) -> Result<()> {
 }
 
 async fn redirect(cli: Cli, port: u32) -> Result<()> {
-    let channel = endpoint::connect(&endpoint_uri(&cli.base, port)).await?;
+    let channel = dial(&endpoint_uri(&cli.base, port)).await?;
     let mut client = ExecClient::new(channel);
 
     let commands = commands_trim_run(&cli.commands);
@@ -218,20 +311,63 @@ async fn redirect(cli: Cli, port: u32) -> Result<()> {
 /// (`_cli_hostname_refresh`) so the prompt tracks `set system
 /// hostname` / `delete system hostname` as soon as they commit.
 async fn hostname_fetch(cli: Cli) -> Result<()> {
-    let channel = endpoint::connect(&endpoint_uri(&cli.base, cli.port)).await?;
+    let reply = probe(&cli).await?;
+    println!("{}", reply.hostname);
+    Ok(())
+}
+
+/// Print how many seconds the session's admin role has left (see
+/// `ExecReply.admin_secs`). Invoked as `vtyhelper -a` by the vty shell,
+/// which leaves configure mode when the answer is 0.
+async fn admin_left(cli: Cli) -> Result<()> {
+    let reply = probe(&cli).await?;
+    println!("{}", reply.admin_secs);
+    Ok(())
+}
+
+/// An empty exec-mode line: runs nothing, passes no admin gate (so it
+/// slides no deadline), and its reply carries the session-wide fields.
+async fn probe(cli: &Cli) -> Result<ExecReply> {
+    let channel = dial(&endpoint_uri(&cli.base, cli.port)).await?;
     let mut client = ExecClient::new(channel);
     let request = tonic::Request::new(exec_request(
         ExecType::Exec as i32,
         &String::from("exec"),
         &Vec::new(),
     ));
-    let reply = client.do_exec(request).await?.into_inner();
-    println!("{}", reply.hostname);
-    Ok(())
+    Ok(client.do_exec(request).await?.into_inner())
+}
+
+/// `--timer SECS`: wake the vty shell when its admin role may have lapsed.
+///
+/// Sleeps, then sends SIGUSR1 to the parent, whose trap asks the daemon
+/// (`-a`) and either re-arms for the time left or leaves configure mode.
+/// The timer must not outlive the shell: a shell that died leaves its pid
+/// free for reuse, and SIGUSR1 kills a process that does not catch it. So
+/// it dies with the shell (PR_SET_PDEATHSIG) and checks the parent is
+/// still the one it started with before signalling.
+fn timer(secs: u64) -> i32 {
+    // SAFETY: getppid, prctl and kill are plain syscalls on integers.
+    let parent = unsafe { libc::getppid() };
+    #[cfg(target_os = "linux")]
+    unsafe {
+        libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
+    }
+    // The parent may have died before prctl took effect.
+    if parent <= 1 || unsafe { libc::getppid() } != parent {
+        return 0;
+    }
+    std::thread::sleep(Duration::from_secs(secs));
+    if unsafe { libc::getppid() } == parent {
+        unsafe {
+            libc::kill(parent, libc::SIGUSR1);
+        }
+    }
+    0
 }
 
 async fn exec(cli: Cli) -> Result<()> {
-    let channel = endpoint::connect(&endpoint_uri(&cli.base, cli.port)).await?;
+    let channel = dial(&endpoint_uri(&cli.base, cli.port)).await?;
     let mut client = ExecClient::new(channel);
 
     let request = tonic::Request::new(exec_request(
@@ -257,7 +393,7 @@ async fn exec(cli: Cli) -> Result<()> {
 /// trap, so this path is silent on success and on failure — the user's
 /// shell is already exiting and any stdout would be jarring.
 async fn logout(cli: Cli) -> Result<()> {
-    let channel = endpoint::connect(&endpoint_uri(&cli.base, cli.port)).await?;
+    let channel = dial(&endpoint_uri(&cli.base, cli.port)).await?;
     let mut client = ExecClient::new(channel);
     let _ = client.logout(tonic::Request::new(LogoutRequest {})).await?;
     Ok(())
@@ -279,11 +415,11 @@ async fn enable(cli: Cli) -> i32 {
         env::remove_var("CLI_ENABLE_PASSWORD");
     }
 
-    let channel = match endpoint::connect(&endpoint_uri(&cli.base, cli.port)).await {
+    let channel = match dial(&endpoint_uri(&cli.base, cli.port)).await {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("% enable: connect failed: {e}");
-            return 2;
+            eprintln!("{e}");
+            return EXIT_UNREACHABLE;
         }
     };
     let mut client = ExecClient::new(channel);
@@ -343,7 +479,7 @@ const UNCOMMITTED_UNKNOWN: i32 = 2;
 /// a shell, which is why this is a one-shot query and not a flag
 /// stamped on every reply.
 async fn uncommitted(cli: Cli) -> i32 {
-    let channel = match endpoint::connect(&endpoint_uri(&cli.base, cli.port)).await {
+    let channel = match dial(&endpoint_uri(&cli.base, cli.port)).await {
         Ok(c) => c,
         Err(_) => return UNCOMMITTED_UNKNOWN,
     };
@@ -383,11 +519,11 @@ async fn uncommitted(cli: Cli) -> i32 {
 
 /// Drop the session back to View. Idempotent; the daemon doesn't error.
 async fn disable(cli: Cli) -> i32 {
-    let channel = match endpoint::connect(&endpoint_uri(&cli.base, cli.port)).await {
+    let channel = match dial(&endpoint_uri(&cli.base, cli.port)).await {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("% disable: connect failed: {e}");
-            return 2;
+            eprintln!("{e}");
+            return EXIT_UNREACHABLE;
         }
     };
     let mut client = ExecClient::new(channel);
@@ -408,6 +544,8 @@ async fn run(cli: Cli) -> Result<()> {
         logout(cli).await?;
     } else if cli.hostname {
         hostname_fetch(cli).await?;
+    } else if cli.admin_left {
+        admin_left(cli).await?;
     } else if cli.show {
         show(cli, None, Vec::new()).await?;
     } else if cli.completion || cli.trailing || cli.first {
@@ -418,36 +556,80 @@ async fn run(cli: Cli) -> Result<()> {
     Ok(())
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+/// Exit status of a failed command path. Prints the unreachable warning
+/// when that is why; a refusal and any other failure stay silent, so the
+/// shell sees empty output and a non-zero status as before.
+fn failure_code(uri: &str, err: &anyhow::Error) -> i32 {
+    if let Some(unreachable) = err.downcast_ref::<Unreachable>() {
+        eprintln!("{unreachable}");
+        return EXIT_UNREACHABLE;
+    }
+    if let Some(status) = err.downcast_ref::<tonic::Status>() {
+        match status.code() {
+            tonic::Code::PermissionDenied | tonic::Code::Unauthenticated => return EXIT_DENIED,
+            // Connected, then lost the daemon (stopped mid-call).
+            tonic::Code::Unavailable => {
+                let unreachable = Unreachable {
+                    uri: uri.to_string(),
+                    reason: status.message().to_string(),
+                    not_running: false,
+                };
+                eprintln!("{unreachable}");
+                return EXIT_UNREACHABLE;
+            }
+            _ => {}
+        }
+    }
+    EXIT_FAILURE
+}
+
+async fn dispatch(cli: Cli) -> i32 {
+    // Enable/Disable need to control their own exit codes for the shell
+    // wrapper to react (e.g. flip CLI_PRIVILEGE on success).
+    if cli.enable {
+        return enable(cli).await;
+    }
+    if cli.disable {
+        return disable(cli).await;
+    }
+    // Same reason as enable/disable: the exit code *is* the answer, so
+    // it must not go through `run`'s failure mapping.
+    if cli.uncommitted {
+        return uncommitted(cli).await;
+    }
+
+    let uri = endpoint_uri(&cli.base, cli.port);
+    let logout_mode = cli.logout;
+    match run(cli).await {
+        Ok(()) => 0,
+        // Logout runs from the bash EXIT trap (`|| true`) of a shell that
+        // is already leaving: no message, no status.
+        Err(_) if logout_mode => 0,
+        // Nothing on stdout, so the bash side can detect failure (empty
+        // output / non-zero exit) and retry registration on the next
+        // command or completion.
+        Err(err) => failure_code(&uri, &err),
+    }
+}
+
+fn main() -> Result<()> {
     let mut cli = Cli::parse();
     if let Ok(val) = env::var("CLI_SERVER_URL") {
         cli.base = val;
     }
 
-    // Enable/Disable need to control their own exit codes for the shell
-    // wrapper to react (e.g. flip CLI_PRIVILEGE on success).
-    if cli.enable {
-        std::process::exit(enable(cli).await);
-    }
-    if cli.disable {
-        std::process::exit(disable(cli).await);
-    }
-    // Same reason as enable/disable: the exit code *is* the answer, so
-    // it must not go through `run`'s blanket "exit 1 on error".
-    if cli.uncommitted {
-        std::process::exit(uncommitted(cli).await);
+    // The timer sleeps for up to the whole admin lease; it needs no
+    // runtime and its threads.
+    if let Some(secs) = cli.timer {
+        std::process::exit(timer(secs));
     }
 
-    let logout_mode = cli.logout;
-    if let Err(_err) = run(cli).await {
-        // Stay silent: no fallback output, so the bash side can detect
-        // failure (empty stdout / non-zero exit) and retry registration
-        // on the next command or completion. Logout runs from the bash
-        // EXIT trap (`|| true`), so a non-zero exit is harmless there.
-        if !logout_mode {
-            std::process::exit(1);
-        }
+    let runtime = tokio::runtime::Runtime::new()?;
+    let code = runtime.block_on(dispatch(cli));
+    // Let the runtime finish any write to stdout before exiting.
+    drop(runtime);
+    if code != 0 {
+        std::process::exit(code);
     }
     Ok(())
 }

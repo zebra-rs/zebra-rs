@@ -118,5 +118,27 @@ ubuntu>set interface eth0 ipv6 address 2001:db8::1/64
 % 'set' is only available in configure mode; type 'configure' first.
 ```
 
+When the Admin role lapses — 900 seconds without a configure-mode command — the
+daemon refuses every configure-mode command, `exit` included, so `vty` takes you
+back to exec mode by itself, with a one-line notice. It does so the moment the
+role lapses, even with a line half typed; type `configure` to continue:
+
+``` shell
+ubuntu#set inter
+% Configuration session timed out; back to exec mode.
+ubuntu>set inter
+```
+
+Uncommitted changes stay in the candidate configuration for the next
+`configure`.
+
+If `vty` cannot reach the zebra-rs daemon, it says so when it starts and on
+each command, rather than "command not found":
+
+``` shell
+ubuntu>show version
+% Cannot connect to zebra-rs at unix:zebra-rs/vty: Connection refused; is zebra-rs running?
+```
+
 See [VTY Access Control](ch-06-00-vty-access.md) for the full role and
 authentication model.
