@@ -9708,3 +9708,7 @@ mod replica_flags_tests;
 #[cfg(test)]
 #[path = "multipath_resync_tests.rs"]
 mod multipath_resync_tests;
+
+#[cfg(test)]
+#[path = "max_prefix_teardown_review_tests.rs"]
+mod max_prefix_teardown_review_tests;
