@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 # Stub `vtyhelper` for the admin-timeout and unreachable-daemon tests.
 #
 # vty.sh calls the helper by bare name (`cli_command=vtyhelper`), so
@@ -17,6 +17,11 @@
 #   STUB_NO_TIMER  when set, `--timer` exits at once without signalling
 #   STUB_OLD       when set, a daemon from before ExecReply.admin: `-a`
 #                  cannot say (exit 5) and `-S` gives no second answer
+#   STUB_DENY      when set, `configure` is refused even with the role
+#   STUB_NOISY     when set, `-f` also writes to stderr when it succeeds
+#
+# Each `--timer` notes its pid in STUB_STATE/timers for the harness to
+# stop, and stops its own sleep when killed.
 #
 # `-e` refuses the password "wrong" (exit 1), as PAM would.
 set -u
@@ -54,8 +59,14 @@ need_admin ()
 case ${1:-} in
   --timer)
     [[ -n ${STUB_NO_TIMER:-} ]] && exit 0
-    sleep "$2"
-    kill -USR1 "${PPID}"
+    echo $$ >>"${state}/timers"
+    trap 'kill "${sleeper}" 2>/dev/null; exit 0' TERM
+    sleep "$2" &
+    sleeper=$!
+    wait "${sleeper}"
+    # Like the real helper: only a parent that catches SIGUSR1 (bit 10).
+    cgt=$(awk '/^SigCgt:/ {print $2}' "/proc/${PPID}/status" 2>/dev/null)
+    [[ -n ${cgt} ]] && (( 16#${cgt} & 0x200 )) && kill -USR1 "${PPID}"
     exit 0 ;;
   -l|--logout) exit 0 ;;
 esac
@@ -94,6 +105,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if (( first )); then
+  [[ -n ${STUB_NOISY:-} ]] && echo "noise" >&2
   case ${mode} in
     exec) printf '%s\n' cli configure help release renew show ;;
     configure) printf '%s\n' clear cli commit delete discard exit help load run save set show ;;
@@ -104,6 +116,7 @@ fi
 enter_configure='SuccessExec\nCLI_MODE=configure;CLI_MODE_STR=Configure;CLI_MODE_PROMPT=;CLI_PRIVILEGE=15;_cli_refresh\n'
 case "${mode}:${args[0]:-}" in
   exec:configure)
+    [[ -n ${STUB_DENY:-} ]] && exit 4
     need_admin
     printf "${enter_configure}"
     ;;
@@ -113,8 +126,11 @@ case "${mode}:${args[0]:-}" in
     printf "${enter_configure}"
     ;;
   configure:exit)
-    need_admin
+    # No role needed to leave, as with the daemon.
     printf 'SuccessExec\nCLI_MODE=exec;CLI_MODE_PROMPT=;CLI_PRIVILEGE=1;_cli_refresh\n'
+    ;;
+  configure:help)
+    echo "Show"
     ;;
   configure:*)
     need_admin

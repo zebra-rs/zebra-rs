@@ -88,6 +88,19 @@ fn admin_lease(sessions: &SessionTable, key: Option<SessionKey>) -> vty::AdminLe
     vty::AdminLease { secs }
 }
 
+/// Configure-mode lines that need no admin role: `exit` and `help`, or a
+/// prefix of either, alone on the line. Decided on the words, before
+/// anything runs, since other configure-mode commands change the
+/// candidate when they run. A prefix that the parser finds ambiguous runs
+/// nothing either.
+fn ungated_in_configure(line: &str) -> bool {
+    let mut words = line.split_whitespace();
+    match (words.next(), words.next()) {
+        (Some(word), None) => "exit".starts_with(word) || "help".starts_with(word),
+        _ => false,
+    }
+}
+
 /// Does this exec-mode line enter configure mode? Asked of what the line
 /// resolved to, so that an abbreviation (`conf`) counts as the whole
 /// word does.
@@ -208,9 +221,17 @@ impl Exec for ExecService {
         //       (`conf`) enters configure mode too. Running the line
         //       first is safe: `configure` only answers the mode switch.
         //
+        //
+        // `exit` and `help` in configure mode pass without the role:
+        // leaving configure mode is the client's own mode switch, so a
+        // session whose role lapsed must still be able to leave.
+        //
         // The configure-mode lock is intentionally deferred (see D11);
         // multiple admins can still enter configure simultaneously.
-        if request.get_ref().r#type == ExecType::Exec as i32 && request.get_ref().mode != "exec" {
+        if request.get_ref().r#type == ExecType::Exec as i32
+            && request.get_ref().mode != "exec"
+            && !ungated_in_configure(&request.get_ref().line)
+        {
             enforce_admin(&self.sessions, &request)?;
         }
 
@@ -686,6 +707,10 @@ struct VtyPeerInterceptor {
     sessions: Arc<SessionTable>,
 }
 
+/// Metadata key on a VTY refusal that is not for want of the admin role
+/// (value `peer`: the uid is not on `ZEBRA_VTY_ALLOW_UIDS`).
+const DENIED_KEY: &str = "zebra-rs-denied";
+
 /// Parse the `ZEBRA_VTY_ALLOW_UIDS` env allow-list shared by both
 /// interceptors. `None` when unset or empty (allow-list disabled).
 fn allow_uids_from_env() -> Option<Arc<HashSet<u32>>> {
@@ -768,9 +793,17 @@ impl tonic::service::Interceptor for VtyPeerInterceptor {
                 && !allowed.contains(&uid)
             {
                 tracing::warn!(uid, gid, pid, "vty rpc denied: uid not in allow-list");
-                return Err(tonic::Status::permission_denied(format!(
+                // Marked, so that vtyhelper does not take it for the
+                // admin role lapsing: it refuses every command, `show`
+                // included, and no role would cure it.
+                let mut status = tonic::Status::permission_denied(format!(
                     "uid {uid} is not permitted to use the VTY"
-                )));
+                ));
+                status.metadata_mut().insert(
+                    DENIED_KEY,
+                    tonic::metadata::MetadataValue::from_static("peer"),
+                );
+                return Err(status);
             }
 
             match self.sessions.resolve(&ProcfsReader, uid, pid) {
@@ -1062,5 +1095,32 @@ mod tests {
         assert_eq!(status.code(), tonic::Code::NotFound);
         assert!(status.message().contains("show nosuch"));
         assert!(rx.recv().await.is_none());
+    }
+}
+
+#[cfg(test)]
+mod gate_tests {
+    use super::ungated_in_configure;
+
+    #[test]
+    fn exit_and_help_pass_without_the_role() {
+        for line in ["exit", "ex", "e", " exit ", "help", "he"] {
+            assert!(ungated_in_configure(line), "{line:?}");
+        }
+    }
+
+    #[test]
+    fn everything_else_is_gated() {
+        for line in [
+            "",
+            "set system hostname x",
+            "exit now",
+            "show",
+            "commit",
+            "exits",
+            "s",
+        ] {
+            assert!(!ungated_in_configure(line), "{line:?}");
+        }
     }
 }

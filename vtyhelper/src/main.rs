@@ -142,6 +142,10 @@ const EXIT_DENIED: i32 = 4;
 /// predates `ExecReply.admin`). Nothing printed.
 const EXIT_UNKNOWN: i32 = 5;
 
+/// Metadata key the daemon puts on a refusal that is not for want of the
+/// admin role (the uid is not on its allow-list).
+const DENIED_KEY: &str = "zebra-rs-denied";
+
 /// The daemon answered `-a` without the admin role's time.
 #[derive(Debug)]
 struct NoLease;
@@ -309,18 +313,33 @@ async fn show(cli: Cli, port: Option<u32>, paths: Vec<CommandPath>) -> Result<()
     while let Some(reply) = stream.next().await {
         let reply = match reply {
             Ok(reply) => reply,
-            // What was printed is all the operator gets: say it is cut
-            // short rather than pass it off as the whole answer.
-            Err(status) => {
+            // Lost the daemon: what was printed is all the operator gets,
+            // so say it is cut short rather than pass it off as the whole
+            // answer.
+            Err(status) if lost_connection(&status) => {
                 stdout.flush().await?;
                 return Err(Unreachable::lost(&uri, &status, true).into());
             }
+            // The daemon's own answer (NotFound: no show handler had
+            // output for the line) ends the output, as it always did.
+            Err(_) => break,
         };
         stdout.write_all(reply.str.as_bytes()).await?;
     }
     stdout.flush().await?;
 
     Ok(())
+}
+
+/// Did this stream error come from losing the connection rather than
+/// from the daemon? The daemon ends a show stream with NotFound when no
+/// handler had output; a dropped connection surfaces as Unavailable,
+/// Unknown (an h2 error) or Cancelled.
+fn lost_connection(status: &tonic::Status) -> bool {
+    matches!(
+        status.code(),
+        tonic::Code::Unavailable | tonic::Code::Unknown | tonic::Code::Cancelled
+    )
 }
 
 async fn completion(cli: Cli) -> Result<()> {
@@ -358,10 +377,10 @@ async fn redirect(cli: Cli, port: u32) -> Result<()> {
 }
 
 /// Print the daemon's configured `system hostname` (empty when
-/// unset). Invoked as `vtyhelper -H` by the vty shell — once at
-/// startup to seed `CLI_HOSTNAME`, and after every executed command
-/// (`_cli_hostname_refresh`) so the prompt tracks `set system
-/// hostname` / `delete system hostname` as soon as they commit.
+/// unset). Invoked as `vtyhelper -H` by the vty shell once at startup
+/// to seed `CLI_HOSTNAME`; after every executed command the shell asks
+/// `-S` instead (`_cli_hostname_refresh`), so the prompt tracks `set
+/// system hostname` / `delete system hostname` as soon as they commit.
 async fn hostname_fetch(cli: Cli) -> Result<()> {
     let reply = probe(&cli).await?;
     println!("{}", reply.hostname);
@@ -441,12 +460,38 @@ fn timer(secs: u64) -> i32 {
         return 0;
     };
     std::thread::sleep(Duration::from_secs(secs));
-    if unsafe { libc::getppid() } == parent && executable(parent).as_deref() == Some(&program) {
+    // Same pid, same program, and it catches SIGUSR1: anything else (an
+    // `exec vty -c ...` script, a vty still starting) would be killed by
+    // it.
+    if unsafe { libc::getppid() } == parent
+        && executable(parent).as_deref() == Some(&program)
+        && catches(parent, libc::SIGUSR1)
+    {
         unsafe {
             libc::kill(parent, libc::SIGUSR1);
         }
     }
     0
+}
+
+/// Does `pid` catch signal `sig`? Read off the `SigCgt` mask in
+/// /proc/PID/status; false when it cannot be read.
+fn catches(pid: libc::pid_t, sig: libc::c_int) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/status"))
+        .ok()
+        .is_some_and(|status| sig_caught(&status, sig))
+}
+
+/// `sig`'s bit in the `SigCgt:` line of a /proc/PID/status text.
+fn sig_caught(status: &str, sig: libc::c_int) -> bool {
+    let Some(mask) = status
+        .lines()
+        .find_map(|line| line.strip_prefix("SigCgt:"))
+        .and_then(|hex| u64::from_str_radix(hex.trim(), 16).ok())
+    else {
+        return false;
+    };
+    (1..=64).contains(&sig) && mask & (1u64 << (sig - 1)) != 0
 }
 
 /// The program `pid` runs, as /proc names it. A binary replaced on disk
@@ -507,7 +552,8 @@ async fn enable(cli: Cli) -> i32 {
         env::remove_var("CLI_ENABLE_PASSWORD");
     }
 
-    let channel = match dial(&endpoint_uri(&cli.base, cli.port)).await {
+    let uri = endpoint_uri(&cli.base, cli.port);
+    let channel = match dial(&uri).await {
         Ok(c) => c,
         Err(e) => {
             eprintln!("{e}");
@@ -529,6 +575,12 @@ async fn enable(cli: Cli) -> i32 {
                 println!("% Enable failed: {}", r.message);
                 1
             }
+        }
+        // Lost the daemon after connecting: the same news as not reaching
+        // it, and the shell says nothing more for exit 3.
+        Err(status) if status.code() == tonic::Code::Unavailable => {
+            eprintln!("{}", Unreachable::lost(&uri, &status, false));
+            EXIT_UNREACHABLE
         }
         Err(status) => {
             // permission_denied = wrong password; everything else is a
@@ -611,7 +663,8 @@ async fn uncommitted(cli: Cli) -> i32 {
 
 /// Drop the session back to View. Idempotent; the daemon doesn't error.
 async fn disable(cli: Cli) -> i32 {
-    let channel = match dial(&endpoint_uri(&cli.base, cli.port)).await {
+    let uri = endpoint_uri(&cli.base, cli.port);
+    let channel = match dial(&uri).await {
         Ok(c) => c,
         Err(e) => {
             eprintln!("{e}");
@@ -623,6 +676,10 @@ async fn disable(cli: Cli) -> i32 {
         Ok(_) => {
             println!("% Disabled");
             0
+        }
+        Err(status) if status.code() == tonic::Code::Unavailable => {
+            eprintln!("{}", Unreachable::lost(&uri, &status, false));
+            EXIT_UNREACHABLE
         }
         Err(status) => {
             println!("% Disable failed: {}", status.message());
@@ -663,6 +720,12 @@ fn failure_code(uri: &str, err: &anyhow::Error) -> i32 {
     }
     if let Some(status) = err.downcast_ref::<tonic::Status>() {
         match status.code() {
+            // Not on the daemon's uid allow-list: every command is
+            // refused, `show` too, and no role would cure that. Say so.
+            tonic::Code::PermissionDenied if status.metadata().get(DENIED_KEY).is_some() => {
+                eprintln!("% {}", status.message());
+                return EXIT_FAILURE;
+            }
             // Only a refusal for want of the role: the shell takes it as
             // the role having lapsed. Unauthenticated means no session
             // at all (a TCP endpoint carries no peer credentials), which
@@ -779,6 +842,38 @@ mod tests {
             Unreachable::lost(URI, &status, true).to_string(),
             "% Output cut short: lost zebra-rs at unix:zebra-rs/vty: connection reset"
         );
+    }
+
+    #[test]
+    fn allow_list_refusal_is_not_a_lapse() {
+        let mut status = tonic::Status::permission_denied("uid 1000 is not permitted");
+        status.metadata_mut().insert(
+            DENIED_KEY,
+            tonic::metadata::MetadataValue::from_static("peer"),
+        );
+        assert_eq!(code_of(status), EXIT_FAILURE);
+    }
+
+    #[test]
+    fn only_a_lost_connection_cuts_show_short() {
+        assert!(lost_connection(&tonic::Status::unavailable("x")));
+        assert!(lost_connection(&tonic::Status::unknown(
+            "h2 protocol error"
+        )));
+        // The daemon's own end of a show with no handler output.
+        assert!(!lost_connection(&tonic::Status::not_found(
+            "no show handler"
+        )));
+    }
+
+    #[test]
+    fn sigcgt_mask_read() {
+        // SIGUSR1 is 10: bit 9 is 0x200.
+        let with = "Name:\tvty\nSigBlk:\t0000000000000000\nSigCgt:\t000000004b817efb\n";
+        let without = "Name:\tsleep\nSigCgt:\t0000000000000000\n";
+        assert!(sig_caught(with, libc::SIGUSR1));
+        assert!(!sig_caught(without, libc::SIGUSR1));
+        assert!(!sig_caught("Name:\tx\n", libc::SIGUSR1));
     }
 
     #[cfg(target_os = "linux")]

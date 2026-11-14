@@ -91,6 +91,8 @@ declare -a _cli_first_level_cmds=()
 # or the refresh after a command): 0 none, -1 never lapses, empty when
 # the daemon could not say.
 _cli_admin_secs=""
+# $SECONDS when _cli_admin_secs was learnt.
+declare -i _cli_admin_secs_at=0
 
 # Set (local) while the configure function runs, which handles a refusal
 # of `configure` itself.
@@ -442,7 +444,7 @@ _cli_hostname_refresh ()
   _cli_admin_secs=""
   out=$(${cli_command} -S 2>/dev/null) || return 0
   { IFS= read -r name; IFS= read -r secs; } <<<"${out}"
-  [[ ${secs} =~ ^-?[0-9]+$ ]] && _cli_admin_secs=${secs}
+  [[ ${secs} =~ ^-?[0-9]+$ ]] && _cli_admin_note "${secs}"
   if [[ ${name} != "${CLI_HOSTNAME}" ]]; then
     CLI_HOSTNAME=${name}
     _cli_prompt_setup
@@ -478,16 +480,17 @@ _cli_register_first_level_command ()
   shopt -s expand_aliases
   unalias -a
   OOIFS=${IFS}
-  # stderr is captured too, but kept apart: the helper prints only the
-  # command list when it succeeds and only its warning when the daemon
-  # cannot be reached. The warning is kept for the callers that report
-  # it; completion retries this on every TAB and must stay quiet.
-  IFS=''  input=$(${cli_command} -f -m ${CLI_MODE} 2>&1)
+  # Quiet: completion retries this on every TAB. Only the command list
+  # is read (it is eval'ed into aliases below, so nothing else may reach
+  # it); when the daemon cannot be reached, ask once more for the
+  # warning, which the callers that report it print.
+  IFS=''  input=$(${cli_command} -f -m ${CLI_MODE} 2>/dev/null)
   local -i rc=$?
   _cli_unreachable_msg=""
   if (( rc != 0 )); then
-    (( rc == 3 )) && _cli_unreachable_msg=${input}
     input=""
+    (( rc == 3 )) \
+      && _cli_unreachable_msg=$(${cli_command} -f -m ${CLI_MODE} 2>&1 >/dev/null)
   fi
   local -i registered=0
   _cli_first_level_cmds=()
@@ -599,13 +602,20 @@ _cli_refresh ()
 # with a one-line notice. Root's role never lapses.
 
 # Is $1 our timer, still running? It may have exited and its pid been
-# reused.
+# reused, by anyone. /proc/PID/stat reads "PID (COMM) STATE PPID ...",
+# and COMM is whatever the process's owner named it: spaces, brackets,
+# `$(...)`. So split after its last ')', and compare as text, never in
+# arithmetic, which would evaluate it.
 _cli_admin_timer_alive ()
 {
-  local comm state ppid
-  [[ -n $1 ]] || return 1
-  read -r _ comm state ppid _ 2>/dev/null </proc/$1/stat || return 1
-  (( ppid == $$ ))
+  local stat comm state ppid
+  [[ $1 =~ ^[0-9]+$ ]] || return 1
+  { IFS= read -r stat; } 2>/dev/null </proc/$1/stat || return 1
+  [[ ${stat} == *") "* ]] || return 1
+  comm=${stat#*(}
+  comm=${comm%)*}
+  read -r state ppid _ <<<"${stat##*) }"
+  [[ ${comm} == "vtyhelper" && ${ppid} == "$$" ]]
 }
 
 _cli_admin_timer_cancel ()
@@ -637,17 +647,33 @@ _cli_admin_left ()
   local out
   local -i rc
   _cli_admin_secs=""
-  out=$(${cli_command} -a 2>&1)
+  out=$(${cli_command} -a 2>/dev/null)
   rc=$?
   if (( rc == 0 )) && [[ ${out} =~ ^-?[0-9]+$ ]]; then
-    _cli_admin_secs=${out}
+    _cli_admin_note "${out}"
     return 0
   fi
   if (( rc == 3 )); then
-    _cli_unreachable_msg=${out}
+    _cli_unreachable_msg=$(${cli_command} -a 2>&1 >/dev/null)
     return 3
   fi
   return 1
+}
+
+# Note how long the admin role has left, just learnt.
+_cli_admin_note ()
+{
+  _cli_admin_secs=$1
+  _cli_admin_secs_at=${SECONDS}
+}
+
+# Did the last answer, recent enough, say the role is held? Then
+# `configure` need not ask again.
+_cli_admin_known_held ()
+{
+  [[ ${_cli_admin_secs} =~ ^-?[0-9]+$ ]] || return 1
+  (( _cli_admin_secs < 0 )) && return 0
+  (( _cli_admin_secs - (SECONDS - _cli_admin_secs_at) > 5 ))
 }
 
 # Watch the admin role the session holds, unless it cannot lapse or a
@@ -659,7 +685,7 @@ _cli_admin_watch ()
   [[ ${EUID} -eq 0 ]] && return 0
   _cli_admin_timer_alive "${_cli_admin_timer_pid}" && return 0
   if [[ $1 =~ ^-?[0-9]+$ ]]; then
-    _cli_admin_secs=$1
+    _cli_admin_note "$1"
   else
     _cli_admin_left || return 0
   fi
@@ -695,6 +721,7 @@ _cli_admin_timer_fired ()
 _cli_admin_lapsed ()
 {
   _cli_admin_timer_cancel
+  _cli_admin_note 0
   if [[ ${CLI_MODE} == "configure" ]]; then
     CLI_PRIVILEGE=1
     _cli_ctrl_caret
@@ -719,14 +746,18 @@ _cli_notice_flush ()
 # Ask the daemon for the admin role: root and zebra-rs group members
 # without a password, everyone else with the root password, read here
 # without echo. The status is vtyhelper's: 0 granted, 3 unreachable.
+# When granted, the reply's "% Enabled (admin role active for N
+# seconds)" is how long the role has, noted for the timer.
 _cli_enable_rpc ()
 {
+  local out
   local -i rc
+  _cli_admin_secs=""
   # A timer going off in the middle of the password prompt would cut it
   # short; the callers watch the role again afterwards.
   _cli_admin_timer_cancel
   if [[ ${EUID} -eq 0 ]] || _cli_in_config_group; then
-    ${cli_command} -e -m ${CLI_MODE}
+    out=$(${cli_command} -e -m ${CLI_MODE})
     rc=$?
   else
     local pw
@@ -738,10 +769,14 @@ _cli_enable_rpc ()
     else
       IFS= read -r pw
     fi
-    CLI_ENABLE_PASSWORD="${pw}" ${cli_command} -e -m ${CLI_MODE}
+    out=$(CLI_ENABLE_PASSWORD="${pw}" ${cli_command} -e -m ${CLI_MODE})
     rc=$?
     pw=""
     unset pw
+  fi
+  [[ -n ${out} ]] && printf '%s\n' "${out}"
+  if (( rc == 0 )) && [[ ${out} =~ active\ for\ ([0-9]+)\ seconds ]]; then
+    _cli_admin_note "${BASH_REMATCH[1]}"
   fi
   return ${rc}
 }
@@ -759,8 +794,8 @@ enable ()
     _cli_prompt_setup
   fi
   # Whatever the answer: a failed second `enable` leaves the first one's
-  # role, which still needs watching.
-  _cli_admin_watch
+  # role, which still needs watching (asked, as the reply cannot say).
+  _cli_admin_watch "${_cli_admin_secs}"
   return ${rc}
 }
 
@@ -790,7 +825,9 @@ configure ()
 
   local _cli_configuring=1
   local -i took=0 rc
-  if [[ ${EUID} -ne 0 ]]; then
+  # The refresh after the last command may have just said the role is
+  # held; a lapse since is caught below like any refusal.
+  if [[ ${EUID} -ne 0 ]] && ! _cli_admin_known_held; then
     _cli_admin_left
     case $? in
       0)
@@ -814,6 +851,12 @@ configure ()
     _cli_exec configure
     rc=$?
   fi
+  # Still refused with the role just taken (the hard cap reached that
+  # moment, a daemon restart): say so rather than nothing.
+  if (( rc == 4 )); then
+    echo "% Configuration access denied"
+    return ${rc}
+  fi
   (( rc == 0 )) || return ${rc}
   [[ ${CLI_MODE} == "configure" ]] || return 1
   CLI_PRIVILEGE=15
@@ -826,6 +869,7 @@ disable ()
   local rc=$?
   if [[ ${rc} -eq 0 ]]; then
     _cli_admin_timer_cancel
+    _cli_admin_note 0
     CLI_PRIVILEGE=1
     _cli_prompt_setup
   fi

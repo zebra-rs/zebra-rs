@@ -358,8 +358,11 @@ unreachable, `configure` says so and asks for no password.
 #### When the Admin role lapses
 
 Once the role lapses (15 minutes idle, or the 4-hour cap), the daemon
-refuses every configure-mode command, `exit` included. The vty shell
-therefore leaves configure mode by itself and prints one line:
+refuses every configure-mode command except `exit` and `help` (alone on
+the line, or abbreviated): leaving configure mode is the client's own
+mode switch, so no client is ever stuck there. The vty shell does not
+wait to be refused; it leaves configure mode by itself and prints one
+line:
 
 ```text
 host#

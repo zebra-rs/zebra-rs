@@ -17,6 +17,7 @@ still at the prompt, without pressing Enter.
 Usage: vty/tests/admin-timeout/run.py [-v]
 """
 
+import atexit
 import fcntl
 import os
 import pty
@@ -56,7 +57,26 @@ def shim_dir(group):
         idp.write_text(f'#!/bin/sh\n[ "$1" = -nG ] && {{ echo {groups}; exit 0; }}\nexec /usr/bin/id "$@"\n')
         os.chmod(idp, 0o755)
         _SHIMS[group] = shim
+        atexit.register(shutil.rmtree, shim, True)
     return _SHIMS[group]
+
+
+# The stub starts with #!/bin/bash, not env: through env its process
+# would be named "bash", and vty.sh rightly takes only a process named
+# vtyhelper for its timer.
+
+
+def stop_timers(state):
+    """Stop stub timers still running: they are background jobs in their
+    own process groups, out of reach of the shell's group kill."""
+    timers = state / "timers"
+    if not timers.exists():
+        return
+    for pid in timers.read_text().split():
+        try:
+            os.kill(int(pid), signal.SIGTERM)
+        except (ProcessLookupError, ValueError):
+            pass
 
 
 class Result:
@@ -77,7 +97,8 @@ class Result:
         return self.output[self.marks[mark]:]
 
 
-def run(steps, ttl=3, timer=True, group=True, down=False, vty=False, old=False, timeout=30.0):
+def run(steps, ttl=3, timer=True, group=True, down=False, vty=False, old=False, deny=False,
+        noisy=False, timeout=30.0):
     """Drive an interactive shell through `steps`: a string is typed as a
     line; ("sleep", s) waits; ("raw", s) types without Enter;
     ("down",) makes the daemon unreachable; ("mark", name) remembers
@@ -99,6 +120,10 @@ def run(steps, ttl=3, timer=True, group=True, down=False, vty=False, old=False, 
         env["STUB_NO_TIMER"] = "1"
     if old:
         env["STUB_OLD"] = "1"
+    if deny:
+        env["STUB_DENY"] = "1"
+    if noisy:
+        env["STUB_NOISY"] = "1"
     env["CLI_PAGER"] = "cat"
     env["CLI_EXIT_PROMPT_TIMEOUT"] = "2"
     env["TERM"] = "dumb"
@@ -162,6 +187,7 @@ def run(steps, ttl=3, timer=True, group=True, down=False, vty=False, old=False, 
         except OSError:
             pass
         calls = [c.strip() for c in log.read_text().splitlines() if c.strip()] if log.exists() else []
+        stop_timers(state)
         shutil.rmtree(state, ignore_errors=True)
 
     text = out.decode("utf-8", "replace").replace("\r", "")
@@ -203,14 +229,15 @@ def case_refused_command():
 
 
 def case_exit_after_lapse():
-    # `exit` in configure mode is refused too; it must not leave the
-    # operator stuck there.
-    # The echo's answer is built at run time: the terminal echoes the
-    # typed line, which must not contain it.
-    r = run(["configure", ("sleep", 2.5), "exit", "echo still-$((40 + 2))", "exit"],
-            ttl=1, timer=False)
-    check("exit after lapse: notice shown", NOTICE in r.output, r.output)
-    check("exit after lapse: in exec mode, shell still up", "still-42" in r.output, r.output)
+    # `exit` needs no role: it leaves configure mode even after the role
+    # lapsed, timer or not. The echo's answer is built at run time: the
+    # terminal echoes the typed line, which must not contain it.
+    r = run(["configure", ("sleep", 2.5), "exit", ("mark", "out"), "echo still-$((40 + 2))",
+             "set x", "exit"], ttl=1, timer=False)
+    check("exit after lapse: reached the daemon", r.called("-m configure exit"), str(r.calls))
+    check("exit after lapse: shell still up", "still-42" in r.output, r.output)
+    check("exit after lapse: in exec mode", EXEC_ONLY in r.since("out"), r.output)
+    check("exit after lapse: set not sent", not r.called("-m configure set x"), str(r.calls))
     check("exit after lapse: second exit leaves", not r.timed_out)
 
 
@@ -230,6 +257,9 @@ def case_reenter_within_role_no_password():
     check("no second password: one prompt", r.output.count("Root password:") == 1, r.output)
     check("no second password: role taken once", r.count("-e") == 1, str(r.calls))
     check("no second password: in configure mode", r.called("-m configure set b"), str(r.calls))
+    # The refresh after `exit` said the role is held: re-entry need not
+    # ask again.
+    check("no second password: role asked once", r.calls.count("-a") == 1, str(r.calls))
     check("no second password: leaves", not r.timed_out)
 
 
@@ -303,6 +333,52 @@ def case_old_daemon_no_second_password():
     check("old daemon: one password prompt", r.output.count("Root password:") == 1, r.output)
     check("old daemon: in configure mode again", r.called("-m configure set b"), str(r.calls))
     check("old daemon: no timer it cannot feed", not r.called("--timer"), str(r.calls))
+
+
+def case_configure_refused_says_so():
+    # Refused even with the role just taken: say so.
+    r = run(["configure", "exit"], deny=True)
+    check("refused after taking the role: says so",
+          "% Configuration access denied" in r.output, r.output)
+
+
+def case_registration_ignores_stderr():
+    # Only the command list becomes aliases: what the helper writes to
+    # stderr must not.
+    r = run(["if alias noise >/dev/null 2>&1; then a=yes; else a=no; fi; echo \"noise-alias:$a\"",
+             "exit"], noisy=True)
+    check("noisy helper: no alias from stderr", "noise-alias:no" in r.output, r.output)
+
+
+def case_timer_check_reads_comm_safely():
+    # A process that reuses the timer's pid may be anyone's, named
+    # anything: its name must neither run as code nor pass for a timer.
+    work = Path(tempfile.mkdtemp(prefix="vty-admin-comm-"))
+    script = work / "script.sh"
+    script.write_text(f"""source {VTY_SH}
+cd {work}
+( printf '%s' 'a b x[$(>M)]' >/proc/$BASHPID/comm; sleep 3; : ) &
+pid=$!
+sleep 0.3
+echo "comm=[$(cat /proc/$pid/comm)]"
+if _cli_admin_timer_alive "$pid"; then r=yes; else r=no; fi
+echo "alive:$r"
+kill $pid
+""")
+    env = dict(os.environ)
+    env.pop("CLI_SERVER_URL", None)
+    env["PATH"] = f"{shim_dir(True)}:{env['PATH']}"
+    env["STUB_STATE"] = str(work)
+    proc = subprocess.run(["bash", str(script)], stdout=subprocess.PIPE,
+                          stderr=subprocess.STDOUT, env=env, timeout=20)
+    injected = (work / "M").exists()
+    shutil.rmtree(work, ignore_errors=True)
+    text = proc.stdout.decode("utf-8", "replace")
+    if VERBOSE:
+        print(f"--- comm script output ---\n{text}")
+    check("hostile comm: the name was set", "comm=[a b x[$(>M)]]" in text, text)
+    check("hostile comm: not taken for a timer", "alive:no" in text, text)
+    check("hostile comm: nothing ran", not injected, text)
 
 
 def case_script_warns_once():
@@ -381,6 +457,9 @@ def main():
     case_configure_unreachable_no_password()
     case_old_daemon_no_second_password()
     case_script_warns_once()
+    case_configure_refused_says_so()
+    case_registration_ignores_stderr()
+    case_timer_check_reads_comm_safely()
     case_unreachable_at_start()
     case_unreachable_later()
     case_unreachable_completion_quiet()

@@ -396,25 +396,17 @@ impl SessionTable {
         if !s.enabled {
             return Err(AuthzError::NotAdmin);
         }
+        // One rule for "lapsed", shared with admin_lease: what the shell
+        // is told is what is enforced.
         let now = Instant::now();
-        match (s.enable_expires, s.enable_hard_deadline) {
-            (Some(expires), Some(hard)) => {
-                if now >= expires || now >= hard {
-                    s.role = Role::View;
-                    s.enabled = false;
-                    s.enable_expires = None;
-                    s.enable_hard_deadline = None;
-                    return Err(AuthzError::EnableExpired);
-                }
-                // Slide the idle deadline forward; the hard cap is fixed.
-                s.enable_expires = Some(now + ENABLE_IDLE_TTL);
-            }
-            (None, None) => {
-                // Permanent admin (root). No deadlines.
-            }
-            _ => {
-                // Defensive: invariant says either both are Some or both
-                // None. Treat partial as expired to fail closed.
+        match Self::lease_of(&s, now) {
+            // Permanent admin (root). No deadlines.
+            AdminLease::Permanent => {}
+            // Slide the idle deadline forward; the hard cap is fixed.
+            AdminLease::Remaining(_) => s.enable_expires = Some(now + ENABLE_IDLE_TTL),
+            // Lapsed, or a half-set pair (the invariant says both or
+            // neither), which fails closed.
+            AdminLease::None => {
                 s.role = Role::View;
                 s.enabled = false;
                 s.enable_expires = None;
