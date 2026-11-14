@@ -42,6 +42,8 @@ mod script;
 mod spf;
 mod srv6;
 mod stamp;
+#[cfg(test)]
+mod test_log;
 mod throttle;
 mod version;
 

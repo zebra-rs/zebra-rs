@@ -130,32 +130,6 @@ fn held_peer(bgp: &mut Bgp) -> (usize, Rx) {
     (id, prx)
 }
 
-fn split(bgp: &mut Bgp) -> (BgpTop<'_>, &mut PeerMap) {
-    (
-        BgpTop {
-            router_id: &bgp.router_id,
-            srv6_ipv6_export: None,
-            local_rib: &mut bgp.local_rib,
-            shard: &mut bgp.shard,
-            tx: &bgp.tx,
-            rib_client: &bgp.ctx.rib,
-            attr_store: &mut bgp.attr_store,
-            update_groups: &mut bgp.update_groups,
-            interface_addrs: &bgp.interface_addrs,
-            vrf_export: None,
-            color_policy: None,
-            flex_algo_routes: None,
-            flex_algo_srv6_routes: None,
-            vrf_import: None,
-            nexthop_cache: None,
-            vrf_transport_v4: None,
-            vrf_transport_v6: None,
-            as_sets_withdraw: bgp.as_sets_withdraw,
-        },
-        &mut bgp.peers,
-    )
-}
-
 fn over_limit_update() -> UpdatePacket {
     let mut packet = UpdatePacket::new();
     packet.bgp_attr = Some(BgpAttr {
@@ -200,7 +174,7 @@ async fn an_update_that_completes_the_handshake_and_trips_the_limit_leaves_nothi
     put_from_source(&mut bgp, DUMPED);
     let (c, mut rx) = held_peer(&mut bgp);
 
-    let (mut top, peers) = split(&mut bgp);
+    let (mut top, peers) = crate::bgp::peer::advertise_top(&mut bgp);
     crate::bgp::peer::fsm(
         &mut top,
         peers,
