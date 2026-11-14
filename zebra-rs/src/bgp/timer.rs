@@ -299,6 +299,11 @@ pub fn update_timers(peer: &mut Peer) {
             if peer.max_prefix.overflow.is_some() {
                 // Held until `clear bgp`, a config change or `restart`.
                 peer.timer.idle_hold_timer = None;
+            } else if !peer.is_dialable() {
+                // No remote AS or no address: nothing to dial, and nothing
+                // an OPEN could be checked against. `Peer::start` comes
+                // when it has both.
+                peer.timer.idle_hold_timer = None;
             } else if peer.is_passive() {
                 // When the peer is configured as passive, its status will transition to
                 // Active. This is the only place we manipulate the peer status outside the
