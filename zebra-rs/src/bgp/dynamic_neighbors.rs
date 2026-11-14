@@ -404,6 +404,31 @@ fn ao_prefix_del(bgp: &Bgp, prefix: &IpNet, send_id: u8, recv_id: u8) -> bool {
     }
 }
 
+/// Remove for good peers the caller has checked are dynamic, live sessions
+/// included, freeing their `listen-limit` slots. Returns whether any was
+/// removed.
+pub(super) fn remove_dynamic_peers(bgp: &mut Bgp, addrs: impl IntoIterator<Item = IpAddr>) -> bool {
+    let mut removed = false;
+    for addr in addrs {
+        debug_assert!(
+            bgp.peers.get(&addr).is_none_or(|peer| matches!(
+                peer.origin,
+                super::peer_key::PeerOrigin::Dynamic { .. }
+            ))
+        );
+        if super::config::remove_peer_full(bgp, addr).is_some() {
+            bgp.dynamic_peer_count = bgp.dynamic_peer_count.saturating_sub(1);
+            removed = true;
+        }
+    }
+    if removed {
+        // They may have been the last next-hop-self holders for a VPNv4 /
+        // Labeled-Unicast family.
+        bgp.reconcile_transit_labels(false);
+    }
+    removed
+}
+
 /// Tear down and remove every `PeerOrigin::Dynamic` peer materialized
 /// from `prefix`, freeing their `listen-limit` slots. Deleting a
 /// listen-range (or unbinding its neighbor-group) revokes the
@@ -430,27 +455,17 @@ pub(super) fn sweep_range_peers(bgp: &mut Bgp, prefix: &IpNet) {
         .map(|peer| peer.address)
         .collect();
 
-    let mut removed_any = false;
-    for addr in victims {
-        if super::config::remove_peer_full(bgp, addr).is_some() {
-            bgp.dynamic_peer_count = bgp.dynamic_peer_count.saturating_sub(1);
-            removed_any = true;
-            // Debug, matching the rest of this module's lifecycle
-            // logging: the peer is already gone, so there is no `Peer`
-            // left to read a tracing gate from.
-            tracing::debug!(
-                peer = %addr,
-                range = %prefix,
-                "bgp: dynamic peer removed by listen-range sweep",
-            );
-        }
+    for addr in &victims {
+        // Debug, matching the rest of this module's lifecycle logging: the
+        // peer is about to go, so there is no `Peer` left to read a tracing
+        // gate from afterwards.
+        tracing::debug!(
+            peer = %addr,
+            range = %prefix,
+            "bgp: dynamic peer removed by listen-range sweep",
+        );
     }
-    if removed_any {
-        // The swept peers may have been the last next-hop-self holders for
-        // a VPNv4 / Labeled-Unicast family; re-derive the transit flags so
-        // their local labels and swap ILMs are released.
-        bgp.reconcile_transit_labels(false);
-    }
+    remove_dynamic_peers(bgp, victims);
 }
 
 #[cfg(test)]
@@ -721,6 +736,168 @@ mod sweep_tests {
         config_listen_range(&mut bgp, arg_words(&["10.1.0.0/24"]), ConfigOp::Delete).unwrap();
 
         assert_eq!(bgp.dynamic_peer_count, 0, "the cap must be fully released");
+    }
+
+    /// A dynamic peer released from the hold has no session for the reaper to
+    /// end, so the release removes it and frees its slot. A static one stays.
+    #[tokio::test]
+    async fn a_released_dynamic_peer_gives_its_slot_back() {
+        use crate::bgp::Message;
+        use crate::bgp::max_prefix::{MaxPrefixExceeded, clear_overflow};
+        use crate::bgp::peer::{BgpClearOp, Event, State, clear_bgp_action};
+        use crate::config::ConfigRequest;
+        use bgp_packet::{Afi, AfiSafi, Safi};
+        let over = MaxPrefixExceeded {
+            afi_safi: AfiSafi::new(Afi::Ip, Safi::Unicast),
+            count: 2,
+            limit: 1,
+        };
+        for release in ["restart", "clear", "commit"] {
+            let mut bgp = fresh_bgp();
+            materialize(&mut bgp, "10.1.0.7", "10.1.0.0/24");
+            let static_addr = addr("10.1.0.8");
+            let static_peer = Peer::new(
+                0,
+                bgp.asn,
+                bgp.router_id,
+                65001,
+                static_addr,
+                bgp.hostname(),
+                bgp.tx.clone(),
+                bgp.ctx.clone(),
+            );
+            bgp.peers.insert(static_addr, static_peer);
+            let addrs = [addr("10.1.0.7"), static_addr];
+            for address in addrs {
+                let peer = bgp.peers.get_mut(&address).unwrap();
+                peer.max_prefix.overflow = Some(over);
+                peer.state = State::Idle;
+            }
+            for address in addrs {
+                let ident = bgp.peers.get(&address).unwrap().ident;
+                match release {
+                    "restart" => {
+                        bgp.process_msg(Message::Event(ident, Event::MaxPrefixRestartExpires))
+                    }
+                    "clear" => {
+                        let mut args = arg_words(&[&address.to_string()]);
+                        clear_bgp_action(&mut bgp, &mut args, None, BgpClearOp::Hard).unwrap();
+                    }
+                    _ => {
+                        clear_overflow(bgp.peers.get_mut(&address).unwrap());
+                    }
+                }
+            }
+            if release == "commit" {
+                bgp.process_cm_msg(ConfigRequest::new(vec![], ConfigOp::CommitEnd));
+            }
+            assert!(bgp.peers.get(&addr("10.1.0.7")).is_none(), "{release}");
+            assert_eq!(bgp.dynamic_peer_count, 0, "{release}");
+            assert!(bgp.peers.get(&static_addr).is_some(), "{release}");
+        }
+
+        // A session that came up between the release and the reaping stays.
+        let mut bgp = fresh_bgp();
+        materialize(&mut bgp, "10.1.0.7", "10.1.0.0/24");
+        let peer = bgp.peers.get_mut(&addr("10.1.0.7")).unwrap();
+        peer.max_prefix.overflow = Some(over);
+        peer.state = State::Idle;
+        clear_overflow(peer);
+        peer.state = State::OpenSent;
+        bgp.process_cm_msg(ConfigRequest::new(vec![], ConfigOp::CommitEnd));
+        assert!(bgp.peers.get(&addr("10.1.0.7")).is_some());
+        assert_eq!(bgp.dynamic_peer_count, 1);
+    }
+
+    /// Revoking group authorization releases held dynamic peers, not static ones.
+    #[tokio::test]
+    async fn deleting_a_group_releases_its_held_dynamic_peer() {
+        use crate::bgp::max_prefix::{MaxPrefixConfig, MaxPrefixExceeded};
+        use crate::bgp::neighbor_group::{GroupAfiSafi, config_neighbor_group};
+        use crate::bgp::peer::State;
+        use bgp_packet::{Afi, AfiSafi, Safi};
+        for remove_group in [true, false] {
+            for clear_first in [false, true] {
+                let mut bgp = fresh_bgp();
+                config_neighbor_group_remote_as(
+                    &mut bgp,
+                    arg_words(&["A", "65001"]),
+                    ConfigOp::Set,
+                )
+                .unwrap();
+                configure_range(&mut bgp, "10.1.0.0/24", "A");
+                let family = AfiSafi::new(Afi::Ip, Safi::Unicast);
+                let block = MaxPrefixConfig {
+                    limit: Some(1),
+                    ..Default::default()
+                };
+                let over = MaxPrefixExceeded {
+                    afi_safi: family,
+                    count: 2,
+                    limit: 1,
+                };
+                let group = bgp.neighbor_groups.get_mut("A").unwrap();
+                group.afi_safi.insert(
+                    family,
+                    GroupAfiSafi {
+                        enabled: true,
+                        ..Default::default()
+                    },
+                );
+                group.max_prefix.insert(family, block);
+                materialize(&mut bgp, "10.1.0.7", "10.1.0.0/24");
+                let static_addr = addr("10.1.0.8");
+                let static_peer = Peer::new(
+                    0,
+                    bgp.asn,
+                    bgp.router_id,
+                    65001,
+                    static_addr,
+                    bgp.hostname(),
+                    bgp.tx.clone(),
+                    bgp.ctx.clone(),
+                );
+                bgp.peers.insert(static_addr, static_peer);
+                let source = addr("10.1.0.7");
+                for address in [source, static_addr] {
+                    let peer = bgp.peers.get_mut(&address).unwrap();
+                    peer.config.neighbor_group = Some("A".to_string());
+                    peer.config.remote_as_inherited = true;
+                    peer.config.max_prefix.insert(family, block);
+                    peer.max_prefix.overflow = Some(over);
+                    peer.state = State::Idle;
+                }
+                if clear_first {
+                    // A preceding leaf delete can release the hold before remote-as.
+                    for address in [source, static_addr] {
+                        let peer = bgp.peers.get_mut(&address).unwrap();
+                        peer.config.max_prefix.clear();
+                        crate::bgp::max_prefix::clear_overflow(peer);
+                    }
+                }
+                if remove_group {
+                    config_neighbor_group(&mut bgp, arg_words(&["A"]), ConfigOp::Delete).unwrap();
+                } else {
+                    config_neighbor_group_remote_as(&mut bgp, arg_words(&["A"]), ConfigOp::Delete)
+                        .unwrap();
+                }
+                while let Ok(message) = bgp.rx.try_recv() {
+                    bgp.process_msg(message);
+                }
+                assert!(
+                    bgp.peers.get(&source).is_none(),
+                    "a group-less held peer cannot reconnect"
+                );
+                assert_eq!(
+                    bgp.dynamic_peer_count, 0,
+                    "the listen-limit slot is released"
+                );
+                assert!(
+                    bgp.peers.get(&static_addr).is_some(),
+                    "configured peers stay dormant"
+                );
+            }
+        }
     }
 
     /// Unbinding the group leaves the range unable to supply session

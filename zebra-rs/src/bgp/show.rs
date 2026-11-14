@@ -241,10 +241,22 @@ fn summary_pfx_counts(
     }
 }
 
+/// The text summary's state word. FRR's `Idle (PfxCt)` tells an operator that
+/// this peer stays down until it is cleared. It is 12 characters, the width of
+/// the State column. The JSON keeps `state` to the FSM state and reports the
+/// hold in `maximum_prefix_overflow`.
+fn summary_state(peer: &Peer) -> &'static str {
+    if peer.max_prefix.overflow.is_some() {
+        "Idle (PfxCt)"
+    } else {
+        peer.state.to_str()
+    }
+}
+
 fn write_summary_header_row(buf: &mut String) -> std::fmt::Result {
     writeln!(
         buf,
-        "{:16}{:>1}{:>11}{:>10}{:>10}{:>9}{:>5}{:>5}{:>9} {:<11} {:>10} Hostname",
+        "{:16}{:>1}{:>11}{:>10}{:>10}{:>9}{:>5}{:>5}{:>9} {:<12} {:>10} Hostname",
         "Neighbor",
         "V",
         "AS",
@@ -277,7 +289,7 @@ fn write_summary_peer_row(
     let up_down = uptime(&peer.instant);
     let negotiated = peer_has_negotiated(peer, afi, safi);
 
-    let state_str = peer.state.to_str().to_string();
+    let state_str = summary_state(peer).to_string();
     let pfx_str = if peer.state != State::Established {
         "N/A".to_string()
     } else if !negotiated {
@@ -296,7 +308,7 @@ fn write_summary_peer_row(
 
     writeln!(
         buf,
-        "{:16}{:>1}{:>11}{:>10}{:>10}{:>9}{:>5}{:>5}{:>9} {:<11} {:>10} {}",
+        "{:16}{:>1}{:>11}{:>10}{:>10}{:>9}{:>5}{:>5}{:>9} {:<12} {:>10} {}",
         // Interface name for unnumbered peers (FRR-style), remote
         // address otherwise.
         peer.display_name(),
@@ -559,6 +571,10 @@ struct BgpPeerSummaryJson {
     state: String,
     pfx_rcvd: u64,
     pfx_sent: u64,
+    /// Present while the peer is held past `maximum-prefix`, as in the
+    /// neighbor JSON; `state` stays the FSM state.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    maximum_prefix_overflow: Option<super::max_prefix::MaxPrefixOverflowShow>,
 }
 
 #[derive(Serialize)]
@@ -2419,6 +2435,7 @@ fn summary_peer_row_json(
         state,
         pfx_rcvd,
         pfx_sent,
+        maximum_prefix_overflow: super::max_prefix::overflow_show(peer),
     }
 }
 
@@ -3844,6 +3861,10 @@ struct Neighbor<'a> {
     /// reset at least once; survives re-establishment.
     #[serde(skip_serializing_if = "Option::is_none")]
     last_reset: Option<LastReset>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    maximum_prefix: Vec<super::max_prefix::MaxPrefixShow>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    maximum_prefix_overflow: Option<super::max_prefix::MaxPrefixOverflowShow>,
     timer: PeerParam,
     timer_sent: PeerParam,
     timer_recv: PeerParam,
@@ -4161,7 +4182,7 @@ struct LastReset {
     reason: &'static str,
 }
 
-fn fetch(peer: &Peer) -> Neighbor<'_> {
+fn fetch<'a>(peer: &'a Peer, shard: &super::shard::BgpShard) -> Neighbor<'a> {
     // Get remaining time for keepalive and hold timers
     let keepalive_timer_rem = peer.timer.keepalive.as_ref().map(|t| t.rem_sec());
     let hold_timer_rem = peer.timer.hold_timer.as_ref().map(|t| t.rem_sec());
@@ -4209,6 +4230,8 @@ fn fetch(peer: &Peer) -> Neighbor<'_> {
             ago: uptime(&Some(at)),
             reason: reason.as_str(),
         }),
+        maximum_prefix: super::max_prefix::show(peer, shard),
+        maximum_prefix_overflow: super::max_prefix::overflow_show(peer),
         timer: peer.param.clone(),
         timer_sent: peer.param_tx.clone(),
         timer_recv: peer.param_rx.clone(),
@@ -4378,6 +4401,11 @@ fn render(out: &mut String, neighbor: &Neighbor) -> std::fmt::Result {
             last_reset.ago, last_reset.reason
         )?;
     }
+    super::max_prefix::render(
+        out,
+        &neighbor.maximum_prefix,
+        neighbor.maximum_prefix_overflow.as_ref(),
+    )?;
 
     // ND discovery block — interface-keyed (unnumbered) peers only.
     if let Some(discovered_secs) = neighbor.nd_discovered_secs_ago {
@@ -5012,7 +5040,7 @@ fn show_bgp_neighbor<V: BgpShowView>(
         // peers are listed too — they're invisible to the address-keyed
         // `iter`, and an operator has no remote address to query them by.
         for (_, peer) in bgp.peers().iter_all() {
-            neighbors.push(fetch(peer));
+            neighbors.push(fetch(peer, bgp.shard()));
         }
         if json {
             return Ok(serde_json::to_string_pretty(&neighbors)
@@ -5042,7 +5070,7 @@ fn show_bgp_neighbor<V: BgpShowView>(
                 .find(|peer| peer.ifname.as_deref() == Some(target.as_str())),
         };
         if let Some(peer) = peer {
-            let neighbor = fetch(peer);
+            let neighbor = fetch(peer, bgp.shard());
             if json {
                 return Ok(serde_json::to_string_pretty(&neighbor)
                     .unwrap_or_else(|e| format!("{{\"error\": \"Failed to serialize: {}\"}}", e)));
@@ -6943,7 +6971,7 @@ mod summary_tests {
         let mut buf = String::new();
         write_summary_header_row(&mut buf).unwrap();
         let expected = "\
-Neighbor        V         AS   MsgRcvd   MsgSent   TblVer  InQ OutQ  Up/Down State       PfxRcd/Snt Hostname\n";
+Neighbor        V         AS   MsgRcvd   MsgSent   TblVer  InQ OutQ  Up/Down State        PfxRcd/Snt Hostname\n";
         assert_eq!(buf, expected);
     }
 
@@ -7106,6 +7134,47 @@ Neighbor        V         AS   MsgRcvd   MsgSent   TblVer  InQ OutQ  Up/Down Sta
             out.contains("Peers 1"),
             "dormant peer must be counted:\n{out}"
         );
+    }
+
+    /// A peer held past `maximum-prefix` reads `Idle (PfxCt)` in the text
+    /// summary without moving the columns after it. The JSON keeps `state` to
+    /// `Idle` and carries the hold in its own field.
+    #[test]
+    fn summary_shows_a_held_peer_in_the_state_column() {
+        let mut peers = PeerMap::new();
+        let mut held = make_peer("10.0.0.1".parse().unwrap());
+        held.max_prefix.overflow = Some(super::super::max_prefix::MaxPrefixExceeded {
+            afi_safi: AfiSafi::new(Afi::Ip, Safi::Unicast),
+            count: 11,
+            limit: 10,
+        });
+        peers.insert("10.0.0.1".parse().unwrap(), held);
+        let idle: IpAddr = "10.0.0.2".parse().unwrap();
+        peers.insert(idle, make_peer(idle));
+        let view = TestView {
+            rib: LocalRib::default(),
+            shard: super::super::shard::BgpShard::default(),
+            peers,
+        };
+
+        let out = show_bgp_summary(&view, Args(VecDeque::new()), false).unwrap();
+        let row = |addr: &str| {
+            out.lines()
+                .find(|l| l.starts_with(addr))
+                .unwrap_or_else(|| panic!("{addr} listed:\n{out}"))
+                .to_string()
+        };
+        assert!(row("10.0.0.1 ").contains("Idle (PfxCt)"), "{out}");
+        assert_eq!(row("10.0.0.1 ").len(), row("10.0.0.2 ").len(), "{out}");
+
+        let out = show_bgp_summary(&view, Args(VecDeque::new()), true).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let peers = v["afi_safis"][0]["peers"].as_array().unwrap();
+        let held = peers.iter().find(|p| p["neighbor"] == "10.0.0.1").unwrap();
+        assert_eq!(held["state"], "Idle");
+        assert_eq!(held["maximum_prefix_overflow"]["limit"], 10);
+        let idle = peers.iter().find(|p| p["neighbor"] == "10.0.0.2").unwrap();
+        assert!(idle.get("maximum_prefix_overflow").is_none());
     }
 
     /// JSON summary: the unnumbered row is identified by the interface
@@ -7340,6 +7409,8 @@ Neighbor        V         AS   MsgRcvd   MsgSent   TblVer  InQ OutQ  Up/Down Sta
     fn minimal_neighbor(interface: Option<&'static str>) -> Neighbor<'static> {
         use std::collections::HashMap as HM;
         Neighbor {
+            maximum_prefix: Vec::new(),
+            maximum_prefix_overflow: None,
             address: "10.0.0.1".parse().unwrap(),
             interface,
             description: None,
@@ -8818,7 +8889,7 @@ fn show_bgp_vrf_detail(
 
 /// Map an [`AfiSafi`] to the zebra-rs config-layer token name used in
 /// `zebra-afi-safi.yang` and `Args::afi_safi`.
-fn afi_safi_config_name(afi_safi: &AfiSafi) -> &'static str {
+pub(super) fn afi_safi_config_name(afi_safi: &AfiSafi) -> &'static str {
     match (afi_safi.afi, afi_safi.safi) {
         (Afi::Ip, Safi::Unicast) => "ipv4",
         (Afi::Ip6, Safi::Unicast) => "ipv6",
