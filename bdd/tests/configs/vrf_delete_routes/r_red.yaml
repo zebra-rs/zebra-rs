@@ -1,0 +1,5 @@
+# Another VRF, with nothing in it. It gets the table id blue had.
+vrf:
+- name: red
+interface:
+- if-name: lan0

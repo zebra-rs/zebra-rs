@@ -8,12 +8,13 @@
 # `resolvectl` sends the system bus an interface index. From a namespace
 # that is the index of some other interface on the host.
 #
-#   resolvectl_stub.sh [--] dns LINK [SERVER…]       as resolvectl
-#   resolvectl_stub.sh [--] domain LINK [DOMAIN…]    as resolvectl
-#   resolvectl_stub.sh [--] revert LINK              as resolvectl
-#   resolvectl_stub.sh status   what is held: `LINK dns …`, `LINK domain …`
+#   resolvectl_stub.sh [--] dns INDEX [SERVER…]      as resolvectl
+#   resolvectl_stub.sh [--] domain INDEX [DOMAIN…]   as resolvectl
+#   resolvectl_stub.sh [--] revert INDEX             as resolvectl
+#   resolvectl_stub.sh status   what is held: `NAME dns …`, `NAME domain …`
 #   resolvectl_stub.sh history  every dns, domain and revert it was asked
-#                               for since the last reset, one a line
+#                               for since the last reset, one a line, with
+#                               the name the interface had then
 #   resolvectl_stub.sh reset    hold nothing, and work
 #   resolvectl_stub.sh break [SECONDS]
 #                               fail every dns, domain and revert, after
@@ -28,10 +29,19 @@
 # feature's daemon and its steps find the same state without being told
 # where it is.
 #
-# As resolved does, it holds an interface's settings and not a name's:
-# they are given to the interface the name is then, and `status` shows
-# them only while the name is still that interface. One deleted and made
-# again under the same name holds nothing.
+# The interface is said by its index, as zebra-rs says it to
+# `resolvectl`, which takes a number in place of a name and uses it as it
+# is. A name is refused here, where `resolvectl` would look it up: a
+# daemon that said one would pass for right on every interface that kept
+# its name, and the suite is to notice.
+#
+# As resolved does, it holds an interface's settings by that index and
+# not by a name. `status` and `history` show the name the index has at
+# that moment, so a renamed interface is shown with what it holds under
+# its new name, and one deleted and made again under the same name holds
+# nothing. An index that is no interface's is shown as `#INDEX` in the
+# history, and its command fails as resolved's does for a link it does
+# not know.
 #
 # `spoil` is what resolved does when it cannot add an entry of a new list
 # (SetLinkDNS and SetLinkDomains in systemd 255): the list being replaced
@@ -49,9 +59,16 @@ fi
 # `hostname_stub_dir` in bdd/src/netns.rs).
 dir=/run/zebra-rs-bdd/resolvectl/$ns
 
-# The index of the interface of that name, or nothing.
-index_of() {
-    cat "/sys/class/net/$1/ifindex" 2>/dev/null || true
+# The name of the interface of that index, or nothing.
+name_of() {
+    for file in /sys/class/net/*/ifindex; do
+        [ -e "$file" ] || continue
+        if [ "$(cat "$file" 2>/dev/null || true)" = "$1" ]; then
+            file=${file%/ifindex}
+            echo "${file##*/}"
+            return
+        fi
+    done
 }
 
 if [ "${1:-}" = "--" ]; then
@@ -70,33 +87,33 @@ dns | domain | revert)
         echo "Failed to $verb: the resolver is away" >&2
         exit 1
     fi
-    link=$1
+    index=$1
     shift
+    case $index in
+    '' | *[!0-9]*)
+        echo "resolvectl_stub: \"$index\" is not an interface index" >&2
+        exit 1
+        ;;
+    esac
     mkdir -p "$dir"
-    echo "$verb $link $*" >>"$dir/history"
-    index=$(index_of "$link")
-    if [ -n "$index" ]; then
-        mkdir -p "$dir"
-        # What the name's previous interface held went with it.
-        if [ "$(cat "$dir/$link.ifindex" 2>/dev/null || true)" != "$index" ]; then
-            rm -f "$dir/$link.dns" "$dir/$link.domain" "$dir/$link.ifindex"
-        fi
+    name=$(name_of "$index")
+    echo "$verb ${name:-#$index} $*" >>"$dir/history"
+    if [ -n "$name" ]; then
         if [ -e "$dir/spoiled" ] && [ "$verb" != revert ]; then
-            rm -f "$dir/$link.$verb"
+            rm -f "$dir/$index.$verb"
             echo "Failed to $verb: no room for it" >&2
             exit 1
         fi
         case $verb in
         revert)
-            rm -f "$dir/$link.dns" "$dir/$link.domain" "$dir/$link.ifindex"
+            rm -f "$dir/$index.dns" "$dir/$index.domain"
             ;;
         *)
-            echo "$index" >"$dir/$link.ifindex"
             # One empty argument clears the list.
             if [ -z "$*" ]; then
-                rm -f "$dir/$link.$verb"
+                rm -f "$dir/$index.$verb"
             else
-                echo "$*" >"$dir/$link.$verb"
+                echo "$*" >"$dir/$index.$verb"
             fi
             ;;
         esac
@@ -106,8 +123,8 @@ dns | domain | revert)
         # the caller kills at its time limit is the sleep.
         exec sleep 60
     fi
-    if [ -z "$index" ]; then
-        echo "Failed to resolve interface \"$link\": No such device" >&2
+    if [ -z "$name" ]; then
+        echo "Failed to $verb: Link $index not known" >&2
         exit 1
     fi
     ;;
@@ -118,10 +135,11 @@ history)
 status)
     for file in "$dir"/*.dns "$dir"/*.domain; do
         [ -e "$file" ] || continue
-        name=${file##*/}
-        link=${name%.*}
-        [ "$(index_of "$link")" = "$(cat "$dir/$link.ifindex" 2>/dev/null || true)" ] || continue
-        echo "$link ${name##*.} $(cat "$file")"
+        held=${file##*/}
+        # Only what an interface that is there holds.
+        name=$(name_of "${held%.*}")
+        [ -n "$name" ] || continue
+        echo "$name ${held##*.} $(cat "$file")"
     done
     echo "status: end"
     ;;
@@ -144,7 +162,7 @@ mend)
     rm -f "$dir/broken" "$dir/stalled" "$dir/spoiled"
     ;;
 *)
-    echo "usage: $0 [--] dns LINK [SERVER…] | domain LINK [DOMAIN…] | revert LINK | status | history | reset | break [SECONDS] | stall | spoil | mend" >&2
+    echo "usage: $0 [--] dns INDEX [SERVER…] | domain INDEX [DOMAIN…] | revert INDEX | status | history | reset | break [SECONDS] | stall | spoil | mend" >&2
     exit 2
     ;;
 esac

@@ -380,8 +380,9 @@ packaged service):
 |---|---|
 | `resolver: wan0: name servers 198.51.100.53, search example.com` | Set. |
 | `resolver: wan0: name servers withdrawn` | Taken back: what named them ended, or `no-name-server` was set. |
-| `resolver: wan0: name servers not set: resolvectl: No such file or directory …` | `resolvectl` is not installed. Install systemd-resolved; zebra-rs tries again by itself. |
-| `resolver: wan0: name servers not set: resolvectl: … Link wan0 is managed.` | systemd-networkd manages the interface. Take it out of the netplan or networkd configuration. |
+| `resolver: wan0: name servers not set: resolvectl: no such program` | `resolvectl` is not installed, or not in a directory of zebra-rs's `PATH`. Install systemd-resolved; zebra-rs tries again by itself. |
+| `resolver: wan0: name servers not set: /usr/bin/resolvectl: … Link wan0 is managed.` | systemd-networkd manages the interface. Take it out of the netplan or networkd configuration. |
+| `resolver: wan0: name servers not set: /usr/bin/resolvectl: …` | Any other answer of `resolvectl`, after the file that was run: its own first line of error, or `no answer in 10 s`. zebra-rs tries again by itself. |
 | `resolver: this is not the host's network namespace: the system resolver is left alone` | zebra-rs runs in another network namespace, and sets nothing until it is started in the host's. |
 | `resolver: cannot tell whether this is the host's network namespace (…; zebra-rs is not root): the system resolver is left alone` | zebra-rs is not root, and sets nothing until it is started as root. |
 
@@ -398,9 +399,22 @@ answered only with `net.ipv4.udp_l3mdev_accept` and
 on that interface keeps the router from asking servers that will not
 answer it.
 
-**Restart.** A restart of zebra-rs leaves what was set in place and sets
-it again from the resumed lease. `no-name-server` set while zebra-rs is
-not running takes nothing back: `resolvectl revert <name>` does it by
+**Restart.** zebra-rs leaves the name servers set when it stops, and
+sets them again from the resumed lease when it starts. What it does not
+learn again is taken back once `--leftover-sweep-time` has passed
+(120 s by default), like the routes of a lease that was not resumed: a
+lease that ran out, a router that no longer advertises, `no-name-server`
+set, or `address dhcp` deleted, while zebra-rs was not running. Until
+then the interface keeps the name servers it had.
+
+zebra-rs knows which interfaces it had set from a record beside the
+leases (`resolver.json`). A reboot ends the record with the settings
+themselves, and an interface that was deleted and made again in the
+meantime is left alone. One that was renamed is still the same
+interface: its name servers are taken back under its new name, unless
+the configuration now has a DHCP client or `autoconf` on that name and
+it learns them again. Name servers set by a version of zebra-rs that
+kept no record are not taken back: `resolvectl revert <name>` does it by
 hand.
 
 ## Commands
@@ -604,13 +618,16 @@ interface wan1 {
 }
 ```
 
-- **The prefix is held by a discard route**, a `D` route at
+- **The prefix is held by an unreachable route**, a `D` route at
   administrative distance 210 in the VRF of the interface. A packet for
   a part of the prefix that nothing uses must not follow the default
   route back to the provider, who routes the whole prefix here and
-  would send it back again. In the kernel it is a `blackhole` route
-  with `proto dhcp`. It stays while the link is down, and goes when the
-  prefix is given back or runs out.
+  would send it back again. It is dropped here, and its sender is told
+  with an ICMPv6 Destination Unreachable ("no route to destination"),
+  so a host behind the router does not wait for an answer that cannot
+  come. In the kernel it is an `unreachable` route with `proto dhcp`.
+  It stays while the link is down, and goes when the prefix is given
+  back or runs out.
 - **The default route** comes from Router Advertisements: `pd` runs the
   RA host like `address dhcpv6` does, without forming a SLAAC address.
 - **What an interface asks for is asked for together.** Adding or
@@ -633,15 +650,22 @@ Interface: wan1
   Renew in:     1200s
   Rebind in:    2400s
 
+router> show ipv6 route 2001:db8:100::/56
+Routing entry for 2001:db8:100::/56
+  Known via "dhcp client", distance 210, metric 0
+  Last update 00:00:12 ago
+  Routing Descriptor Blocks
+    discard (unreachable)
+
 $ ip -6 route show 2001:db8:100::/56
-blackhole 2001:db8:100::/56 dev lo proto dhcp metric 1024 pref medium
+unreachable 2001:db8:100::/56 dev lo proto dhcp metric 1024 pref medium
 ```
 
 A delegation that holds nothing shows as `none (pd <id>)`. In `json`,
 `pd` lists each delegation with its prefixes and, once it holds one,
 its own server and renewal times. After a restart of zebra-rs the lease
-is taken from disk with its prefixes, the discard routes are back at
-once, and the server is asked whether the lease still stands.
+is taken from disk with its prefixes, the unreachable routes are back
+at once, and the server is asked whether the lease still stands.
 
 ### Numbering the interfaces behind the router
 
@@ -678,7 +702,7 @@ and `lan2` an address in `2001:db8:100:2::/64`.
   it, and it goes when the prefix is given back or runs out. `show
   interface` marks it `dhcpv6-pd`.
 - **Its /64 is a connected route** on the interface, which takes that
-  part of the prefix off the discard route. The rest stays there.
+  part of the prefix off the unreachable route. The rest stays there.
 - **Each interface of a delegation needs its own /64.** A commit that
   gives two of them the same `sla-id` is refused, and so is one that
   names the interface the prefix is delegated on.
@@ -733,7 +757,5 @@ interface was taken out of the configuration meanwhile is removed.
 - A delegated prefix that changed while zebra-rs was not running is
   not taken out of use on the hosts behind the router: they keep their
   old addresses until the lifetime they last heard runs out.
-- The discard route of a delegated prefix drops a packet without the
-  ICMPv6 Destination Unreachable that RFC 7084 asks for.
 - The RA host does not advertise the prefixes it learns on other
   interfaces, and does not use stable-privacy or temporary addresses.

@@ -366,13 +366,24 @@ fn config_builder<F: StaticFamily>(base: &str) -> ConfigBuilder<F> {
         .path(&format!("{base}/{}/route/nexthop", F::FAMILY))
         .set(|config, cache, prefix, args| {
             let s = cache_get::<F>(config, cache, prefix).context(CONFIG_ERR)?;
-            // `nexthop blackhole` — the discard keyword sits at the
-            // nexthop key position (a union with the address type),
-            // so it satisfies the route's `ext:non-empty "nexthop"`.
-            if args.peek_str() == Some("blackhole") {
-                let _ = args.string();
-                s.blackhole = true;
-                return Ok(());
+            // `nexthop blackhole` / `nexthop unreachable` — a discard
+            // keyword sits at the nexthop key position (a union with
+            // the address type), so it satisfies the route's
+            // `ext:non-empty "nexthop"`. Each is a list entry of its
+            // own, set and deleted by itself, so one replaces the other
+            // in a commit whichever of the two lines comes first.
+            match args.peek_str() {
+                Some("blackhole") => {
+                    let _ = args.string();
+                    s.blackhole = true;
+                    return Ok(());
+                }
+                Some("unreachable") => {
+                    let _ = args.string();
+                    s.unreachable = true;
+                    return Ok(());
+                }
+                _ => {}
             }
             let naddr = F::parse_addr(args).context(NEXTHOP_ERR)?;
             let _ = s.nexthops.entry(naddr).or_default();
@@ -380,10 +391,18 @@ fn config_builder<F: StaticFamily>(base: &str) -> ConfigBuilder<F> {
         })
         .del(|config, cache, prefix, args| {
             let s = cache_lookup::<F>(config, cache, prefix).context(CONFIG_ERR)?;
-            if args.peek_str() == Some("blackhole") {
-                let _ = args.string();
-                s.blackhole = false;
-                return Ok(());
+            match args.peek_str() {
+                Some("blackhole") => {
+                    let _ = args.string();
+                    s.blackhole = false;
+                    return Ok(());
+                }
+                Some("unreachable") => {
+                    let _ = args.string();
+                    s.unreachable = false;
+                    return Ok(());
+                }
+                _ => {}
             }
             let naddr = F::parse_addr(args).context(NEXTHOP_ERR)?;
             s.nexthops.remove(&naddr).context(CONFIG_ERR)?;
@@ -599,6 +618,104 @@ mod tests {
         assert_eq!(msgs.len(), 1);
         assert_ipv4_add(&msgs[0], prefix());
         assert!(sc.config.contains_key(&prefix()));
+    }
+
+    /// One config line, as the config manager hands it to `exec`.
+    fn line(sc: &mut StaticConfig<V4>, op: ConfigOp, leaf: &str, values: &[&str]) {
+        let args = std::iter::once("10.0.0.0/24")
+            .chain(values.iter().copied())
+            .map(str::to_string)
+            .collect();
+        sc.exec(format!("/router/static/ipv4/route{leaf}"), Args(args), op)
+            .unwrap_or_else(|e| panic!("{leaf} {values:?}: {e}"));
+    }
+
+    fn committed_nexthop(sc: &mut StaticConfig<V4>) -> Option<Nexthop> {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        sc.commit(tx);
+        match drain(&mut rx).as_slice() {
+            [] => None,
+            [Message::Ipv4Add { rib, .. }] => Some(rib.nexthop.clone()),
+            [Message::Ipv4Del { .. }] => Some(Nexthop::default()),
+            other => panic!("{} messages", other.len()),
+        }
+    }
+
+    /// `nexthop unreachable` is a discard route of its own kind, with the
+    /// route's metric, and goes when its line is deleted.
+    #[test]
+    fn nexthop_unreachable_is_an_unreachable_route() {
+        let mut sc = StaticConfig::<V4>::new();
+        line(&mut sc, ConfigOp::Set, "/nexthop", &["unreachable"]);
+        assert_eq!(committed_nexthop(&mut sc), Some(Nexthop::unreachable(0)));
+        line(&mut sc, ConfigOp::Set, "/metric", &["50"]);
+        assert_eq!(committed_nexthop(&mut sc), Some(Nexthop::unreachable(50)));
+        // And `nexthop blackhole` is still what it was.
+        let mut other = StaticConfig::<V4>::new();
+        line(&mut other, ConfigOp::Set, "/nexthop", &["blackhole"]);
+        assert_eq!(committed_nexthop(&mut other), Some(Nexthop::blackhole(0)));
+
+        line(&mut sc, ConfigOp::Delete, "/nexthop", &["unreachable"]);
+        // Withdrawn: `committed_nexthop` reads a delete as the default.
+        assert_eq!(committed_nexthop(&mut sc), Some(Nexthop::default()));
+        assert!(sc.config[&prefix()].to_entry().is_none());
+    }
+
+    /// One keyword in the other's place in a single commit, whichever of
+    /// the two lines the commit brings first.
+    #[test]
+    fn one_discard_keyword_replaces_the_other() {
+        for set_first in [true, false] {
+            let mut sc = StaticConfig::<V4>::new();
+            line(&mut sc, ConfigOp::Set, "/nexthop", &["blackhole"]);
+            assert_eq!(committed_nexthop(&mut sc), Some(Nexthop::blackhole(0)));
+            if set_first {
+                line(&mut sc, ConfigOp::Set, "/nexthop", &["unreachable"]);
+                line(&mut sc, ConfigOp::Delete, "/nexthop", &["blackhole"]);
+            } else {
+                line(&mut sc, ConfigOp::Delete, "/nexthop", &["blackhole"]);
+                line(&mut sc, ConfigOp::Set, "/nexthop", &["unreachable"]);
+            }
+            assert_eq!(
+                committed_nexthop(&mut sc),
+                Some(Nexthop::unreachable(0)),
+                "set first: {set_first}"
+            );
+            // And back.
+            if set_first {
+                line(&mut sc, ConfigOp::Set, "/nexthop", &["blackhole"]);
+                line(&mut sc, ConfigOp::Delete, "/nexthop", &["unreachable"]);
+            } else {
+                line(&mut sc, ConfigOp::Delete, "/nexthop", &["unreachable"]);
+                line(&mut sc, ConfigOp::Set, "/nexthop", &["blackhole"]);
+            }
+            assert_eq!(
+                committed_nexthop(&mut sc),
+                Some(Nexthop::blackhole(0)),
+                "set first: {set_first}"
+            );
+            // Nothing of the keyword that went is left behind: without
+            // the one that stayed there is no route.
+            line(&mut sc, ConfigOp::Delete, "/nexthop", &["blackhole"]);
+            assert_eq!(committed_nexthop(&mut sc), Some(Nexthop::default()));
+            assert!(sc.config[&prefix()].to_entry().is_none());
+        }
+    }
+
+    /// Both keywords reach the callbacks only from a startup config (a
+    /// commit refuses the pair): the route is then a blackhole in either
+    /// order, and deleting that keyword leaves the unreachable route.
+    #[test]
+    fn both_discard_keywords_from_a_startup_config() {
+        for order in [["blackhole", "unreachable"], ["unreachable", "blackhole"]] {
+            let mut sc = StaticConfig::<V4>::new();
+            for keyword in order {
+                line(&mut sc, ConfigOp::Set, "/nexthop", &[keyword]);
+            }
+            assert_eq!(committed_nexthop(&mut sc), Some(Nexthop::blackhole(0)));
+            line(&mut sc, ConfigOp::Delete, "/nexthop", &["blackhole"]);
+            assert_eq!(committed_nexthop(&mut sc), Some(Nexthop::unreachable(0)));
+        }
     }
 
     #[test]

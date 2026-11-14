@@ -30,7 +30,7 @@ use super::{ApplyCode, Completion, Config, ConfigRequest, DisplayRequest, ExecCo
 use crate::context::Task;
 use libyang::{Entry, YangStore, to_entry};
 use similar::TextDiff;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -310,6 +310,11 @@ pub struct ConfigManager {
     /// [`super::resolver::spawn_resolver`], which every source's spawn
     /// calls, so a source always gets a live sender. `None` until then.
     pub resolver_tx: RefCell<Option<crate::resolver::ResolverTx>>,
+    /// How long after startup what an earlier run left behind is kept
+    /// for this run to claim (`--leftover-sweep-time`). The RIB has its
+    /// own copy for the routes; this one is the resolver task's, for the
+    /// name servers ([`super::resolver::spawn_resolver`]).
+    pub leftover_sweep_time: Cell<std::time::Duration>,
     /// BGP task inbox sender, captured at `spawn_bgp` time so the IS-IS
     /// task can push BGP Link-State (RFC 9552) producer routes to BGP.
     /// Populated by [`super::bgp::spawn_bgp`]; `None` while no BGP task
@@ -502,6 +507,7 @@ impl ConfigManager {
             stamp_client_tx: RefCell::new(None),
             nd_client_tx: RefCell::new(None),
             resolver_tx: RefCell::new(None),
+            leftover_sweep_time: Cell::new(std::time::Duration::from_secs(120)),
             cradle_port_tx,
             cradle_port_rx: RefCell::new(Some(cradle_port_rx)),
             protocol_tasks: RefCell::new(HashMap::new()),
@@ -887,6 +893,13 @@ impl ConfigManager {
         self.checked_lines(text, check::maximum_prefix_line)
     }
 
+    /// The discard keywords of the static routes among config `text`'s
+    /// lines (`check::static_discard_exclusive`), as callback paths and
+    /// arguments.
+    fn static_discard_entries(&self, text: &str) -> Vec<(String, Vec<String>)> {
+        self.checked_lines(text, check::static_discard_line)
+    }
+
     /// Commit the candidate. Refuses it, dispatching nothing, when it
     /// fails validation: mandatory nodes, the leaf value checks, or a label
     /// check it would newly break.
@@ -1012,6 +1025,25 @@ impl ConfigManager {
             }
             for error in &max_prefix {
                 tracing::warn!("startup config: {error}");
+            }
+        }
+
+        // A static route is a blackhole or an unreachable route, not
+        // both. A startup config is only warned about, as above; the
+        // route is then the one that says nothing. Only a config with
+        // an unreachable route can have the pair: one without (however
+        // many blackhole routes it has) is not parsed for it.
+        let discards = if candidate.contains(" nexthop unreachable") {
+            check::static_discard_exclusive(&self.static_discard_entries(&candidate))
+        } else {
+            Vec::new()
+        };
+        if !discards.is_empty() {
+            if !startup {
+                return Err(anyhow::anyhow!(discards.join("\n")));
+            }
+            for error in &discards {
+                tracing::warn!("startup config: {error}; the route is a blackhole");
             }
         }
 
@@ -3004,6 +3036,52 @@ mod save_config_tests {
         }
     }
 
+    /// `nexthop blackhole` and `nexthop unreachable` on one static route
+    /// are refused at commit (`check::static_discard_exclusive`), and the
+    /// refused commit leaves the running config alone. One replaces the
+    /// other in a single commit.
+    #[test]
+    fn a_static_route_with_both_discard_keywords_fails_the_commit() {
+        let cm = manager_with_config(&temp_path("static-discard"));
+        let mode = cm.modes.get("configure").expect("configure mode");
+        let edit = |line: &str| {
+            let (code, output, _) = cm.execute(mode, line);
+            assert_eq!(code, ExecCode::Show, "`{line}` rejected: {output:?}");
+        };
+        let running = || {
+            let mut running = String::new();
+            cm.store.running.borrow().list(&mut running);
+            running
+        };
+        let refused = "router static ipv4 route 10.9.9.0/24: nexthop blackhole cannot be \
+                       combined with nexthop unreachable; delete one or the other";
+
+        edit("set router static ipv4 route 10.9.9.0/24 nexthop blackhole");
+        edit("set router static ipv6 route 2001:db8:dead::/48 nexthop unreachable");
+        edit("set router static vrf blue ipv4 route 10.9.9.0/24 nexthop unreachable");
+        cm.commit_config().expect("one keyword a route commits");
+        let committed = running();
+        assert!(
+            committed.contains("router static ipv6 route 2001:db8:dead::/48 nexthop unreachable"),
+            "{committed}"
+        );
+
+        edit("set router static ipv4 route 10.9.9.0/24 nexthop unreachable");
+        let err = cm.commit_config().expect_err("both on one route");
+        assert_eq!(err.to_string(), refused);
+        assert_eq!(running(), committed, "a refused commit changes nothing");
+
+        // The other keyword in the blackhole's place, in one commit.
+        edit("delete router static ipv4 route 10.9.9.0/24 nexthop blackhole");
+        cm.commit_config().expect("replaced");
+        let replaced = running();
+        assert!(
+            replaced.contains("router static ipv4 route 10.9.9.0/24 nexthop unreachable"),
+            "{replaced}"
+        );
+        assert!(!replaced.contains("nexthop blackhole"), "{replaced}");
+    }
+
     /// `interface <name> ipv4 address dhcp` and a static address on the
     /// same interface are refused at commit (the `must` on that list in
     /// config.yang, enforced by `check::address_dhcp_exclusive`), in
@@ -3250,6 +3328,43 @@ mod save_config_tests {
         // Another source asking for the sender: the task there is, not
         // a second one.
         assert!(first.same_channel(&spawn_resolver(&cm)));
+    }
+
+    /// At startup the resolver task is spawned without a source when a
+    /// run before this one left name servers set: a configuration with
+    /// no source of them any more must still take them back. With
+    /// nothing left, the task waits for its first source as before.
+    #[tokio::test]
+    async fn the_resolver_task_starts_by_itself_for_what_an_earlier_run_left() {
+        use crate::config::resolver::resume_from;
+        use crate::resolver::record::{Origin, Record};
+
+        let dir =
+            std::env::temp_dir().join(format!("zebra-resolver-resume-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let here = Origin {
+            boot: "this-boot".to_string(),
+            netns: "net:[4026531840]".to_string(),
+        };
+        let record = |name: &str| Record::load(dir.join(name), here.clone());
+
+        let cm = manager_with_config(&temp_path("resolver-resume-nothing"));
+        resume_from(&cm, record("nothing.json"));
+        assert!(cm.resolver_tx.borrow().is_none());
+        assert!(!cm.protocol_tasks.borrow().contains_key("resolver"));
+
+        // An interface there is no such thing as: the task is spawned
+        // for what the record names, and finds by itself that this one
+        // holds nothing.
+        let mut left = record("left.json");
+        left.hold("zrs-no-such-if0", 4242);
+        let cm = manager_with_config(&temp_path("resolver-resume-left"));
+        resume_from(&cm, record("left.json"));
+        assert!(cm.protocol_tasks.borrow().contains_key("resolver"));
+        let tx = cm.resolver_tx.borrow().clone().expect("a sender");
+        // And it is the task the sources then report to.
+        assert!(tx.same_channel(&crate::config::resolver::spawn_resolver(&cm)));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// `parameters-only` beside `address dhcpv6` or `dhcpv6-options pd`

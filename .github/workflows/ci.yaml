@@ -71,6 +71,10 @@ jobs:
       # needed.
       - name: Exit-hook matrix
         run: python3 vty/tests/exit-hook/run.py
+      # Configure-mode commands typed in exec mode are vty.sh aliases
+      # too, so the same stock-bash, stubbed-helper approach covers them.
+      - name: Configure-only commands in exec mode
+        run: python3 vty/tests/configure-only/run.py
 
   test:
     name: cargo test

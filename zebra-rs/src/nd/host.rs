@@ -309,13 +309,10 @@ pub enum HostAction {
     /// Give a SLAAC address up.
     AddrDel { ifindex: u32, addr: Ipv6Net },
     /// Tell the resolver task what RAs now give the host of name
-    /// resolution on `ifname`: `None` when that is nothing (any more).
-    /// What is told is used; `ra-options no-name-server` is why an
-    /// interface's is not told.
-    Dns {
-        ifname: String,
-        dns: Option<LinkDns>,
-    },
+    /// resolution on the interface of that index: `None` when that is
+    /// nothing (any more). What is told is used; `ra-options
+    /// no-name-server` is why an interface's is not told.
+    Dns { ifindex: u32, dns: Option<LinkDns> },
 }
 
 impl HostAction {
@@ -431,8 +428,8 @@ pub struct RaHosts {
     hosts: BTreeMap<u32, Host>,
     /// What the RIB was last told, per (VRF, prefix).
     installed: BTreeMap<(Option<String>, Ipv6Net), RaRoute>,
-    /// What the resolver task was last told, per interface name.
-    reported_dns: BTreeMap<String, LinkDns>,
+    /// What the resolver task was last told, per interface index.
+    reported_dns: BTreeMap<u32, LinkDns>,
     actions: Vec<HostAction>,
     rng: Box<dyn RngSource + Send + Sync>,
 }
@@ -956,16 +953,18 @@ impl RaHosts {
     }
 
     /// Tell the resolver task what the hosts now give the system of
-    /// name resolution: every change, once, by interface name. What is
-    /// said there is the system's to use, as the routes are, so nothing
-    /// is said of an interface with `ra-options no-name-server`: set
-    /// under a running host, that takes its name servers back, and
-    /// deleted, it gives the ones still held.
+    /// name resolution: every change, once, by the index of the
+    /// interface the host runs on. What is said there is the system's to
+    /// use, as the routes are, so nothing is said of an interface with
+    /// `ra-options no-name-server`: set under a running host, that takes
+    /// its name servers back, and deleted, it gives the ones still held.
     ///
     /// A host says it for as long as it runs and its options have
     /// lifetime left, link up or down: the system resolver itself leaves
     /// a link without carrier alone. A host that stops says nothing any
-    /// more, and neither does the old name of an interface renamed.
+    /// more. One that goes on running through a change of its
+    /// interface's name has nothing new to say: it is the same
+    /// interface.
     fn sync_dns(&mut self) {
         let mut now = BTreeMap::new();
         for (ifindex, host) in &self.hosts {
@@ -980,21 +979,21 @@ impl RaHosts {
                 continue;
             }
             if let Some(dns) = host.link_dns() {
-                now.insert(link.name.clone(), dns);
+                now.insert(*ifindex, dns);
             }
         }
-        for ifname in self.reported_dns.keys() {
-            if !now.contains_key(ifname) {
+        for ifindex in self.reported_dns.keys() {
+            if !now.contains_key(ifindex) {
                 self.actions.push(HostAction::Dns {
-                    ifname: ifname.clone(),
+                    ifindex: *ifindex,
                     dns: None,
                 });
             }
         }
-        for (ifname, dns) in &now {
-            if self.reported_dns.get(ifname) != Some(dns) {
+        for (ifindex, dns) in &now {
+            if self.reported_dns.get(ifindex) != Some(dns) {
                 self.actions.push(HostAction::Dns {
-                    ifname: ifname.clone(),
+                    ifindex: *ifindex,
                     dns: Some(dns.clone()),
                 });
             }
@@ -1818,20 +1817,20 @@ mod tests {
     }
 
     /// What the host reported of name resolution since the last call,
-    /// by interface name.
-    fn reported(hosts: &mut RaHosts) -> Vec<(String, Option<LinkDns>)> {
+    /// by interface index.
+    fn reported(hosts: &mut RaHosts) -> Vec<(u32, Option<LinkDns>)> {
         hosts
             .take_actions()
             .into_iter()
             .filter_map(|action| match action {
-                HostAction::Dns { ifname, dns } => Some((ifname, dns)),
+                HostAction::Dns { ifindex, dns } => Some((ifindex, dns)),
                 _ => None,
             })
             .collect()
     }
 
-    fn wan0(dns: Option<LinkDns>) -> Vec<(String, Option<LinkDns>)> {
-        vec![("wan0".to_string(), dns)]
+    fn wan0(dns: Option<LinkDns>) -> Vec<(u32, Option<LinkDns>)> {
+        vec![(WAN, dns)]
     }
 
     /// The resolver hears of every change in what RAs say of name
@@ -2001,10 +2000,7 @@ mod tests {
         let servers = Some(link_dns(&["2001:db8::53"], &[]));
         assert_eq!(
             reported(&mut hosts),
-            [
-                ("wan0".to_string(), servers.clone()),
-                ("wan1".to_string(), servers)
-            ]
+            [(WAN, servers.clone()), (WAN2, servers)]
         );
 
         hosts.link_state(WAN, false, now + secs(1));
@@ -2014,7 +2010,7 @@ mod tests {
         hosts.update_config("wan0", now + secs(3), |cfg| cfg.autoconf = false);
         assert_eq!(reported(&mut hosts), wan0(None));
         hosts.link_del(WAN2);
-        assert_eq!(reported(&mut hosts), [("wan1".to_string(), None)]);
+        assert_eq!(reported(&mut hosts), [(WAN2, None)]);
     }
 
     /// The leaves of one commit take effect together. `address autoconf`
@@ -2183,10 +2179,13 @@ mod tests {
         );
     }
 
-    /// The name is what the resolver knows an interface by: a renamed
-    /// one gives its servers under the new name and none under the old.
+    /// The index is what the resolver knows an interface by. A host
+    /// that goes on running through a change of its interface's name
+    /// has nothing new to say: the servers are that interface's still.
+    /// One that stops, because nothing is configured for the new name,
+    /// takes them back from the interface it ran on.
     #[test]
-    fn a_renamed_interface_reports_under_its_new_name() {
+    fn a_renamed_interface_is_the_same_interface_to_the_resolver() {
         let now = t0();
         let mut hosts = hosts_with(&[(WAN, "wan0")], now);
         hosts.update_config("uplink", now, |cfg| cfg.autoconf = true);
@@ -2198,13 +2197,12 @@ mod tests {
         );
         reported(&mut hosts);
         hosts.link_add(WAN, link("uplink", true), now + secs(1));
-        assert_eq!(
-            reported(&mut hosts),
-            [
-                ("wan0".to_string(), None),
-                ("uplink".to_string(), Some(link_dns(&["2001:db8::53"], &[]))),
-            ]
-        );
+        assert!(hosts.host(WAN).is_some());
+        assert_eq!(reported(&mut hosts), []);
+
+        hosts.link_add(WAN, link("spare", true), now + secs(2));
+        assert!(hosts.host(WAN).is_none());
+        assert_eq!(reported(&mut hosts), wan0(None));
     }
 
     /// An advertisement's withdrawals are taken in ahead of what it

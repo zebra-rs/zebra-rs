@@ -51,7 +51,6 @@ const RT_SCOPE_UNIVERSE: u8 = 0;
 
 const RTN_UNSPEC: u8 = 0;
 const RTN_UNICAST: u8 = 1;
-const RTN_BLACKHOLE: u8 = 6;
 
 // ── route attributes ────────────────────────────────────────────────
 const RTA_DST: u16 = 1;
@@ -275,7 +274,13 @@ pub fn encode_route(
     vrf_ifindex: u32,
 ) -> Option<Vec<u8>> {
     let mut legs = legs(&entry.nexthop);
-    let blackhole = matches!(entry.nexthop, Nexthop::Blackhole(_));
+    // The discard route type, as FRR sends it: `RTN_BLACKHOLE` for its
+    // `blackhole`/`Null0`, `RTN_UNREACHABLE` for its `reject`.
+    let discard = match &entry.nexthop {
+        Nexthop::Blackhole(bh) => Some(bh.kind.rtm_type()),
+        _ => None,
+    };
+    let blackhole = discard.is_some();
 
     // A connected route carries no nexthop object — its "leg" is the
     // interface itself, which FRR encodes as RTA_OIF with no gateway.
@@ -331,8 +336,7 @@ pub fn encode_route(
         // A delete identifies the route by prefix alone, and FRR leaves
         // the type unset rather than repeating it.
         RouteOp::Del => RTN_UNSPEC,
-        RouteOp::Add if blackhole => RTN_BLACKHOLE,
-        RouteOp::Add => RTN_UNICAST,
+        RouteOp::Add => discard.unwrap_or(RTN_UNICAST),
     });
     w.u32(0); // flags
 
@@ -591,8 +595,15 @@ mod tests {
 
     #[test]
     fn blackhole_v4_matches_frr() {
-        let e = entry(RibType::Static, Nexthop::Blackhole(0));
+        let e = entry(RibType::Static, Nexthop::blackhole(0));
         let msg = encode_route(RouteOp::Add, &"10.100.4.0/24".parse().unwrap(), &e, 0).unwrap();
+        assert_matches_frr(&msg, "basic.fpm");
+    }
+
+    #[test]
+    fn reject_v4_matches_frr() {
+        let e = entry(RibType::Static, Nexthop::unreachable(0));
+        let msg = encode_route(RouteOp::Add, &"10.100.5.0/24".parse().unwrap(), &e, 0).unwrap();
         assert_matches_frr(&msg, "basic.fpm");
     }
 

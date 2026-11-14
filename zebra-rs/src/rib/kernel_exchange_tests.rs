@@ -2,6 +2,7 @@
 //! state and must be run as root inside an isolated network namespace.
 use super::*;
 use crate::fib::netlink::route_from_msg;
+use crate::rib::BlackholeKind;
 use netlink_packet_route::AddressFamily;
 use netlink_packet_route::route::{
     RouteAddress, RouteAttribute, RouteMessage, RouteProtocol, RouteScope, RouteType,
@@ -108,7 +109,7 @@ async fn installed_protocol_route_echoes_do_not_enter_kernel_rib() {
                 owner.distance = 110;
                 owner.metric = metric;
                 owner.nexthop = if blackhole {
-                    Nexthop::Blackhole(metric)
+                    Nexthop::blackhole(metric)
                 } else {
                     Nexthop::Uni(crate::rib::NexthopUni {
                         metric,
@@ -280,7 +281,7 @@ async fn external_protocol_routes_and_startup_leftovers_are_not_echoes() {
     let event = kernel_route(prefix, RouteProtocol::Zebra, true, 10, RT_TABLE_MAIN);
     assert!(!rib.is_kernel_route_echo(&event));
     let mut owner = RibEntry::new(RibType::Static);
-    owner.nexthop = Nexthop::Blackhole(10);
+    owner.nexthop = Nexthop::blackhole(10);
     owner.valid = true;
     owner.selected = true;
     // An uninstalled candidate does not own the kernel route.
@@ -353,6 +354,18 @@ fn ip(args: &[&str]) -> String {
     String::from_utf8(output.stdout).unwrap()
 }
 
+/// A test that drives a `Rib` outside a namespace of its own counts on
+/// its FIB handle being refused: the installs fail and only the RIB
+/// changes. As root on the host they would succeed, in the host's own
+/// tables. Such a test asks this first and does nothing then.
+fn fib_writes_would_reach_the_host() -> bool {
+    let host = nix::unistd::geteuid().is_root() && ip(&["netns", "identify"]).trim().is_empty();
+    if host {
+        eprintln!("skipped: as root outside a network namespace this would change host routes");
+    }
+    host
+}
+
 fn require_netns() {
     assert!(
         !ip(&["netns", "identify"]).trim().is_empty(),
@@ -368,7 +381,7 @@ async fn static_blackhole_echo_keeps_real_kernel_route() {
     let prefix = "203.0.113.0/24".parse().unwrap();
     let mut entry = RibEntry::new(RibType::Static);
     entry.distance = 1;
-    entry.nexthop = Nexthop::Blackhole(0);
+    entry.nexthop = Nexthop::blackhole(0);
     rib.ipv4_route_add(&prefix, entry, RT_TABLE_MAIN).await;
     assert!(
         !ip(&["route", "show", "exact", "203.0.113.0/24"])
@@ -389,6 +402,75 @@ async fn static_blackhole_echo_keeps_real_kernel_route() {
             .trim()
             .is_empty()
     );
+}
+
+/// A discard route goes into the kernel as the kind it is, one kind
+/// replaces the other in place, and each is deleted as what it is: an
+/// IPv4 delete only matches a route of the type it names.
+#[tokio::test]
+#[ignore = "requires root in an isolated network namespace"]
+async fn discard_routes_follow_their_kind_in_the_kernel() {
+    require_netns();
+    let rib = Rib::new(false).unwrap();
+    for (family, prefix) in [("-4", "198.51.100.0/24"), ("-6", "2001:db8:77::/48")] {
+        let prefix: IpNet = prefix.parse().unwrap();
+        let shown = prefix.to_string();
+        let route = || ip(&[family, "route", "show", "exact", &shown]);
+        let entry = |nexthop: Nexthop| {
+            let mut entry = RibEntry::new(RibType::DhcpClient);
+            entry.distance = 210;
+            entry.metric = 20;
+            entry.nexthop = nexthop;
+            entry
+        };
+        let add = async |entry: &RibEntry| match prefix {
+            IpNet::V4(p) => {
+                rib.fib_handle
+                    .route_ipv4_add(&p, entry, RT_TABLE_MAIN)
+                    .await
+            }
+            IpNet::V6(p) => {
+                rib.fib_handle
+                    .route_ipv6_add(&p, entry, RT_TABLE_MAIN)
+                    .await
+            }
+        };
+        let del = async |entry: &RibEntry| match prefix {
+            IpNet::V4(p) => {
+                rib.fib_handle
+                    .route_ipv4_del(&p, entry, RT_TABLE_MAIN)
+                    .await
+            }
+            IpNet::V6(p) => {
+                rib.fib_handle
+                    .route_ipv6_del(&p, entry, RT_TABLE_MAIN)
+                    .await
+            }
+        };
+        let unreachable = entry(Nexthop::unreachable(20));
+        let blackhole = entry(Nexthop::blackhole(20));
+
+        assert!(add(&unreachable).await);
+        assert!(route().starts_with("unreachable "), "{family}: {}", route());
+        assert!(route().contains("proto dhcp metric 20"), "{}", route());
+        // One kind over the other is one route, not two.
+        assert!(add(&blackhole).await);
+        assert!(route().starts_with("blackhole "), "{family}: {}", route());
+        assert_eq!(route().lines().count(), 1, "{}", route());
+        assert!(add(&unreachable).await);
+        assert!(route().starts_with("unreachable "), "{family}: {}", route());
+        assert_eq!(route().lines().count(), 1, "{}", route());
+
+        del(&unreachable).await;
+        assert!(route().trim().is_empty(), "{family}: {}", route());
+
+        // As an earlier run's leftover.
+        assert!(add(&unreachable).await);
+        rib.fib_handle
+            .route_del_leftover(prefix, &unreachable, RT_TABLE_MAIN)
+            .await;
+        assert!(route().trim().is_empty(), "{family}: {}", route());
+    }
 }
 
 #[tokio::test]
@@ -509,16 +591,16 @@ async fn legacy_proto_static_route_is_adopted_only_by_the_same_static() {
         };
         let mut legacy = RibEntry::new(RibType::Kernel);
         legacy.metric = priority;
-        legacy.nexthop = Nexthop::Blackhole(priority);
+        legacy.nexthop = Nexthop::blackhole(priority);
         insert(&mut rib, prefix, RT_TABLE_MAIN, legacy);
         rib.legacy_statics.insert((RT_TABLE_MAIN, prefix, priority));
 
         let mut config = RibEntry::new(RibType::Static);
-        config.nexthop = Nexthop::Blackhole(0);
+        config.nexthop = Nexthop::blackhole(0);
         // Another table, or another priority, is a different route.
         rib.adopt_legacy_static(100, prefix, &config);
         let mut other = config.clone();
-        other.nexthop = Nexthop::Blackhole(20);
+        other.nexthop = Nexthop::blackhole(20);
         rib.adopt_legacy_static(RT_TABLE_MAIN, prefix, &other);
         assert_eq!(entries(&rib, prefix, RT_TABLE_MAIN).len(), 1);
         // Not a static: never adopts.
@@ -532,6 +614,21 @@ async fn legacy_proto_static_route_is_adopted_only_by_the_same_static() {
         assert!(rib.legacy_statics.is_empty());
     }
 }
+
+/// The two routes of each leftover case, at priorities 100 and 200. The
+/// first pair is two unicast routes: `check_leftover_priorities` merges
+/// it into a floating route.
+const LEFTOVER_KINDS: [[&str; 2]; 9] = [
+    ["unicast", "unicast"],
+    ["ecmp", "ecmp"],
+    ["blackhole", "blackhole"],
+    ["unicast", "blackhole"],
+    ["blackhole", "ecmp"],
+    ["ecmp", "unicast"],
+    ["unreachable", "unreachable"],
+    ["unicast", "unreachable"],
+    ["unreachable", "blackhole"],
+];
 
 async fn check_leftover_priorities(replace: bool) {
     require_netns();
@@ -565,14 +662,7 @@ async fn check_leftover_priorities(replace: bool) {
                 (_, "-4") => ("lefttenant", ["198.51.100.1", "198.51.100.3"]),
                 _ => ("lefttenant", ["2001:db8:20::1", "2001:db8:20::3"]),
             };
-            for kinds in [
-                ["unicast", "unicast"],
-                ["ecmp", "ecmp"],
-                ["blackhole", "blackhole"],
-                ["unicast", "blackhole"],
-                ["blackhole", "ecmp"],
-                ["ecmp", "unicast"],
-            ] {
+            for kinds in LEFTOVER_KINDS {
                 let serial = cases.len() + 1;
                 let prefix = if family == "-4" {
                     format!("10.240.{serial}.0/24")
@@ -582,8 +672,8 @@ async fn check_leftover_priorities(replace: bool) {
                 for (index, kind) in kinds.into_iter().enumerate() {
                     let priority = ["100", "200"][index];
                     let mut args = vec![family, "route", "add"];
-                    if kind == "blackhole" {
-                        args.push("blackhole");
+                    if matches!(kind, "blackhole" | "unreachable") {
+                        args.push(kind);
                     }
                     args.extend([
                         &prefix, "table", &table_arg, "proto", "zebra", "metric", priority,
@@ -679,7 +769,7 @@ async fn check_leftover_priorities(replace: bool) {
     } else {
         // Also exercise deletion of the list form of a floating leftover.
         // Keep other cases separate so mixed and ECMP kinds retain coverage.
-        for (table, _, prefix, _) in cases.iter().step_by(6) {
+        for (table, _, prefix, _) in cases.iter().step_by(LEFTOVER_KINDS.len()) {
             let prefix: IpNet = prefix.parse().unwrap();
             let rows = entries(&rib, prefix, *table);
             let mut merged = rows[0].clone();
@@ -767,6 +857,133 @@ async fn sweep_removes_every_leftover_priority_and_route_type() {
 #[ignore = "requires root in an isolated network namespace"]
 async fn fresh_floating_static_replaces_every_leftover_priority() {
     check_leftover_priorities(true).await;
+}
+
+/// Deleting a VRF takes out of the kernel what zebra-rs installed in its
+/// table. The kernel removes with the device the routes through the VRF's
+/// own interfaces and no others: a discard route, and a route through an
+/// interface outside the VRF (what an imported VPN route is), would stay
+/// for the next VRF given that table id, and the next-hop object of the
+/// second with them. An operator's route in the table is not zebra-rs's
+/// to remove.
+#[tokio::test]
+#[ignore = "requires root in an isolated network namespace"]
+async fn deleting_a_vrf_withdraws_what_was_installed_in_its_table() {
+    require_netns();
+    for (dev, v4, v6) in [
+        ("vdcore", "198.51.100.1/24", "2001:db8:2::1/64"),
+        ("vdin", "192.0.2.1/24", "2001:db8:1::1/64"),
+    ] {
+        ip(&["link", "add", dev, "type", "dummy"]);
+        ip(&["link", "set", dev, "up"]);
+        ip(&["addr", "add", v4, "dev", dev]);
+        ip(&["-6", "addr", "add", v6, "dev", dev, "nodad"]);
+    }
+    let mut rib = Rib::new(false).unwrap();
+    crate::fib::fib_dump(&mut rib).await.unwrap();
+    rib.process_msg(
+        Message::VrfAdd {
+            name: "vdvrf".into(),
+        },
+        RT_TABLE_MAIN,
+    )
+    .await;
+    let table = rib.vrfs["vdvrf"].table_id;
+    let table_arg = table.to_string();
+    // vdin goes into the VRF; its addresses go with it and come back.
+    ip(&["link", "set", "vdin", "master", "vdvrf"]);
+    ip(&["addr", "replace", "192.0.2.1/24", "dev", "vdin"]);
+    pump(&mut rib).await;
+    while let Ok(msg) = rib.rx.try_recv() {
+        rib.process_msg(msg, RT_TABLE_MAIN).await;
+    }
+    let ifindex = |rib: &Rib, name: &str| {
+        rib.links
+            .values()
+            .find(|link| link.name == name)
+            .unwrap()
+            .index
+    };
+    let (core, inside) = (ifindex(&rib, "vdcore"), ifindex(&rib, "vdin"));
+    let uni = |addr: &str, ifindex: u32| {
+        Nexthop::Uni(NexthopUni {
+            addr: addr.parse().unwrap(),
+            ifindex_origin: Some(ifindex),
+            ..Default::default()
+        })
+    };
+    let ours = [
+        ("10.9.9.0/24", RibType::Static, Nexthop::blackhole(0)),
+        ("10.7.0.0/16", RibType::Bgp, uni("198.51.100.2", core)),
+        ("10.8.0.0/16", RibType::Static, uni("192.0.2.2", inside)),
+        ("2001:db8:dead::/48", RibType::Static, Nexthop::blackhole(0)),
+        ("2001:db8:7::/48", RibType::Bgp, uni("2001:db8:2::2", core)),
+    ];
+    for (prefix, rtype, nexthop) in &ours {
+        let mut entry = RibEntry::new(*rtype);
+        entry.distance = 1;
+        entry.nexthop = nexthop.clone();
+        match prefix.parse().unwrap() {
+            IpNet::V4(prefix) => rib.ipv4_route_add_vrf(table, &prefix, entry).await,
+            IpNet::V6(prefix) => rib.ipv6_route_add_vrf(table, &prefix, entry).await,
+        }
+    }
+    ip(&[
+        "route",
+        "add",
+        "10.5.0.0/16",
+        "via",
+        "198.51.100.9",
+        "dev",
+        "vdcore",
+        "table",
+        &table_arg,
+        "proto",
+        "static",
+    ]);
+    let everything =
+        || ip(&["route", "show", "table", "all"]) + &ip(&["-6", "route", "show", "table", "all"]);
+    let in_table = |all: &str, prefix: &str| {
+        all.lines()
+            .any(|line| line.contains(prefix) && line.contains(&format!(" table {table_arg} ")))
+    };
+    let before = everything();
+    for (prefix, ..) in &ours {
+        assert!(in_table(&before, prefix), "{prefix} installed: {before}");
+    }
+    let objects = ip(&["nexthop", "show"]);
+    assert!(objects.contains("via 198.51.100.2 dev vdcore"), "{objects}");
+    assert!(
+        objects.contains("via 2001:db8:2::2 dev vdcore"),
+        "{objects}"
+    );
+
+    rib.process_msg(
+        Message::VrfDel {
+            name: "vdvrf".into(),
+        },
+        RT_TABLE_MAIN,
+    )
+    .await;
+    let after = everything();
+    for (prefix, ..) in &ours {
+        assert!(!in_table(&after, prefix), "{prefix} left behind: {after}");
+    }
+    assert!(
+        in_table(&after, "10.5.0.0/16"),
+        "an operator's stays: {after}"
+    );
+    let objects = ip(&["nexthop", "show"]);
+    assert!(
+        !objects.contains("vdcore"),
+        "next-hop objects let go: {objects}"
+    );
+    assert!(!rib.vrf_tables.contains_key(&table));
+    assert!(!ip(&["-br", "link", "show"]).contains("vdvrf"));
+
+    ip(&["route", "del", "10.5.0.0/16", "table", &table_arg]);
+    ip(&["link", "del", "vdcore"]);
+    ip(&["link", "del", "vdin"]);
 }
 
 /// Apply the kernel's own notifications to the RIB, as the event loop does.
@@ -1334,6 +1551,7 @@ async fn sweep_keeps_routes_that_replaced_srv6_leftovers() {
                 &blackhole_prefix,
                 &RibEntry::new(RibType::Isis),
                 1024,
+                BlackholeKind::Null,
                 RT_TABLE_MAIN,
                 true
             )
@@ -2031,6 +2249,275 @@ async fn a_dynamic_address_given_up_takes_its_prefix_route_along() {
     assert!(!ip(&["-6", "addr", "show", "dev", "pd6"]).contains("2001:db8:100:2::1/"));
     assert!(route("2001:db8:100:2::/64").contains("2001:db8:100:2::/64"));
     ip(&["link", "del", "pd6"]);
+}
+
+/// An unreachable route under `RTPROT_DHCP` is in the RIB only as an
+/// earlier run's leftover the route record names: there the DHCP client's
+/// route for the delegated prefix replaces it, or the sweep takes it.
+/// Another program's (systemd-networkd holds a delegated prefix with one)
+/// stays out, at startup and afterwards, where its blackhole route is
+/// learned as before.
+#[tokio::test]
+async fn an_unreachable_route_is_in_the_rib_only_as_a_recorded_leftover() {
+    use crate::rib::route_record::{FILE, RouteRecord};
+    if fib_writes_would_reach_the_host() {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("route-record-unreach-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let path = dir.join(FILE);
+    let resumed: IpNet = "2001:db8:100::/56".parse().unwrap();
+    let given_up: IpNet = "2001:db8:200::/56".parse().unwrap();
+    let lost: IpNet = "2001:db8:300::/56".parse().unwrap();
+    let theirs: IpNet = "2001:db8:f00::/56".parse().unwrap();
+    let their_blackhole: IpNet = "2001:db8:e00::/56".parse().unwrap();
+
+    let mut earlier = RouteRecord::default();
+    earlier.load(path.clone());
+    for prefix in [resumed, given_up, lost] {
+        earlier.add(RibType::DhcpClient, RT_TABLE_MAIN, prefix, vec![1024], 210);
+    }
+
+    let unreachable = |prefix: IpNet| {
+        let mut msg = RouteMessage::default();
+        msg.header.address_family = AddressFamily::Inet6;
+        msg.header.destination_prefix_length = prefix.prefix_len();
+        msg.header.protocol = RouteProtocol::Dhcp;
+        msg.header.kind = RouteType::Unreachable;
+        msg.header.scope = RouteScope::Universe;
+        let IpNet::V6(net) = prefix else {
+            unreachable!()
+        };
+        msg.attributes.extend([
+            RouteAttribute::Table(RT_TABLE_MAIN),
+            RouteAttribute::Destination(RouteAddress::Inet6(net.addr())),
+            RouteAttribute::Priority(1024),
+        ]);
+        route_from_msg(msg).unwrap()
+    };
+    let rows = |rib: &Rib, prefix: IpNet| {
+        let IpNet::V6(net) = prefix else {
+            unreachable!()
+        };
+        rib.table_v6
+            .get(&net)
+            .map(|entries| {
+                entries
+                    .iter()
+                    .map(|e| (e.rtype, e.stale, e.distance, e.nexthop.clone()))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    };
+
+    let mut rib = Rib::new(false).unwrap();
+    rib.route_record.load(path);
+    for prefix in [resumed, given_up, lost, theirs] {
+        rib.process_fib_msg(FibMessage::NewRoute(unreachable(prefix)))
+            .await;
+    }
+    rib.process_fib_msg(FibMessage::NewRoute(kernel_route(
+        their_blackhole,
+        RouteProtocol::Dhcp,
+        true,
+        1024,
+        RT_TABLE_MAIN,
+    )))
+    .await;
+    let leftover = vec![(RibType::DhcpClient, true, 210, Nexthop::unreachable(1024))];
+    assert_eq!(rows(&rib, resumed), leftover);
+    assert_eq!(rows(&rib, given_up), leftover);
+    assert_eq!(rows(&rib, lost), leftover);
+    assert!(rows(&rib, theirs).is_empty(), "another program's stays out");
+    assert_eq!(
+        rows(&rib, their_blackhole),
+        vec![(RibType::Dhcp, false, 0, Nexthop::blackhole(1024))],
+        "as before"
+    );
+
+    // Another program's going is nothing to the RIB, and a leftover the
+    // kernel loses before the sweep goes from the RIB too.
+    rib.process_fib_msg(FibMessage::DelRoute(unreachable(theirs)))
+        .await;
+    assert!(rows(&rib, theirs).is_empty());
+    rib.process_fib_msg(FibMessage::DelRoute(unreachable(lost)))
+        .await;
+    assert!(rows(&rib, lost).is_empty());
+
+    // IPv4 keeps two routes of one priority side by side. Another
+    // program's unreachable route going leaves its blackhole route, which
+    // is learned, where it is.
+    let both: Ipv4Net = "198.51.100.0/24".parse().unwrap();
+    let their_unreachable = || {
+        let mut msg = RouteMessage::default();
+        msg.header.address_family = AddressFamily::Inet;
+        msg.header.destination_prefix_length = both.prefix_len();
+        msg.header.protocol = RouteProtocol::Dhcp;
+        msg.header.kind = RouteType::Unreachable;
+        msg.header.scope = RouteScope::Universe;
+        msg.attributes.extend([
+            RouteAttribute::Table(RT_TABLE_MAIN),
+            RouteAttribute::Destination(RouteAddress::Inet(both.addr())),
+            RouteAttribute::Priority(5),
+        ]);
+        route_from_msg(msg).unwrap()
+    };
+    rib.process_fib_msg(FibMessage::NewRoute(kernel_route(
+        IpNet::V4(both),
+        RouteProtocol::Dhcp,
+        true,
+        5,
+        RT_TABLE_MAIN,
+    )))
+    .await;
+    rib.process_fib_msg(FibMessage::NewRoute(their_unreachable()))
+        .await;
+    rib.process_fib_msg(FibMessage::DelRoute(their_unreachable()))
+        .await;
+    let learned: Vec<_> = rib.table.get(&both).unwrap().iter().collect();
+    assert_eq!(learned.len(), 1);
+    assert_eq!(learned[0].nexthop, Nexthop::blackhole(5));
+
+    // The lease is resumed: the client's route takes the leftover's place.
+    if let IpNet::V6(prefix) = resumed {
+        let mut entry = RibEntry::new(RibType::DhcpClient);
+        entry.distance = 210;
+        entry.nexthop = Nexthop::unreachable(0);
+        rib.ipv6_route_add(&prefix, entry, RT_TABLE_MAIN).await;
+    }
+    let held = rows(&rib, resumed);
+    assert_eq!(held.len(), 1);
+    assert_eq!(
+        (held[0].0, held[0].1, held[0].2),
+        (RibType::DhcpClient, false, 210)
+    );
+    assert!(held[0].3.is_unreachable());
+
+    // The sweep takes the one nothing asked for again, and after it an
+    // unreachable route under `RTPROT_DHCP` is nobody's leftover.
+    rib.process_msg(Message::SweepLeftovers, RT_TABLE_MAIN)
+        .await;
+    assert!(rows(&rib, given_up).is_empty());
+    assert_eq!(rows(&rib, resumed).len(), 1);
+    rib.process_fib_msg(FibMessage::NewRoute(unreachable(given_up)))
+        .await;
+    assert!(rows(&rib, given_up).is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// An unreachable route under `RTPROT_ZEBRA` is a static route's. The
+/// startup dump brings an earlier run's as a stale leftover, which the
+/// static route replaces if it is configured still, and the sweep takes
+/// otherwise. One reported later is not zebra-rs's own doing and stays
+/// out. In a table zebra-rs does not manage there is nothing to replace
+/// or sweep it, and it is no route to redistribute: it stays out of the
+/// `redistribute table` store, and its going leaves that store alone.
+#[tokio::test]
+async fn an_unreachable_static_leftover_is_replaced_or_swept() {
+    use crate::fib::netlink::route_from_msg_with;
+    if fib_writes_would_reach_the_host() {
+        return;
+    }
+    const UNMANAGED: u32 = 77;
+    let kept: Ipv4Net = "198.51.100.0/24".parse().unwrap();
+    let dropped: Ipv4Net = "203.0.113.0/24".parse().unwrap();
+    let theirs: Ipv4Net = "192.0.2.0/24".parse().unwrap();
+    let unreachable = |prefix: Ipv4Net, table: u32, dump: bool| {
+        let mut msg = RouteMessage::default();
+        msg.header.address_family = AddressFamily::Inet;
+        msg.header.destination_prefix_length = prefix.prefix_len();
+        msg.header.protocol = RouteProtocol::Zebra;
+        msg.header.kind = RouteType::Unreachable;
+        msg.header.scope = RouteScope::Universe;
+        msg.attributes.extend([
+            RouteAttribute::Table(table),
+            RouteAttribute::Destination(RouteAddress::Inet(prefix.addr())),
+            RouteAttribute::Priority(0),
+        ]);
+        route_from_msg_with(msg, &std::collections::BTreeMap::new(), dump).unwrap()
+    };
+    let rows = |rib: &Rib, prefix: Ipv4Net| {
+        rib.table
+            .get(&prefix)
+            .map(|entries| {
+                entries
+                    .iter()
+                    .map(|e| (e.rtype, e.stale, e.nexthop.clone()))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    };
+
+    let mut rib = Rib::new(false).unwrap();
+    for prefix in [kept, dropped] {
+        rib.process_fib_msg(FibMessage::NewRoute(unreachable(
+            prefix,
+            RT_TABLE_MAIN,
+            true,
+        )))
+        .await;
+        assert_eq!(
+            rows(&rib, prefix),
+            vec![(RibType::Static, true, Nexthop::unreachable(0))]
+        );
+    }
+    rib.process_fib_msg(FibMessage::NewRoute(unreachable(
+        theirs,
+        RT_TABLE_MAIN,
+        false,
+    )))
+    .await;
+    assert!(
+        rows(&rib, theirs).is_empty(),
+        "not from the dump: stays out"
+    );
+
+    // A table that is neither main nor a VRF's: a blackhole route there
+    // is one to redistribute, an unreachable route is not, from the dump
+    // or later, and its going does not take the blackhole route's place
+    // in the store, which the prefix alone keys.
+    let stored = |rib: &Rib| {
+        rib.table_routes_v4
+            .get(&UNMANAGED)
+            .map(|routes| routes.keys().copied().collect::<Vec<_>>())
+            .unwrap_or_default()
+    };
+    for dump in [true, false] {
+        rib.process_fib_msg(FibMessage::NewRoute(unreachable(kept, UNMANAGED, dump)))
+            .await;
+        assert!(stored(&rib).is_empty(), "dump: {dump}");
+    }
+    rib.process_fib_msg(FibMessage::NewRoute(kernel_route(
+        IpNet::V4(kept),
+        RouteProtocol::Boot,
+        true,
+        0,
+        UNMANAGED,
+    )))
+    .await;
+    assert_eq!(stored(&rib), [kept]);
+    for dump in [true, false] {
+        rib.process_fib_msg(FibMessage::DelRoute(unreachable(kept, UNMANAGED, dump)))
+            .await;
+        assert_eq!(stored(&rib), [kept], "dump: {dump}");
+    }
+
+    // Still configured: the static route takes the leftover's place.
+    let mut entry = RibEntry::new(RibType::Static);
+    entry.distance = 1;
+    entry.nexthop = Nexthop::unreachable(0);
+    rib.ipv4_route_add(&kept, entry, RT_TABLE_MAIN).await;
+    let held = rows(&rib, kept);
+    assert_eq!(held.len(), 1);
+    assert!(!held[0].1, "the leftover is replaced: {held:?}");
+
+    rib.process_msg(Message::SweepLeftovers, RT_TABLE_MAIN)
+        .await;
+    assert!(
+        rows(&rib, dropped).is_empty(),
+        "configured no longer: swept"
+    );
+    assert_eq!(rows(&rib, kept).len(), 1);
 }
 
 /// A restart with a route record from the earlier run: the DHCP client's

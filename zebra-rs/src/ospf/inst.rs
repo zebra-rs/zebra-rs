@@ -3829,7 +3829,7 @@ impl Ospf<Ospfv2> {
             if !desired.contains_key(prefix) {
                 let mut rib = rib::entry::RibEntry::new(RibType::Ospf);
                 rib.distance = 110;
-                rib.nexthop = rib::Nexthop::Blackhole(0);
+                rib.nexthop = rib::Nexthop::blackhole(0);
                 let _ = self.ctx.rib.send(rib::Message::Ipv4Del {
                     prefix: *prefix,
                     rib,
@@ -3842,7 +3842,7 @@ impl Ospf<Ospfv2> {
                 let mut rib = rib::entry::RibEntry::new(RibType::Ospf);
                 rib.distance = 110;
                 rib.metric = *metric;
-                rib.nexthop = rib::Nexthop::Blackhole(*metric);
+                rib.nexthop = rib::Nexthop::blackhole(*metric);
                 let _ = self.ctx.rib.send(rib::Message::Ipv4Add {
                     prefix: *prefix,
                     rib,
@@ -10704,7 +10704,7 @@ impl Ospf<Ospfv3> {
             if !desired.contains_key(prefix) {
                 let mut rib = rib::entry::RibEntry::new(RibType::Ospf);
                 rib.distance = 110;
-                rib.nexthop = rib::Nexthop::Blackhole(0);
+                rib.nexthop = rib::Nexthop::blackhole(0);
                 let _ = self.ctx.rib.send(rib::Message::Ipv6Del {
                     prefix: *prefix,
                     rib,
@@ -10717,7 +10717,7 @@ impl Ospf<Ospfv3> {
                 let mut rib = rib::entry::RibEntry::new(RibType::Ospf);
                 rib.distance = 110;
                 rib.metric = *metric;
-                rib.nexthop = rib::Nexthop::Blackhole(*metric);
+                rib.nexthop = rib::Nexthop::blackhole(*metric);
                 let _ = self.ctx.rib.send(rib::Message::Ipv6Add {
                     prefix: *prefix,
                     rib,

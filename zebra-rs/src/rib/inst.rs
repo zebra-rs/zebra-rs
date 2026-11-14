@@ -969,6 +969,14 @@ impl IlmEntry {
     }
 }
 
+/// A kernel-reported unreachable route that is no earlier run's leftover:
+/// another program's. A leftover is stale: a static route's from the
+/// startup dump (`leftover_rtype`), a delegated prefix's because the
+/// route record named it.
+fn foreign_unreachable(route: &crate::fib::FibRoute) -> bool {
+    !route.entry.stale && route.entry.nexthop.is_unreachable()
+}
+
 /// Default administrative distance for an ILM entry owned by `rtype`,
 /// following the same FRR/Cisco convention as the IP RIB. BGP uses the
 /// eBGP value (20); VPN decap labels are uniquely owned, so the
@@ -4056,15 +4064,14 @@ impl Rib {
                     self.fib_handle.vrf_del(&name).await;
                     return;
                 };
-                // Drop the parked per-VRF routing tables alongside
-                // the kernel VRF master. The per-VRF dispatcher
-                // populates these on install; a follow-up will add
-                // the matching withdraw walk.
-                self.vrf_tables.remove(&vrf.table_id);
+                // The VRF's tables go from the RIB, and what zebra-rs
+                // installed in them from the kernel: the kernel removes
+                // with the device only the routes through the VRF's own
+                // interfaces, and the table id is handed out again.
+                self.vrf_table_withdraw(vrf.table_id).await;
                 self.fib_handle.unregister_vrf_ifindex(vrf.table_id);
-                // The kernel flushes the VRF's routes with the device,
-                // but the FPM mirror would keep them — and every later
-                // reconnect would replay the dead VRF's routes back
+                // The FPM mirror would keep the VRF's routes — and every
+                // later reconnect would replay the dead VRF's routes back
                 // into APPL_DB, possibly keyed to a recycled ifindex.
                 self.fib_handle.fpm_flush_vrf(vrf.ifindex).await;
                 // Nexthops tracked in the dropped table no longer
@@ -4313,6 +4320,22 @@ impl Rib {
                 self.reconcile_egress_mpls_redirects().await;
             }
             Message::Shutdown { tx } => {
+                // The VRF devices this process created go below, and
+                // nothing takes their tables' routes over after a
+                // restart, when the table id may be another VRF's: what
+                // was installed in them is withdrawn, as when a VRF is
+                // deleted. First, while the next-hop objects are there
+                // to be let go by the routes that hold them. An adopted
+                // VRF stays, and its routes with it, as the main table's.
+                let owned: Vec<u32> = self
+                    .vrfs
+                    .values()
+                    .filter(|vrf| vrf.owned)
+                    .map(|vrf| vrf.table_id)
+                    .collect();
+                for table_id in owned {
+                    self.vrf_table_withdraw(table_id).await;
+                }
                 self.nmap.shutdown(&self.fib_handle).await;
                 let ilms = self.ilm.clone();
 
@@ -5106,6 +5129,16 @@ impl Rib {
                     route.entry.distance = distance;
                     route.kernel_protocol = None;
                 }
+                // An unreachable route is in the RIB only as an earlier
+                // run's leftover: that one, or a static route's the dump
+                // marked. Any other is another program's (systemd-networkd
+                // holds a delegated prefix with one under `RTPROT_DHCP`):
+                // it stays out, as every unreachable route did before
+                // zebra-rs installed any, and does not come in at
+                // distance 0 over every protocol's route for the prefix.
+                if foreign_unreachable(&route) {
+                    return;
+                }
                 if route.legacy_static {
                     self.legacy_statics
                         .insert((route.table_id, route.prefix, route.entry.metric));
@@ -5142,10 +5175,13 @@ impl Rib {
                         // are ignored rather than dumped into the default.
                         self.ipv4_route_add_vrf(route.table_id, &prefix, route.entry)
                             .await;
-                    } else {
+                    } else if !route.entry.nexthop.is_unreachable() {
                         // A non-main, non-VRF kernel table: keep it in
                         // the `redistribute table <id>` store and
-                        // notify subscribers.
+                        // notify subscribers. Not an unreachable route:
+                        // one comes this far only as an earlier run's
+                        // leftover, and in a table zebra-rs does not
+                        // manage nothing replaces it or sweeps it.
                         self.table_route_upsert(route.table_id, prefix, &route.entry);
                     }
                 }
@@ -5191,6 +5227,14 @@ impl Rib {
                     route.entry.distance = distance;
                     route.kernel_protocol = None;
                 }
+                // Not a route the RIB took in under this name (see
+                // `NewRoute`). A delete names no kind, so it must not take
+                // a learned blackhole route of the same priority along. A
+                // static leftover it may be the end of stays until its
+                // owner or the sweep ends it, as a unicast leftover does.
+                if foreign_unreachable(&route) {
+                    return;
+                }
                 if route.kernel_protocol == Some(RibType::Ra) {
                     self.learned_ra
                         .remove(&(route.table_id, route.prefix, route.entry.metric));
@@ -5212,7 +5256,9 @@ impl Rib {
                     } else if self.vrf_tables.contains_key(&route.table_id) {
                         self.ipv4_route_del_vrf(route.table_id, &prefix, route.entry)
                             .await;
-                    } else {
+                    } else if !route.entry.nexthop.is_unreachable() {
+                        // The store holds no unreachable route, and is
+                        // keyed by the prefix alone.
                         self.table_route_remove(route.table_id, prefix);
                     }
                 }
@@ -7773,7 +7819,7 @@ mod local_device_mac_tests {
         for prefix in ["10.20.0.0/24", "2001:db8:20::/64"] {
             let prefix: IpNet = prefix.parse().unwrap();
             let mut entry = RibEntry::new(RibType::Kernel);
-            entry.nexthop = Nexthop::Blackhole(1000);
+            entry.nexthop = Nexthop::blackhole(1000);
             entry.metric = 1000;
             entry.set_valid(true);
             let route = crate::fib::FibRoute {
@@ -8392,7 +8438,7 @@ mod proto_cleanup_ospf_tests {
     fn discard() -> RibEntry {
         let mut rib = RibEntry::new(RibType::Ospf);
         rib.distance = 110;
-        rib.nexthop = Nexthop::Blackhole(10);
+        rib.nexthop = Nexthop::blackhole(10);
         rib
     }
 

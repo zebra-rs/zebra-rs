@@ -39,7 +39,7 @@ attributes:
 router static {
   ipv4 {
     route <prefix> {
-      nexthop <address | blackhole> {
+      nexthop <address | blackhole | unreachable> {
         metric <metric>;        # per-nexthop metric (primary/backup)
         weight <1-255>;         # ECMP weight
         label <label> ...;      # MPLS labels to push
@@ -60,7 +60,8 @@ Points worth knowing:
 
 - A bare `route <prefix>` with no nexthop carries no forwarding
   information and is rejected at commit — every route needs at least
-  one `nexthop` (an IP address, or the `blackhole` keyword — see
+  one `nexthop` (an IP address, or one of the discard keywords
+  `blackhole` and `unreachable` — see
   [Blackhole (Discard) Static Route](ch-01-03-blackhole-static-route.md)).
 - Configuring several nexthops on one route gives ECMP; unequal
   `weight` values give weighted (UCMP) load-sharing, and unequal

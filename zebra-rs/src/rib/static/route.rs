@@ -4,7 +4,7 @@ use std::net::{IpAddr, Ipv6Addr};
 use isis_packet::srv6::EncapType;
 
 use crate::rib::entry::RibEntry;
-use crate::rib::nexthop::{Label, NexthopUni};
+use crate::rib::nexthop::{Blackhole, BlackholeKind, Label, NexthopUni};
 use crate::rib::{Nexthop, NexthopList, NexthopMember, NexthopMulti, RibType, SidBehavior};
 
 use super::config::StaticFamily;
@@ -33,11 +33,17 @@ pub struct StaticRoute<F: StaticFamily> {
     pub nh6: Option<Ipv6Addr>,
     /// IPv4 cross-connect adjacency for `action End.DX4` (`nh4`).
     pub nh4: Option<std::net::Ipv4Addr>,
-    /// Discard route (`route <prefix> blackhole`): `to_entry`
+    /// Discard route (`route <prefix> nexthop blackhole`): `to_entry`
     /// produces a `Nexthop::Blackhole` the FIB installs as an
     /// `RTN_BLACKHOLE` kernel route. Mutually exclusive with
     /// nexthops / segs.
     pub blackhole: bool,
+    /// Discard route that tells the sender (`route <prefix> nexthop
+    /// unreachable`): an `RTN_UNREACHABLE` kernel route. A commit
+    /// refuses it beside `blackhole` (`config::check::
+    /// static_discard_exclusive`); a startup config that has both is
+    /// only warned about, and `blackhole` is what it gets.
+    pub unreachable: bool,
     pub delete: bool,
 }
 
@@ -53,6 +59,7 @@ impl<F: StaticFamily> Default for StaticRoute<F> {
             nh6: None,
             nh4: None,
             blackhole: false,
+            unreachable: false,
             delete: false,
         }
     }
@@ -70,6 +77,7 @@ impl<F: StaticFamily> Clone for StaticRoute<F> {
             nh6: self.nh6,
             nh4: self.nh4,
             blackhole: self.blackhole,
+            unreachable: self.unreachable,
             delete: self.delete,
         }
     }
@@ -88,19 +96,34 @@ where
             .field("encap_type", &self.encap_type)
             .field("seg6local_action", &self.seg6local_action)
             .field("blackhole", &self.blackhole)
+            .field("unreachable", &self.unreachable)
             .field("delete", &self.delete)
             .finish()
     }
 }
 
 impl<F: StaticFamily> StaticRoute<F> {
+    /// What kind of discard route this is, if it is one. With both
+    /// keywords (a startup config: a commit refuses the pair) it is the
+    /// one that says nothing.
+    pub fn discard(&self) -> Option<BlackholeKind> {
+        if self.blackhole {
+            Some(BlackholeKind::Null)
+        } else if self.unreachable {
+            Some(BlackholeKind::Unreachable)
+        } else {
+            None
+        }
+    }
+
     pub fn to_entry(&self) -> Option<RibEntry> {
+        let discard = self.discard();
         if self.nexthops.is_empty()
             && self.segs.is_empty()
             && self.seg6local_action.is_none()
             && self.nh6.is_none()
             && self.nh4.is_none()
-            && !self.blackhole
+            && discard.is_none()
         {
             return None;
         }
@@ -110,9 +133,9 @@ impl<F: StaticFamily> StaticRoute<F> {
 
         let metric = self.metric.unwrap_or(0);
 
-        if self.blackhole {
+        if let Some(kind) = discard {
             // A discard route drops matching traffic; no nexthop.
-            entry.nexthop = Nexthop::Blackhole(metric);
+            entry.nexthop = Nexthop::Blackhole(Blackhole { metric, kind });
             entry.metric = metric;
             return Some(entry);
         }
@@ -458,8 +481,36 @@ mod tests {
             ..Default::default()
         };
         let entry = r.to_entry().expect("blackhole entry built");
-        assert_eq!(entry.nexthop, Nexthop::Blackhole(50));
+        assert_eq!(entry.nexthop, Nexthop::blackhole(50));
         assert_eq!(entry.metric, 50);
+    }
+
+    #[test]
+    fn unreachable_route_builds_unreachable_nexthop() {
+        // The other discard keyword: the same shape, the other kind.
+        let r = StaticRoute::<V4> {
+            unreachable: true,
+            metric: Some(50),
+            ..Default::default()
+        };
+        assert_eq!(r.discard(), Some(BlackholeKind::Unreachable));
+        let entry = r.to_entry().expect("unreachable entry built");
+        assert_eq!(entry.nexthop, Nexthop::unreachable(50));
+        assert_eq!(entry.metric, 50);
+        assert_eq!(entry.distance, 1);
+    }
+
+    #[test]
+    fn both_discard_keywords_make_a_blackhole() {
+        // A commit refuses the pair; a startup config that has it is the
+        // route that says nothing, whichever line came first.
+        let r = StaticRoute::<V4> {
+            blackhole: true,
+            unreachable: true,
+            ..Default::default()
+        };
+        assert_eq!(r.discard(), Some(BlackholeKind::Null));
+        assert_eq!(r.to_entry().unwrap().nexthop, Nexthop::blackhole(0));
     }
 
     #[test]

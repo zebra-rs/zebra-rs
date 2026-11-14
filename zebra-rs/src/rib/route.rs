@@ -186,6 +186,68 @@ impl Rib {
             .add(entry.rtype, table_id, prefix, priorities, entry.distance);
     }
 
+    /// Take a VRF's tables out of the RIB and what zebra-rs installed in
+    /// them out of the kernel, ahead of the VRF device itself.
+    ///
+    /// The kernel removes the routes through a VRF's own interfaces with
+    /// the device, and no others. A route with no interface (a discard
+    /// route) or through an interface outside the VRF (an imported VPN
+    /// route, by way of the core) stays in the table, where the next VRF
+    /// given that table id would find it. So each installed route is
+    /// deleted here, as a selection change deletes one it replaces, and
+    /// the next-hop objects the routes held are let go: the RIB entries
+    /// that counted on them go with the tables.
+    ///
+    /// What others put in the table (the kernel's own routes, an
+    /// operator's) is not touched.
+    pub(super) async fn vrf_table_withdraw(&mut self, table_id: u32) {
+        let Some(tables) = self.vrf_tables.remove(&table_id) else {
+            return;
+        };
+        let (mut routes, mut leftovers) = (0usize, 0usize);
+        let v4 = tables
+            .table
+            .iter()
+            .map(|(prefix, entries)| (IpNet::V4(prefix), entries));
+        let v6 = tables
+            .table_v6
+            .iter()
+            .map(|(prefix, entries)| (IpNet::V6(prefix), entries));
+        for (prefix, entries) in v4.chain(v6) {
+            for entry in entries.iter() {
+                self.route_record.del(entry.rtype, table_id, prefix);
+                if entry.stale {
+                    self.fib_handle
+                        .route_del_leftover(prefix, entry, table_id)
+                        .await;
+                    leftovers += 1;
+                }
+                if !entry.is_protocol() {
+                    continue;
+                }
+                if entry.is_fib() {
+                    match prefix {
+                        IpNet::V4(p) => self.fib_handle.route_ipv4_del(&p, entry, table_id).await,
+                        IpNet::V6(p) => self.fib_handle.route_ipv6_del(&p, entry, table_id).await,
+                    }
+                    routes += 1;
+                } else if is_bridge_type5(entry) {
+                    // Its failed install is still tracked for recovery.
+                    self.fib_handle.evpn_prefix_withdraw(table_id, prefix).await;
+                }
+                let mut entry = entry.clone();
+                entry.nexthop_unsync(&mut self.nmap, &self.fib_handle).await;
+            }
+        }
+        self.legacy_statics.retain(|(table, ..)| *table != table_id);
+        self.learned_ra.retain(|(table, ..)| *table != table_id);
+        if routes > 0 || leftovers > 0 {
+            tracing::info!(
+                "vrf table {table_id}: withdrew {routes} route(s) and {leftovers} leftover(s)"
+            );
+        }
+    }
+
     /// Withdraw every leftover from an earlier run that its owner has not
     /// replaced by now: statics, IS-IS, and VRF BGP, plus SRv6 routes under
     /// any of our protocols that nothing reinstalled, and the next-hop
@@ -2672,7 +2734,7 @@ pub(crate) fn kernel_priorities(entry: &RibEntry, v6: bool) -> Vec<u32> {
         Nexthop::Multi(multi) => vec![multi.metric],
         Nexthop::List(list) => list.nexthops.iter().map(|m| m.metric()).collect(),
         Nexthop::Protect(protect) => vec![protect.primary.metric(), protect.backup.metric()],
-        Nexthop::Blackhole(metric) => vec![*metric],
+        Nexthop::Blackhole(bh) => vec![bh.metric],
         Nexthop::Link(_) => vec![entry.metric],
     };
     path_priorities(&metrics, v6)
@@ -2933,7 +2995,7 @@ fn rib_replace_system(
         }
         // System (kernel) routes are never primary+backup protected.
         Nexthop::Protect(_) => false,
-        Nexthop::Blackhole(m) => *m == entry.metric,
+        Nexthop::Blackhole(bh) => bh.metric == entry.metric,
     };
     if replace {
         return if entry.is_connected() {
@@ -3301,7 +3363,7 @@ fn rib_replace_system_v6(
         }
         // System (kernel) routes are never primary+backup protected.
         Nexthop::Protect(_) => false,
-        Nexthop::Blackhole(m) => *m == entry.metric,
+        Nexthop::Blackhole(bh) => bh.metric == entry.metric,
     };
     if replace {
         return if entry.is_connected() {
@@ -3723,7 +3785,7 @@ mod tests {
         let mut hole = RibEntries::new();
         let mut blackhole = RibEntry::new(RibType::Kernel);
         blackhole.metric = 1024;
-        blackhole.nexthop = Nexthop::Blackhole(1024);
+        blackhole.nexthop = Nexthop::blackhole(1024);
         rib_add_kernel(&mut hole, blackhole.clone());
         assert_eq!(rib_replace_kernel(&mut hole, &blackhole, true).len(), 1);
 
@@ -3764,7 +3826,7 @@ mod tests {
                     metric: 200,
                     ..Default::default()
                 }),
-                Nexthop::Blackhole(200),
+                Nexthop::blackhole(200),
             ] {
                 let mut primary = RibEntry::new(rtype);
                 primary.stale = true;
@@ -3784,7 +3846,7 @@ mod tests {
                 }
                 // A duplicate at the same priority must update its kind
                 // without discarding the other priority.
-                primary.nexthop = Nexthop::Blackhole(100);
+                primary.nexthop = Nexthop::blackhole(100);
                 rib_add_system(&mut table, &v4, primary.clone());
                 rib_add_system_v6(&mut table_v6, &v6, primary);
                 for entries in [table.get(&v4).unwrap(), table_v6.get(&v6).unwrap()] {
@@ -3795,7 +3857,7 @@ mod tests {
                         std::mem::discriminant(&entries[0].nexthop),
                         std::mem::discriminant(&backup)
                     );
-                    assert!(matches!(entries[1].nexthop, Nexthop::Blackhole(100)));
+                    assert_eq!(entries[1].nexthop, Nexthop::blackhole(100));
                 }
                 assert_eq!(rib_replace(&mut table, &v4, rtype).len(), 2);
                 assert_eq!(rib_replace_v6(&mut table_v6, &v6, rtype).len(), 2);
@@ -5244,5 +5306,70 @@ mod tests {
         assert_eq!(lost, [(gids[0], 1), (gids[1], 2)]);
         assert_eq!(members_valid(&entry), [false, false, true]);
         assert!(!entry.is_fib());
+    }
+    /// Deleting a VRF takes its tables out of the RIB and lets go of
+    /// what their routes held: the next-hop group of a route, and what
+    /// was noted of the table's routes. Another table's are left alone.
+    /// Nothing here is installed, so the kernel is not asked anything;
+    /// `deleting_a_vrf_withdraws_what_was_installed_in_its_table` is
+    /// the same with a kernel.
+    #[tokio::test]
+    async fn a_deleted_vrfs_table_lets_go_of_what_its_routes_held() {
+        use super::*;
+        use crate::rib::Rib;
+        use crate::rib::nexthop::GroupTrait;
+        use crate::rib::vrf::VrfRibTables;
+        const TABLE: u32 = 77;
+        const OTHER: u32 = 78;
+        let mut rib = Rib::new(false).unwrap();
+        let v4: Ipv4Net = "10.7.0.0/16".parse().unwrap();
+        let v6: Ipv6Net = "2001:db8:7::/48".parse().unwrap();
+        let mut held = Vec::new();
+        for table in [TABLE, OTHER] {
+            let mut tables = VrfRibTables::new();
+            for addr in ["198.51.100.2", "2001:db8:2::2"] {
+                let mut uni = NexthopUni {
+                    addr: addr.parse().unwrap(),
+                    ifindex_origin: Some(2),
+                    ..Default::default()
+                };
+                let group = rib.nmap.fetch_uni(&uni, table).unwrap();
+                group.refcnt_inc();
+                uni.gid = group.gid();
+                held.push((table, uni.gid));
+                let mut entry = RibEntry::new(RibType::Bgp);
+                entry.distance = 200;
+                let is_v6 = uni.addr.is_ipv6();
+                entry.nexthop = Nexthop::Uni(uni);
+                // A kernel's own route beside it holds nothing.
+                let entries = vec![entry, RibEntry::new(RibType::Kernel)];
+                if is_v6 {
+                    tables.table_v6.insert(v6, entries);
+                } else {
+                    tables.table.insert(v4, entries);
+                }
+            }
+            rib.vrf_tables.insert(table, tables);
+            rib.legacy_statics.insert((table, IpNet::V4(v4), 0));
+            rib.learned_ra.insert((table, IpNet::V6(v6), 1024));
+        }
+        assert!(held.iter().all(|(_, gid)| rib.nmap.get(*gid).is_some()));
+
+        rib.vrf_table_withdraw(TABLE).await;
+        assert!(!rib.vrf_tables.contains_key(&TABLE));
+        assert!(rib.vrf_tables.contains_key(&OTHER));
+        for (table, gid) in &held {
+            assert_eq!(rib.nmap.get(*gid).is_some(), *table == OTHER, "{table}");
+        }
+        assert_eq!(
+            rib.legacy_statics.iter().map(|k| k.0).collect::<Vec<_>>(),
+            [OTHER]
+        );
+        assert_eq!(
+            rib.learned_ra.iter().map(|k| k.0).collect::<Vec<_>>(),
+            [OTHER]
+        );
+        // A table the RIB does not have is nothing to withdraw.
+        rib.vrf_table_withdraw(TABLE).await;
     }
 }

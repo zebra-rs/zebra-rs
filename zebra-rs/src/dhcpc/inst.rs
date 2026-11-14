@@ -167,9 +167,9 @@ pub struct Dhcpc {
     pub(super) v6: V6,
     /// Where the leases' name servers go for the host to use
     /// ([`crate::resolver`]), and what has been said there, by interface
-    /// (`sync_dns`).
+    /// index (`sync_dns`).
     pub(super) resolver: Option<ResolverTx>,
-    reported_dns: BTreeMap<String, LinkDns>,
+    reported_dns: BTreeMap<u32, LinkDns>,
 }
 
 pub(super) fn unix_now() -> u64 {
@@ -1055,17 +1055,24 @@ impl Dhcpc {
     /// system resolver itself leaves a link without carrier alone. A
     /// saved lease on its way back to the server (`begin_release`) is
     /// held only to be released, and says nothing.
+    ///
+    /// It is said of the link the lease is held on, by its index: the
+    /// one the lease's address is on, whatever the link is called by
+    /// now. A lease is held on a link or not at all (`detach`).
     fn sync_dns(&mut self) {
         let Some(resolver) = &self.resolver else {
             return;
         };
         let mut now = BTreeMap::new();
-        for (name, iface) in &self.ifaces {
+        for iface in self.ifaces.values() {
             if iface.releasing.is_some() || iface.cfg.no_name_server {
                 continue;
             }
-            if let Some(dns) = iface.bound.as_ref().and_then(lease_dns) {
-                now.insert(name.clone(), dns);
+            let (Some(lease), Some(ifindex)) = (&iface.bound, iface.ifindex) else {
+                continue;
+            };
+            if let Some(dns) = lease_dns(lease) {
+                now.insert(ifindex, dns);
             }
         }
         report_dns(resolver, Source::Dhcp4, &mut self.reported_dns, now);
@@ -1135,27 +1142,29 @@ impl Dhcpc {
 }
 
 /// Tell the resolver task how what `source` knows of name servers has
-/// changed: `now` by interface, against what it `reported` last. Every
-/// change once, and an interface that has nothing any more as that.
+/// changed: `now` by interface index, against what it `reported` last.
+/// Every change once, and an interface that has nothing any more as
+/// that. One deleted and made again under its name is two interfaces
+/// here: the first has nothing any more, and the second what it learns.
 pub(super) fn report_dns(
     resolver: &ResolverTx,
     source: Source,
-    reported: &mut BTreeMap<String, LinkDns>,
-    now: BTreeMap<String, LinkDns>,
+    reported: &mut BTreeMap<u32, LinkDns>,
+    now: BTreeMap<u32, LinkDns>,
 ) {
-    for name in reported.keys() {
-        if !now.contains_key(name) {
+    for ifindex in reported.keys() {
+        if !now.contains_key(ifindex) {
             let _ = resolver.send(Report {
-                ifname: name.clone(),
+                ifindex: *ifindex,
                 source,
                 dns: None,
             });
         }
     }
-    for (name, dns) in &now {
-        if reported.get(name) != Some(dns) {
+    for (ifindex, dns) in &now {
+        if reported.get(ifindex) != Some(dns) {
             let _ = resolver.send(Report {
-                ifname: name.clone(),
+                ifindex: *ifindex,
                 source,
                 dns: Some(dns.clone()),
             });
@@ -1489,7 +1498,7 @@ mod tests {
     fn reported(rx: &mut UnboundedReceiver<Report>) -> Vec<Option<LinkDns>> {
         let mut out = Vec::new();
         while let Ok(report) = rx.try_recv() {
-            assert_eq!((report.ifname.as_str(), report.source), (IF, Source::Dhcp4));
+            assert_eq!((report.ifindex, report.source), (IFINDEX, Source::Dhcp4));
             out.push(report.dns);
         }
         out
@@ -1581,6 +1590,40 @@ mod tests {
         reported(&mut rx);
         b.dhcpc.process_rib_msg(RibRx::LinkDel(IFINDEX));
         assert_eq!(reported(&mut rx), [None]);
+    }
+
+    /// The name servers are said of the link the lease is held on, by
+    /// its index, as the address is added to it by its index. A link
+    /// deleted and made again under its name is another link: the first
+    /// has nothing any more, and the lease taken on the second is said
+    /// of that one.
+    #[tokio::test]
+    async fn name_servers_are_reported_for_the_link_the_lease_is_on() {
+        const AGAIN: u32 = IFINDEX + 1;
+        let mut b = bench("dns-index", true);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        b.dhcpc.set_resolver(tx);
+        let mut said = move || {
+            let mut out = Vec::new();
+            while let Ok(report) = rx.try_recv() {
+                assert_eq!(report.source, Source::Dhcp4);
+                out.push((report.ifindex, report.dns));
+            }
+            out
+        };
+        with_resumed_lease(&mut b, &lease_with_dns());
+        assert_eq!(said(), [(IFINDEX, Some(its_dns()))]);
+
+        let link = b.dhcpc.links[&IFINDEX].clone();
+        b.dhcpc.process_rib_msg(RibRx::LinkDel(IFINDEX));
+        assert_eq!(said(), [(IFINDEX, None)]);
+        b.dhcpc.links.insert(AGAIN, link);
+        with_resumed_lease(&mut b, &lease_with_dns());
+        assert_eq!(b.dhcpc.ifaces[IF].ifindex, Some(AGAIN));
+        assert_eq!(said(), [(AGAIN, Some(its_dns()))]);
+
+        b.dhcpc.release(verb(IF));
+        assert_eq!(said(), [(AGAIN, None)]);
     }
 
     /// A lease without name servers reports nothing, and one that comes

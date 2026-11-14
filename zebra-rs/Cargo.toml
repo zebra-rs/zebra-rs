@@ -28,7 +28,7 @@ depends = "$auto, libcap2-bin"
 # the top-level `cradle-version` file by version-update.sh; the release /
 # publish-apt pipeline ingests exactly that cradle release so
 # `apt install zebra-rs` pulls it.
-recommends = "cradle-rs (>= 1.1.9)"
+recommends = "cradle-rs (>= 1.1.10)"
 # Drop the default `-1` revision so the artifact stays zebra-rs_<ver>_<arch>.deb
 # (the CI dist-suffix rename in build-debs.yaml expects that shape).
 revision = ""
@@ -172,7 +172,6 @@ socket2 = "0.6"
 nix = { version = "0.31", features = ["fs", "net", "socket", "uio", "user"] }
 libc = "0.2.167"
 bgp-packet = { path = "../crates/bgp-packet" }
-bgp-macros = { path = "../crates/bgp-macros" }
 ospf-packet = { path = "../crates/ospf-packet" }
 ospf-macros = { path = "../crates/ospf-macros" }
 isis-packet = { path = "../crates/isis-packet" }
