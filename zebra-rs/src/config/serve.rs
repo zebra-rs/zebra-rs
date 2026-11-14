@@ -11,9 +11,9 @@ use tonic::transport::Server;
 use crate::config::api::DeployRequest;
 use crate::config::enable_rate::EnableRateLimiter;
 use crate::config::session::{
-    AuthzError, DEFAULT_GC_INTERVAL, DEFAULT_IDLE_TTL, ENABLE_HARD_CAP, ENABLE_IDLE_TTL,
-    ENABLE_PAM_USER, ProcfsReader, SessionContext, SessionError, SessionTable, run_gc,
-    watch_bash_death,
+    AdminLease, AuthzError, DEFAULT_GC_INTERVAL, DEFAULT_IDLE_TTL, ENABLE_HARD_CAP,
+    ENABLE_IDLE_TTL, ENABLE_PAM_USER, ProcfsReader, SessionContext, SessionError, SessionKey,
+    SessionTable, run_gc, watch_bash_death,
 };
 
 use super::api::{
@@ -62,6 +62,22 @@ fn enforce_admin<T>(
         Err(AuthzError::EnableExpired) => Err(tonic::Status::permission_denied(
             "enable session expired; run 'enable' again",
         )),
+    }
+}
+
+/// [`ExecReply::admin_secs`] for the caller's session: 0 when not admin,
+/// -1 when the role never lapses, else the seconds left, rounded up so
+/// that a role with a fraction of a second left is not reported lapsed
+/// (the shell asks again when that second is up).
+fn admin_secs(sessions: &SessionTable, key: Option<SessionKey>) -> i32 {
+    let lease = key.map_or(AdminLease::None, |key| sessions.admin_lease(&key));
+    match lease {
+        AdminLease::None => 0,
+        AdminLease::Permanent => -1,
+        AdminLease::Remaining(left) => {
+            let secs = left.as_secs() + u64::from(left.subsec_nanos() > 0);
+            i32::try_from(secs).unwrap_or(i32::MAX)
+        }
     }
 }
 
@@ -127,6 +143,7 @@ impl ExecService {
             port: 2666,
             paths: Vec::new(),
             hostname: String::new(),
+            admin_secs: 0,
         };
         Ok(Response::new(reply))
     }
@@ -137,6 +154,7 @@ impl ExecService {
         lines: String,
         paths: Vec<CommandPath>,
         hostname: String,
+        admin_secs: i32,
     ) -> Result<Response<ExecReply>, tonic::Status> {
         let reply = ExecReply {
             code: code as i32,
@@ -145,6 +163,7 @@ impl ExecService {
             port: 2666,
             paths,
             hostname,
+            admin_secs,
         };
         Ok(Response::new(reply))
     }
@@ -183,13 +202,15 @@ impl Exec for ExecService {
             }
         }
 
+        let key = request.extensions().get::<SessionContext>().map(|c| c.key);
         let request = request.get_ref();
         match request.r#type {
             x if x == ExecType::Exec as i32 => {
                 let resp = self.execute_request(&request.mode, &request.line).await;
                 let hostname = resp.hostname.clone().unwrap_or_default();
                 let (code, output, paths) = exec_commands(&resp);
-                self.reply_exec(code, output, paths, hostname)
+                let admin_secs = admin_secs(&self.sessions, key);
+                self.reply_exec(code, output, paths, hostname, admin_secs)
             }
             x if x == ExecType::CompleteFirstCommands as i32 => {
                 let resp = self

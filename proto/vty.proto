@@ -96,6 +96,12 @@ message ExecReply {
   // the prompt renders the configured name (falling back to the OS
   // hostname when empty).
   string hostname = 6;
+  // Seconds before the caller's admin role lapses, on ExecType.EXEC
+  // replies: 0 when the session is not admin (never enabled, disabled,
+  // or lapsed), -1 when it never lapses (root). Read without sliding the
+  // idle deadline; the vty shell asks with an empty exec-mode line so it
+  // can leave configure mode when the role lapses.
+  int32 admin_secs = 7;
 }
 
 // The Command register.

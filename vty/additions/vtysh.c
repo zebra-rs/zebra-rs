@@ -30,6 +30,10 @@
 #include "builtins/common.h"
 #include "bashhist.h"
 
+#if defined (READLINE)
+#  include <readline/readline.h>
+#endif
+
 /* xxd -i vty.sh >vty.c */
 #include "vty.c"
 
@@ -179,4 +183,38 @@ cli_execute_startup_string()
 
   bash_history_enable();
   enable_history_list = 1;
+}
+
+/* Called from bash_event_hook after the traps a signal made pending
+   have run, while readline waits for input.  When the admin role
+   lapses, the timer trap in vty.sh switches the vty back to exec mode
+   and leaves a one-line notice in _cli_notice; without this the
+   operator would see neither until their next Enter, and would type the
+   next line after the configure-mode prompt still shown.  Print the
+   notice under the line being typed and redraw that line after the new
+   prompt.  Outside readline the notice waits for PROMPT_COMMAND
+   (_cli_notice_flush) instead. */
+void
+cli_signal_event_hook (void)
+{
+#if defined (READLINE)
+  char *notice, *ps1, *prompt;
+
+  notice = get_string_value ("_cli_notice");
+  if (notice == NULL || *notice == '\0')
+    return;
+
+  rl_crlf ();
+  fputs (notice, rl_outstream);
+  rl_crlf ();
+  fflush (rl_outstream);
+  /* Frees the value NOTICE points at. */
+  bind_variable ("_cli_notice", "", 0);
+
+  ps1 = get_string_value ("PS1");
+  prompt = decode_prompt_string (ps1 ? ps1 : "", 1);
+  rl_set_prompt (prompt ? prompt : "");
+  free (prompt);
+  rl_forced_update_display ();
+#endif
 }

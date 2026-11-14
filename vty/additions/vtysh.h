@@ -26,5 +26,6 @@
 extern int cli_mode __P((void));
 extern int cli_option_parse __P((int, char **));
 extern void cli_execute_startup_string __P((void));
+extern void cli_signal_event_hook __P((void));
 
 #endif /* _VTYSH_H_ */

@@ -1,0 +1,113 @@
+#!/usr/bin/env bash
+# Stub `vtyhelper` for the admin-timeout and unreachable-daemon tests.
+#
+# vty.sh calls the helper by bare name (`cli_command=vtyhelper`), so
+# putting this first on PATH stands in for the daemon. It keeps the
+# daemon's admin rule on a short clock: `-e` grants the role for
+# STUB_TTL seconds, each configure-mode command (and `configure`
+# itself) slides it, and once it lapses those commands are refused with
+# exit 4 and no output, as the real helper does. `-a` answers how many
+# seconds are left without sliding.
+#
+#   STUB_LOG       file every invocation is appended to
+#   STUB_STATE     directory for the lease (`deadline`, in ms) and the
+#                  `down` flag: while that file exists, the daemon is
+#                  unreachable (warning on stderr, exit 3)
+#   STUB_TTL       seconds `-e` grants (default 3)
+#   STUB_NO_TIMER  when set, `--timer` exits at once without signalling
+set -u
+
+[[ -n ${STUB_LOG:-} ]] && printf '%s\n' "$*" >>"${STUB_LOG}"
+
+state=${STUB_STATE:?}
+now_ms=$(( ${EPOCHREALTIME/./} / 1000 ))
+
+down ()
+{
+  echo "% Cannot connect to zebra-rs at unix:zebra-rs/vty: Connection refused; is zebra-rs running?" >&2
+  exit 3
+}
+
+# Seconds left on the lease, rounded up; 0 when none.
+left ()
+{
+  local deadline
+  deadline=$(cat "${state}/deadline" 2>/dev/null) || { echo 0; return; }
+  if (( deadline > now_ms )); then
+    echo $(( (deadline - now_ms + 999) / 1000 ))
+  else
+    echo 0
+  fi
+}
+
+# Refuse unless the role is held; slide it when it is.
+need_admin ()
+{
+  (( $(left) > 0 )) || exit 4
+  echo $(( now_ms + ${STUB_TTL:-3} * 1000 )) >"${state}/deadline"
+}
+
+case ${1:-} in
+  --timer)
+    [[ -n ${STUB_NO_TIMER:-} ]] && exit 0
+    sleep "$2"
+    kill -USR1 "${PPID}"
+    exit 0 ;;
+  -l|--logout) exit 0 ;;
+esac
+
+[[ -e ${state}/down ]] && down
+
+mode="exec"
+first=0
+args=()
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    -m) mode=$2; shift 2 ;;
+    -f|--first) first=1; shift ;;
+    -H|--hostname) echo "teststub"; exit 0 ;;
+    -a|--admin-left) left; exit 0 ;;
+    -u|--uncommitted) exit 1 ;;
+    -c|--completion|-t|--trailing) exit 0 ;;
+    -e|--enable)
+      echo $(( now_ms + ${STUB_TTL:-3} * 1000 )) >"${state}/deadline"
+      echo "% Enabled (admin role active for ${STUB_TTL:-3} seconds)"
+      exit 0 ;;
+    -d|--disable) rm -f "${state}/deadline"; echo "% Disabled"; exit 0 ;;
+    -j|--json) shift ;;
+    *) args+=("$1"); shift ;;
+  esac
+done
+
+if (( first )); then
+  case ${mode} in
+    exec) printf '%s\n' cli configure help release renew show ;;
+    configure) printf '%s\n' clear cli commit delete discard exit help load run save set show ;;
+  esac
+  exit 0
+fi
+
+enter_configure='SuccessExec\nCLI_MODE=configure;CLI_MODE_STR=Configure;CLI_MODE_PROMPT=;CLI_PRIVILEGE=15;_cli_refresh\n'
+case "${mode}:${args[0]:-}" in
+  exec:configure)
+    need_admin
+    printf "${enter_configure}"
+    ;;
+  exec:co|exec:con|exec:conf|exec:confi|exec:config|exec:configu|exec:configur)
+    # The daemon's gate matches the whole word only: an abbreviation
+    # enters configure mode without the role.
+    printf "${enter_configure}"
+    ;;
+  configure:exit)
+    need_admin
+    printf 'SuccessExec\nCLI_MODE=exec;CLI_MODE_PROMPT=;CLI_PRIVILEGE=1;_cli_refresh\n'
+    ;;
+  configure:*)
+    need_admin
+    echo "Show"
+    ;;
+  *)
+    echo "Show"
+    ;;
+esac
+exit 0
