@@ -2433,8 +2433,11 @@ impl<P: Prefix + Copy> LocalRibTable<P> {
         let replaced: Vec<BgpRib> = cands
             .extract_if(.., |r| r.ident == rib.ident && r.remote_id == rib.remote_id)
             .collect();
-        self.3.add(rib.ident);
-        self.3.sub(rib.ident, replaced.len());
+        // A replace keeps the peer's row count: touch it only when it moves.
+        if replaced.len() != 1 {
+            self.3.add(rib.ident);
+            self.3.sub(rib.ident, replaced.len());
+        }
 
         // Allocate local_id for the new/updated rib
         let mut next_id = 1u32;
