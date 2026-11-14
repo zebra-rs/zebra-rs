@@ -11066,6 +11066,28 @@ mod neighbor_group_wiring_tests {
         .unwrap();
     }
 
+    /// A held member that leaves the group it took its remote-as from is
+    /// released from the hold while it still has that remote-as, which arms
+    /// the idle hold timer, and is reset to AS 0 after. The timer's Start
+    /// must not dial it.
+    #[tokio::test]
+    async fn a_held_member_that_leaves_its_group_is_not_dialed() {
+        use crate::bgp::peer::{State, fsm_start};
+
+        let mut bgp = fresh_bgp();
+        group_member_with_limit(&mut bgp);
+        hold_in_overflow(&mut bgp);
+        config_peer_neighbor_group(&mut bgp, arg_words(&["10.0.0.1", "G"]), ConfigOp::Delete)
+            .unwrap();
+        assert!(!held(&bgp));
+        let peer = bgp.peers.get_mut(&peer_addr()).unwrap();
+        assert_eq!(peer.remote_as, 0, "setup: the remote-as was the group's");
+
+        assert_eq!(fsm_start(peer), State::Idle);
+        assert!(peer.task.connect.is_none(), "no dial");
+        assert!(peer.timer.idle_hold_timer.is_none());
+    }
+
     /// A group change that leaves a member's effective block alone must not
     /// release its hold: it would only reconnect and trip again.
     #[tokio::test]

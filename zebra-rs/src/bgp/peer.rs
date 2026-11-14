@@ -1605,10 +1605,13 @@ impl Peer {
     /// AS 0, and one materialized before its first Router Advertisement
     /// sits at `address == ::`.
     ///
-    /// [`timer::update_timers`] re-checks neither, so **any caller that
-    /// arms the idle-hold timer outside [`Peer::start`] must consult
-    /// this first** — an ungated arm sends the peer into `fsm_start`,
-    /// which dials whatever `address` holds.
+    /// A peer can also stop being dialable: one that took its remote-as
+    /// from a neighbor-group is reset to AS 0 when it leaves the group or
+    /// the group loses its remote-as.
+    ///
+    /// [`timer::update_timers`] arms no idle-hold timer for a peer that
+    /// is not dialable, and `fsm_start` does not dial one: a timer armed
+    /// while it still was may fire after.
     pub fn is_dialable(&self) -> bool {
         (self.remote_as != 0 || self.config.remote_as_external) && !self.address.is_unspecified()
     }
@@ -2465,6 +2468,13 @@ fn addr_is_v6_link_local(addr: &IpAddr) -> bool {
 
 pub fn fsm_start(peer: &mut Peer) -> State {
     if peer.max_prefix.overflow.is_some() {
+        return State::Idle;
+    }
+    if !peer.is_dialable() {
+        // The timer that sent this was armed while the peer could still be
+        // dialed. Idle to Idle runs no `update_timers`, so drop it here: left
+        // in place, spent, it would keep `Peer::start` from arming a new one.
+        peer.timer.idle_hold_timer = None;
         return State::Idle;
     }
     peer.first_start = false;
@@ -4606,6 +4616,79 @@ mod fsm_idle_hold_tests {
             "idle hold timer must be re-armed after a connection failure"
         );
         assert!(peer.timer.connect_retry.is_none());
+    }
+
+    /// A peer that took its remote-as from a neighbor-group is reset to
+    /// AS 0 and stopped when it leaves the group. Idle armed the idle hold
+    /// timer all the same, whose Start dialed a peer that every OPEN then
+    /// failed against, again and again.
+    #[tokio::test]
+    async fn a_peer_without_a_remote_as_is_not_redialed() {
+        let mut peer = test_peer(false);
+        peer.state = State::Established;
+        peer.remote_as = 0;
+
+        // What `fsm()` does for the Stop the config change sends.
+        peer.state = fsm_stop(&mut peer);
+        timer::update_timers(&mut peer);
+
+        assert_eq!(peer.state, State::Idle);
+        assert!(peer.timer.idle_hold_timer.is_none(), "no redial pacer");
+    }
+
+    /// The same for a peer that has no address yet, as an
+    /// `interface-neighbor` before its first Router Advertisement.
+    #[tokio::test]
+    async fn a_peer_without_an_address_is_not_redialed() {
+        let mut peer = test_peer(false);
+        peer.address = "::".parse().unwrap();
+        timer::update_timers(&mut peer);
+        assert!(peer.timer.idle_hold_timer.is_none());
+    }
+
+    /// A passive peer is moved from Idle to Active to take connections.
+    /// One without a remote-as has nothing to check their OPEN against.
+    #[tokio::test]
+    async fn a_passive_peer_without_a_remote_as_stays_idle() {
+        let mut peer = test_peer(true);
+        peer.remote_as = 0;
+        timer::update_timers(&mut peer);
+        assert_eq!(peer.state, State::Idle);
+
+        peer.remote_as = 65002;
+        peer.start();
+        assert_eq!(peer.state, State::Active, "with one, it listens");
+    }
+
+    /// A timer armed while the peer could still be dialed may fire after.
+    /// Its Start dials nothing, and the spent timer is dropped: left in
+    /// place it would keep `Peer::start` from arming a new one when the
+    /// remote-as is back.
+    #[tokio::test]
+    async fn a_start_on_its_way_does_not_dial_a_peer_that_lost_its_remote_as() {
+        let mut peer = test_peer(false);
+        timer::update_timers(&mut peer);
+        assert!(peer.timer.idle_hold_timer.is_some(), "setup: armed");
+
+        peer.remote_as = 0;
+        assert_eq!(fsm_start(&mut peer), State::Idle);
+        assert!(peer.task.connect.is_none(), "no dial");
+        assert!(peer.timer.idle_hold_timer.is_none());
+
+        peer.remote_as = 65002;
+        peer.start();
+        assert!(peer.timer.idle_hold_timer.is_some(), "paced again");
+    }
+
+    /// `remote-as external` keeps AS 0 as a placeholder until the OPEN
+    /// says what it is, and is dialed.
+    #[tokio::test]
+    async fn remote_as_external_is_still_dialed() {
+        let mut peer = test_peer(false);
+        peer.remote_as = 0;
+        peer.config.remote_as_external = true;
+        timer::update_timers(&mut peer);
+        assert!(peer.timer.idle_hold_timer.is_some());
     }
 
     /// An Established session dying at TCP level (RST, peer killed)
