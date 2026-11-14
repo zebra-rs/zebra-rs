@@ -212,8 +212,10 @@ else
         fail "something was written under /etc: $(find "$SCR/upper" -type f)"
     show_hostname | grep -q "not applied to the system: zebra-rs is not in the default network namespace" ||
         fail "show hostname does not say why: $(show_hostname)"
-    grep -q "system hostname is not applied to the system" "$SCR/zebra-rs.log" ||
-        fail "the log does not say why"
+    # `show hostname` is where the reason is given. The log keeps it at
+    # debug, so a daemon run without root every day does not repeat it.
+    ! grep -q "system hostname is not applied to the system" "$SCR/zebra-rs.log" ||
+        fail "the log repeats why at the default level"
     stop_daemon
 fi
 
