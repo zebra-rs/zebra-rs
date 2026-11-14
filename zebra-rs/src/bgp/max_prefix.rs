@@ -34,7 +34,6 @@ use bgp_packet::{Afi, AfiSafi, Safi};
 use serde::Serialize;
 
 use super::Bgp;
-use super::Message;
 use super::neighbor_group::NeighborGroup;
 use super::peer::{Event, Peer, PeerConfig, State};
 use super::peer_key::PeerOrigin;
@@ -553,7 +552,7 @@ pub fn block_changed(peer: &mut Peer) {
     peer.max_prefix.limit_warned.clear();
     peer.max_prefix.threshold_warned.clear();
     // A round in flight took its counts before this change: drop it, so the
-    // check this change queues judges the new block against fresh counts.
+    // check at the commit's end judges the new block against fresh counts.
     peer.max_prefix.barrier.invalidate();
     peer.max_prefix.check_at_commit_end = true;
     // Whatever the state: a peer can come up before the commit ends. A new
@@ -572,27 +571,20 @@ pub fn refresh(groups: &BTreeMap<String, NeighborGroup>, peer: &mut Peer) {
     }
 }
 
-/// Queue a check of the peer's limits. When the queue is full the check is left
-/// for the next commit instead of being dropped.
-pub fn queue_check(peer: &mut Peer) {
-    let sent = peer
-        .tx
-        .try_send(Message::Event(peer.ident, Event::MaxPrefixCheck))
-        .is_ok();
-    peer.max_prefix.check_at_commit_end |= !sent;
-}
-
-/// A commit ended: check the sessions it changed against their new blocks.
-pub fn commit_end(peers: &mut PeerMap) {
+/// A commit ended: the sessions it changed, to check against their new blocks.
+/// The caller runs the checks itself rather than queue them: the bounded event
+/// queue may be full, and nothing would try again before the next commit.
+pub fn commit_end(peers: &mut PeerMap) -> Vec<usize> {
+    let mut due = Vec::new();
     for (_, peer) in peers.iter_mut_all() {
         peer.max_prefix.block_in_commit = false;
-        if !std::mem::take(&mut peer.max_prefix.check_at_commit_end) {
-            continue;
-        }
-        if peer.state == State::Established {
-            queue_check(peer);
+        if std::mem::take(&mut peer.max_prefix.check_at_commit_end)
+            && peer.state == State::Established
+        {
+            due.push(peer.ident);
         }
     }
+    due
 }
 
 #[derive(Debug, Serialize)]
@@ -966,13 +958,11 @@ mod tests {
         assert!(rx.try_recv().is_err(), "no check inside the commit");
 
         let (mut peers, ident) = peers_with(peer);
-        commit_end(&mut peers);
-        match rx.try_recv() {
-            Ok(Message::Event(got, Event::MaxPrefixCheck)) => assert_eq!(got, ident),
-            other => panic!("expected MaxPrefixCheck, got {other:?}"),
-        }
-        commit_end(&mut peers);
-        assert!(rx.try_recv().is_err(), "a later commit changed nothing");
+        assert_eq!(commit_end(&mut peers), vec![ident]);
+        assert!(
+            commit_end(&mut peers).is_empty(),
+            "a later commit changed nothing"
+        );
     }
 
     /// An UPDATE between the two callbacks is not checked either.
@@ -1047,24 +1037,19 @@ mod tests {
         ));
     }
 
-    /// A check that could not be queued waits for the next commit.
+    /// A full event queue does not hold the check back: the caller runs it.
     #[tokio::test]
-    async fn a_full_channel_keeps_the_check_pending() {
-        let (mut peer, mut rx) = test_peer_with_rx(false);
+    async fn a_full_queue_does_not_hold_the_check_back() {
+        let (mut peer, _rx) = test_peer_with_rx(false);
         peer.state = State::Established;
         block_changed(&mut peer);
-        while peer.tx.try_send(Message::Event(1, Event::Start)).is_ok() {}
+        while peer
+            .tx
+            .try_send(super::super::Message::Event(1, Event::Start))
+            .is_ok()
+        {}
         let (mut peers, ident) = peers_with(peer);
-        commit_end(&mut peers);
-        assert!(
-            peers
-                .get_by_idx(ident)
-                .unwrap()
-                .max_prefix
-                .check_at_commit_end
-        );
-        while rx.try_recv().is_ok() {}
-        commit_end(&mut peers);
+        assert_eq!(commit_end(&mut peers), vec![ident]);
         assert!(
             !peers
                 .get_by_idx(ident)
@@ -1072,28 +1057,6 @@ mod tests {
                 .max_prefix
                 .check_at_commit_end
         );
-    }
-
-    /// A soft-in check that could not be queued is kept, not dropped.
-    #[tokio::test]
-    async fn a_check_the_full_queue_refuses_waits_for_the_next_commit() {
-        let (mut peer, mut rx) = test_peer_with_rx(false);
-        peer.state = State::Established;
-        while peer.tx.try_send(Message::Event(1, Event::Start)).is_ok() {}
-        queue_check(&mut peer);
-        assert!(
-            peer.max_prefix.check_at_commit_end,
-            "kept for the next commit"
-        );
-
-        while rx.try_recv().is_ok() {}
-        peer.max_prefix.check_at_commit_end = false;
-        queue_check(&mut peer);
-        assert!(!peer.max_prefix.check_at_commit_end);
-        assert!(matches!(
-            rx.try_recv(),
-            Ok(Message::Event(_, Event::MaxPrefixCheck))
-        ));
     }
 
     #[tokio::test]

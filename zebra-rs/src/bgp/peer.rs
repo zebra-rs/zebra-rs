@@ -4237,14 +4237,6 @@ pub fn apply_soft_in_peer(bgp: &mut Bgp, peer_idx: usize) {
         .keys()
         .map(|af| (u16::from(af.afi), u8::from(af.safi)))
         .collect();
-    // The re-run policy can change the accepted count. Queued, so it is judged
-    // after this replay.
-    if let Some(peer) = bgp.peers.get_mut_by_idx(peer_idx)
-        && !peer.config.max_prefix.is_empty()
-    {
-        super::max_prefix::queue_check(peer);
-    }
-
     if soft_in {
         let mut bgp_ref = BgpTop {
             router_id: &bgp.router_id,
@@ -4277,6 +4269,16 @@ pub fn apply_soft_in_peer(bgp: &mut Bgp, peer_idx: usize) {
         for (afi, safi) in &mp_pairs {
             peer_send_route_refresh(peer, *afi, *safi);
         }
+    }
+    // The re-run policy can change the accepted count: judge it after the
+    // replay, directly, as at CommitEnd, since a full event queue would refuse
+    // a queued check.
+    if bgp
+        .peers
+        .get_by_idx(peer_idx)
+        .is_some_and(|peer| !peer.config.max_prefix.is_empty())
+    {
+        bgp.process_msg(Message::Event(peer_idx, Event::MaxPrefixCheck));
     }
 }
 

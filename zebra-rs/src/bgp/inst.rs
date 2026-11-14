@@ -3739,7 +3739,11 @@ impl Bgp {
                 // removals. Spawn-time structural edits to an existing VRF
                 // use the same full teardown/spawn path.
                 super::vrf_config::log_commit_diff(self);
-                super::max_prefix::commit_end(&mut self.peers);
+                // Directly, as the router-id reset does: a queued check could
+                // be refused by a full event queue.
+                for ident in super::max_prefix::commit_end(&mut self.peers) {
+                    self.process_msg(Message::Event(ident, super::peer::Event::MaxPrefixCheck));
+                }
                 super::max_prefix::reap_all_released(self);
                 self.apply_vrf_commit_diff();
                 self.vrf_commit_baseline.clear();
