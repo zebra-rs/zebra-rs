@@ -11007,6 +11007,41 @@ mod neighbor_group_wiring_tests {
         assert!(!held(&bgp));
     }
 
+    /// `clear bgp` on a held peer only releases it: there is no session to
+    /// stop, and a Stop could drop the connection a passive peer accepts next.
+    /// A peer that is not held is still stopped.
+    #[tokio::test]
+    async fn clearing_a_held_peer_queues_no_stop() {
+        use crate::bgp::peer::{BgpClearOp, clear_bgp_action};
+
+        let mut bgp = fresh_bgp();
+        config_peer(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+        while bgp.rx.try_recv().is_ok() {}
+        hold_in_overflow(&mut bgp);
+        clear_bgp_action(
+            &mut bgp,
+            &mut arg_words(&["10.0.0.1"]),
+            None,
+            BgpClearOp::Hard,
+        )
+        .unwrap();
+        assert!(!held(&bgp));
+        assert!(bgp.rx.try_recv().is_err(), "no Stop for a released peer");
+        assert!(bgp.peers.get(&peer_addr()).unwrap().down_reason.is_none());
+
+        clear_bgp_action(
+            &mut bgp,
+            &mut arg_words(&["10.0.0.1"]),
+            None,
+            BgpClearOp::Hard,
+        )
+        .unwrap();
+        assert!(matches!(
+            bgp.rx.try_recv(),
+            Ok(crate::bgp::Message::Event(_, crate::bgp::peer::Event::Stop))
+        ));
+    }
+
     /// A block needs `limit` to mean anything, whatever order its leaves land.
     #[tokio::test]
     async fn maximum_prefix_leaves_without_a_limit_set_no_limit() {

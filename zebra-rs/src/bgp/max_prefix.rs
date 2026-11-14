@@ -498,9 +498,10 @@ pub fn barrier_answer(
 
 /// Leave the overflow hold. Stop alone would not: Idle to Idle returns early
 /// from `fsm`, so nothing would re-arm the idle hold timer.
-pub fn clear_overflow(peer: &mut Peer) {
+pub fn clear_overflow(peer: &mut Peer) -> bool {
     peer.timer.max_prefix_restart = None;
-    if peer.max_prefix.overflow.take().is_some() {
+    let held = peer.max_prefix.overflow.take().is_some();
+    if held {
         tracing::warn!(
             peer = peer.display_name(),
             "bgp: maximum-prefix hold released",
@@ -511,6 +512,7 @@ pub fn clear_overflow(peer: &mut Peer) {
         peer.max_prefix.released = matches!(peer.origin, PeerOrigin::Dynamic { .. })
             && matches!(peer.state, State::Idle | State::Active);
     }
+    held
 }
 
 /// Remove a dynamic peer [`clear_overflow`] released: with no session to end,

@@ -793,7 +793,9 @@ mod sweep_tests {
                         let mut args = arg_words(&[&address.to_string()]);
                         clear_bgp_action(&mut bgp, &mut args, None, BgpClearOp::Hard).unwrap();
                     }
-                    _ => clear_overflow(bgp.peers.get_mut(&address).unwrap()),
+                    _ => {
+                        clear_overflow(bgp.peers.get_mut(&address).unwrap());
+                    }
                 }
             }
             if release == "commit" {

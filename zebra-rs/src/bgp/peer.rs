@@ -4409,12 +4409,18 @@ pub fn clear_bgp_action(
     for &peer_idx in &targets {
         match op {
             BgpClearOp::Hard => {
-                if let Some(peer) = bgp.peers.get_mut_by_idx(peer_idx) {
-                    peer.down_reason = Some(PeerDownReason::AdminReset);
-                    super::max_prefix::clear_overflow(peer);
-                }
+                // A peer released from the hold has no session to stop, and a
+                // passive one is Active again: a Stop could drop the
+                // connection it accepts first.
+                let released = bgp.peers.get_mut_by_idx(peer_idx).is_some_and(|peer| {
+                    let released = super::max_prefix::clear_overflow(peer);
+                    if !released {
+                        peer.down_reason = Some(PeerDownReason::AdminReset);
+                    }
+                    released
+                });
                 super::max_prefix::reap_released(bgp, peer_idx);
-                if bgp.peers.get_by_idx(peer_idx).is_some() {
+                if !released && bgp.peers.get_by_idx(peer_idx).is_some() {
                     let _ = bgp.tx.try_send(Message::Event(peer_idx, Event::Stop));
                 }
             }
