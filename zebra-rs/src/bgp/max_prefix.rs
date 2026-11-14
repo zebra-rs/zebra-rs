@@ -135,8 +135,8 @@ pub fn warn_unsupported(family: AfiSafi) {
 }
 
 /// A CE peer has no `maximum-prefix`: `clear bgp` does not reach its task, so a
-/// held peer could not be cleared. Said once, where a VRF neighbor and a group
-/// with a block meet, rather than let the group's limit look applied.
+/// held peer could not be cleared. Said rather than let the group's limit look
+/// applied.
 fn warn_vrf_neighbor(vrf: &str, addr: std::net::IpAddr, group: &str) {
     tracing::warn!(
         vrf,
@@ -146,26 +146,36 @@ fn warn_vrf_neighbor(vrf: &str, addr: std::net::IpAddr, group: &str) {
     );
 }
 
-/// [`warn_vrf_neighbor`] for each VRF neighbor of `group`, which has just got
-/// its first block.
-pub fn warn_vrf_members(bgp: &Bgp, group: &str) {
+/// [`warn_vrf_neighbor`] for every VRF neighbor this commit brought together
+/// with a group that has a block: the neighbor joined the group, or the group
+/// got its first block.
+///
+/// Judged when the commit ends, against what it started from, and not as the
+/// leaves land: a changed leaf arrives as a Delete and a Set, and a group
+/// whose only leaf is `limit` has no block between the two. A commit that only
+/// changes a block that was there warns nobody.
+pub fn warn_vrf_neighbors(bgp: &Bgp) {
+    let has_block = |groups: &BTreeMap<String, NeighborGroup>, group: &str| {
+        groups.get(group).is_some_and(|g| !g.max_prefix.is_empty())
+    };
     for (vrf, cfg) in &bgp.vrfs {
         for (addr, nbr) in &cfg.neighbors {
-            if nbr.config.neighbor_group.as_deref() == Some(group) {
+            let Some(group) = nbr.config.neighbor_group.as_deref() else {
+                continue;
+            };
+            if !has_block(&bgp.neighbor_groups, group) {
+                continue;
+            }
+            let together_before = has_block(&bgp.vrf_neighbor_group_commit_baseline, group)
+                && bgp
+                    .vrf_commit_baseline
+                    .get(vrf)
+                    .and_then(|cfg| cfg.neighbors.get(addr))
+                    .is_some_and(|nbr| nbr.config.neighbor_group.as_deref() == Some(group));
+            if !together_before {
                 warn_vrf_neighbor(vrf, *addr, group);
             }
         }
-    }
-}
-
-/// [`warn_vrf_neighbor`] when a VRF neighbor joins a group that has a block.
-pub fn warn_vrf_join(bgp: &Bgp, vrf: &str, addr: std::net::IpAddr, group: &str) {
-    if bgp
-        .neighbor_groups
-        .get(group)
-        .is_some_and(|g| !g.max_prefix.is_empty())
-    {
-        warn_vrf_neighbor(vrf, addr, group);
     }
 }
 

@@ -3745,6 +3745,8 @@ impl Bgp {
                     self.process_msg(Message::Event(ident, super::peer::Event::MaxPrefixCheck));
                 }
                 super::max_prefix::reap_all_released(self);
+                // Before the baselines go: it compares against them.
+                super::max_prefix::warn_vrf_neighbors(self);
                 self.apply_vrf_commit_diff();
                 self.vrf_commit_baseline.clear();
                 self.vrf_neighbor_group_commit_baseline.clear();
