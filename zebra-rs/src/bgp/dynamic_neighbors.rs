@@ -809,6 +809,47 @@ mod sweep_tests {
         assert_eq!(bgp.dynamic_peer_count, 1);
     }
 
+    /// A commit can release several held dynamic peers at once, as a change
+    /// to their group's block does. They all go, and one whose session came
+    /// up between the release and the commit's end stays.
+    #[tokio::test]
+    async fn a_commit_gives_back_the_slot_of_every_peer_it_released() {
+        use crate::bgp::max_prefix::{MaxPrefixExceeded, clear_overflow};
+        use crate::bgp::peer::State;
+        use crate::config::ConfigRequest;
+        use bgp_packet::{Afi, AfiSafi, Safi};
+        let over = MaxPrefixExceeded {
+            afi_safi: AfiSafi::new(Afi::Ip, Safi::Unicast),
+            count: 2,
+            limit: 1,
+        };
+        let mut bgp = fresh_bgp();
+        for address in ["10.1.0.7", "10.1.0.8", "10.1.0.9"] {
+            materialize(&mut bgp, address, "10.1.0.0/24");
+            let peer = bgp.peers.get_mut(&addr(address)).unwrap();
+            peer.max_prefix.overflow = Some(over);
+            peer.state = State::Idle;
+            clear_overflow(peer);
+        }
+        bgp.peers.get_mut(&addr("10.1.0.9")).unwrap().state = State::OpenSent;
+
+        bgp.process_cm_msg(ConfigRequest::new(vec![], ConfigOp::CommitEnd));
+
+        assert!(bgp.peers.get(&addr("10.1.0.7")).is_none());
+        assert!(bgp.peers.get(&addr("10.1.0.8")).is_none());
+        assert!(
+            bgp.peers.get(&addr("10.1.0.9")).is_some(),
+            "it has a session"
+        );
+        assert_eq!(bgp.dynamic_peer_count, 1);
+
+        // The mark went with the look: a later session end is the session-end
+        // reaper's, and a later commit removes nothing on a stale mark.
+        bgp.peers.get_mut(&addr("10.1.0.9")).unwrap().state = State::Idle;
+        bgp.process_cm_msg(ConfigRequest::new(vec![], ConfigOp::CommitEnd));
+        assert!(bgp.peers.get(&addr("10.1.0.9")).is_some());
+    }
+
     /// Revoking group authorization releases held dynamic peers, not static ones.
     #[tokio::test]
     async fn deleting_a_group_releases_its_held_dynamic_peer() {

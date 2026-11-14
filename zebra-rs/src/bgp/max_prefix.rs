@@ -537,26 +537,29 @@ pub fn reap_released(bgp: &mut Bgp, ident: usize) {
     let Some(peer) = bgp.peers.get_mut_by_idx(ident) else {
         return;
     };
-    // Still no session: one may have come up since the release.
-    if std::mem::take(&mut peer.max_prefix.released)
-        && matches!(peer.state, State::Idle | State::Active)
-    {
+    if take_released(peer) {
         let addr = peer.address;
         super::dynamic_neighbors::remove_dynamic_peers(bgp, [addr]);
     }
 }
 
-/// [`reap_released`] for every peer a commit released.
+/// Whether a peer is [`reap_released`]'s to remove, taking the mark off it.
+/// Still with no session: one may have come up since the release.
+fn take_released(peer: &mut Peer) -> bool {
+    std::mem::take(&mut peer.max_prefix.released)
+        && matches!(peer.state, State::Idle | State::Active)
+}
+
+/// [`reap_released`] for every peer a commit released, as one removal: what
+/// follows a removal, the reconcile of the transit labels, then runs once and
+/// not once per peer.
 pub fn reap_all_released(bgp: &mut Bgp) {
-    let marked: Vec<usize> = bgp
+    let gone: Vec<std::net::IpAddr> = bgp
         .peers
-        .iter_all()
-        .filter(|(_, peer)| peer.max_prefix.released)
-        .map(|(_, peer)| peer.ident)
+        .iter_mut_all()
+        .filter_map(|(_, peer)| take_released(peer).then_some(peer.address))
         .collect();
-    for ident in marked {
-        reap_released(bgp, ident);
-    }
+    super::dynamic_neighbors::remove_dynamic_peers(bgp, gone);
 }
 
 /// The effective block changed. As in FRR that ends an overflow hold. Checking
