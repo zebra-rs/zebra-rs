@@ -455,27 +455,17 @@ pub(super) fn sweep_range_peers(bgp: &mut Bgp, prefix: &IpNet) {
         .map(|peer| peer.address)
         .collect();
 
-    let mut removed_any = false;
-    for addr in victims {
-        if super::config::remove_peer_full(bgp, addr).is_some() {
-            bgp.dynamic_peer_count = bgp.dynamic_peer_count.saturating_sub(1);
-            removed_any = true;
-            // Debug, matching the rest of this module's lifecycle
-            // logging: the peer is already gone, so there is no `Peer`
-            // left to read a tracing gate from.
-            tracing::debug!(
-                peer = %addr,
-                range = %prefix,
-                "bgp: dynamic peer removed by listen-range sweep",
-            );
-        }
+    for addr in &victims {
+        // Debug, matching the rest of this module's lifecycle logging: the
+        // peer is about to go, so there is no `Peer` left to read a tracing
+        // gate from afterwards.
+        tracing::debug!(
+            peer = %addr,
+            range = %prefix,
+            "bgp: dynamic peer removed by listen-range sweep",
+        );
     }
-    if removed_any {
-        // The swept peers may have been the last next-hop-self holders for
-        // a VPNv4 / Labeled-Unicast family; re-derive the transit flags so
-        // their local labels and swap ILMs are released.
-        bgp.reconcile_transit_labels(false);
-    }
+    remove_dynamic_peers(bgp, victims);
 }
 
 #[cfg(test)]
