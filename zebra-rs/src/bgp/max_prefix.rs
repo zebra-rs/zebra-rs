@@ -326,62 +326,94 @@ impl MaxPrefixState {
     }
 }
 
-/// `bgp_maximum_prefix_overflow`, without the teardown. `None` keeps the
-/// session up. Warnings fire once per crossing.
+/// A warning [`check_family`] decided on. The caller logs it, so the peer's
+/// name is only built when there is something to log.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Notice {
+    Exceeded,
+    Threshold(u8),
+}
+
+/// `bgp_maximum_prefix_overflow`, without the teardown. The first value is
+/// `None` while the session stays up. Warnings fire once per crossing.
 fn check_family(
     state: &mut MaxPrefixState,
-    name: &str,
     family: AfiSafi,
     cfg: &MaxPrefixConfig,
     count: u64,
-) -> Option<MaxPrefixExceeded> {
-    let limit = cfg.limit?;
-    let afi = family.afi;
-    let safi = family.safi;
+) -> (Option<MaxPrefixExceeded>, Option<Notice>) {
+    let Some(limit) = cfg.limit else {
+        return (None, None);
+    };
     if count > u64::from(limit) {
-        if state.limit_warned.insert(family) {
-            tracing::warn!(
-                peer = name,
-                ?afi,
-                ?safi,
-                count,
-                limit,
-                action = if cfg.warning_only {
-                    "warning only, session stays up"
-                } else {
-                    "ending the session"
-                },
-                "bgp: maximum-prefix exceeded",
-            );
-        }
-        if cfg.warning_only {
-            return None;
-        }
-        return Some(MaxPrefixExceeded {
+        let notice = state
+            .limit_warned
+            .insert(family)
+            .then_some(Notice::Exceeded);
+        let over = (!cfg.warning_only).then_some(MaxPrefixExceeded {
             afi_safi: family,
             count,
             limit,
         });
+        return (over, notice);
     }
     state.limit_warned.remove(&family);
 
     let threshold = cfg.warning_threshold.unwrap_or(WARNING_THRESHOLD_DEFAULT);
     if count > u64::from(limit) * u64::from(threshold) / 100 {
-        if state.threshold_warned.insert(family) {
-            tracing::warn!(
-                peer = name,
-                ?afi,
-                ?safi,
-                count,
-                limit,
-                threshold,
-                "bgp: maximum-prefix warning threshold reached",
-            );
-        }
-    } else {
-        state.threshold_warned.remove(&family);
+        let notice = state
+            .threshold_warned
+            .insert(family)
+            .then_some(Notice::Threshold(threshold));
+        return (None, notice);
     }
-    None
+    state.threshold_warned.remove(&family);
+    (None, None)
+}
+
+/// Judge one family's counts against its block: the check without a pool and
+/// the barrier's last answer share it, so the two cannot drift apart.
+fn judge(
+    state: &mut MaxPrefixState,
+    name: impl Fn() -> String,
+    family: AfiSafi,
+    cfg: &MaxPrefixConfig,
+    accepted: usize,
+    received: usize,
+) -> Option<MaxPrefixExceeded> {
+    let count = cfg.counted(accepted, received);
+    if cfg.force {
+        state.received.insert(family, received as u64);
+    }
+    let (over, notice) = check_family(state, family, cfg, count);
+    let (afi, safi) = (family.afi, family.safi);
+    let limit = cfg.limit.unwrap_or_default();
+    match notice {
+        Some(Notice::Exceeded) => tracing::warn!(
+            peer = name(),
+            ?afi,
+            ?safi,
+            count,
+            limit,
+            action = if cfg.warning_only {
+                "warning only, session stays up"
+            } else {
+                "ending the session"
+            },
+            "bgp: maximum-prefix exceeded",
+        ),
+        Some(Notice::Threshold(threshold)) => tracing::warn!(
+            peer = name(),
+            ?afi,
+            ?safi,
+            count,
+            limit,
+            threshold,
+            "bgp: maximum-prefix warning threshold reached",
+        ),
+        None => {}
+    }
+    over
 }
 
 fn is_pooled(family: AfiSafi) -> bool {
@@ -421,11 +453,11 @@ pub fn check_limits(
     {
         return None;
     }
-    let name = peer.display_name();
     let mut exceeded = None;
     let mut need_barrier = false;
-    for (family, cfg) in &peer.config.max_prefix {
-        if pool.is_some() && is_pooled(*family) {
+    let name = || Peer::name_of(peer.ifname.as_deref(), &peer.address);
+    for (&family, cfg) in &peer.config.max_prefix {
+        if pool.is_some() && is_pooled(family) {
             need_barrier = true;
             continue;
         }
@@ -435,11 +467,7 @@ pub fn check_limits(
         } else {
             0
         };
-        let count = cfg.counted(accepted, received);
-        if cfg.force {
-            peer.max_prefix.received.insert(*family, received as u64);
-        }
-        let over = check_family(&mut peer.max_prefix, &name, *family, cfg, count);
+        let over = judge(&mut peer.max_prefix, name, family, cfg, accepted, received);
         exceeded = exceeded.or(over);
     }
     if exceeded.is_none()
@@ -480,15 +508,17 @@ pub fn barrier_answer(
         return None;
     }
     let family = AfiSafi::new(Afi::Ip, Safi::Unicast);
-    if let Some(cfg) = peer.config.max_prefix.get(&family).copied() {
-        let name = peer.display_name();
-        let count = cfg.counted(accepted, received);
-        if cfg.force {
-            peer.max_prefix.received.insert(family, received as u64);
-        }
-        if let Some(over) = check_family(&mut peer.max_prefix, &name, family, &cfg, count) {
-            return Some(Event::MaxPrefixExceeded(over));
-        }
+    if let Some(cfg) = peer.config.max_prefix.get(&family).copied()
+        && let Some(over) = judge(
+            &mut peer.max_prefix,
+            || Peer::name_of(peer.ifname.as_deref(), &peer.address),
+            family,
+            &cfg,
+            accepted,
+            received,
+        )
+    {
+        return Some(Event::MaxPrefixExceeded(over));
     }
     if rerun && let Some(pool) = pool {
         start_barrier(ident, peer, pool);
@@ -761,7 +791,7 @@ mod tests {
     }
 
     fn eval(state: &mut MaxPrefixState, cfg: &MaxPrefixConfig, count: u64) -> bool {
-        check_family(state, "p", v4(), cfg, count).is_some()
+        check_family(state, v4(), cfg, count).0.is_some()
     }
 
     #[test]

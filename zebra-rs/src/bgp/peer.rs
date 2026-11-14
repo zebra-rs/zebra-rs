@@ -1537,9 +1537,15 @@ impl Peer {
     /// otherwise. FRR renders unnumbered peers the same way in
     /// `show bgp summary`.
     pub fn display_name(&self) -> String {
-        match &self.ifname {
-            Some(name) => name.clone(),
-            None => self.address.to_string(),
+        Self::name_of(self.ifname.as_deref(), &self.address)
+    }
+
+    /// [`Self::display_name`] from the two fields it reads, for a caller that
+    /// holds another field of the peer mutably.
+    pub fn name_of(ifname: Option<&str>, address: &IpAddr) -> String {
+        match ifname {
+            Some(name) => name.to_string(),
+            None => address.to_string(),
         }
     }
 
