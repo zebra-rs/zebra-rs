@@ -655,7 +655,7 @@ pub(super) fn resolve_vrf_peer_config(
         .neighbor_group
         .as_deref()
         .and_then(|name| groups.get(name))
-        .is_some_and(|group| group.afi_safi.values().any(|e| e.maximum_prefix.is_some()))
+        .is_some_and(|group| !group.max_prefix.is_empty())
     {
         tracing::warn!(
             group = config.neighbor_group.as_deref(),
@@ -1821,7 +1821,6 @@ mod tests {
             GroupAfiSafi {
                 enabled: true,
                 add_path: None,
-                maximum_prefix: None,
                 next_hop_self: Some(true),
             },
         );
@@ -1927,7 +1926,6 @@ mod tests {
             GroupAfiSafi {
                 enabled: true,
                 add_path: None,
-                maximum_prefix: None,
                 next_hop_self: None,
             },
         );

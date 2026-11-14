@@ -239,9 +239,6 @@ pub struct GroupAfiSafi {
     /// carry an ADD-PATH capability. Without the group opinion the
     /// capability cannot be requested for dynamic peers at all.
     pub add_path: Option<AddPathSendReceive>,
-    /// Per-family `maximum-prefix` block inherited by members. A member's
-    /// own block replaces it whole.
-    pub maximum_prefix: Option<super::max_prefix::MaxPrefixConfig>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -254,6 +251,11 @@ pub struct NeighborGroup {
     /// (the peer's own default / explicit setting stands). The entry
     /// also carries the optional per-family `next-hop-self` opinion.
     pub afi_safi: BTreeMap<AfiSafi, GroupAfiSafi>,
+    /// Per-family `maximum-prefix` blocks inherited by members. A member's
+    /// own block replaces one whole. Kept out of [`Self::afi_safi`]: a changed
+    /// `enabled` is applied as a Delete then a Set, and the Delete removes
+    /// that entry while the block's lines stay out of the diff.
+    pub max_prefix: BTreeMap<AfiSafi, super::max_prefix::MaxPrefixConfig>,
     /// Whole-session knobs inheritable by members.
     pub knobs: InheritableKnobs,
 }
@@ -375,6 +377,7 @@ pub fn config_neighbor_group_afi_safi(bgp: &mut Bgp, mut args: Args, op: ConfigO
         ConfigOp::Delete => {
             if let Some(group) = bgp.neighbor_groups.get_mut(&name) {
                 group.afi_safi.remove(&family);
+                group.max_prefix.remove(&family);
             }
             sweep_group_afi_safi(bgp, &name);
         }
@@ -561,17 +564,19 @@ fn config_neighbor_group_maximum_prefix(
         super::max_prefix::warn_unsupported(family);
         return None;
     }
-    let group = bgp.neighbor_groups.entry(name.clone()).or_default();
-    let entry = if op.is_set() {
-        group.afi_safi.entry(family).or_default()
+    // A delete must not make again a group that was removed before it.
+    let group = if op.is_set() {
+        bgp.neighbor_groups.entry(name.clone()).or_default()
     } else {
-        // A new entry would mean `enabled false`, which forces the family
-        // off for every member.
-        group.afi_safi.get_mut(&family)?
+        bgp.neighbor_groups.get_mut(&name)?
     };
-    let mut block = entry.maximum_prefix.unwrap_or_default();
+    let mut block = group.max_prefix.get(&family).copied().unwrap_or_default();
     set(&mut block, op, &mut args)?;
-    entry.maximum_prefix = (block != Default::default()).then_some(block);
+    if block == Default::default() {
+        group.max_prefix.remove(&family);
+    } else {
+        group.max_prefix.insert(family, block);
+    }
     sweep_members(bgp, &name, |groups, peer| {
         super::max_prefix::refresh(groups, peer);
         false
@@ -605,8 +610,7 @@ pub fn resolve_max_prefix(
                 .neighbor_group
                 .as_deref()
                 .and_then(|name| groups.get(name))
-                .and_then(|group| group.afi_safi.get(&family))
-                .and_then(|entry| entry.maximum_prefix)
+                .and_then(|group| group.max_prefix.get(&family).copied())
                 .filter(|block| block.limit.is_some())
         })
 }
@@ -639,7 +643,7 @@ pub fn recompute_peer_max_prefix(
         .as_deref()
         .and_then(|name| groups.get(name))
     {
-        families.extend(group.afi_safi.keys().copied());
+        families.extend(group.max_prefix.keys().copied());
     }
     families.sort_unstable();
     families.dedup();

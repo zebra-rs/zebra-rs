@@ -844,14 +844,15 @@ mod sweep_tests {
                     count: 2,
                     limit: 1,
                 };
-                bgp.neighbor_groups.get_mut("A").unwrap().afi_safi.insert(
+                let group = bgp.neighbor_groups.get_mut("A").unwrap();
+                group.afi_safi.insert(
                     family,
                     GroupAfiSafi {
                         enabled: true,
-                        maximum_prefix: Some(block),
                         ..Default::default()
                     },
                 );
+                group.max_prefix.insert(family, block);
                 materialize(&mut bgp, "10.1.0.7", "10.1.0.0/24");
                 let static_addr = addr("10.1.0.8");
                 let static_peer = Peer::new(

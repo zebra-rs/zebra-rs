@@ -10765,6 +10765,52 @@ mod neighbor_group_wiring_tests {
         assert!(!bgp.neighbor_groups["G"].afi_safi.contains_key(&v4()));
     }
 
+    /// A changed `enabled` arrives as a Delete then a Set. The block's lines
+    /// are not in that diff, so the block must outlive the entry's Delete,
+    /// and a held member must stay held.
+    #[tokio::test]
+    async fn group_maximum_prefix_survives_a_change_to_enabled() {
+        let mut bgp = fresh_bgp();
+        group_member_with_limit(&mut bgp);
+        hold_in_overflow(&mut bgp);
+        for (old, new) in [("true", "false"), ("false", "true")] {
+            config_neighbor_group_afi_safi_enabled(
+                &mut bgp,
+                arg_words(&["G", "ipv4", old]),
+                ConfigOp::Delete,
+            )
+            .unwrap();
+            config_neighbor_group_afi_safi_enabled(
+                &mut bgp,
+                arg_words(&["G", "ipv4", new]),
+                ConfigOp::Set,
+            )
+            .unwrap();
+        }
+        let peer = bgp.peers.get(&peer_addr()).unwrap();
+        assert_eq!(
+            peer.config.max_prefix.get(&v4()).and_then(|b| b.limit),
+            Some(10)
+        );
+        assert!(held(&bgp));
+    }
+
+    /// Leaf deletes can land after the group's own delete.
+    #[tokio::test]
+    async fn group_maximum_prefix_delete_does_not_make_the_group_again() {
+        use super::super::neighbor_group::config_neighbor_group_maximum_prefix_limit;
+
+        let mut bgp = fresh_bgp();
+        group_member_with_limit(&mut bgp);
+        config_neighbor_group(&mut bgp, arg_words(&["G"]), ConfigOp::Delete).unwrap();
+        let _ = config_neighbor_group_maximum_prefix_limit(
+            &mut bgp,
+            arg_words(&["G", "ipv4", "10"]),
+            ConfigOp::Delete,
+        );
+        assert!(!bgp.neighbor_groups.contains_key("G"));
+    }
+
     #[tokio::test]
     async fn maximum_prefix_refuses_a_family_it_cannot_count() {
         let mut bgp = fresh_bgp();
@@ -10840,19 +10886,16 @@ mod neighbor_group_wiring_tests {
         assert!(held(&bgp));
     }
 
-    /// `enabled` lands before the block's leaves on a delete and takes the
-    /// family's entry with it, so the release must not wait for them.
+    /// A whole-entry delete skips the per-leaf callbacks, so the family's
+    /// delete takes the block with it and releases the member.
     #[tokio::test]
     async fn deleting_a_group_family_releases_a_member() {
         let mut bgp = fresh_bgp();
         group_member_with_limit(&mut bgp);
         hold_in_overflow(&mut bgp);
-        config_neighbor_group_afi_safi_enabled(
-            &mut bgp,
-            arg_words(&["G", "ipv4", "true"]),
-            ConfigOp::Delete,
-        )
-        .unwrap();
+        config_neighbor_group_afi_safi(&mut bgp, arg_words(&["G", "ipv4"]), ConfigOp::Delete)
+            .unwrap();
+        assert!(bgp.neighbor_groups["G"].max_prefix.is_empty());
         assert!(!held(&bgp));
     }
 
