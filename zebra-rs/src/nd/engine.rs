@@ -1066,6 +1066,7 @@ mod tests {
     use super::fixtures::*;
     use super::*;
     use crate::nd::send::RaSendConfig;
+    use crate::test_log::logs;
     use ipnet::{IpNet, Ipv6Net};
     use nd_packet::{NaFlags, NeighborAdvert, NeighborSolicit, RouterAdvert, RouterSolicit};
     use netlink_packet_route::link::LinkFlags;
@@ -1085,69 +1086,6 @@ mod tests {
             Ok(())
         });
         out
-    }
-
-    /// The log lines `f` emits on this thread, as `LEVEL message`.
-    ///
-    /// Captured by one global layer rather than a scoped `with_default`
-    /// subscriber: tracing caches each callsite's interest process-wide,
-    /// so a scoped subscriber can miss a callsite another test thread
-    /// registered while there was none, and the test saw no line at all
-    /// under the full parallel suite. This layer is installed once,
-    /// answers every callsite `sometimes`, and records only on a thread
-    /// that is capturing.
-    fn logs(f: impl FnOnce()) -> String {
-        use std::cell::RefCell;
-        use std::fmt::Write;
-        use std::sync::Once;
-        use tracing::field::{Field, Visit};
-        use tracing::subscriber::Interest;
-        use tracing::{Event, Metadata, Subscriber};
-        use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
-
-        thread_local! {
-            static CAPTURE: RefCell<Option<String>> = const { RefCell::new(None) };
-        }
-
-        struct Message<'a>(&'a mut String);
-        impl Visit for Message<'_> {
-            fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
-                if field.name() == "message" {
-                    let _ = write!(self.0, "{value:?}");
-                }
-            }
-        }
-
-        struct Capture;
-        impl<S: Subscriber> Layer<S> for Capture {
-            fn register_callsite(&self, _: &'static Metadata<'static>) -> Interest {
-                Interest::sometimes()
-            }
-            fn enabled(&self, _: &Metadata<'_>, _: Context<'_, S>) -> bool {
-                CAPTURE.with(|c| c.borrow().is_some())
-            }
-            fn on_event(&self, event: &Event<'_>, _: Context<'_, S>) {
-                CAPTURE.with(|c| {
-                    if let Some(out) = c.borrow_mut().as_mut() {
-                        let _ = write!(out, "{} ", event.metadata().level());
-                        event.record(&mut Message(out));
-                        out.push('\n');
-                    }
-                });
-            }
-        }
-
-        static INSTALL: Once = Once::new();
-        INSTALL.call_once(|| {
-            tracing::subscriber::set_global_default(tracing_subscriber::registry().with(Capture))
-                .expect("no other global subscriber in unit tests");
-        });
-        // A callsite first hit before the layer was installed may still
-        // cache the interest it had with no subscriber.
-        tracing::callsite::rebuild_interest_cache();
-        CAPTURE.with(|c| *c.borrow_mut() = Some(String::new()));
-        f();
-        CAPTURE.with(|c| c.borrow_mut().take()).unwrap_or_default()
     }
 
     fn ll(s: &str) -> Ipv6Addr {

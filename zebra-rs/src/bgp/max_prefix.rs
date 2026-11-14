@@ -169,33 +169,6 @@ pub fn warn_vrf_join(bgp: &Bgp, vrf: &str, addr: std::net::IpAddr, group: &str) 
     }
 }
 
-/// The WARN lines `f` logs, for tests of log-once behavior.
-#[cfg(test)]
-pub fn warnings_during(f: impl FnOnce()) -> String {
-    use std::sync::{Arc, Mutex};
-    #[derive(Clone)]
-    struct Sink(Arc<Mutex<Vec<u8>>>);
-    impl std::io::Write for Sink {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(buf);
-            Ok(buf.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-    let sink = Sink(Arc::default());
-    let writer = sink.clone();
-    let subscriber = tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::WARN)
-        .with_ansi(false)
-        .with_writer(move || writer.clone())
-        .finish();
-    tracing::subscriber::with_default(subscriber, f);
-    let out = sink.0.lock().unwrap().clone();
-    String::from_utf8(out).unwrap()
-}
-
 /// Record one leaf of the neighbor's own block. The effective value is the
 /// caller's to re-resolve, since it may come from the group.
 pub fn stage_leaf(
@@ -721,9 +694,7 @@ mod tests {
     use std::net::Ipv4Addr;
 
     use super::*;
-    use crate::bgp::peer::{
-        fsm_idle_hold_timer_expires, fsm_next_state, fsm_start, test_peer, test_peer_with_rx,
-    };
+    use crate::bgp::peer::{fsm_idle_hold_timer_expires, fsm_next_state, fsm_start, test_peer};
     use crate::bgp::route::{BgpRib, BgpRibType};
 
     fn v4() -> AfiSafi {
@@ -980,17 +951,24 @@ mod tests {
         assert!(peer.max_prefix.limit_warned.is_empty());
     }
 
-    /// `limit` and `warning-only` of one commit land as two callbacks. Nothing
-    /// may check the limit between them.
+    /// A changed block is the commit's to check, once, when it ends. That
+    /// nothing checks it before is
+    /// `an_update_inside_the_commit_waits_for_its_end`.
     #[tokio::test]
     async fn config_changes_are_checked_when_the_commit_ends() {
-        let (mut peer, mut rx) = test_peer_with_rx(false);
-        peer.state = State::Established;
+        let mut peer = established(limit(10));
         block_changed(&mut peer);
-        assert!(rx.try_recv().is_err(), "no check inside the commit");
+        let mut down = test_peer(false);
+        down.address = "10.0.0.3".parse().unwrap();
+        block_changed(&mut down);
 
         let (mut peers, ident) = peers_with(peer);
-        assert_eq!(commit_end(&mut peers), vec![ident]);
+        peers.insert(down.address, down);
+        assert_eq!(
+            commit_end(&mut peers),
+            vec![ident],
+            "only a session that is up has anything to check"
+        );
         assert!(
             commit_end(&mut peers).is_empty(),
             "a later commit changed nothing"
@@ -1067,28 +1045,6 @@ mod tests {
             check_limits(ident, &shard, &mut peers, None),
             Some(Event::MaxPrefixExceeded(_))
         ));
-    }
-
-    /// A full event queue does not hold the check back: the caller runs it.
-    #[tokio::test]
-    async fn a_full_queue_does_not_hold_the_check_back() {
-        let (mut peer, _rx) = test_peer_with_rx(false);
-        peer.state = State::Established;
-        block_changed(&mut peer);
-        while peer
-            .tx
-            .try_send(super::super::Message::Event(1, Event::Start))
-            .is_ok()
-        {}
-        let (mut peers, ident) = peers_with(peer);
-        assert_eq!(commit_end(&mut peers), vec![ident]);
-        assert!(
-            !peers
-                .get_by_idx(ident)
-                .unwrap()
-                .max_prefix
-                .check_at_commit_end
-        );
     }
 
     #[tokio::test]

@@ -4559,10 +4559,12 @@ mod bfd_config_tests {
     }
 }
 
-/// A peer and the receiving end of its event channel.
+/// Peer wired to a parked event channel — timer callbacks and
+/// dial tasks can send without erroring, and nothing reads.
 #[cfg(test)]
-pub(super) fn test_peer_with_rx(passive: bool) -> (Peer, mpsc::Receiver<Message>) {
+pub(super) fn test_peer(passive: bool) -> Peer {
     let (tx, rx) = mpsc::channel::<Message>(64);
+    Box::leak(Box::new(rx));
     let mut peer = Peer::new(
         1,
         65001,
@@ -4575,15 +4577,6 @@ pub(super) fn test_peer_with_rx(passive: bool) -> (Peer, mpsc::Receiver<Message>
     );
     peer.config.transport.passive = passive;
     peer.first_start = false;
-    (peer, rx)
-}
-
-/// Peer wired to a parked event channel — timer callbacks and
-/// dial tasks can send without erroring, and nothing reads.
-#[cfg(test)]
-pub(super) fn test_peer(passive: bool) -> Peer {
-    let (peer, rx) = test_peer_with_rx(passive);
-    Box::leak(Box::new(rx));
     peer
 }
 
@@ -5462,11 +5455,10 @@ mod fsm_idle_hold_tests {
         assert_eq!(next, State::OpenConfirm);
     }
 
-    /// An UPDATE while a KEEPALIVE is held shows the remote Established
-    /// on the primary: it cannot be on the parked conn, whose OPEN we
-    /// have not answered. The handshake completes and the UPDATE is
-    /// processed, where it used to be dropped as from a session not up.
-    /// With no KEEPALIVE held an UPDATE in OpenConfirm is still dropped.
+    /// A cause parked before the session came up is dropped when the
+    /// UPDATE that trips the limit is also the one that completed the
+    /// handshake. A cause set on a session that was already Established
+    /// is left alone.
     #[tokio::test]
     async fn a_parked_cause_does_not_label_a_max_prefix_teardown() {
         let (mut peer, _primary_id, _collision_id) = peer_with_collision();
@@ -5486,6 +5478,11 @@ mod fsm_idle_hold_tests {
         );
     }
 
+    /// An UPDATE while a KEEPALIVE is held shows the remote Established
+    /// on the primary: it cannot be on the parked conn, whose OPEN we
+    /// have not answered. The handshake completes and the UPDATE is
+    /// processed, where it used to be dropped as from a session not up.
+    /// With no KEEPALIVE held an UPDATE in OpenConfirm is still dropped.
     #[tokio::test]
     async fn an_update_completes_a_held_keepalive() {
         let (mut peer, primary_id, _collision_id) = peer_with_collision();

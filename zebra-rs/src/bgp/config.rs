@@ -10748,11 +10748,17 @@ mod neighbor_group_wiring_tests {
         assert_eq!(limit(&bgp), None, "no block left, no limit");
     }
 
-    /// `enabled: false` forces the family off, so a delete must not create the
-    /// entry: leaves of a deleted `afi-safi` can land after `enabled`.
+    /// The leaves of a deleted `afi-safi` can land after the entry's own
+    /// delete has taken the block, and must leave nothing behind: an entry
+    /// would mean `enabled: false`, which forces the family off, and an empty
+    /// block would pass for the group's first, so that the real first one
+    /// warns no VRF neighbor.
     #[tokio::test]
-    async fn group_maximum_prefix_delete_does_not_create_the_family() {
-        use super::super::neighbor_group::config_neighbor_group_maximum_prefix_limit;
+    async fn group_maximum_prefix_delete_leaves_neither_a_family_nor_a_block() {
+        use super::super::neighbor_group::{
+            config_neighbor_group_maximum_prefix_limit,
+            config_neighbor_group_maximum_prefix_warning_only,
+        };
 
         let mut bgp = fresh_bgp();
         config_neighbor_group_remote_as(&mut bgp, arg_words(&["G", "65000"]), ConfigOp::Set)
@@ -10762,7 +10768,14 @@ mod neighbor_group_wiring_tests {
             arg_words(&["G", "ipv4", "10"]),
             ConfigOp::Delete,
         );
-        assert!(!bgp.neighbor_groups["G"].afi_safi.contains_key(&v4()));
+        let _ = config_neighbor_group_maximum_prefix_warning_only(
+            &mut bgp,
+            arg_words(&["G", "ipv4"]),
+            ConfigOp::Delete,
+        );
+        let group = &bgp.neighbor_groups["G"];
+        assert!(!group.afi_safi.contains_key(&v4()));
+        assert!(group.max_prefix.is_empty(), "{:?}", group.max_prefix);
     }
 
     /// A changed `enabled` arrives as a Delete then a Set. The block's lines
@@ -10799,15 +10812,15 @@ mod neighbor_group_wiring_tests {
     /// block meet, and names the VRF and the neighbor.
     #[tokio::test]
     async fn the_vrf_warning_is_logged_once_where_group_and_neighbor_meet() {
-        use super::super::max_prefix::warnings_during;
         use super::super::neighbor_group::{
             config_neighbor_group_maximum_prefix_limit,
             config_neighbor_group_maximum_prefix_warning_threshold,
         };
         use super::super::vrf_config::config_vrf_neighbor_neighbor_group;
+        use crate::test_log::warnings;
 
         let mut bgp = fresh_bgp();
-        let logged = warnings_during(|| {
+        let logged = warnings(|| {
             config_neighbor_group_maximum_prefix_limit(
                 &mut bgp,
                 arg_words(&["G", "ipv4", "10"]),
@@ -10817,7 +10830,7 @@ mod neighbor_group_wiring_tests {
         });
         assert!(logged.is_empty(), "no VRF neighbor yet: {logged}");
 
-        let logged = warnings_during(|| {
+        let logged = warnings(|| {
             config_vrf_neighbor_neighbor_group(
                 &mut bgp,
                 arg_words(&["V", "192.0.2.1", "G"]),
@@ -10835,7 +10848,7 @@ mod neighbor_group_wiring_tests {
         );
         assert!(logged.contains("192.0.2.1"), "{logged}");
 
-        let logged = warnings_during(|| {
+        let logged = warnings(|| {
             config_neighbor_group_maximum_prefix_warning_threshold(
                 &mut bgp,
                 arg_words(&["G", "ipv4", "80"]),
@@ -10850,14 +10863,14 @@ mod neighbor_group_wiring_tests {
     /// joined it.
     #[tokio::test]
     async fn the_vrf_warning_is_logged_when_the_group_gets_its_first_block() {
-        use super::super::max_prefix::warnings_during;
         use super::super::neighbor_group::config_neighbor_group_maximum_prefix_limit;
         use super::super::vrf_config::config_vrf_neighbor_neighbor_group;
+        use crate::test_log::warnings;
 
         let mut bgp = fresh_bgp();
         config_neighbor_group_remote_as(&mut bgp, arg_words(&["G", "65000"]), ConfigOp::Set)
             .unwrap();
-        let logged = warnings_during(|| {
+        let logged = warnings(|| {
             config_vrf_neighbor_neighbor_group(
                 &mut bgp,
                 arg_words(&["V", "192.0.2.1", "G"]),
@@ -10866,7 +10879,7 @@ mod neighbor_group_wiring_tests {
             .unwrap();
         });
         assert!(logged.is_empty(), "{logged}");
-        let logged = warnings_during(|| {
+        let logged = warnings(|| {
             config_neighbor_group_maximum_prefix_limit(
                 &mut bgp,
                 arg_words(&["G", "ipv4", "10"]),
@@ -10894,6 +10907,51 @@ mod neighbor_group_wiring_tests {
             ConfigOp::Delete,
         );
         assert!(!bgp.neighbor_groups.contains_key("G"));
+    }
+
+    /// A commit that lowers a quiet peer's limit below what it already holds
+    /// checks it itself when it ends: no UPDATE is coming to do it, and a
+    /// check sent through the event queue is refused when that is full.
+    #[tokio::test]
+    async fn a_lowered_limit_is_checked_by_the_commit_that_lowers_it() {
+        use crate::bgp::Message;
+        use crate::bgp::peer::{Event, State};
+        use crate::bgp::route::{BgpRib, BgpRibType};
+        use crate::config::ConfigRequest;
+
+        let mut bgp = fresh_bgp();
+        config_peer(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+        let peer = bgp.peers.get_mut(&peer_addr()).unwrap();
+        peer.state = State::Established;
+        let ident = peer.ident;
+        for prefix in ["198.18.0.0/24", "198.18.1.0/24"] {
+            let row = BgpRib::new_arc(
+                ident,
+                "10.0.0.1".parse().unwrap(),
+                BgpRibType::EBGP,
+                0,
+                0,
+                std::sync::Arc::new(Default::default()),
+                None,
+                None,
+                false,
+            );
+            bgp.shard.update(None, prefix.parse().unwrap(), row);
+        }
+
+        bgp.process_cm_msg(ConfigRequest::new(vec![], ConfigOp::CommitStart));
+        config_maximum_prefix_limit(
+            &mut bgp,
+            arg_words(&["10.0.0.1", "ipv4", "1"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+        assert!(!held(&bgp), "the block may be half applied");
+        while bgp.tx.try_send(Message::Event(ident, Event::Start)).is_ok() {}
+        bgp.process_cm_msg(ConfigRequest::new(vec![], ConfigOp::CommitEnd));
+
+        assert!(held(&bgp), "two paths against a limit of one");
+        assert_eq!(bgp.peers.get(&peer_addr()).unwrap().state, State::Idle);
     }
 
     #[tokio::test]

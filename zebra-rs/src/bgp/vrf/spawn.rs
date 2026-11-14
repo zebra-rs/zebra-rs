@@ -2223,7 +2223,7 @@ mod tests {
         let mut n = nbr(Some(65001));
         n.config.neighbor_group = Some("G".to_string());
         m.insert(diff_addr("192.0.2.1"), n);
-        let logged = crate::bgp::max_prefix::warnings_during(|| {
+        let logged = crate::test_log::warnings(|| {
             compute_vrf_neighbor_diff(&m, &groups, &m.clone(), &groups);
         });
         assert!(logged.is_empty(), "{logged}");
