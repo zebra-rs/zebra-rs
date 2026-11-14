@@ -105,6 +105,15 @@ struct Cli {
 
     #[arg(
         long,
+        value_name = "PID",
+        requires = "timer",
+        help = "With --timer: the vty shell's own pid. The timer signals only that process, \
+                and only while it is still the timer's parent"
+    )]
+    parent: Option<i32>,
+
+    #[arg(
+        long,
         help = "Deprecated and ignored; the daemon always authenticates enable against root."
     )]
     auth_user: Option<String>,
@@ -145,6 +154,22 @@ const EXIT_UNKNOWN: i32 = 5;
 /// Metadata key the daemon puts on a refusal that is not for want of the
 /// admin role (the uid is not on its allow-list).
 const DENIED_KEY: &str = "zebra-rs-denied";
+
+/// A `show` stream ended in an error after part of the output: the
+/// warning is already on stdout, after that output.
+#[derive(Debug)]
+struct CutShort {
+    /// Lost the daemon, rather than an error of the daemon's or ours.
+    lost: bool,
+}
+
+impl std::fmt::Display for CutShort {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "output cut short")
+    }
+}
+
+impl std::error::Error for CutShort {}
 
 /// The daemon answered `-a` without the admin role's time.
 #[derive(Debug)]
@@ -310,20 +335,36 @@ async fn show(cli: Cli, port: Option<u32>, paths: Vec<CommandPath>) -> Result<()
     let mut stdout = io::stdout();
     let mut stream = client.show(request).await?.into_inner();
     println!("Show");
+    let mut at_line_start = true;
     while let Some(reply) = stream.next().await {
         let reply = match reply {
             Ok(reply) => reply,
-            // Lost the daemon: what was printed is all the operator gets,
-            // so say it is cut short rather than pass it off as the whole
-            // answer.
-            Err(status) if lost_connection(&status) => {
+            // The daemon's own end: no show handler had output for the
+            // line. Nothing is missing.
+            Err(status) if status.code() == tonic::Code::NotFound => break,
+            // Anything else leaves what was printed short of the answer
+            // (the daemon lost, a chunk over the decode limit). Say so
+            // after it, on stdout: the vty pages stdout only once we
+            // exit, so a warning on stderr would come out above the
+            // output and scroll away.
+            Err(status) => {
+                let lost = lost_connection(&status);
+                let warning = if lost {
+                    Unreachable::lost(&uri, &status, true).to_string()
+                } else {
+                    format!("% Output cut short: {}", status.message())
+                };
+                let lead = if at_line_start { "" } else { "\n" };
+                stdout
+                    .write_all(format!("{lead}{warning}\n").as_bytes())
+                    .await?;
                 stdout.flush().await?;
-                return Err(Unreachable::lost(&uri, &status, true).into());
+                return Err(CutShort { lost }.into());
             }
-            // The daemon's own answer (NotFound: no show handler had
-            // output for the line) ends the output, as it always did.
-            Err(_) => break,
         };
+        if let Some(last) = reply.str.as_bytes().last() {
+            at_line_start = *last == b'\n';
+        }
         stdout.write_all(reply.str.as_bytes()).await?;
     }
     stdout.flush().await?;
@@ -441,15 +482,25 @@ async fn probe(cli: &Cli) -> Result<ExecReply> {
 /// host` keeps its pid but is now another program, which the death
 /// signal does not cover: the parent's executable must also be the one
 /// it was.
-fn timer(secs: u64) -> i32 {
+fn timer(secs: u64, shell: Option<libc::pid_t>) -> i32 {
     // SAFETY: getppid, prctl and kill are plain syscalls on integers.
     let parent = unsafe { libc::getppid() };
+    // The shell names itself (`--parent $$`): a vty may be PID 1 in its
+    // container, which is also what an orphaned timer's parent reads as.
+    // Without the name, a parent of 1 can only be an orphan's.
+    match shell {
+        Some(pid) if pid != parent => return 0,
+        None if parent <= 1 => return 0,
+        _ => {}
+    }
+    // prctl reads its second argument as an unsigned long. Without the
+    // death signal the timer could outlive the shell: no timer then.
     #[cfg(target_os = "linux")]
-    unsafe {
-        libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
+    if unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL as libc::c_ulong) } != 0 {
+        return 0;
     }
     // The parent may have died before prctl took effect.
-    if parent <= 1 || unsafe { libc::getppid() } != parent {
+    if unsafe { libc::getppid() } != parent {
         return 0;
     }
     // Unknown means it cannot be checked later: do not signal at all.
@@ -578,7 +629,7 @@ async fn enable(cli: Cli) -> i32 {
         }
         // Lost the daemon after connecting: the same news as not reaching
         // it, and the shell says nothing more for exit 3.
-        Err(status) if status.code() == tonic::Code::Unavailable => {
+        Err(status) if lost_connection(&status) => {
             eprintln!("{}", Unreachable::lost(&uri, &status, false));
             EXIT_UNREACHABLE
         }
@@ -677,7 +728,7 @@ async fn disable(cli: Cli) -> i32 {
             println!("% Disabled");
             0
         }
-        Err(status) if status.code() == tonic::Code::Unavailable => {
+        Err(status) if lost_connection(&status) => {
             eprintln!("{}", Unreachable::lost(&uri, &status, false));
             EXIT_UNREACHABLE
         }
@@ -715,6 +766,14 @@ fn failure_code(uri: &str, err: &anyhow::Error) -> i32 {
         eprintln!("{unreachable}");
         return EXIT_UNREACHABLE;
     }
+    // Already said, after the output it cut short.
+    if let Some(cut) = err.downcast_ref::<CutShort>() {
+        return if cut.lost {
+            EXIT_UNREACHABLE
+        } else {
+            EXIT_FAILURE
+        };
+    }
     if err.downcast_ref::<NoLease>().is_some() {
         return EXIT_UNKNOWN;
     }
@@ -727,16 +786,20 @@ fn failure_code(uri: &str, err: &anyhow::Error) -> i32 {
                 return EXIT_FAILURE;
             }
             // Only a refusal for want of the role: the shell takes it as
-            // the role having lapsed. Unauthenticated means no session
-            // at all (a TCP endpoint carries no peer credentials), which
-            // no role would cure.
+            // the role having lapsed, or as `configure` needing it.
             tonic::Code::PermissionDenied => return EXIT_DENIED,
             // Connected, then lost the daemon (stopped mid-call).
-            tonic::Code::Unavailable => {
+            _ if lost_connection(status) => {
                 eprintln!("{}", Unreachable::lost(uri, status, false));
                 return EXIT_UNREACHABLE;
             }
-            _ => {}
+            // Any other refusal is the daemon's to explain: no session
+            // (a TCP endpoint has no peer credentials), a client outside
+            // its PID namespace, /proc unreadable.
+            _ => {
+                eprintln!("% {}", status.message());
+                return EXIT_FAILURE;
+            }
         }
     }
     EXIT_FAILURE
@@ -780,7 +843,7 @@ fn main() -> Result<()> {
     // The timer sleeps for up to the whole admin lease; it needs no
     // runtime and its threads.
     if let Some(secs) = cli.timer {
-        std::process::exit(timer(secs));
+        std::process::exit(timer(secs, cli.parent));
     }
 
     // One request per run: a thread pool would only cost start-up time,
@@ -818,9 +881,28 @@ mod tests {
     #[test]
     fn lost_daemon_is_unreachable() {
         assert_eq!(code_of(tonic::Status::unavailable("x")), EXIT_UNREACHABLE);
+        // A dropped connection can surface as an h2 error or a cancel.
+        assert_eq!(code_of(tonic::Status::unknown("h2")), EXIT_UNREACHABLE);
+        assert_eq!(code_of(tonic::Status::cancelled("x")), EXIT_UNREACHABLE);
         let refused =
             anyhow::Error::new(std::io::Error::from(std::io::ErrorKind::ConnectionRefused));
         assert_eq!(code_of(Unreachable::new(URI, &refused)), EXIT_UNREACHABLE);
+    }
+
+    #[test]
+    fn other_refusals_are_failures_not_lapses() {
+        let pidns = tonic::Status::failed_precondition("client not visible");
+        assert_eq!(code_of(pidns), EXIT_FAILURE);
+        assert_eq!(
+            code_of(tonic::Status::internal("cannot read /proc")),
+            EXIT_FAILURE
+        );
+    }
+
+    #[test]
+    fn cut_short_keeps_its_cause() {
+        assert_eq!(code_of(CutShort { lost: true }), EXIT_UNREACHABLE);
+        assert_eq!(code_of(CutShort { lost: false }), EXIT_FAILURE);
     }
 
     #[test]

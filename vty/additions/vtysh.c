@@ -189,17 +189,18 @@ cli_execute_startup_string()
    have run, while readline waits for input.  When the admin role
    lapses, the timer trap in vty.sh switches the vty back to exec mode
    and leaves a one-line notice in _cli_notice; without this the
-   operator would see neither until their next Enter, and would type the
-   next line after the configure-mode prompt still shown.  Print the
-   notice under the prompt and redraw the half-typed line after the new
-   prompt.  Outside readline the notice waits for PROMPT_COMMAND
-   (_cli_notice_flush) instead. */
+   operator would see neither until their next Enter, and would finish
+   the line under a configure-mode prompt still shown.  Print the notice
+   under the line and start a fresh one after the new prompt.  The
+   half-typed text stays on screen above but is not carried over: typed
+   for configure mode, it may mean something else in exec mode (`exit`
+   there leaves the vty).  Outside readline the notice waits for
+   PROMPT_COMMAND (_cli_notice_flush) instead. */
 void
 cli_signal_event_hook (void)
 {
 #if defined (READLINE)
-  char *notice, *ps1, *prompt, *typed;
-  int point;
+  char *notice, *ps1, *prompt;
 
   notice = get_string_value ("_cli_notice");
   if (notice == NULL || *notice == '\0')
@@ -212,13 +213,10 @@ cli_signal_event_hook (void)
 		  | RL_STATE_COMPLETING | RL_STATE_MOREINPUT))
     return;
 
-  /* Take the typed text off the screen first, so that a line wrapped
-     over several rows leaves none of them behind under the notice. */
-  typed = rl_copy_text (0, rl_end);
-  point = rl_point;
-  rl_replace_line ("", 0);
+  /* Below the typed text's last row, so that a line wrapped over
+     several rows keeps them all. */
+  rl_point = rl_end;
   rl_redisplay ();
-
   rl_crlf ();
   fputs (notice, rl_outstream);
   rl_crlf ();
@@ -231,9 +229,8 @@ cli_signal_event_hook (void)
   rl_set_prompt (prompt ? prompt : "");
   free (prompt);
 
-  rl_replace_line (typed ? typed : "", 0);
-  rl_point = point <= rl_end ? point : rl_end;
-  free (typed);
+  rl_replace_line ("", 1);
+  rl_point = 0;
   rl_forced_update_display ();
 #endif
 }

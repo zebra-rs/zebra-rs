@@ -98,11 +98,12 @@ class Result:
 
 
 def run(steps, ttl=3, timer=True, group=True, down=False, vty=False, old=False, deny=False,
-        noisy=False, timeout=30.0):
+        noisy=False, env_extra=None, timeout=30.0):
     """Drive an interactive shell through `steps`: a string is typed as a
     line; ("sleep", s) waits; ("raw", s) types without Enter;
-    ("down",) makes the daemon unreachable; ("mark", name) remembers
-    where the output stands."""
+    ("down",) makes the daemon unreachable; ("droprole",) takes the
+    admin role away (a daemon restart); ("hostname", name) renames the
+    host; ("mark", name) remembers where the output stands."""
     state = Path(tempfile.mkdtemp(prefix="vty-admin-state-"))
     if down:
         (state / "down").touch()
@@ -124,6 +125,7 @@ def run(steps, ttl=3, timer=True, group=True, down=False, vty=False, old=False, 
         env["STUB_DENY"] = "1"
     if noisy:
         env["STUB_NOISY"] = "1"
+    env.update(env_extra or {})
     env["CLI_PAGER"] = "cat"
     env["CLI_EXIT_PROMPT_TIMEOUT"] = "2"
     env["TERM"] = "dumb"
@@ -171,6 +173,10 @@ def run(steps, ttl=3, timer=True, group=True, down=False, vty=False, old=False, 
                 pump(0.5)
             elif step[0] == "down":
                 (state / "down").touch()
+            elif step[0] == "droprole":
+                (state / "deadline").unlink(missing_ok=True)
+            elif step[0] == "hostname":
+                (state / "hostname").write_text(step[1] + "\n")
             elif step[0] == "mark":
                 marks[step[1]] = len(out.decode("utf-8", "replace").replace("\r", ""))
         deadline = time.time() + timeout
@@ -257,17 +263,17 @@ def case_reenter_within_role_no_password():
     check("no second password: one prompt", r.output.count("Root password:") == 1, r.output)
     check("no second password: role taken once", r.count("-e") == 1, str(r.calls))
     check("no second password: in configure mode", r.called("-m configure set b"), str(r.calls))
-    # The refresh after `exit` said the role is held: re-entry need not
-    # ask again.
-    check("no second password: role asked once", r.calls.count("-a") == 1, str(r.calls))
+    # `configure` asks nothing first: the daemon's refusal is the answer.
+    check("no second password: no question asked", "-a" not in r.calls, str(r.calls))
     check("no second password: leaves", not r.timed_out)
 
 
 def case_abbreviation_takes_role():
+    # Refused like the whole word (the daemon gates what it resolves
+    # to): the role is taken and the line tried again.
     r = run(["conf", "set b", "exit", "exit"], ttl=30)
     check("conf: takes the role", r.called("-e"), str(r.calls))
-    check("conf: enters as configure", r.called("-m exec configure"), str(r.calls))
-    check("conf: abbreviation not sent", "-m exec conf" not in r.calls, str(r.calls))
+    check("conf: tried again", r.calls.count("-m exec conf") == 2, str(r.calls))
     check("conf: in configure mode", r.called("-m configure set b"), str(r.calls))
 
 
@@ -381,6 +387,53 @@ kill $pid
     check("hostile comm: nothing ran", not injected, text)
 
 
+def case_transient_failure_keeps_watching():
+    # The daemon could not be asked once: ask again, not stop watching.
+    # Stock bash runs the trap at the next Enter: one for the timer, one
+    # for the retry a second later.
+    r = run(["configure", ("sleep", 3), "", ("sleep", 2), "", "exit"], ttl=2,
+            env_extra={"STUB_A_FAIL_ONCE": "1", "CLI_ADMIN_RETRY": "1"})
+    check("transient: asked again", r.calls.count("-a") >= 2, str(r.calls))
+    check("transient: lapse still noticed", NOTICE in r.output, r.output)
+
+
+def case_disable_in_configure_mode_leaves_it():
+    r = run(["configure", "disable", ("mark", "off"), "set x", "exit"], ttl=30)
+    check("disable in configure: back in exec mode", EXEC_ONLY in r.since("off"), r.output)
+    check("disable in configure: set not sent", not r.called("-m configure set x"), str(r.calls))
+
+
+def case_role_taken_is_not_a_timeout():
+    # A daemon restart takes the role long before its time: say so, and
+    # do not blame the clock.
+    r = run(["configure", ("droprole",), "set x", "exit"], ttl=30)
+    check("role taken: told", "% Admin role no longer held; back to exec mode." in r.output, r.output)
+    check("role taken: not a timeout", "timed out" not in r.output, r.output)
+
+
+def case_failed_take_drops_stale_prompt():
+    # `#` from enable, the role taken by a restart, a wrong password at
+    # `configure`: the `#` must go.
+    r = run(["enable", "secret", ("droprole",), "configure", "wrong", "exit"],
+            ttl=30, group=False)
+    check("failed take: access denied", "% Configuration access denied" in r.output, r.output)
+    check("failed take: stale # dropped", "% Admin role no longer held." in r.output, r.output)
+
+
+def case_dash_words_reach_the_daemon():
+    # The operator's words are not helper options.
+    r = run(["configure", "set interface eth0 description -a", "exit", "exit"], ttl=30)
+    check("dash word: reached the daemon",
+          "RECEIVED:set interface eth0 description -a" in r.output, r.output)
+
+
+def case_old_helper_still_follows_hostname():
+    # A vty rebuilt without reinstalling vtyhelper: no -S, but the
+    # prompt still follows the host name.
+    r = run([("hostname", "renamed"), "show version", "exit"], env_extra={"STUB_NO_S": "1"})
+    check("old helper: prompt renamed", "renamed>" in r.output, r.output)
+
+
 def case_script_warns_once():
     # Not interactive: the command says the daemon is down; startup does
     # not say it first.
@@ -416,8 +469,13 @@ def case_unreachable_later():
 
 
 def case_unreachable_completion_quiet():
-    r = run([("raw", "sh\t\t"), ("raw", "\x15"), "exit"], down=True)
+    # TAB on an empty line: vty.sh's completion even under stock bash,
+    # whose own command completion takes a first word like `sh`.
+    r = run([("raw", "\t\t"), ("raw", "\x15"), "exit"], down=True)
     check("down: TAB stays quiet", r.output.count(UNREACHABLE) == 1, r.output)
+    # Two at startup (the attempt, then the warning); one per TAB.
+    firsts = r.calls.count("-f -m exec")
+    check("down: one attempt per TAB", firsts == 4, str(r.calls))
 
 
 def case_configure_unreachable():
@@ -435,11 +493,14 @@ def case_vty_redraws_at_once():
         print(f"SKIP vty redraw: {VTY} not built (run `make -C vty` first)")
         return
     r = run(["configure", ("raw", "set inter"), ("sleep", 3.5), ("mark", "lapsed"),
-             ("raw", "\x15"), "exit"], ttl=2, vty=True)
+             "exit"], ttl=2, vty=True)
     before_enter = r.output[:r.marks["lapsed"]]
     check("vty: notice before any Enter", NOTICE in before_enter, r.output)
-    tail = before_enter.split(NOTICE, 1)[-1]
-    check("vty: exec prompt redrawn with the typed text", "teststub>set inter" in tail, repr(tail))
+    head, _, tail = before_enter.partition(NOTICE)
+    check("vty: typed text left above", "teststub#set inter" in head, repr(head))
+    # Not carried over: typed for configure mode, `exit` would leave the
+    # vty in exec mode.
+    check("vty: fresh exec-mode line", tail.rstrip().endswith("teststub>"), repr(tail))
     check("vty: exit leaves", not r.timed_out)
 
 
@@ -458,6 +519,12 @@ def main():
     case_old_daemon_no_second_password()
     case_script_warns_once()
     case_configure_refused_says_so()
+    case_transient_failure_keeps_watching()
+    case_disable_in_configure_mode_leaves_it()
+    case_role_taken_is_not_a_timeout()
+    case_failed_take_drops_stale_prompt()
+    case_dash_words_reach_the_daemon()
+    case_old_helper_still_follows_hostname()
     case_registration_ignores_stderr()
     case_timer_check_reads_comm_safely()
     case_unreachable_at_start()

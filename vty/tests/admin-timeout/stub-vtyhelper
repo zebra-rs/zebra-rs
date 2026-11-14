@@ -19,6 +19,11 @@
 #                  cannot say (exit 5) and `-S` gives no second answer
 #   STUB_DENY      when set, `configure` is refused even with the role
 #   STUB_NOISY     when set, `-f` also writes to stderr when it succeeds
+#   STUB_NO_S      when set, a helper from before `-S`: refuses it (2)
+#   STUB_A_FAIL_ONCE  when set, the first `-a` fails (exit 1)
+#
+# The host name is STUB_STATE/hostname's, "teststub" without it. A
+# configure-mode command echoes what it received as "RECEIVED:words".
 #
 # Each `--timer` notes its pid in STUB_STATE/timers for the harness to
 # stop, and stops its own sleep when killed.
@@ -26,7 +31,10 @@
 # `-e` refuses the password "wrong" (exit 1), as PAM would.
 set -u
 
-[[ -n ${STUB_LOG:-} ]] && printf '%s\n' "$*" >>"${STUB_LOG}"
+# The vty passes `--` before the operator's words; logged without it.
+logargs=()
+for a in "$@"; do [[ ${a} == "--" ]] || logargs+=("${a}"); done
+[[ -n ${STUB_LOG:-} ]] && printf '%s\n' "${logargs[*]}" >>"${STUB_LOG}"
 
 state=${STUB_STATE:?}
 now_ms=$(( ${EPOCHREALTIME/./} / 1000 ))
@@ -80,13 +88,18 @@ while [[ $# -gt 0 ]]; do
   case $1 in
     -m) mode=$2; shift 2 ;;
     -f|--first) first=1; shift ;;
-    -H|--hostname) echo "teststub"; exit 0 ;;
+    -H|--hostname) cat "${state}/hostname" 2>/dev/null || echo "teststub"; exit 0 ;;
     -S|--state)
-      echo "teststub"
+      [[ -n ${STUB_NO_S:-} ]] && exit 2
+      cat "${state}/hostname" 2>/dev/null || echo "teststub"
       if [[ -n ${STUB_OLD:-} ]]; then echo; else left; fi
       exit 0 ;;
     -a|--admin-left)
       [[ -n ${STUB_OLD:-} ]] && exit 5
+      if [[ -n ${STUB_A_FAIL_ONCE:-} && ! -e ${state}/a_failed ]]; then
+        touch "${state}/a_failed"
+        exit 1
+      fi
       left; exit 0 ;;
     -u|--uncommitted) exit 1 ;;
     -c|--completion|-t|--trailing) exit 0 ;;
@@ -100,6 +113,7 @@ while [[ $# -gt 0 ]]; do
       exit 0 ;;
     -d|--disable) rm -f "${state}/deadline"; echo "% Disabled"; exit 0 ;;
     -j|--json) shift ;;
+    --) shift; args+=("$@"); break ;;
     *) args+=("$1"); shift ;;
   esac
 done
@@ -135,6 +149,7 @@ case "${mode}:${args[0]:-}" in
   configure:*)
     need_admin
     echo "Show"
+    echo "RECEIVED:${args[*]}"
     ;;
   *)
     echo "Show"

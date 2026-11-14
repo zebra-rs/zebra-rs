@@ -1,5 +1,10 @@
 use anyhow::{Context, Result, anyhow};
+use std::time::Duration;
 use tonic::transport::{Channel, Endpoint};
+
+/// How long a TCP connect may take. Without a bound, an unreachable host
+/// (a black-holed route) holds every command and TAB for minutes.
+const TCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Connect to the zebra-rs VTY gRPC server.
 ///
@@ -28,6 +33,7 @@ pub async fn connect(uri: &str) -> Result<Channel> {
     };
     Endpoint::try_from(normalized.clone())
         .map_err(|e| anyhow!("invalid endpoint {normalized:?}: {e}"))?
+        .connect_timeout(TCP_CONNECT_TIMEOUT)
         .connect()
         .await
         .with_context(|| format!("connect {normalized}"))

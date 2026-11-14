@@ -121,12 +121,14 @@ ubuntu>set interface eth0 ipv6 address 2001:db8::1/64
 When the Admin role lapses — 900 seconds without a configure-mode command — the
 daemon refuses every configure-mode command but `exit` and `help`, so `vty` takes
 you back to exec mode by itself, with a one-line notice. It does so the moment the
-role lapses, even with a line half typed; type `configure` to continue:
+role lapses, even with a line half typed. That line stays on screen but is not
+carried over, since it was meant for configure mode; type `configure` to
+continue:
 
 ``` shell
-ubuntu#
+ubuntu#set inter
 % Configuration session timed out; back to exec mode.
-ubuntu>set inter
+ubuntu>
 ```
 
 Uncommitted changes stay in the candidate configuration for the next

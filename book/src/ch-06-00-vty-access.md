@@ -347,13 +347,13 @@ host(configure)#
 
 Users who still hold the Admin role — an earlier `enable` or
 `configure` within its TTL — enter configure mode with no prompt. The
-shell asks the daemon whether the role is held (`vtyhelper -a`, which
-does not slide the TTL) rather than trusting its own prompt: `exit`
-drops the `#` while the role lives on, and a lapse or a daemon restart
-takes the role away under a prompt that still shows it. A daemon from
-before that question cannot answer it; the shell then tries
-`configure` and takes the role only if refused. With the daemon
-unreachable, `configure` says so and asks for no password.
+shell does not judge that from its own prompt (`exit` drops the `#`
+while the role lives on; a lapse or a daemon restart takes the role
+away under a prompt that still shows it): it sends `configure`, and
+only when the daemon refuses it takes the role and tries once more.
+The daemon gates what the line resolves to, so `conf` and the other
+abbreviations behave the same. With the daemon unreachable,
+`configure` says so and asks for no password.
 
 #### When the Admin role lapses
 
@@ -365,7 +365,7 @@ wait to be refused; it leaves configure mode by itself and prints one
 line:
 
 ```text
-host#
+host#set inter
 % Configuration session timed out; back to exec mode.
 host>
 ```
@@ -376,12 +376,16 @@ child that dies with the shell, and signals nothing once the shell has
 lapsed. The shell then asks how long the role has left
 (`vtyhelper -a`) and either waits again — every configure-mode command
 slides the TTL — or goes back to exec mode. The vty's bash patch runs
-that trap while readline waits for input and redraws the half-typed line
-after the exec-mode prompt, so the notice appears at once. A command the
-daemon refuses for want of the role brings the shell back the same way,
-which also covers a daemon restart. An `enable`d exec prompt (`#`) drops
-to `>` with `% Admin role timed out.` Uncommitted changes stay in the
-candidate configuration. Root's role never lapses.
+that trap while readline waits for input, so the notice appears at
+once; a half-typed line stays on screen above it but is not carried
+over to the exec prompt, where it could mean something else (`exit`
+leaves the vty). A command the daemon refuses for want of the role
+brings the shell back the same way; when the role went before its time
+(a daemon restart), the notice says `% Admin role no longer held; back
+to exec mode.` instead. `disable` in configure mode leaves it too. An
+`enable`d exec prompt (`#`) drops to `>` with `% Admin role timed
+out.` Uncommitted changes stay in the candidate configuration. Root's
+role never lapses.
 
 `configure` combines `enable` + mode entry for one-shot
 configuration sessions; `enable` is for operators who want to hold
