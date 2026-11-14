@@ -165,6 +165,15 @@ fn start_idle_hold_timer(peer: &mut Peer) -> Timer {
     start_timer!(peer, tx, time, Event::Start)
 }
 
+pub fn start_max_prefix_restart_timer(peer: &Peer, minutes: u16) -> Timer {
+    start_timer!(
+        peer,
+        tx,
+        u64::from(minutes) * 60,
+        Event::MaxPrefixRestartExpires
+    )
+}
+
 pub fn start_connect_retry_timer(peer: &Peer) -> Timer {
     start_timer!(
         peer,
@@ -287,7 +296,10 @@ pub fn update_timers(peer: &mut Peer) {
     use State::*;
     match peer.state {
         Idle => {
-            if peer.is_passive() {
+            if peer.max_prefix.overflow.is_some() {
+                // Held until `clear bgp`, a config change or `restart`.
+                peer.timer.idle_hold_timer = None;
+            } else if peer.is_passive() {
                 // When the peer is configured as passive, its status will transition to
                 // Active. This is the only place we manipulate the peer status outside the
                 // FSM.

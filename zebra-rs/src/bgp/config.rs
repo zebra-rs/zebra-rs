@@ -348,6 +348,19 @@ fn config_srv6_ipv6_unicast(bgp: &mut Bgp, _args: Args, op: ConfigOp) -> Option<
 fn config_peer(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let addr = args.addr()?;
     if op == ConfigOp::Set {
+        if bgp
+            .peers
+            .get(&addr)
+            .is_some_and(|peer| matches!(peer.origin, super::peer_key::PeerOrigin::Dynamic { .. }))
+        {
+            // A configured neighbor starts a new peer. Replaced in place, the
+            // dynamic one would hand it its ident, and with it the routes of
+            // the old session, the events still queued for it and the
+            // listen-limit slot, which nothing would release.
+            if !super::dynamic_neighbors::remove_dynamic_peers(bgp, [addr]) {
+                return None;
+            }
+        }
         let mut peer = Peer::new(
             0, // PeerMap will assign the stable index
             bgp.asn,
@@ -385,11 +398,10 @@ fn config_peer(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
 /// The full peer-removal ritual: listener auth cleanup, Loc-RIB route
 /// withdrawal, update-group detach, map removal, and the listener-wide
 /// TCP-MSS / IP_TRANSPARENT reconciliations. Shared by the static
-/// `delete router bgp neighbor <addr>` path above and the
-/// dynamic-neighbors range sweep
-/// (`super::dynamic_neighbors::sweep_range_peers`); the sweep owns the
-/// `dynamic_peer_count` decrement, since only it knows the peer was
-/// slot-counted.
+/// `delete router bgp neighbor <addr>` path above and the removal of
+/// dynamic peers (`super::dynamic_neighbors::sweep_range_peers` and
+/// `remove_dynamic_peers`); those own the `dynamic_peer_count` decrement,
+/// since only they know the peer was slot-counted.
 pub(super) fn remove_peer_full(bgp: &mut Bgp, addr: IpAddr) -> Option<()> {
     let peer_idx = {
         let peer = bgp.peers.get(&addr)?;
@@ -4074,6 +4086,29 @@ pub(super) fn config_table_map(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> O
     Some(())
 }
 
+/// A neighbor's `afi-safi <name> maximum-prefix` leaf.
+fn config_maximum_prefix(
+    bgp: &mut Bgp,
+    mut args: Args,
+    op: ConfigOp,
+    set: super::max_prefix::LeafSetter,
+) -> Option<()> {
+    let addr = args.addr()?;
+    let afi_safi: AfiSafi = args.afi_safi()?;
+    let peer = bgp.peers.get_mut(&addr)?;
+    super::max_prefix::stage_leaf(&mut peer.config, afi_safi, op, &mut args, set)?;
+    super::max_prefix::refresh(&bgp.neighbor_groups, peer);
+    Some(())
+}
+
+super::max_prefix::max_prefix_callbacks! { config_maximum_prefix:
+    config_maximum_prefix_limit => set_limit,
+    config_maximum_prefix_warning_threshold => set_warning_threshold,
+    config_maximum_prefix_warning_only => set_warning_only,
+    config_maximum_prefix_force => set_force,
+    config_maximum_prefix_restart => set_restart,
+}
+
 /// `set/delete router bgp neighbor <addr> afi-safi <name> add-path
 /// <mode>`.
 ///
@@ -5354,6 +5389,26 @@ impl Bgp {
             super::neighbor_group::config_neighbor_group_afi_safi_next_hop_self,
         );
         self.callback_add(
+            "/router/bgp/neighbor-group/afi-safi/maximum-prefix/limit",
+            super::neighbor_group::config_neighbor_group_maximum_prefix_limit,
+        );
+        self.callback_add(
+            "/router/bgp/neighbor-group/afi-safi/maximum-prefix/warning-threshold",
+            super::neighbor_group::config_neighbor_group_maximum_prefix_warning_threshold,
+        );
+        self.callback_add(
+            "/router/bgp/neighbor-group/afi-safi/maximum-prefix/warning-only",
+            super::neighbor_group::config_neighbor_group_maximum_prefix_warning_only,
+        );
+        self.callback_add(
+            "/router/bgp/neighbor-group/afi-safi/maximum-prefix/restart",
+            super::neighbor_group::config_neighbor_group_maximum_prefix_restart,
+        );
+        self.callback_add(
+            "/router/bgp/neighbor-group/afi-safi/maximum-prefix/force",
+            super::neighbor_group::config_neighbor_group_maximum_prefix_force,
+        );
+        self.callback_add(
             "/router/bgp/neighbor-group/ttl-security",
             super::neighbor_group::config_neighbor_group_ttl_security,
         );
@@ -5972,6 +6027,26 @@ impl Bgp {
 
         self.callback_peer("/afi-safi/enabled", config_afi_safi);
         self.callback_peer("/afi-safi/add-path", config_add_path);
+        self.callback_peer(
+            "/afi-safi/maximum-prefix/limit",
+            config_maximum_prefix_limit,
+        );
+        self.callback_peer(
+            "/afi-safi/maximum-prefix/warning-threshold",
+            config_maximum_prefix_warning_threshold,
+        );
+        self.callback_peer(
+            "/afi-safi/maximum-prefix/warning-only",
+            config_maximum_prefix_warning_only,
+        );
+        self.callback_peer(
+            "/afi-safi/maximum-prefix/restart",
+            config_maximum_prefix_restart,
+        );
+        self.callback_peer(
+            "/afi-safi/maximum-prefix/force",
+            config_maximum_prefix_force,
+        );
         self.callback_peer("/afi-safi/encapsulation-type", config_encapsulation_type);
         self.callback_peer("/afi-safi/next-hop-self", config_next_hop_self);
         self.callback_peer("/afi-safi/next-hop-unchanged", config_next_hop_unchanged);
@@ -9646,6 +9721,71 @@ mod neighbor_group_wiring_tests {
         assert!(bfd_rx.try_recv().is_err(), "one Subscribe");
     }
 
+    /// A neighbor configured on a dynamic peer's address replaces the dynamic
+    /// peer instead of taking over its ident.
+    #[tokio::test]
+    async fn a_neighbor_on_a_dynamic_address_replaces_the_dynamic_peer() {
+        use super::super::dynamic_neighbors::{
+            config_listen_range, config_listen_range_neighbor_group,
+        };
+        use super::super::peer::{State, try_dynamic_accept};
+        use super::super::peer_key::PeerOrigin;
+        use super::super::route::{BgpRib, BgpRibType};
+
+        let (mut bgp, _bfd_rx) = fresh_bgp_with_bfd();
+        config_neighbor_group_remote_as(&mut bgp, arg_words(&["G", "65002"]), ConfigOp::Set)
+            .unwrap();
+        config_listen_range(&mut bgp, arg_words(&["10.1.0.0/24"]), ConfigOp::Set).unwrap();
+        config_listen_range_neighbor_group(
+            &mut bgp,
+            arg_words(&["10.1.0.0/24", "G"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let _client = tokio::net::TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (server, _) = listener.accept().await.unwrap();
+        let source: IpAddr = "10.1.0.7".parse().unwrap();
+        assert!(try_dynamic_accept(&mut bgp, source, server).is_none());
+        assert_eq!(bgp.dynamic_peer_count, 1);
+        let old = bgp.peers.get(&source).unwrap().ident;
+        bgp.peers.get_mut(&source).unwrap().state = State::Established;
+        let prefix = "198.18.0.0/24".parse().unwrap();
+        let row = BgpRib::new_arc(
+            old,
+            "10.1.0.7".parse().unwrap(),
+            BgpRibType::EBGP,
+            0,
+            0,
+            std::sync::Arc::new(Default::default()),
+            None,
+            None,
+            false,
+        );
+        bgp.shard.adj_in_mut(old).add(None, prefix, row.clone());
+        bgp.shard.update(None, prefix, row);
+
+        config_peer(&mut bgp, arg_words(&["10.1.0.7"]), ConfigOp::Set).unwrap();
+        let peer = bgp.peers.get(&source).unwrap();
+        assert_eq!(peer.origin, PeerOrigin::Static);
+        assert_ne!(
+            peer.ident, old,
+            "events queued for the old peer must miss this one"
+        );
+        assert!(bgp.peers.get_by_idx(old).is_none());
+        assert_eq!(
+            bgp.dynamic_peer_count, 0,
+            "the listen-limit slot is released"
+        );
+        assert_eq!(bgp.shard.adj_in_count(old, Afi::Ip, Safi::Unicast), 0);
+        assert!(
+            bgp.shard.select_best_path(prefix).is_empty(),
+            "the old session's route is withdrawn"
+        );
+    }
+
     /// The dynamic-neighbor reaper releases what the peer held: the BFD
     /// session an instance-wide `bfd enabled` subscribed, and the policy
     /// watches its group registered. Each new source address
@@ -9699,6 +9839,67 @@ mod neighbor_group_wiring_tests {
         }
         let (_, unregistered) = drain(&mut policy_rx);
         assert_eq!(unregistered, registered);
+    }
+
+    /// A dynamic peer held past `maximum-prefix` is not reaped: reaping it
+    /// would let every reconnect install routes up to the limit again. The
+    /// held peer drops the next connection, and once the hold is cleared the
+    /// reaper takes it as usual.
+    #[tokio::test]
+    async fn dynamic_peer_held_past_maximum_prefix_is_not_reaped() {
+        use super::super::dynamic_neighbors::{
+            config_listen_range, config_listen_range_neighbor_group,
+        };
+        use super::super::max_prefix::{MaxPrefixExceeded, clear_overflow};
+        use super::super::peer::{State, handle_peer_connection, try_dynamic_accept};
+        use bgp_packet::{Afi, AfiSafi, Safi};
+
+        let (mut bgp, _bfd_rx) = fresh_bgp_with_bfd();
+        config_neighbor_group_remote_as(&mut bgp, arg_words(&["G", "65002"]), ConfigOp::Set)
+            .unwrap();
+        config_listen_range(&mut bgp, arg_words(&["10.1.0.0/24"]), ConfigOp::Set).unwrap();
+        config_listen_range_neighbor_group(
+            &mut bgp,
+            arg_words(&["10.1.0.0/24", "G"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+        // Any connected socket will do: the accept path reads the peer
+        // address from its argument, not from the stream.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let local = listener.local_addr().unwrap();
+        let _first_client = tokio::net::TcpStream::connect(local).await.unwrap();
+        let (first, _) = listener.accept().await.unwrap();
+        let source: IpAddr = "10.1.0.7".parse().unwrap();
+        assert!(try_dynamic_accept(&mut bgp, source, first).is_none());
+
+        let ident = bgp.peers.get(&source).unwrap().ident;
+        let peer = bgp.peers.get_mut(&source).unwrap();
+        peer.max_prefix.overflow = Some(MaxPrefixExceeded {
+            afi_safi: AfiSafi::new(Afi::Ip, Safi::Unicast),
+            count: 2,
+            limit: 1,
+        });
+        peer.state = State::Idle;
+        bgp.gc_dynamic_peer_if_session_ended(ident, Some(State::Established));
+        assert!(bgp.peers.get(&source).is_some(), "the held peer is kept");
+        assert_eq!(bgp.dynamic_peer_count, 1);
+
+        let _second_client = tokio::net::TcpStream::connect(local).await.unwrap();
+        let (second, _) = listener.accept().await.unwrap();
+        assert!(
+            handle_peer_connection(&mut bgp.peers, source, None, second).is_none(),
+            "the held peer drops the connection"
+        );
+        assert_eq!(bgp.dynamic_peer_count, 1, "no second peer");
+        assert_eq!(bgp.peers.get(&source).unwrap().state, State::Idle);
+
+        let peer = bgp.peers.get_mut(&source).unwrap();
+        clear_overflow(peer);
+        peer.state = State::Idle;
+        bgp.gc_dynamic_peer_if_session_ended(ident, Some(State::Established));
+        assert!(bgp.peers.get(&source).is_none(), "reaped once released");
+        assert_eq!(bgp.dynamic_peer_count, 0);
     }
 
     // ---- interface-neighbor timers --------------------------------
@@ -10488,6 +10689,388 @@ mod neighbor_group_wiring_tests {
             super::super::peer::GR_RESTART_TIME_DEFAULT,
             "delete must not advertise a 0 Restart Time"
         );
+    }
+
+    #[tokio::test]
+    async fn maximum_prefix_inherits_with_explicit_priority() {
+        use super::super::neighbor_group::config_neighbor_group_maximum_prefix_limit;
+
+        let mut bgp = fresh_bgp();
+        config_neighbor_group_remote_as(&mut bgp, arg_words(&["G", "65000"]), ConfigOp::Set)
+            .unwrap();
+        config_peer(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+        config_peer_neighbor_group(&mut bgp, arg_words(&["10.0.0.1", "G"]), ConfigOp::Set).unwrap();
+        let limit = |bgp: &Bgp| {
+            bgp.peers
+                .get(&peer_addr())
+                .unwrap()
+                .config
+                .max_prefix
+                .get(&v4())
+                .and_then(|block| block.limit)
+        };
+        assert_eq!(limit(&bgp), None, "no limit unless configured");
+
+        config_neighbor_group_maximum_prefix_limit(
+            &mut bgp,
+            arg_words(&["G", "ipv4", "200"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+        assert_eq!(limit(&bgp), Some(200), "the member inherits the group's");
+
+        config_maximum_prefix_limit(
+            &mut bgp,
+            arg_words(&["10.0.0.1", "ipv4", "10"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+        assert_eq!(limit(&bgp), Some(10), "the explicit block wins");
+
+        config_maximum_prefix_limit(
+            &mut bgp,
+            arg_words(&["10.0.0.1", "ipv4", "10"]),
+            ConfigOp::Delete,
+        )
+        .unwrap();
+        assert_eq!(
+            limit(&bgp),
+            Some(200),
+            "deleting it falls back to the group"
+        );
+
+        config_neighbor_group_maximum_prefix_limit(
+            &mut bgp,
+            arg_words(&["G", "ipv4", "200"]),
+            ConfigOp::Delete,
+        )
+        .unwrap();
+        assert_eq!(limit(&bgp), None, "no block left, no limit");
+    }
+
+    /// `enabled: false` forces the family off, so a delete must not create the
+    /// entry: leaves of a deleted `afi-safi` can land after `enabled`.
+    #[tokio::test]
+    async fn group_maximum_prefix_delete_does_not_create_the_family() {
+        use super::super::neighbor_group::config_neighbor_group_maximum_prefix_limit;
+
+        let mut bgp = fresh_bgp();
+        config_neighbor_group_remote_as(&mut bgp, arg_words(&["G", "65000"]), ConfigOp::Set)
+            .unwrap();
+        let _ = config_neighbor_group_maximum_prefix_limit(
+            &mut bgp,
+            arg_words(&["G", "ipv4", "10"]),
+            ConfigOp::Delete,
+        );
+        assert!(!bgp.neighbor_groups["G"].afi_safi.contains_key(&v4()));
+    }
+
+    /// A changed `enabled` arrives as a Delete then a Set. The block's lines
+    /// are not in that diff, so the block must outlive the entry's Delete,
+    /// and a held member must stay held.
+    #[tokio::test]
+    async fn group_maximum_prefix_survives_a_change_to_enabled() {
+        let mut bgp = fresh_bgp();
+        group_member_with_limit(&mut bgp);
+        hold_in_overflow(&mut bgp);
+        for (old, new) in [("true", "false"), ("false", "true")] {
+            config_neighbor_group_afi_safi_enabled(
+                &mut bgp,
+                arg_words(&["G", "ipv4", old]),
+                ConfigOp::Delete,
+            )
+            .unwrap();
+            config_neighbor_group_afi_safi_enabled(
+                &mut bgp,
+                arg_words(&["G", "ipv4", new]),
+                ConfigOp::Set,
+            )
+            .unwrap();
+        }
+        let peer = bgp.peers.get(&peer_addr()).unwrap();
+        assert_eq!(
+            peer.config.max_prefix.get(&v4()).and_then(|b| b.limit),
+            Some(10)
+        );
+        assert!(held(&bgp));
+    }
+
+    /// The VRF warning is logged once where a VRF neighbor and a group with a
+    /// block meet, and names the VRF and the neighbor.
+    #[tokio::test]
+    async fn the_vrf_warning_is_logged_once_where_group_and_neighbor_meet() {
+        use super::super::max_prefix::warnings_during;
+        use super::super::neighbor_group::{
+            config_neighbor_group_maximum_prefix_limit,
+            config_neighbor_group_maximum_prefix_warning_threshold,
+        };
+        use super::super::vrf_config::config_vrf_neighbor_neighbor_group;
+
+        let mut bgp = fresh_bgp();
+        let logged = warnings_during(|| {
+            config_neighbor_group_maximum_prefix_limit(
+                &mut bgp,
+                arg_words(&["G", "ipv4", "10"]),
+                ConfigOp::Set,
+            )
+            .unwrap();
+        });
+        assert!(logged.is_empty(), "no VRF neighbor yet: {logged}");
+
+        let logged = warnings_during(|| {
+            config_vrf_neighbor_neighbor_group(
+                &mut bgp,
+                arg_words(&["V", "192.0.2.1", "G"]),
+                ConfigOp::Set,
+            )
+            .unwrap();
+        });
+        assert_eq!(
+            logged.matches("does not apply to a VRF neighbor").count(),
+            1
+        );
+        assert!(
+            logged.contains("vrf=\"V\"") || logged.contains("vrf=V"),
+            "{logged}"
+        );
+        assert!(logged.contains("192.0.2.1"), "{logged}");
+
+        let logged = warnings_during(|| {
+            config_neighbor_group_maximum_prefix_warning_threshold(
+                &mut bgp,
+                arg_words(&["G", "ipv4", "80"]),
+                ConfigOp::Set,
+            )
+            .unwrap();
+        });
+        assert!(logged.is_empty(), "the group had a block already: {logged}");
+    }
+
+    /// The other order: the group gets its first block after the VRF neighbor
+    /// joined it.
+    #[tokio::test]
+    async fn the_vrf_warning_is_logged_when_the_group_gets_its_first_block() {
+        use super::super::max_prefix::warnings_during;
+        use super::super::neighbor_group::config_neighbor_group_maximum_prefix_limit;
+        use super::super::vrf_config::config_vrf_neighbor_neighbor_group;
+
+        let mut bgp = fresh_bgp();
+        config_neighbor_group_remote_as(&mut bgp, arg_words(&["G", "65000"]), ConfigOp::Set)
+            .unwrap();
+        let logged = warnings_during(|| {
+            config_vrf_neighbor_neighbor_group(
+                &mut bgp,
+                arg_words(&["V", "192.0.2.1", "G"]),
+                ConfigOp::Set,
+            )
+            .unwrap();
+        });
+        assert!(logged.is_empty(), "{logged}");
+        let logged = warnings_during(|| {
+            config_neighbor_group_maximum_prefix_limit(
+                &mut bgp,
+                arg_words(&["G", "ipv4", "10"]),
+                ConfigOp::Set,
+            )
+            .unwrap();
+        });
+        assert_eq!(
+            logged.matches("does not apply to a VRF neighbor").count(),
+            1
+        );
+    }
+
+    /// Leaf deletes can land after the group's own delete.
+    #[tokio::test]
+    async fn group_maximum_prefix_delete_does_not_make_the_group_again() {
+        use super::super::neighbor_group::config_neighbor_group_maximum_prefix_limit;
+
+        let mut bgp = fresh_bgp();
+        group_member_with_limit(&mut bgp);
+        config_neighbor_group(&mut bgp, arg_words(&["G"]), ConfigOp::Delete).unwrap();
+        let _ = config_neighbor_group_maximum_prefix_limit(
+            &mut bgp,
+            arg_words(&["G", "ipv4", "10"]),
+            ConfigOp::Delete,
+        );
+        assert!(!bgp.neighbor_groups.contains_key("G"));
+    }
+
+    #[tokio::test]
+    async fn maximum_prefix_refuses_a_family_it_cannot_count() {
+        let mut bgp = fresh_bgp();
+        config_peer(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+        assert!(
+            config_maximum_prefix_limit(
+                &mut bgp,
+                arg_words(&["10.0.0.1", "evpn", "10"]),
+                ConfigOp::Set,
+            )
+            .is_none()
+        );
+        let peer = bgp.peers.get(&peer_addr()).unwrap();
+        assert!(peer.config.max_prefix.is_empty());
+        assert!(peer.config.max_prefix_explicit.is_empty());
+    }
+
+    fn hold_in_overflow(bgp: &mut Bgp) {
+        use bgp_packet::{Afi, Safi};
+        let peer = bgp.peers.get_mut(&peer_addr()).unwrap();
+        peer.max_prefix.overflow = Some(super::super::max_prefix::MaxPrefixExceeded {
+            afi_safi: AfiSafi::new(Afi::Ip, Safi::Unicast),
+            count: 11,
+            limit: 10,
+        });
+    }
+
+    fn held(bgp: &Bgp) -> bool {
+        let peer = bgp.peers.get(&peer_addr()).unwrap();
+        peer.max_prefix.overflow.is_some()
+    }
+
+    fn group_member_with_limit(bgp: &mut Bgp) {
+        use super::super::neighbor_group::config_neighbor_group_maximum_prefix_limit;
+        config_neighbor_group_remote_as(bgp, arg_words(&["G", "65000"]), ConfigOp::Set).unwrap();
+        config_peer(bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+        config_peer_neighbor_group(bgp, arg_words(&["10.0.0.1", "G"]), ConfigOp::Set).unwrap();
+        config_neighbor_group_afi_safi_enabled(
+            bgp,
+            arg_words(&["G", "ipv4", "true"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+        config_neighbor_group_maximum_prefix_limit(
+            bgp,
+            arg_words(&["G", "ipv4", "10"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+    }
+
+    /// A group change that leaves a member's effective block alone must not
+    /// release its hold: it would only reconnect and trip again.
+    #[tokio::test]
+    async fn a_group_change_a_member_overrides_keeps_its_hold() {
+        use super::super::neighbor_group::config_neighbor_group_maximum_prefix_warning_threshold;
+
+        let mut bgp = fresh_bgp();
+        group_member_with_limit(&mut bgp);
+        config_maximum_prefix_limit(
+            &mut bgp,
+            arg_words(&["10.0.0.1", "ipv4", "5"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+        hold_in_overflow(&mut bgp);
+        config_neighbor_group_maximum_prefix_warning_threshold(
+            &mut bgp,
+            arg_words(&["G", "ipv4", "80"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+        assert!(held(&bgp));
+    }
+
+    /// A whole-entry delete skips the per-leaf callbacks, so the family's
+    /// delete takes the block with it and releases the member.
+    #[tokio::test]
+    async fn deleting_a_group_family_releases_a_member() {
+        let mut bgp = fresh_bgp();
+        group_member_with_limit(&mut bgp);
+        hold_in_overflow(&mut bgp);
+        config_neighbor_group_afi_safi(&mut bgp, arg_words(&["G", "ipv4"]), ConfigOp::Delete)
+            .unwrap();
+        assert!(bgp.neighbor_groups["G"].max_prefix.is_empty());
+        assert!(!held(&bgp));
+    }
+
+    /// A held peer has negotiated nothing, which must not take it out of
+    /// `clear bgp ipv4 all`. A soft clear leaves the hold alone.
+    #[tokio::test]
+    async fn clear_by_family_reaches_a_held_peer() {
+        use crate::bgp::peer::{BgpClearOp, clear_bgp_action};
+        use bgp_packet::{Afi, Safi};
+
+        let mut bgp = fresh_bgp();
+        config_peer(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+        hold_in_overflow(&mut bgp);
+        let family = Some((Afi::Ip, Safi::Unicast));
+        clear_bgp_action(
+            &mut bgp,
+            &mut arg_words(&["all"]),
+            family,
+            BgpClearOp::SoftIn,
+        )
+        .unwrap();
+        assert!(held(&bgp));
+        clear_bgp_action(&mut bgp, &mut arg_words(&["all"]), family, BgpClearOp::Hard).unwrap();
+        assert!(!held(&bgp));
+    }
+
+    /// `clear bgp` on a held peer only releases it: there is no session to
+    /// stop, and a Stop could drop the connection a passive peer accepts next.
+    /// A peer that is not held is still stopped.
+    #[tokio::test]
+    async fn clearing_a_held_peer_queues_no_stop() {
+        use crate::bgp::peer::{BgpClearOp, clear_bgp_action};
+
+        let mut bgp = fresh_bgp();
+        config_peer(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+        while bgp.rx.try_recv().is_ok() {}
+        hold_in_overflow(&mut bgp);
+        clear_bgp_action(
+            &mut bgp,
+            &mut arg_words(&["10.0.0.1"]),
+            None,
+            BgpClearOp::Hard,
+        )
+        .unwrap();
+        assert!(!held(&bgp));
+        assert!(bgp.rx.try_recv().is_err(), "no Stop for a released peer");
+        assert!(bgp.peers.get(&peer_addr()).unwrap().down_reason.is_none());
+
+        clear_bgp_action(
+            &mut bgp,
+            &mut arg_words(&["10.0.0.1"]),
+            None,
+            BgpClearOp::Hard,
+        )
+        .unwrap();
+        assert!(matches!(
+            bgp.rx.try_recv(),
+            Ok(crate::bgp::Message::Event(_, crate::bgp::peer::Event::Stop))
+        ));
+    }
+
+    /// A block needs `limit` to mean anything, whatever order its leaves land.
+    #[tokio::test]
+    async fn maximum_prefix_leaves_without_a_limit_set_no_limit() {
+        let mut bgp = fresh_bgp();
+        config_peer(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+        config_maximum_prefix_restart(
+            &mut bgp,
+            arg_words(&["10.0.0.1", "ipv4", "5"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+        let block = |bgp: &Bgp| {
+            bgp.peers
+                .get(&peer_addr())
+                .unwrap()
+                .config
+                .max_prefix
+                .get(&v4())
+                .copied()
+        };
+        assert_eq!(block(&bgp), None);
+        config_maximum_prefix_limit(
+            &mut bgp,
+            arg_words(&["10.0.0.1", "ipv4", "10"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+        let got = block(&bgp).unwrap();
+        assert_eq!((got.limit, got.restart), (Some(10), Some(5)));
     }
 
     /// Per-family `add-path` inherits through the group's afi-safi entry

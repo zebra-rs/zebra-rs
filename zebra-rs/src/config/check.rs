@@ -11,6 +11,7 @@
 use std::collections::BTreeMap;
 
 use crate::bgp::ethernet_segment::check_es_esi;
+use crate::bgp::max_prefix::SUPPORTED_FAMILY_NAMES;
 use crate::flex_algo::check_max_link_loss;
 use crate::stamp::session::{check_loss_interval, check_loss_percent};
 
@@ -308,6 +309,45 @@ pub fn dhcpv6_pd_interfaces(entries: &[(String, Vec<String>)]) -> PdFindings {
     findings
 }
 
+/// Whether a config line can carry a leaf [`maximum_prefix`] reads.
+pub fn maximum_prefix_line(line: &str) -> bool {
+    line.contains(" maximum-prefix ")
+}
+
+/// A BGP `maximum-prefix` block must carry a `limit` and name a family it can
+/// count. Either way the commit would otherwise leave the peer without the
+/// limit the block asks for, or under a group's limit in place of a member's
+/// `warning-only`. `leaves` are a whole config's [`maximum_prefix_line`]s as
+/// (callback path, arguments); the result is one error per bad block.
+pub fn maximum_prefix(leaves: &[(String, Vec<String>)]) -> Vec<String> {
+    let mut blocks: BTreeMap<(&str, &str, &str), bool> = BTreeMap::new();
+    for (path, args) in leaves {
+        let Some((subtree, leaf)) = path
+            .strip_prefix("/router/bgp/")
+            .and_then(|rest| rest.split_once("/afi-safi/maximum-prefix/"))
+        else {
+            continue;
+        };
+        let [owner, family, ..] = args.as_slice() else {
+            continue;
+        };
+        *blocks.entry((subtree, owner, family)).or_default() |= leaf == "limit";
+    }
+    let mut errors = Vec::new();
+    for ((subtree, owner, family), has_limit) in blocks {
+        let block = format!("{subtree} {owner} afi-safi {family} maximum-prefix");
+        if !SUPPORTED_FAMILY_NAMES.contains(&family) {
+            errors.push(format!(
+                "{block}: not supported for this family; use one of {}",
+                SUPPORTED_FAMILY_NAMES.join(", ")
+            ));
+        } else if !has_limit {
+            errors.push(format!("{block}: needs `limit`"));
+        }
+    }
+    errors
+}
+
 /// A leaf value check: `Err` holds the reason, shown after the line.
 pub type ValueCheck = fn(&str) -> Result<(), String>;
 
@@ -483,6 +523,53 @@ pub fn reserved_vrf(path: &str, keys: &[&str]) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    use super::{maximum_prefix, maximum_prefix_line};
+
+    fn max_prefix_leaf(subtree: &str, name: &str, args: &[&str]) -> (String, Vec<String>) {
+        (
+            format!("/router/bgp/{subtree}/afi-safi/maximum-prefix/{name}"),
+            args.iter().map(|a| a.to_string()).collect(),
+        )
+    }
+
+    #[test]
+    fn maximum_prefix_needs_a_limit_and_a_family_it_counts() {
+        let ok = [
+            max_prefix_leaf("neighbor", "limit", &["10.0.0.1", "ipv4", "10"]),
+            max_prefix_leaf("neighbor", "warning-only", &["10.0.0.1", "ipv4"]),
+            max_prefix_leaf("neighbor-group", "limit", &["G", "ipv6", "10"]),
+        ];
+        assert_eq!(maximum_prefix(&ok), Vec::<String>::new());
+
+        let no_limit = [max_prefix_leaf(
+            "neighbor",
+            "warning-only",
+            &["10.0.0.1", "ipv4"],
+        )];
+        let errors = maximum_prefix(&no_limit);
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("needs `limit`"), "{errors:?}");
+
+        for family in ["vpnv4", "label-v6", "evpn"] {
+            let block = [max_prefix_leaf(
+                "neighbor-group",
+                "limit",
+                &["G", family, "10"],
+            )];
+            let errors = maximum_prefix(&block);
+            assert_eq!(errors.len(), 1);
+            assert!(errors[0].contains("not supported"), "{errors:?}");
+        }
+    }
+
+    #[test]
+    fn maximum_prefix_reads_the_lines_that_can_carry_a_block() {
+        assert!(maximum_prefix_line(
+            "router bgp neighbor 10.0.0.1 afi-safi ipv4 maximum-prefix warning-only"
+        ));
+        assert!(!maximum_prefix_line("router bgp global as 65000"));
+    }
+
     use super::*;
 
     #[test]

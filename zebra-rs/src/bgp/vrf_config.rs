@@ -793,10 +793,14 @@ pub fn config_vrf_neighbor_neighbor_group(
 ) -> Option<()> {
     let name = args.string()?;
     let addr = args.addr()?;
-    let cfg = vrf_entry(bgp, name, op)?;
+    let cfg = vrf_entry(bgp, name.clone(), op)?;
     let nbr = neighbor_entry(cfg, addr, op)?;
     match op {
-        ConfigOp::Set => nbr.config.neighbor_group = Some(args.string()?),
+        ConfigOp::Set => {
+            let group = args.string()?;
+            nbr.config.neighbor_group = Some(group.clone());
+            super::max_prefix::warn_vrf_join(bgp, &name, addr, &group);
+        }
         ConfigOp::Delete => nbr.config.neighbor_group = None,
         _ => {}
     }

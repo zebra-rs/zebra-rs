@@ -251,6 +251,11 @@ pub struct NeighborGroup {
     /// (the peer's own default / explicit setting stands). The entry
     /// also carries the optional per-family `next-hop-self` opinion.
     pub afi_safi: BTreeMap<AfiSafi, GroupAfiSafi>,
+    /// Per-family `maximum-prefix` blocks inherited by members. A member's
+    /// own block replaces one whole. Kept out of [`Self::afi_safi`]: a changed
+    /// `enabled` is applied as a Delete then a Set, and the Delete removes
+    /// that entry while the block's lines stay out of the diff.
+    pub max_prefix: BTreeMap<AfiSafi, super::max_prefix::MaxPrefixConfig>,
     /// Whole-session knobs inheritable by members.
     pub knobs: InheritableKnobs,
 }
@@ -372,6 +377,7 @@ pub fn config_neighbor_group_afi_safi(bgp: &mut Bgp, mut args: Args, op: ConfigO
         ConfigOp::Delete => {
             if let Some(group) = bgp.neighbor_groups.get_mut(&name) {
                 group.afi_safi.remove(&family);
+                group.max_prefix.remove(&family);
             }
             sweep_group_afi_safi(bgp, &name);
         }
@@ -542,6 +548,112 @@ pub fn config_neighbor_group_afi_safi_add_path(
         changed && matches!(peer.state, State::Established)
     });
     Some(())
+}
+
+/// A group's `afi-safi <name> maximum-prefix` leaf. No bounce: a member whose
+/// effective block changed only has its session checked again.
+fn config_neighbor_group_maximum_prefix(
+    bgp: &mut Bgp,
+    mut args: Args,
+    op: ConfigOp,
+    set: super::max_prefix::LeafSetter,
+) -> Option<()> {
+    let name = args.string()?;
+    let family: AfiSafi = args.afi_safi()?;
+    if !super::max_prefix::family_supported(family) {
+        super::max_prefix::warn_unsupported(family);
+        return None;
+    }
+    // A delete must not make again a group that was removed before it.
+    let group = if op.is_set() {
+        bgp.neighbor_groups.entry(name.clone()).or_default()
+    } else {
+        bgp.neighbor_groups.get_mut(&name)?
+    };
+    let had_block = !group.max_prefix.is_empty();
+    let mut block = group.max_prefix.get(&family).copied().unwrap_or_default();
+    set(&mut block, op, &mut args)?;
+    if block == Default::default() {
+        group.max_prefix.remove(&family);
+    } else {
+        group.max_prefix.insert(family, block);
+    }
+    if !had_block && !group.max_prefix.is_empty() {
+        super::max_prefix::warn_vrf_members(bgp, &name);
+    }
+    sweep_members(bgp, &name, |groups, peer| {
+        super::max_prefix::refresh(groups, peer);
+        false
+    });
+    Some(())
+}
+
+super::max_prefix::max_prefix_callbacks! { config_neighbor_group_maximum_prefix:
+    config_neighbor_group_maximum_prefix_limit => set_limit,
+    config_neighbor_group_maximum_prefix_warning_threshold => set_warning_threshold,
+    config_neighbor_group_maximum_prefix_warning_only => set_warning_only,
+    config_neighbor_group_maximum_prefix_force => set_force,
+    config_neighbor_group_maximum_prefix_restart => set_restart,
+}
+
+/// A member's effective `maximum-prefix` for one family: its own block if that
+/// has a `limit`, else the group's. A block without `limit` is ignored whole,
+/// which only a startup config can leave behind: a commit refuses one.
+pub fn resolve_max_prefix(
+    groups: &BTreeMap<String, NeighborGroup>,
+    config: &PeerConfig,
+    family: AfiSafi,
+) -> Option<super::max_prefix::MaxPrefixConfig> {
+    config
+        .max_prefix_explicit
+        .get(&family)
+        .copied()
+        .filter(|block| block.limit.is_some())
+        .or_else(|| {
+            config
+                .neighbor_group
+                .as_deref()
+                .and_then(|name| groups.get(name))
+                .and_then(|group| group.max_prefix.get(&family).copied())
+                .filter(|block| block.limit.is_some())
+        })
+}
+
+/// Write the resolved block into [`PeerConfig::max_prefix`].
+pub fn apply_resolved_max_prefix(
+    groups: &BTreeMap<String, NeighborGroup>,
+    config: &mut PeerConfig,
+    family: AfiSafi,
+) {
+    match resolve_max_prefix(groups, config, family) {
+        Some(block) => {
+            config.max_prefix.insert(family, block);
+        }
+        None => {
+            config.max_prefix.remove(&family);
+        }
+    }
+}
+
+/// Re-resolve every family either side mentions.
+pub fn recompute_peer_max_prefix(
+    groups: &BTreeMap<String, NeighborGroup>,
+    config: &mut PeerConfig,
+) {
+    let mut families: Vec<AfiSafi> = config.max_prefix.keys().copied().collect();
+    families.extend(config.max_prefix_explicit.keys().copied());
+    if let Some(group) = config
+        .neighbor_group
+        .as_deref()
+        .and_then(|name| groups.get(name))
+    {
+        families.extend(group.max_prefix.keys().copied());
+    }
+    families.sort_unstable();
+    families.dedup();
+    for family in families {
+        apply_resolved_max_prefix(groups, config, family);
+    }
 }
 
 /// Resolve a member's effective per-family `add-path`: the explicit
@@ -1460,6 +1572,7 @@ fn sweep_group_afi_safi(bgp: &mut Bgp, name: &str) {
         recompute_peer_mp(groups, &mut peer.config);
         recompute_peer_nhs(groups, peer);
         recompute_peer_addpath(groups, &mut peer.config);
+        super::max_prefix::refresh(groups, peer);
         let after: std::collections::BTreeSet<AfiSafi> = peer.config.mp.0.keys().copied().collect();
         let addpath_after: BTreeMap<AfiSafi, AddPathSendReceive> = peer
             .config
@@ -1645,6 +1758,7 @@ pub(super) fn apply_inherited(
     // this is the only place its ADD-PATH mode can come from. No bounce
     // is needed here — the peer has not sent its OPEN yet.
     recompute_peer_addpath(groups, &mut peer.config);
+    super::max_prefix::refresh(groups, peer);
 
     // Resolve every knob up front by constructing the full record. Shared
     // with the per-VRF path via `resolve_inherited_knobs`; the destructure
@@ -1884,6 +1998,7 @@ pub(super) fn sweep_action(
 fn sweep_peers_for_group(bgp: &mut Bgp, name: &str, new_asn: Option<u32>) {
     let local_asn = bgp.asn;
     let mut stops: Vec<usize> = Vec::new();
+    let mut inactive_dynamic = Vec::new();
     // Members whose session type may have changed: BFD infers its hop
     // mode from it.
     let mut retyped: Vec<usize> = Vec::new();
@@ -1951,11 +2066,23 @@ fn sweep_peers_for_group(bgp: &mut Bgp, name: &str, new_asn: Option<u32>) {
                 peer.remote_as = 0;
                 peer.config.remote_as_inherited = false;
                 peer.active = false;
-                stops.push(peer.ident);
+                if matches!(peer.origin, PeerOrigin::Dynamic { .. })
+                    && !matches!(
+                        peer.state,
+                        State::OpenSent | State::OpenConfirm | State::Established
+                    )
+                {
+                    // No session to end, so the session-end reaper would never
+                    // run: a `maximum-prefix` hold keeps the peer in Idle.
+                    inactive_dynamic.push(peer.address);
+                } else {
+                    stops.push(peer.ident);
+                }
             }
         }
     }
 
+    super::dynamic_neighbors::remove_dynamic_peers(bgp, inactive_dynamic);
     for ident in stops {
         let _ = bgp.tx.try_send(Message::Event(ident, Event::Stop));
     }

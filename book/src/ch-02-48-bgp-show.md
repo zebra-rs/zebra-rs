@@ -309,8 +309,8 @@ BGP router identifier 192.0.2.1, local AS number 65000 VRF default vrf-id 0
 RIB entries 42
 Peers 1
 
-Neighbor        V         AS   MsgRcvd   MsgSent   TblVer  InQ OutQ  Up/Down State       PfxRcd/Snt Hostname
-192.0.2.2       4      65001        42        40        0    0    0 00:05:00 Established      42/10 r2
+Neighbor        V         AS   MsgRcvd   MsgSent   TblVer  InQ OutQ  Up/Down State        PfxRcd/Snt Hostname
+192.0.2.2       4      65001        42        40        0    0    0 00:05:00 Established       42/10 r2
 ```
 
 `PfxRcd/Snt` reads `N/A` until the session is Established and `NoNeg`

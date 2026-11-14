@@ -306,6 +306,17 @@ impl BgpShard {
             .unwrap_or(0)
     }
 
+    /// Loc-RIB rows from peer `ident` for a family `maximum-prefix` covers:
+    /// routes that passed inbound policy, counted per path. At N>1 the v4
+    /// count on main's shard reads the [`Self::mirror_v4`] replica.
+    pub fn accepted_paths(&self, ident: usize, afi: Afi, safi: Safi) -> usize {
+        match (afi, safi) {
+            (Afi::Ip, Safi::Unicast) => self.v4.3.get(ident),
+            (Afi::Ip6, Safi::Unicast) => self.v6.3.get(ident),
+            _ => 0,
+        }
+    }
+
     // Update LocalRIB route.
     pub fn update(
         &mut self,
