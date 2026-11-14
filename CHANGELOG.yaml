@@ -11,6 +11,79 @@
 # Fields "distribution" and "urgency" are optional per-entry; if you omit them,
 # changelog-gen.sh defaults to distribution "unstable" and urgency "medium".
 
+- semver: 26.11.4
+  date: 2026-11-14T18:00:00+09:00
+  distribution: unstable
+  urgency: medium
+  packager: Kunihiro Ishiguro <kunihiro@zebra.rs>
+  changes:
+    - note: |
+        ### Upgrade notes
+        * The vty admin role (from `enable`, or from `configure` for a
+          `zebra-rs` group member or with the root password) now lasts
+          the 15 idle minutes it promises: the idle-session sweep used
+          to take it at about 10
+        * When the role lapses, `vty` leaves configure mode by itself
+          with a one-line notice. `exit` and `help` in configure mode
+          no longer need the role; an abbreviation of `configure`
+          (`conf`) now needs it, as the whole word always did
+        * `vtyhelper` exits 3 when it cannot reach zebra-rs (with a
+          one-line warning on stderr) and 4 when a command needs the
+          admin role the session does not hold; both used to be 1
+          with nothing printed
+        * `show bgp summary`: the State column is one character wider,
+          to fit `Idle (PfxCt)`
+        * A BGP peer with no remote-as or no address is no longer
+          dialed: a neighbor whose inherited remote-as went away was
+          redialed for ever
+    - note: |
+        ### BGP: maximum-prefix
+        * `afi-safi <ipv4|ipv6> maximum-prefix limit <n>` on a neighbor
+          or a neighbor-group, as FRR's `neighbor X maximum-prefix`
+          (contributed by @kurokiyokiyo). Past the limit the session
+          ends with Cease / Maximum Number of Prefixes Reached
+          (RFC 4486) and the peer stays Idle, shown as `Idle (PfxCt)`,
+          until `clear bgp`, a change to the block, or `restart
+          <minutes>`
+        * `warning-threshold` (percent, default 75) logs once on the
+          way up; `warning-only` logs instead of ending the session;
+          `force` counts the routes inbound policy denied as well
+        * Counts the paths that passed inbound policy, across the RIB
+          shard pool, after each UPDATE and when a commit that changes
+          the limit ends. A neighbor's own block replaces its group's
+          whole; a block without `limit` is refused at commit, and a
+          group block that cannot reach a VRF neighbor draws one
+          warning per commit
+        * A dynamic (listen-range) peer is replaced when its address is
+          configured as a neighbor
+    - note: |
+        ### vty: admin role timeout, unreachable daemon
+        * The shell starts a timer with the admin role and asks the
+          daemon how long the role has left (a new `ADMIN_LEFT` request,
+          which does not extend it). When it lapses: "% Configuration
+          session timed out; back to exec mode.", or "% Admin role no
+          longer held" when it went before its time (a daemon restart).
+          The notice shows at once, with a line half typed; the vty's
+          bash patch runs the trap while readline waits for input
+        * An `enable`d `#` exec prompt drops to `>` with "% Admin role
+          timed out."; `disable` in configure mode leaves it
+        * `configure` takes the role when the daemon refuses it and
+          tries once more, so a second `configure` within the role's
+          time asks for no second password, and one after a lapse asks
+          again instead of failing silently
+        * "% Cannot connect to zebra-rs at <socket>: <reason>" at
+          startup and on each command, rather than nothing or "command
+          not found"; TAB stays quiet. TCP endpoints time out after 5 s
+        * A word starting with `-` in a command (`description -a`) was
+          taken as a vtyhelper option and the command dropped
+        * A `show` cut short by a lost daemon says so after the output
+          it printed
+    - note: |
+        ### Build and dependencies
+        * Dependencies that Rust 1.100's `cargo::unused_dependencies`
+          lint reports are dropped from five crates; `serde_json` moves
+          to `isis-packet`'s dev-dependencies
+
 - semver: 26.11.3
   date: 2026-11-13T18:00:00+09:00
   distribution: unstable
