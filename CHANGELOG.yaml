@@ -11,6 +11,160 @@
 # Fields "distribution" and "urgency" are optional per-entry; if you omit them,
 # changelog-gen.sh defaults to distribution "unstable" and urgency "medium".
 
+- semver: 26.11.3
+  date: 2026-11-13T18:00:00+09:00
+  distribution: unstable
+  urgency: medium
+  packager: Kunihiro Ishiguro <kunihiro@zebra.rs>
+  changes:
+    - note: |
+        ### Upgrade notes
+        * `interface <if> ipv4 address dhcp` now runs zebra-rs's own
+          DHCP client, with or without `--feature insomnia`. Under the
+          feature the value used to be accepted and do nothing
+        * Name servers learned on an interface (a DHCPv4 or DHCPv6
+          lease, Router Advertisements) become the host's through
+          systemd-resolved by default. `no-name-server` under
+          `ipv4 dhcp-options`, `ipv6 dhcpv6-options` or
+          `ipv6 ra-options` keeps them back
+        * One interface address per `set` command, IPv4 and IPv6, and
+          addresses keep the order they were set in. JSON and YAML
+          output writes an address as `{"address": …}`; files with the
+          old plain list still load. `ipv4 address dhcp` beside a
+          static IPv4 address on the same interface is refused at
+          commit; a startup configuration is only warned about
+        * `system hostname` is checked at commit on every router: at
+          most 64 characters, in labels of letters, digits and
+          hyphens. With `--feature insomnia` (and so with the insomnia
+          package) a configured name now renames the system, kernel
+          name and `/etc/hostname`, at the first start after the
+          upgrade
+        * IS-IS (TLV 137) and the BGP FQDN capability advertise
+          `system hostname` when the protocol has no hostname of its
+          own. They advertised the operating system's name
+        * An interface that sends Router Advertisements now names its
+          global /64 prefixes in them, on-link and autonomous, so hosts
+          on it number themselves
+        * `ip -6 route` shows `metric 1` for the metric-0 member of an
+          IPv6 floating static route (it was 1024); `show ipv6 route`
+          still shows the configured metrics
+    - note: |
+        ### DHCPv4 client
+        * `interface <if> ipv4 address dhcp` leases an address: RFC 2131
+          with conflict detection, renew, rebind and INIT-REBOOT. The
+          default route is a `D` route at distance 210, installed as
+          `proto dhcp`; two uplinks are primary and backup by
+          `dhcp-options default-route-distance`, or ECMP at equal
+          distance
+        * `ipv4 dhcp-options`: `client-id`, `host-name`,
+          `vendor-class-id`, `user-class`, `default-route-distance`,
+          `no-default-route`, `reject`, `no-name-server`
+        * Leases are kept in `/var/lib/zebra-rs/dhcp`, so a restart
+          keeps the address and verifies the lease. `show dhcp client
+          leases`, `renew dhcp interface <if>`, `release dhcp interface
+          <if>`
+        * A message is at most 548 bytes (a 576-byte datagram): long
+          options move into the `file` and `sname` fields (option 52),
+          and one with no room is not sent and logged
+        * A reply naming another client identifier, or any when none is
+          configured, is ignored (RFC 6842), and a NAK from a server
+          other than the one selected no longer ends the acquisition
+    - note: |
+        ### IPv6 uplinks: RA host and DHCPv6 client
+        * `ipv6 address autoconf` runs an RA host: Router
+          Solicitations, then the default route (RFC 4191 preference),
+          on-link prefixes and SLAAC addresses, as `A` routes at
+          distance 210 installed as `proto ra`. The kernel's own RA
+          processing is turned off on the interface. `ipv6 ra-options`:
+          `default-route-distance`, `no-default-route`,
+          `no-name-server`. It may sit beside static IPv6 addresses
+        * `ipv6 address dhcpv6` leases an address (RFC 8415, one IA_NA)
+          as a /128 with no route; the RA host runs alongside for the
+          routes. `ipv6 dhcpv6-options`: `duid`, `parameters-only`,
+          `rapid-commit`, `no-release`, `no-name-server`. The system
+          DUID is kept in `/var/lib/zebra-rs/dhcp/duid`
+        * `show dhcpv6 client leases`, `renew dhcpv6 interface <if>`,
+          `release dhcpv6 interface <if>`. `show ipv6 nd interface`
+          shows the RA host: routers, prefixes, RDNSS and DNSSL (64 of
+          each held, as systemd-networkd)
+        * A restart takes back the routes the client and the RA host
+          left in the kernel that nothing installs again, after
+          `--leftover-sweep-time`; insomnia's and the kernel's own
+          `proto dhcp`/`proto ra` routes are left alone
+        * A dynamic address installed with `noprefixroute` (SLAAC, a
+          DHCPv6 /128) brings no connected route. An address both
+          configured and leased stays when the lease ends
+    - note: |
+        ### DHCPv6 prefix delegation
+        * `ipv6 dhcpv6-options pd <id> [length <n>]` asks for a
+          delegated prefix (IA_PD), alone or beside the address. The
+          prefix is held with an `unreachable` route (RFC 7084 WPD-5),
+          so a packet for an unused part of it is answered with ICMPv6
+          Destination Unreachable instead of looping to the provider
+        * `pd <id> interface <lan> { sla-id <n>; address <n>; }` numbers
+          a LAN interface from the prefix: the /64 at `sla-id`, with
+          `address` as the host part or EUI-64. The address follows the
+          lease and is shown as `dhcpv6-pd`
+        * Router Advertisements name the prefix with what is left of its
+          lifetimes, and a prefix that goes is advertised with both
+          lifetimes zero (RFC 9096)
+        * A lease of prefixes alone is saved and verified by a Rebind
+          after a restart. A Reply that renews part of a lease renews
+          that part (RFC 8415 §18.2.10.1), and a Rebind at T2 no longer
+          waits for a Request that is out
+    - note: |
+        ### Name servers to systemd-resolved
+        * The name servers and search domains of a DHCPv4 lease, a
+          DHCPv6 server and Router Advertisements (RDNSS/DNSSL) are set
+          on the link with `resolvectl`, in that order, and taken back
+          when the source loses them. zebra-rs does not write
+          `resolv.conf`
+        * Only as root and in PID 1's network namespace: a daemon under
+          `ip netns exec` leaves the host's resolver alone and logs why
+        * Name servers an earlier run left set are taken back after
+          `--leftover-sweep-time` unless learned again
+          (`/var/lib/zebra-rs/dhcp/resolver.json`)
+    - note: |
+        ### System host name
+        * With `--feature insomnia`, `system hostname` names the system
+          when a commit ends, in the default network namespace only.
+          `delete system hostname` gives back the name found at the
+          first takeover, kept in
+          `/var/lib/zebra-rs/system/hostname.json`
+        * `show hostname` says when the system's name is not the
+          configured one, and why; JSON gains `managed`, `os` and
+          `reason`
+        * A changed name reaches IS-IS neighbors at once (the LSP is
+          regenerated) and BGP neighbors at their next OPEN
+    - note: |
+        ### RIB and static routes
+        * `router static … nexthop unreachable` (IPv4 and IPv6, global
+          and per VRF) drops like `blackhole` and answers with ICMP
+          Destination Unreachable. Both keywords on one route are
+          refused at commit
+        * Deleting a VRF, or stopping zebra-rs gracefully, withdraws the
+          routes zebra-rs installed in its table. Discard routes and
+          routes through interfaces outside the VRF stayed, and the next
+          VRF given that table id inherited them
+        * A floating route (members at different metrics) installs the
+          members that resolve: a member that did not resolve kept the
+          whole route out of the FIB, and a gateway that stopped
+          resolving with its link up left the primary in the kernel.
+          `show ip route` marks `*` per member
+        * IPv6 deletes name the route's kernel priority: changing a
+          single IPv6 static's metric from 0 left the old route behind
+    - note: |
+        ### CLI, packaging and dependencies
+        * `set`, `delete`, `commit` and the other configure-mode
+          commands typed in exec mode say so. `set` was taken silently
+          by bash's own builtin
+        * The pinned cradle-rs engine release is v1.1.10 (no change to
+          `proto/cradle.proto`)
+        * libyang 2.4 (parol 5); prefix-trie 0.10.2, dirs 7,
+          itertools 0.15; the unused `audit` crate is dropped
+        * The DHCP codec moves from insomnia to `crates/dhcp-packet`,
+          shared by the client and insomnia's relay
+
 - semver: 26.11.2
   date: 2026-11-09T18:00:00+09:00
   distribution: unstable
