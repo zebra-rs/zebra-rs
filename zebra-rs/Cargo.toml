@@ -172,7 +172,6 @@ socket2 = "0.6"
 nix = { version = "0.31", features = ["fs", "net", "socket", "uio", "user"] }
 libc = "0.2.167"
 bgp-packet = { path = "../crates/bgp-packet" }
-bgp-macros = { path = "../crates/bgp-macros" }
 ospf-packet = { path = "../crates/ospf-packet" }
 ospf-macros = { path = "../crates/ospf-macros" }
 isis-packet = { path = "../crates/isis-packet" }
