@@ -2310,11 +2310,14 @@ pub fn fsm(
     fsm_effect(id, effect, bgp_ref, peer_map, shards);
 
     // Direct call rather than a queued event: UPDATEs already queued for this
-    // peer must not be ingested past the limit. The return skips nothing: this
-    // event left the state as it was.
+    // peer must not be ingested past the limit. The return skips the
+    // state-transition block below, which the teardown runs for itself.
     if check_limits
         && let Some(event) = super::max_prefix::check_limits(id, bgp_ref.shard, peer_map, shards)
     {
+        if let Some(peer) = peer_map.get_mut_by_idx(id) {
+            settle_before_max_prefix_teardown(peer, prev_state);
+        }
         fsm(bgp_ref, peer_map, id, event, shards);
         return;
     }
@@ -2401,6 +2404,16 @@ pub fn fsm(
             }
         }
         peer_map.debug_verify_membership();
+    }
+}
+
+/// What the skipped state-transition block must still do before a direct
+/// `MaxPrefixExceeded`: an UPDATE that completed the handshake made the peer
+/// Established, whose entry drops a cause parked before the session came up,
+/// so that it does not label this teardown.
+fn settle_before_max_prefix_teardown(peer: &mut Peer, prev_state: State) {
+    if !prev_state.is_established() && peer.state.is_established() {
+        peer.down_reason = None;
     }
 }
 
@@ -5448,6 +5461,25 @@ mod fsm_idle_hold_tests {
     /// have not answered. The handshake completes and the UPDATE is
     /// processed, where it used to be dropped as from a session not up.
     /// With no KEEPALIVE held an UPDATE in OpenConfirm is still dropped.
+    #[tokio::test]
+    async fn a_parked_cause_does_not_label_a_max_prefix_teardown() {
+        let (mut peer, _primary_id, _collision_id) = peer_with_collision();
+        peer.state = State::Established;
+        peer.down_reason = Some(PeerDownReason::AdminReset);
+        settle_before_max_prefix_teardown(&mut peer, State::OpenConfirm);
+        assert!(
+            peer.down_reason.is_none(),
+            "this UPDATE made it Established"
+        );
+
+        peer.down_reason = Some(PeerDownReason::AdminReset);
+        settle_before_max_prefix_teardown(&mut peer, State::Established);
+        assert!(
+            matches!(peer.down_reason, Some(PeerDownReason::AdminReset)),
+            "an earlier session's cause is not this function's to drop"
+        );
+    }
+
     #[tokio::test]
     async fn an_update_completes_a_held_keepalive() {
         let (mut peer, primary_id, _collision_id) = peer_with_collision();
