@@ -241,8 +241,10 @@ fn summary_pfx_counts(
     }
 }
 
-/// The summary's state word. FRR's `Idle (PfxCt)` tells an operator that this
-/// peer stays down until it is cleared.
+/// The text summary's state word. FRR's `Idle (PfxCt)` tells an operator that
+/// this peer stays down until it is cleared. It is 12 characters, the width of
+/// the State column. The JSON keeps `state` to the FSM state and reports the
+/// hold in `maximum_prefix_overflow`.
 fn summary_state(peer: &Peer) -> &'static str {
     if peer.max_prefix.overflow.is_some() {
         "Idle (PfxCt)"
@@ -254,7 +256,7 @@ fn summary_state(peer: &Peer) -> &'static str {
 fn write_summary_header_row(buf: &mut String) -> std::fmt::Result {
     writeln!(
         buf,
-        "{:16}{:>1}{:>11}{:>10}{:>10}{:>9}{:>5}{:>5}{:>9} {:<11} {:>10} Hostname",
+        "{:16}{:>1}{:>11}{:>10}{:>10}{:>9}{:>5}{:>5}{:>9} {:<12} {:>10} Hostname",
         "Neighbor",
         "V",
         "AS",
@@ -306,7 +308,7 @@ fn write_summary_peer_row(
 
     writeln!(
         buf,
-        "{:16}{:>1}{:>11}{:>10}{:>10}{:>9}{:>5}{:>5}{:>9} {:<11} {:>10} {}",
+        "{:16}{:>1}{:>11}{:>10}{:>10}{:>9}{:>5}{:>5}{:>9} {:<12} {:>10} {}",
         // Interface name for unnumbered peers (FRR-style), remote
         // address otherwise.
         peer.display_name(),
@@ -569,6 +571,10 @@ struct BgpPeerSummaryJson {
     state: String,
     pfx_rcvd: u64,
     pfx_sent: u64,
+    /// Present while the peer is held past `maximum-prefix`, as in the
+    /// neighbor JSON; `state` stays the FSM state.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    maximum_prefix_overflow: Option<super::max_prefix::MaxPrefixOverflowShow>,
 }
 
 #[derive(Serialize)]
@@ -2414,7 +2420,7 @@ fn summary_peer_row_json(
     // FRR-style State/PfxRcd column: an Established session shows its
     // received-prefix count in place of the state word.
     let state = if peer.state != State::Established {
-        summary_state(peer).to_string()
+        peer.state.to_str().to_string()
     } else {
         pfx_rcvd.to_string()
     };
@@ -2429,6 +2435,7 @@ fn summary_peer_row_json(
         state,
         pfx_rcvd,
         pfx_sent,
+        maximum_prefix_overflow: super::max_prefix::overflow_show(peer),
     }
 }
 
@@ -6964,7 +6971,7 @@ mod summary_tests {
         let mut buf = String::new();
         write_summary_header_row(&mut buf).unwrap();
         let expected = "\
-Neighbor        V         AS   MsgRcvd   MsgSent   TblVer  InQ OutQ  Up/Down State       PfxRcd/Snt Hostname\n";
+Neighbor        V         AS   MsgRcvd   MsgSent   TblVer  InQ OutQ  Up/Down State        PfxRcd/Snt Hostname\n";
         assert_eq!(buf, expected);
     }
 
@@ -7127,6 +7134,47 @@ Neighbor        V         AS   MsgRcvd   MsgSent   TblVer  InQ OutQ  Up/Down Sta
             out.contains("Peers 1"),
             "dormant peer must be counted:\n{out}"
         );
+    }
+
+    /// A peer held past `maximum-prefix` reads `Idle (PfxCt)` in the text
+    /// summary without moving the columns after it. The JSON keeps `state` to
+    /// `Idle` and carries the hold in its own field.
+    #[test]
+    fn summary_shows_a_held_peer_in_the_state_column() {
+        let mut peers = PeerMap::new();
+        let mut held = make_peer("10.0.0.1".parse().unwrap());
+        held.max_prefix.overflow = Some(super::super::max_prefix::MaxPrefixExceeded {
+            afi_safi: AfiSafi::new(Afi::Ip, Safi::Unicast),
+            count: 11,
+            limit: 10,
+        });
+        peers.insert("10.0.0.1".parse().unwrap(), held);
+        let idle: IpAddr = "10.0.0.2".parse().unwrap();
+        peers.insert(idle, make_peer(idle));
+        let view = TestView {
+            rib: LocalRib::default(),
+            shard: super::super::shard::BgpShard::default(),
+            peers,
+        };
+
+        let out = show_bgp_summary(&view, Args(VecDeque::new()), false).unwrap();
+        let row = |addr: &str| {
+            out.lines()
+                .find(|l| l.starts_with(addr))
+                .unwrap_or_else(|| panic!("{addr} listed:\n{out}"))
+                .to_string()
+        };
+        assert!(row("10.0.0.1 ").contains("Idle (PfxCt)"), "{out}");
+        assert_eq!(row("10.0.0.1 ").len(), row("10.0.0.2 ").len(), "{out}");
+
+        let out = show_bgp_summary(&view, Args(VecDeque::new()), true).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let peers = v["afi_safis"][0]["peers"].as_array().unwrap();
+        let held = peers.iter().find(|p| p["neighbor"] == "10.0.0.1").unwrap();
+        assert_eq!(held["state"], "Idle");
+        assert_eq!(held["maximum_prefix_overflow"]["limit"], 10);
+        let idle = peers.iter().find(|p| p["neighbor"] == "10.0.0.2").unwrap();
+        assert!(idle.get("maximum_prefix_overflow").is_none());
     }
 
     /// JSON summary: the unnumbered row is identified by the interface
