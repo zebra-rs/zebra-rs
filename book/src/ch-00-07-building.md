@@ -54,7 +54,7 @@ On Ubuntu/Debian:
 ``` shell
 sudo apt update
 sudo apt install -y build-essential pkg-config curl \
-    protobuf-compiler libpam0g-dev bison xxd
+    protobuf-compiler libpam0g-dev bison xxd libncurses-dev
 ```
 
 | Package | Needed for |
@@ -64,6 +64,7 @@ sudo apt install -y build-essential pkg-config curl \
 | `libpam0g-dev` | the `vtypam` PAM authentication helper |
 | `bison` | bash's grammar, regenerated during the `vty` build |
 | `xxd` | embeds `vty.sh` into the `vty` binary during the build |
+| `libncurses-dev` | the terminfo library the `vty` line editor looks the terminal up in; the `vty` build stops without it |
 
 Building or testing only the Rust workspace (`cargo build`, `cargo test`)
 needs just `protobuf-compiler` and `libpam0g-dev` — that is all `ci.yaml`

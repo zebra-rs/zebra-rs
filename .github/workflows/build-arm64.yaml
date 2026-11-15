@@ -22,7 +22,7 @@ jobs:
         run: |
           grep -l dl.google.com /etc/apt/sources.list.d/* | xargs -r sudo rm -f
           sudo apt update -y
-          sudo apt install -y protobuf-compiler bison xxd libpam0g-dev
+          sudo apt install -y protobuf-compiler bison xxd libpam0g-dev libncurses-dev
           make -C vty
           cargo install cargo-deb --locked
           make -C packaging arm64
