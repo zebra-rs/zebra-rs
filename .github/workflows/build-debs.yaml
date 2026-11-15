@@ -57,7 +57,7 @@ jobs:
         run: |
           grep -l dl.google.com /etc/apt/sources.list.d/* | xargs -r sudo rm -f
           sudo apt-get update -y
-          sudo apt-get install -y protobuf-compiler bison xxd libpam0g-dev
+          sudo apt-get install -y protobuf-compiler bison xxd libpam0g-dev libncurses-dev
 
       - name: Install cargo-deb
         run: cargo install cargo-deb --version "$CARGO_DEB_VERSION" --locked
@@ -131,7 +131,7 @@ jobs:
       - name: Install build dependencies
         run: |
           apt-get update -y
-          apt-get install -y protobuf-compiler bison xxd libpam0g-dev
+          apt-get install -y protobuf-compiler bison xxd libpam0g-dev libncurses-dev
 
       - name: Install cargo-deb
         run: cargo install cargo-deb --version "$CARGO_DEB_VERSION" --locked

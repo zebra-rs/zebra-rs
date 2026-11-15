@@ -20,6 +20,14 @@ a copy at `vty` for packaging.
 
 Override the cache location with `CACHE_DIR=/some/path`.
 
+The build needs the ncurses development files (`libncurses-dev` on
+Debian/Ubuntu) besides a C toolchain, `bison` and `xxd`. Without
+them bash's `configure` does not fail: it falls back to its bundled
+termcap library, which finds no terminal description on a system
+without `/etc/termcap`, and the line editor then treats every
+terminal as dumb (Ctrl-L prints a newline, no bracketed paste). The
+Makefile stops after `configure` when that fallback was chosen.
+
 ## Layout
 
     additions/                  vty-specific source files (real source)

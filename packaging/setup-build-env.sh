@@ -13,7 +13,7 @@
 #
 # What it installs:
 #   * APT system packages (build-essential, protobuf-compiler, libpam0g-dev,
-#     bison, xxd, ...) for the workspace and the `vty` build.
+#     bison, xxd, libncurses-dev, ...) for the workspace and the `vty` build.
 #   * The stable Rust toolchain via rustup (if cargo is not already present).
 #   * cargo-deb (via `cargo install`), the Debian package builder.
 #
@@ -36,8 +36,9 @@ INSTALL_RUST=1
 
 # System packages. build-essential/pkg-config/curl drive the `vty` C build (GNU
 # bash compiled from source); protobuf-compiler + libpam0g-dev are the only ones
-# the plain `cargo build`/`cargo test` needs; bison/xxd complete the `vty` shell
-# build. git/make round out the build.
+# the plain `cargo build`/`cargo test` needs; bison/xxd/libncurses-dev complete
+# the `vty` shell build (without libncurses-dev its line editor cannot look up
+# the terminal, so vty/Makefile refuses to build). git/make round out the build.
 APT_PACKAGES=(
     build-essential
     pkg-config
@@ -48,6 +49,7 @@ APT_PACKAGES=(
     libpam0g-dev
     bison
     xxd
+    libncurses-dev
 )
 
 # ---- helpers -----------------------------------------------------------------

@@ -46,8 +46,22 @@ prepare: $(STAMP_PREPARE)
 $(BINARY): $(TARGET)
 	cp $< $@
 
+# bash's configure does not fail when there is no curses/terminfo library
+# to link: it quietly builds its bundled GNU termcap instead, which reads
+# only $TERMCAP and /etc/termcap. Ubuntu has neither, so such a vty knows
+# nothing about the terminal: Ctrl-L prints a newline instead of clearing
+# the screen and bracketed paste stays off. The Ubuntu 26.04 packages up to
+# 26.11.4 were built that way, in a container without libncurses-dev. Only a
+# system library gives TERMCAP_LIB a -l flag, so anything else stops here.
 $(TARGET): $(STAMP_PREPARE)
 	cd $(BUILD_DIR) && ./configure
+	@lib=$$(sed -n 's/^TERMCAP_LIB[[:space:]]*=[[:space:]]*//p' $(BUILD_DIR)/Makefile); \
+	case "$$lib" in \
+	    -l*) ;; \
+	    *) echo "vty: configure found no curses/terminfo library (TERMCAP_LIB = '$$lib')." >&2; \
+	       echo "vty: install the ncurses development files (libncurses-dev on Debian/Ubuntu), then run make again." >&2; \
+	       exit 1 ;; \
+	esac
 	$(MAKE) -C $(BUILD_DIR)
 
 $(STAMP_PREPARE): $(TARBALL) $(UPSTREAM_PATCHES) $(PATCH) $(ADDITIONS)
