@@ -174,7 +174,7 @@ exists.
 
 These stop a per-role family from being ported at all.
 
-### `maximum-prefix` — confirmed absent
+### `maximum-prefix` — CLOSED (was: confirmed absent)
 
 SONiC: `neighbor BGPMON maximum-prefix 1` (monitors, a deliberate
 tripwire — a BGP monitor should never receive routes) and
@@ -197,7 +197,17 @@ Note the enforcement semantics matter as much as the leaf: FRR tears the
 session down when the limit is exceeded, and the monitors use of
 `maximum-prefix 1` depends on that.
 
-### `send-community` — confirmed absent
+### `send-community` — NOT A GAP (measured 2026-11-16)
+
+Measured on two SONiC VS back to back: a community set by a zebra-rs
+egress policy (`65100:777`, additive) arrived at the FRR eBGP peer, with
+no `send-community` configured — there is none to configure. zebra-rs
+sends standard communities unconditionally, so FRR's line has nothing to
+port: a template drops it, and says so. FRR needs the knob only because
+its default is not to send. Not measured: extended and large communities,
+and an iBGP peer (the `internal` and `voq_chassis` case), though nothing in
+`src/bgp/` filters by session type. The original entry follows.
+
 
 SONiC: `neighbor BGPMON send-community` (monitors).
 
@@ -319,8 +329,53 @@ Recorded so the list reads as a state, not a history:
   (ADD-PATH is negotiated in the OPEN), and is resolved on the per-VRF
   path too so the two neighbor surfaces do not drift.
 
-## Not yet examined
+## Found by reading `internal` and `voq_chassis`
 
-The `voq_chassis` and `internal` template families have not been read
-yet, so this list is not complete. `internal` uses `set tag`, which now
-exists.
+Both families are for multi-ASIC and chassis devices. Read on 2026-11-16;
+the entries below are from the schema, not from a live probe, so they are
+"not found", not "confirmed absent" in the sense used above.
+
+### `set originator-id` — not found
+
+`internal` only: `route-map FROM_BGP_INTERNAL_PEER_V4 permit 1 / set
+originator-id <router-id or Loopback4096>` on a BackEnd ASIC, so routes
+reflected between the ASICs of one box carry the box's identity. No such
+policy action in `config.yang`.
+
+### Tuned keepalive — these two happen to come out right
+
+`internal` sets `timers 3 10` and `voq_chassis` `timers 2 7`. Both are the
+per-neighbour `keepalive` gap above in form, but not in effect: zebra-rs
+derives the keepalive as hold time / 3 (`bgp/timer.rs`), and 10 / 3 = 3,
+7 / 3 = 2 in integer division — exactly what the templates ask for. So
+porting them as hold time alone is equivalent here. It stays a coincidence
+of those two pairs; `timers 5 180` still ports to 60.
+
+### `bgp bestpath peer-type multipath-relax` — not found
+
+`voq_chassis` sets it beside `as-path multipath-relax`, so that an eBGP
+path and an iBGP path to the same prefix can share an ECMP set — on a VOQ
+chassis the same destination is reachable through an external peer and
+through another line card. `zebra-bgp-multipath.yang` has the `as-path`
+relax only. It changes which links carry traffic, so a port should refuse
+it rather than drop it. `voq_chassis` also needs `send-community`.
+
+### `next-hop-self force` — unchecked
+
+`internal` uses the `force` form on a BackEnd or chassis-packet device.
+`next-hop-self` exists per family; its description says it forces self on
+reflected paths, which is what `force` means in FRR, but that is a
+reading of a description, not a measurement.
+
+## Closed since this list was last revised
+
+* **`maximum-prefix`** — implemented on neighbors and neighbor-groups for
+  IPv4 and IPv6 unicast (`limit`, `warning-threshold`, `warning-only`,
+  `force`, `restart`), ending the session with Cease/Maximum Number of
+  Prefixes Reached. A VRF neighbor has no such block. The section above
+  describing it as absent is kept for the history of how it was probed;
+  the `sentinels` family is ported on top of it.
+* **`neighbor X enabled false`** — was accepted and inert, which made
+  SONiC's `config bgp shutdown neighbor` a silent no-op. Now
+  administrative shutdown (`Idle (Admin)`). Found on a SONiC VS, not by a
+  probe: the leaf was accepted, so every probe passed.
