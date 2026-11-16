@@ -46,3 +46,59 @@ mod testdata;
 
 pub use client::FpmFib;
 pub use encode::{RouteOp, encode_route};
+
+/// Whether a prefix belongs in the FPM stream at all.
+///
+/// The host loopback net (`127.0.0.0/8`, `::1`) and IPv6 link-local
+/// (`fe80::/10`) never reach APPL_DB from SONiC's FRR: its zebra has no
+/// connected route for the loopback net and does not hand link-local
+/// prefixes to the dataplane. zebra-rs carries both as ordinary connected
+/// routes, so without this gate they are teed, `fpmsyncd` accepts them,
+/// and the ASIC is programmed with `127.0.0.0/16 -> lo`, `::1 -> lo` and
+/// one `fe80::/64` — rows the FRR being replaced never produces. Seen as
+/// an APPL_DB diff between an FRR and a zebra-rs SONiC VS on the same
+/// config. A sub-prefix of either range is excluded too.
+pub fn is_fpm_prefix(prefix: &ipnet::IpNet) -> bool {
+    match prefix {
+        ipnet::IpNet::V4(p) => !p.addr().is_loopback(),
+        ipnet::IpNet::V6(p) => {
+            let addr = p.addr();
+            !addr.is_loopback() && (addr.segments()[0] & 0xffc0) != 0xfe80
+        }
+    }
+}
+
+#[cfg(test)]
+mod prefix_gate_tests {
+    use super::is_fpm_prefix;
+
+    fn fpm(s: &str) -> bool {
+        is_fpm_prefix(&s.parse().unwrap())
+    }
+
+    #[test]
+    fn loopback_and_link_local_stay_out_of_fpm() {
+        // What a SONiC box has on `lo` and on every L3 interface.
+        assert!(!fpm("127.0.0.0/16"));
+        assert!(!fpm("127.0.0.0/8"));
+        assert!(!fpm("127.0.0.1/32"));
+        assert!(!fpm("::1/128"));
+        assert!(!fpm("fe80::/64"));
+        assert!(!fpm("fe80::/10"));
+        assert!(!fpm("febf::1/128"));
+    }
+
+    #[test]
+    fn ordinary_prefixes_are_teed() {
+        assert!(fpm("0.0.0.0/0"));
+        assert!(fpm("::/0"));
+        assert!(fpm("10.1.0.1/32"));
+        assert!(fpm("10.0.0.0/31"));
+        assert!(fpm("240.127.1.0/24"));
+        assert!(fpm("fc00:1::/64"));
+        // Just outside fe80::/10 on both sides.
+        assert!(fpm("fe7f::/16"));
+        assert!(fpm("fec0::/10"));
+        assert!(fpm("2001:db8::1/128"));
+    }
+}

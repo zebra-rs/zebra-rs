@@ -1037,6 +1037,9 @@ impl FibHandle {
         if !entry.is_protocol() && !matches!(entry.rtype, RibType::Connected) {
             return None;
         }
+        if !crate::fib::fpm::is_fpm_prefix(&prefix) {
+            return None;
+        }
 
         // FPM's table field is a VRF *device ifindex*, not a kernel
         // routing-table id (dplane_fpm_sonic.c:1232 — "Put vrf if_index
