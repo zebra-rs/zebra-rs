@@ -239,7 +239,13 @@ inherited encapsulation tunnels the packet across the core.
 - With more than one segment, `segments <s1> <s2> ...` installs the
   full SRH; the default encapsulation is `H.Encap` (RFC 8986 §5.1),
   so the kernel carries every configured segment. Opt into the
-  SRH-reduced form with `encap-type H.Encap.Red`.
+  SRH-reduced form with `encap-type H.Encap.Red`: the first segment
+  stays out of the SRH, and a single segment gets no SRH at all. It
+  is the kernel's `encap.red` mode and needs Linux 6.0 or later.
+- The packet visits the segments in the order written, `<s1>` first,
+  exactly as `ip -6 route add ... encap seg6 mode encap segs
+  <s1>,<s2>` does, and `ip -6 route show` prints the list back in
+  that order.
 - `segments` and `nexthop` are alternative forwarding models on the
   same route; when both are configured, the segment list wins.
 - The `distance` and `metric` leaves work on SRv6-steered routes the

@@ -333,6 +333,11 @@ module config-static {
         leaf-list segments {
           ext:help "SRv6 segment list";
           type inet:ipv6-address;
+          description
+            "The segments in the order the packet visits them, the
+             first one first, as in `ip -6 route add ... encap seg6
+             ... segs <s1>,<s2>`. The route is resolved through the
+             first segment.";
         }
         leaf encap-type {
           ext:help "SRv6 encapsulation type";
@@ -340,6 +345,12 @@ module config-static {
             enum "H.Encap";
             enum "H.Encap.Red";
           }
+          description
+            "H.Encap (RFC 8986 5.1, the default) carries every segment
+             in the SRH. H.Encap.Red (5.2) keeps the first segment out
+             of the SRH, since the outer destination already holds it,
+             and sends no SRH at all for a single segment; it is the
+             kernel's `encap.red` mode, which needs Linux 6.0.";
         }
         leaf action {
           ext:help "SRv6 seg6local endpoint behavior";

@@ -1,0 +1,33 @@
+# z2 — the first segment of every list: its End SID moves the packet on
+# to the next segment, one of z3's SIDs, which z2 can reach and z1 cannot.
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8::2/128
+- if-name: z2-z1
+  ipv6:
+    address: 2001:db8:12::2/64
+- if-name: z2-z3
+  ipv6:
+    address: 2001:db8:23::2/64
+segment-routing:
+  locator:
+  - name: LOC2
+    prefix: fcbb:bbbb:2::/48
+router:
+  ospfv3:
+    router-id: 10.0.0.2
+    segment-routing:
+      srv6:
+        locator: LOC2
+    area:
+    - area-id: 0.0.0.0
+      interface:
+      - if-name: lo
+        enabled: true
+      - if-name: z2-z1
+        enabled: true
+        network-type: point-to-point
+      - if-name: z2-z3
+        enabled: true
+        network-type: point-to-point
