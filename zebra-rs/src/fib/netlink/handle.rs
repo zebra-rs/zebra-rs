@@ -272,17 +272,43 @@ fn set_route_table(msg: &mut RouteMessage, table_id: u32) {
 /// only zebra-rs installs routes with. It enters the RIB stale, under its
 /// owner's type, so the owner's own route replaces it; the rest are swept
 /// (`Message::SweepStale`, `Message::SweepLeftovers`). Main-table BGP is
-/// not ours to claim: another daemon may own it (an underlay bgpd).
-pub(crate) fn leftover_rtype(protocol: RouteProtocol, table_id: u32) -> Option<(RibType, u8)> {
+/// not ours to claim by default: another daemon may own it (an underlay
+/// bgpd). `claim_main_bgp` (`--claim-main-bgp`) says none does.
+pub(crate) fn leftover_rtype(
+    protocol: RouteProtocol,
+    table_id: u32,
+    claim_main_bgp: bool,
+) -> Option<(RibType, u8)> {
     match protocol {
         RouteProtocol::Ospf => Some((RibType::Ospf, 110)),
         RouteProtocol::Isis => Some((RibType::Isis, 115)),
         RouteProtocol::Zebra => Some((RibType::Static, 1)),
-        RouteProtocol::Bgp if table_id != RouteHeader::RT_TABLE_MAIN as u32 => {
+        RouteProtocol::Bgp if claim_main_bgp || table_id != RouteHeader::RT_TABLE_MAIN as u32 => {
             Some((RibType::Bgp, 200))
         }
         _ => None,
     }
+}
+
+/// `--claim-main-bgp`: zebra-rs is the only BGP speaker installing routes
+/// on this host, so a main-table `proto bgp` route the startup dump finds
+/// is an earlier run's and is treated like the other leftovers.
+///
+/// Off by default for the reason [`leftover_rtype`] gives. It has to be on
+/// where zebra-rs *is* the routing stack and restarts in place — SONiC's
+/// bgp container shares the host's network namespace, so every container
+/// restart leaves the previous instance's BGP routes in the kernel. Left
+/// unclaimed they come back as distance-0 kernel routes that outrank the
+/// BGP routes learned afresh: the RIB keeps selecting the dead instance's
+/// copy, nothing about that prefix is ever re-sent over FPM, and a path
+/// that has since gone away stays in the kernel and in the ASIC. Seen on a
+/// SONiC VS: after a container restart a neighbor was removed and its next
+/// hop stayed in APPL_DB's ECMP set.
+static CLAIM_MAIN_BGP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Set once from the command line, before the startup dump.
+pub fn set_claim_main_bgp(claim: bool) {
+    CLAIM_MAIN_BGP.store(claim, std::sync::atomic::Ordering::Relaxed);
 }
 
 const RTA_NH_ID: u16 = 30;
@@ -1035,6 +1061,9 @@ impl FibHandle {
         table_id: u32,
     ) -> Option<(u32, Vec<u8>)> {
         if !entry.is_protocol() && !matches!(entry.rtype, RibType::Connected) {
+            return None;
+        }
+        if !crate::fib::fpm::is_fpm_prefix(&prefix) {
             return None;
         }
 
@@ -6507,7 +6536,11 @@ pub fn route_from_msg_with(
         return None;
     }
     let leftover = if dump {
-        leftover_rtype(protocol, table_id)
+        leftover_rtype(
+            protocol,
+            table_id,
+            CLAIM_MAIN_BGP.load(std::sync::atomic::Ordering::Relaxed),
+        )
     } else {
         None
     };
@@ -7312,9 +7345,24 @@ mod tests {
         // Statics install as RTPROT_ZEBRA, so the dump can recognize them.
         assert_eq!(route_protocol(RibType::Static), RouteProtocol::Zebra);
         assert_eq!(
-            leftover_rtype(route_protocol(RibType::Static), main),
+            leftover_rtype(route_protocol(RibType::Static), main, false),
             Some((RibType::Static, 1))
         );
+    }
+
+    /// Main-table BGP is another daemon's unless `--claim-main-bgp` says
+    /// zebra-rs is the only BGP speaker on the host; VRF-table BGP is
+    /// always its own. The flag claims nothing else.
+    #[test]
+    fn main_table_bgp_leftover_needs_the_claim() {
+        let main = RouteHeader::RT_TABLE_MAIN as u32;
+        let bgp = route_protocol(RibType::Bgp);
+        assert_eq!(leftover_rtype(bgp, main, false), None);
+        assert_eq!(leftover_rtype(bgp, main, true), Some((RibType::Bgp, 200)));
+        assert_eq!(leftover_rtype(bgp, 100, false), Some((RibType::Bgp, 200)));
+        assert_eq!(leftover_rtype(bgp, 100, true), Some((RibType::Bgp, 200)));
+        assert_eq!(leftover_rtype(RouteProtocol::Kernel, main, true), None);
+        assert_eq!(leftover_rtype(RouteProtocol::Static, main, true), None);
     }
 
     /// An IPv4 VTEP needs RMAC neighbors for itself and its IPv4-mapped

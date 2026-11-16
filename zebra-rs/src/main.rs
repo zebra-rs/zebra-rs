@@ -109,6 +109,12 @@ struct Arg {
 
     #[arg(
         long,
+        help = "Treat main-table `proto bgp` routes found in the kernel at startup as an earlier run's leftovers: the BGP routes learned again replace them and the rest are removed after --leftover-sweep-time. Only where zebra-rs is the sole BGP speaker installing routes on the host (as in SONiC's bgp container); without it such routes are assumed to be another daemon's and are left alone"
+    )]
+    claim_main_bgp: bool,
+
+    #[arg(
+        long,
         help = "VTY gRPC listen address. Forms: unix:NAME (Linux abstract socket), unix:/PATH (filesystem socket) or tcp:HOST:PORT",
         default_value = "unix:zebra-rs/vty"
     )]
@@ -260,6 +266,8 @@ async fn run(arg: Arg) -> anyhow::Result<()> {
         tracing::warn!("failed to raise file descriptor limit: {}", e);
     }
 
+    #[cfg(target_os = "linux")]
+    fib::netlink::handle::set_claim_main_bgp(arg.claim_main_bgp);
     let mut rib = Rib::new(arg.no_nhid)?;
     rib.leftover_sweep_time = std::time::Duration::from_secs(arg.leftover_sweep_time);
     // With `--feature insomnia` zebra-rs is the configuration owner of the

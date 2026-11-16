@@ -4253,6 +4253,39 @@ fn config_local_identifier(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Optio
     Some(())
 }
 
+/// `neighbor X enabled <bool>`: administrative shutdown. `false` ends the
+/// session (the same teardown `clear bgp ... hard` uses) and holds the peer
+/// in Idle, neither dialing nor accepting; `true`, or deleting the
+/// statement, lets it start again. A statement that changes nothing does
+/// nothing, so re-applying `enabled true` never bounces a session.
+fn config_peer_enabled(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let addr = args.addr()?;
+    let shutdown = if op.is_set() { !args.boolean()? } else { false };
+
+    if let Some(peer) = bgp.peers.get_mut(&addr) {
+        if peer.config.shutdown == shutdown {
+            return Some(());
+        }
+        peer.config.shutdown = shutdown;
+        if shutdown {
+            // Not `active` any more, so the `start` that re-enables it arms
+            // the idle-hold timer again; and no timer left to fire meanwhile.
+            peer.active = false;
+            peer.timer.idle_hold_timer = None;
+            tracing::info!(peer = %addr, "bgp: neighbor administratively shut down");
+            let _ = bgp.tx.try_send(super::inst::Message::Event(
+                peer.ident,
+                super::peer::Event::Stop,
+            ));
+        } else {
+            tracing::info!(peer = %addr, "bgp: neighbor administratively enabled");
+            peer.start();
+        }
+    }
+
+    Some(())
+}
+
 fn config_transport_passive(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let addr = args.addr()?;
     // Per-neighbor `transport passive-mode` is a boolean leaf: Set
@@ -5363,6 +5396,7 @@ impl Bgp {
         // Free-form operator note; storage-only, shown by
         // `show bgp neighbors`.
         self.callback_peer("/description", config_peer_description);
+        self.callback_peer("/enabled", config_peer_enabled);
         // `set router bgp neighbor-group <name> [...]`.
         self.callback_add(
             "/router/bgp/neighbor-group",

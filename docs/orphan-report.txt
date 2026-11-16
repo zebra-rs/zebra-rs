@@ -1,5 +1,4 @@
 == Collapsed orphan report ==
-ORPHAN leaf         /router/bgp/neighbor/enabled
 ORPHAN leaf         /router/bgp/sharding/rib-sharding
 ORPHAN leaf         /router/bgp/sharding/peer-sharding
 
@@ -24,16 +23,19 @@ grepping for registrations), and it creates/tears down the peer when
 the list entry itself is set/deleted.
 
 Total settable schema nodes: 379
-Handled: 364
-Orphans: 3
+Handled: 365
+Orphans: 2
 
 Note: these orphans have no config callback but are kept intentionally.
 sharding/rib-sharding and sharding/peer-sharding are consumed at BGP task
 spawn by the flattened-config text scan in src/config/bgp.rs
-(configured_shards / configured_peer_task). neighbor/enabled is a standard
-IETF/OpenConfig/FRR idiom (`neighbor X enabled true`, present in ~418 test
-configs); it is accepted and inert (a neighbor is enabled by configuring
-remote-as) and the schema must accept it so those configs load. The other
+(configured_shards / configured_peer_task). neighbor/enabled was a third
+such orphan — accepted and inert, kept so the ~418 test configs that state
+`neighbor X enabled true` would load. It now has a handler
+(config_peer_enabled): `false` is administrative shutdown, `true` remains a
+no-op, so those configs load unchanged and it counts as handled above. It
+stopped being safe to leave inert once SONiC's `config bgp shutdown
+neighbor` was mapped onto it and silently did nothing. The other
 42 handler-less neighbor nodes were removed from the BGP YANG (vendored
 ietf leftovers / duplicates of handled zebra knobs); of those,
 neighbor/description has since been restored WITH a config handler
