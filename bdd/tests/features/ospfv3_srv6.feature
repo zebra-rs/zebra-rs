@@ -39,9 +39,13 @@ Feature: OSPFv3 SRv6 locator origination (RFC 9513)
     And show command "show ospfv3 database detail" in namespace "z1" should contain "SRv6 Locator TLV: 2001:db8:f:2::/64"
     And show command "show ospfv3 database detail" in namespace "z2" should contain "SRv6 Locator TLV: fcbb:bbbb:1::/48"
     # The End SID rides inside the Locator TLV with its structure:
-    # uN (End with NEXT-CSID, codepoint 48) for z1's uSID locator,
-    # classic End (codepoint 1) for z2's.
+    # uN (End with NEXT-CSID, codepoint 43) for z1's uSID locator,
+    # classic End (codepoint 1) for z2's. The database view prints each
+    # codepoint with its name; the first is z1's own, the second only
+    # z2 originates.
     And show command "show ospfv3 database detail" in namespace "z1" should contain "SRv6 End SID Sub-TLV:"
+    And show command "show ospfv3 database detail" in namespace "z1" should contain "Endpoint Behavior: 43 (uN)"
+    And show command "show ospfv3 database detail" in namespace "z1" should contain "Endpoint Behavior: 1 (End)"
     And show command "show ospfv3 database detail" in namespace "z1" should contain "SID: fcbb:bbbb:1::"
     And show command "show ospfv3 database detail" in namespace "z1" should contain "SID Structure: LB 32 LN 16 Fun 16 Arg 0"
     And show command "show ospfv3 database detail" in namespace "z2" should contain "SID Structure: LB 40 LN 24 Fun 16 Arg 0"
@@ -78,6 +82,9 @@ Feature: OSPFv3 SRv6 locator origination (RFC 9513)
     # per-link E-Router-LSA and floods to the peer.
     And show command "show ospfv3 database detail" in namespace "z2" should contain "SRv6 End.X SID Sub-TLV:"
     And show command "show ospfv3 database detail" in namespace "z1" should contain "SRv6 End.X SID Sub-TLV:"
+    # Named there as well: z1's adjacency SID is a uA, z2's an End.X.
+    And show command "show ospfv3 database detail" in namespace "z2" should contain "Endpoint Behavior: 52 (uA)"
+    And show command "show ospfv3 database detail" in namespace "z1" should contain "Endpoint Behavior: 5 (End.X)"
     # The dedicated SRv6 show surfaces the locator, the End SID, and
     # the per-adjacency End.X table with the installed nexthop and
     # the LIB twin.
