@@ -1,0 +1,15 @@
+# h3 — the host behind z3, with one address per segment list of z1.
+interface:
+- if-name: h3-z3
+  ipv6:
+    address:
+    - 2001:db8:300::100/64
+    - 2001:db8:300::101/64
+    - 2001:db8:300::102/64
+router:
+  static:
+    ipv6:
+      route:
+      - prefix: ::/0
+        nexthop:
+        - address: 2001:db8:300::1

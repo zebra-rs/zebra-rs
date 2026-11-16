@@ -14,13 +14,15 @@ use crate::rib::{SidBehavior, SidStructure};
 // returned encap in either RouteAttribute::Encap (for embedded route-message
 // encap) or NexthopAttribute::Encap (for nexthop-table entries).
 //
-// HEncap carries every segment in the SRH. HEncapRed (RFC 8986 §5.2) drops
-// the first segment from the SRH because the kernel's outer IPv6 destination
-// already encodes it; the remaining segments must be non-empty. HInsert
-// (kernel `mode inline`) inserts the SRH into the existing IPv6 packet with
-// the original destination as the final segment — see build_srh_inline.
-// Other EncapType variants are rejected here so callers surface a useful
-// error instead of silently flattening behavior.
+// `segments` is in forwarding order, first visited first, as iproute2's
+// `segs A,B` is. HEncap (kernel `mode encap`) carries every segment in the
+// SRH. HEncapRed (RFC 8986 §5.2, kernel `mode encap.red`, Linux 6.0) gets
+// the same full list: the kernel itself keeps the first segment out of the
+// SRH, and sends no SRH at all for a single segment. HInsert (kernel `mode
+// inline`) inserts the SRH into the existing IPv6 packet with the original
+// destination as the final segment — see build_srh_inline. Other EncapType
+// variants are rejected here so callers surface a useful error instead of
+// silently flattening behavior.
 pub fn build_seg6_lwtunnel(
     segments: &[Ipv6Addr],
     encap_type: EncapType,
@@ -30,12 +32,7 @@ pub fn build_seg6_lwtunnel(
     }
     let (mode, ipv6_sr_hdr) = match encap_type {
         EncapType::HEncap => (Seg6IpTunnelMode::Encap, build_srh(segments)),
-        EncapType::HEncapRed => {
-            if segments.len() < 2 {
-                bail!("H.Encap.Red requires at least two segments");
-            }
-            (Seg6IpTunnelMode::Encap, build_srh(&segments[1..]))
-        }
+        EncapType::HEncapRed => (Seg6IpTunnelMode::EncapRed, build_srh(segments)),
         EncapType::HInsert => (Seg6IpTunnelMode::Inline, build_srh_inline(segments)),
         other => bail!("unsupported SRv6 encap type: {other}"),
     };
@@ -91,9 +88,17 @@ fn build_srh_inline(segments: &[Ipv6Addr]) -> Ipv6SrHdr {
     }
 }
 
-// Build the SRH (`Ipv6SrHdr`) carrying `segments` in forwarding order,
-// shared by the H.Encap encap path and the End.B6.Encaps seg6local
-// push. `segments` must be non-empty (callers guarantee it).
+// Build the SRH (`Ipv6SrHdr`) for `segments`, given in forwarding order
+// (first visited first). Shared by the H.Encap encap paths and the
+// End.B6.Encaps seg6local push. `segments` must be non-empty (callers
+// guarantee it).
+//
+// The kernel takes this header as it goes on the wire, where the list is
+// stored backwards (RFC 8754 §2): the last segment at index 0, the first
+// at `first_segment`, which is where the kernel reads the outer
+// destination from (`hdr->daddr = isrh->segments[isrh->first_segment]`).
+// iproute2 does the same reversal for `segs A,B`. Until this was reversed
+// here, a list of two or more segments was visited last segment first.
 fn build_srh(segments: &[Ipv6Addr]) -> Ipv6SrHdr {
     let n = segments.len() as u8;
     Ipv6SrHdr {
@@ -104,7 +109,7 @@ fn build_srh(segments: &[Ipv6Addr]) -> Ipv6SrHdr {
         first_segment: n - 1,
         flags: 0,
         tag: 0,
-        segments: segments.to_vec(),
+        segments: segments.iter().rev().copied().collect(),
         ..Default::default()
     }
 }
@@ -467,7 +472,12 @@ mod tests {
             RouteLwTunnelEncap::Seg6Local(RouteSeg6LocalIpTunnel::Srh(h)) => Some(h),
             _ => None,
         });
-        assert_eq!(srh.expect("SRH present").segments, segs);
+        // The policy visits fc00:0:2:: first: on the wire that is the top
+        // index, with the last segment at index 0.
+        let srh = srh.expect("SRH present");
+        let backwards: Vec<Ipv6Addr> = segs.iter().rev().copied().collect();
+        assert_eq!(srh.segments, backwards);
+        assert_eq!(srh.segments[srh.first_segment as usize], segs[0]);
     }
 
     #[test]
@@ -537,6 +547,59 @@ mod tests {
         assert_eq!(srh.segments_left, 2);
         assert_eq!(srh.first_segment, 2);
         assert_eq!(srh.hdrlen, 6);
+    }
+
+    /// The seg6 iptunnel part of an encap.
+    fn seg6_encap(encap: RouteLwTunnelEncap) -> Seg6IpTunnelEncap {
+        let RouteLwTunnelEncap::Seg6(RouteSeg6IpTunnel::Seg6IpTunnel(seg6)) = encap else {
+            panic!("expected seg6 iptunnel encap");
+        };
+        seg6
+    }
+
+    #[test]
+    fn h_encap_puts_the_first_segment_where_the_kernel_reads_it() {
+        // Forwarding order [s1, s2, s3], as `ip route … segs s1,s2,s3`. The
+        // kernel sends the packet to segments[first_segment], so that slot
+        // must hold s1 and index 0 the last segment. In forwarding order
+        // the packet went to s3 first.
+        let s1: Ipv6Addr = "fcbb:bbbb:2::".parse().unwrap();
+        let s2: Ipv6Addr = "fcbb:bbbb:3::".parse().unwrap();
+        let s3: Ipv6Addr = "fcbb:bbbb:4:e064::".parse().unwrap();
+        let seg6 = seg6_encap(build_seg6_lwtunnel(&[s1, s2, s3], EncapType::HEncap).unwrap());
+        assert_eq!(seg6.mode, Seg6IpTunnelMode::Encap);
+        let srh = &seg6.ipv6_sr_hdr.0[0];
+        assert_eq!(srh.segments, vec![s3, s2, s1]);
+        assert_eq!(srh.first_segment, 2);
+        assert_eq!(srh.segments_left, 2);
+        assert_eq!(srh.segments[srh.first_segment as usize], s1);
+        assert_eq!(srh.hdrlen, 6);
+
+        // One segment reads the same both ways, which is why this went
+        // unnoticed.
+        let seg6 = seg6_encap(build_seg6_lwtunnel(&[s1], EncapType::HEncap).unwrap());
+        assert_eq!(seg6.ipv6_sr_hdr.0[0].segments, vec![s1]);
+    }
+
+    #[test]
+    fn h_encap_red_leaves_the_reduction_to_the_kernel() {
+        // `mode encap.red` takes the full list like `mode encap`; the
+        // kernel keeps the first segment out of the SRH. Cutting it off
+        // here under `mode encap` made the second segment the outer
+        // destination, so the first was never visited.
+        let s1: Ipv6Addr = "fcbb:bbbb:2::".parse().unwrap();
+        let s2: Ipv6Addr = "fcbb:bbbb:3:e064::".parse().unwrap();
+        let seg6 = seg6_encap(build_seg6_lwtunnel(&[s1, s2], EncapType::HEncapRed).unwrap());
+        assert_eq!(seg6.mode, Seg6IpTunnelMode::EncapRed);
+        let srh = &seg6.ipv6_sr_hdr.0[0];
+        assert_eq!(srh.segments, vec![s2, s1]);
+        assert_eq!(srh.segments[srh.first_segment as usize], s1);
+
+        // A single segment is a valid reduced encapsulation (no SRH on
+        // the wire); it used to be refused.
+        let seg6 = seg6_encap(build_seg6_lwtunnel(&[s1], EncapType::HEncapRed).unwrap());
+        assert_eq!(seg6.mode, Seg6IpTunnelMode::EncapRed);
+        assert_eq!(seg6.ipv6_sr_hdr.0[0].segments, vec![s1]);
     }
 
     #[test]

@@ -1,0 +1,53 @@
+# z1 — the ingress under test. Three static routes steer one host address
+# each through z2's End SID to z3's End.DT6 SID: plain H.Encap, H.Encap.Red,
+# and a three-segment list that also names z3's End SID.
+#
+# The blackhole cuts z3's locator off at z1 (a static beats the OSPFv3
+# locator route), so a packet whose outer destination is one of z3's SIDs
+# never leaves z1. Each list therefore works only if z2's SID, the first
+# segment, is the one the packet is sent to.
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8::1/128
+- if-name: z1-z2
+  ipv6:
+    address: 2001:db8:12::1/64
+segment-routing:
+  locator:
+  - name: LOC1
+    prefix: fcbb:bbbb:1::/48
+router:
+  ospfv3:
+    router-id: 10.0.0.1
+    segment-routing:
+      srv6:
+        locator: LOC1
+    area:
+    - area-id: 0.0.0.0
+      interface:
+      - if-name: lo
+        enabled: true
+      - if-name: z1-z2
+        enabled: true
+        network-type: point-to-point
+  static:
+    ipv6:
+      route:
+      - prefix: fcbb:bbbb:3::/48
+        nexthop:
+        - address: blackhole
+      - prefix: 2001:db8:300::100/128
+        segments:
+        - 'fcbb:bbbb:2::'
+        - 'fcbb:bbbb:3:e064::'
+      - prefix: 2001:db8:300::101/128
+        encap-type: H.Encap.Red
+        segments:
+        - 'fcbb:bbbb:2::'
+        - 'fcbb:bbbb:3:e064::'
+      - prefix: 2001:db8:300::102/128
+        segments:
+        - 'fcbb:bbbb:2::'
+        - 'fcbb:bbbb:3::'
+        - 'fcbb:bbbb:3:e064::'
