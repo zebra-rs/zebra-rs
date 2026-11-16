@@ -516,12 +516,10 @@ module ietf-bgp {
               dynamically.";
         }
 
-        // `enabled` is a standard IETF/OpenConfig/FRR neighbor knob
-        // (`neighbor X enabled true`) present in many configs. It has no
-        // config handler yet, so it is accepted and inert (a neighbor is
-        // brought up by configuring remote-as); the schema keeps it so
-        // those configs load. Intentionally retained, not a removal
-        // candidate — wire a handler if administrative disable is wanted.
+        // `enabled` is the standard IETF/OpenConfig neighbor knob, and
+        // FRR's `neighbor X shutdown` inverted. `false` is administrative
+        // shutdown (config_peer_enabled); `true` is the default and a
+        // no-op, so configs that state it explicitly load unchanged.
         leaf enabled {
           ext:help "Administratively enable this neighbor";
           type boolean;
@@ -529,8 +527,10 @@ module ietf-bgp {
           description
             "Whether the BGP peer is enabled. When set to false the local
              system should not initiate connections to the neighbor and
-             should tear down an established session. zebra-rs currently
-             accepts this leaf but does not enforce it.";
+             should tear down an established session. zebra-rs ends the
+             session, holds the peer in Idle and drops the neighbor's own
+             connection attempts until this is true again or deleted.
+             `show bgp summary` shows such a peer as `Idle (Admin)`.";
           reference
             "RFC 4271: A Border Gateway Protocol 4 (BGP-4), Section 8.1.2.";
         }

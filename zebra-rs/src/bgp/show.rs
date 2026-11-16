@@ -248,6 +248,9 @@ fn summary_pfx_counts(
 fn summary_state(peer: &Peer) -> &'static str {
     if peer.max_prefix.overflow.is_some() {
         "Idle (PfxCt)"
+    } else if peer.config.shutdown {
+        // FRR's word for `neighbor X shutdown`; also 12 characters.
+        "Idle (Admin)"
     } else {
         peer.state.to_str()
     }

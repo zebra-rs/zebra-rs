@@ -609,6 +609,11 @@ pub struct PeerConfig {
     /// per-peer config callbacks to decide whether a change to the
     /// group should propagate (or unset) the peer's remote-as.
     pub remote_as_inherited: bool,
+    /// `neighbor X enabled false`: administratively shut down. The session
+    /// is ended and the peer is neither dialed nor accepted until the
+    /// statement goes or turns true. Part of [`Peer::is_dialable`], so
+    /// every gate that keeps an unresolved peer quiet keeps this one quiet.
+    pub shutdown: bool,
     /// `remote-as external` (an `interface-neighbor` only, FRR's
     /// shorthand): any AS other than ours is accepted. [`Peer::remote_as`]
     /// holds the placeholder 0 until the neighbor's OPEN supplies the AS,
@@ -812,6 +817,7 @@ impl Default for PeerConfig {
             sub: Default::default(),
             neighbor_group: None,
             remote_as_inherited: false,
+            shutdown: false,
             remote_as_external: false,
             bfd: PeerBfdConfig::default(),
             allowas_in: None,
@@ -1609,11 +1615,18 @@ impl Peer {
     /// from a neighbor-group is reset to AS 0 when it leaves the group or
     /// the group loses its remote-as.
     ///
+    /// An administratively shut down peer (`enabled false`) is not
+    /// dialable either. It then rests in Idle, where an inbound connection
+    /// is dropped (`handle_peer_connection`), so the remote cannot bring
+    /// the session up from its side.
+    ///
     /// [`timer::update_timers`] arms no idle-hold timer for a peer that
     /// is not dialable, and `fsm_start` does not dial one: a timer armed
     /// while it still was may fire after.
     pub fn is_dialable(&self) -> bool {
-        (self.remote_as != 0 || self.config.remote_as_external) && !self.address.is_unspecified()
+        !self.config.shutdown
+            && (self.remote_as != 0 || self.config.remote_as_external)
+            && !self.address.is_unspecified()
     }
 
     pub fn start(&mut self) {
@@ -5977,6 +5990,31 @@ mod as4_negotiation_tests {
     async fn an_unresolved_remote_as_is_not_dialable() {
         let peer = opensent_peer(0);
         assert!(!peer.is_dialable());
+    }
+
+    /// `enabled false`: a fully resolved peer is not dialed, `start` arms
+    /// nothing, and a start event that was already queued leaves it in
+    /// Idle. Turning it back on makes it dialable again.
+    #[tokio::test]
+    async fn a_shut_down_peer_is_not_dialed() {
+        let mut peer = opensent_peer(65002);
+        assert!(peer.is_dialable());
+
+        peer.config.shutdown = true;
+        assert!(!peer.is_dialable());
+        peer.state = State::Idle;
+        peer.active = false;
+        peer.timer.idle_hold_timer = None;
+        peer.start();
+        assert!(!peer.active, "start must not arm a shut down peer");
+        assert!(peer.timer.idle_hold_timer.is_none());
+        assert_eq!(fsm_start(&mut peer), State::Idle);
+
+        peer.config.shutdown = false;
+        assert!(peer.is_dialable());
+        peer.start();
+        assert!(peer.active);
+        assert!(peer.timer.idle_hold_timer.is_some());
     }
 
     /// The OPEN we send for a >65535 local AS: AS_TRANS in My-AS (the

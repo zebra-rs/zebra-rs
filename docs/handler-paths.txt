@@ -186,6 +186,7 @@
 /router/bgp/neighbor/description
 /router/bgp/neighbor/disable-connected-check
 /router/bgp/neighbor/ebgp-multihop
+/router/bgp/neighbor/enabled
 /router/bgp/neighbor/enforce-first-as
 /router/bgp/neighbor/flowspec/validation
 /router/bgp/neighbor/ip-transparent
