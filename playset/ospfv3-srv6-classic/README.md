@@ -208,12 +208,13 @@ At `d`, the End.DT6 SID decapsulates and delivers the inner packet to `e2`.
 
 ## Static routes over the SRv6 core
 
-Three short experiments, best run before the TI-LFA sections below
+Four short experiments, best run before the TI-LFA sections below
 (each one cleans up after itself). Together they tell one story: what
-a static route does — and doesn't — get from an SRv6 underlay. They
-are the live companion to the *SRv6 Static Routes* chapter of the
-book; the [IS-IS classic lab](../isis-srv6-classic/README.md) has the
-same walkthrough over an IS-IS underlay.
+a static route does — and doesn't — get from an SRv6 underlay. The
+first three are the live companion to the *SRv6 Static Routes* chapter
+of the book, and the [IS-IS classic lab](../isis-srv6-classic/README.md)
+has the same three over an IS-IS underlay. The fourth needs the eBPF
+data plane, so it needs the `cradle-rs` package installed.
 
 ### Recursion alone is not enough
 
@@ -351,6 +352,120 @@ service route produces `proto bgp … encap seg6` entries; see the
 `bgp_srv6_nht` BDD feature for that variant.) Clean up: delete the
 `3001:db8::2/128` statics on `s` and `d`, and drop the address from
 `e2`'s loopback.
+
+### The node SID as the service SID: End with USD
+
+The all-static service needed a decap SID pinned on `d`. Every
+locator already has a node SID, the End SID — can the segment list
+simply end there?
+
+``` shell
+s#set router static ipv6 route 2001:db8:200::/64 segments fcbb:bbbb:8::
+s#commit
+s>show ipv6 route
+...
+B     2001:db8:200::/64 [200/0] via seg6 [fcbb:bbbb:8:40::], s-n1, 00:02:35
+S  *> 2001:db8:200::/64 [1/0] via seg6 [fcbb:bbbb:8::], s-n1, 00:00:03
+
+$ sudo ip netns exec e1 ping 2001:db8:200::100
+3 packets transmitted, 0 received, 100% packet loss
+```
+
+The packets reach `d` and die there. End is a transit behavior: it
+moves a packet on to the next segment and never decapsulates. As the
+last segment it has no next segment, and the kernel drops the packet.
+
+RFC 8986 has a flavor for exactly this. With **USD** (Ultimate Segment
+Decapsulation, §4.16.3), an End SID that is the last segment removes
+the outer header and forwards the inner packet by the main table. The
+Linux kernel does not implement USD, the eBPF data plane does. So move
+`d` onto the eBPF engine and flavor its locator, in one commit:
+
+``` shell
+d#set system ebpf enabled true
+d#set interface d-n1 ebpf enabled true
+d#set interface d-r3 ebpf enabled true
+d#set interface d-e2 ebpf enabled true
+d#set segment-routing locator LOC8 flavor usd
+d#commit
+```
+
+`system ebpf enabled` makes zebra-rs spawn the cradle engine, each
+`interface ... ebpf enabled` attaches a port to it, and the flavor
+applies to the End SID of the locator. OSPFv3 now advertises that SID
+with the flavored codepoint: 28 is "End with USD", where the other
+nodes say 1, plain End.
+
+``` shell
+n1>show ospfv3 database detail
+...
+  SRv6 Locator TLV: fcbb:bbbb:8::/48
+    Route Type: 1
+    Algorithm: 0
+    Metric: 0
+    SRv6 End SID Sub-TLV:
+      Endpoint Behavior: 28
+      SID: fcbb:bbbb:8::
+```
+
+The SID has left the kernel, which refuses a USD-flavored route, and
+lives in the engine (`flavors=4` is the USD bit):
+
+``` shell
+d>ip -6 route show fcbb:bbbb:8::
+
+$ sudo ip netns exec d cradle dump srv6
+localsid fcbb:bbbb:8::/128 End            flavors=4 vrf=0 nh_id=0
+localsid fcbb:bbbb:8:e000::/128 End.X          flavors=0 vrf=0 nh_id=31 via 2001:db8:10::1 dev if3
+localsid fcbb:bbbb:8:e001::/128 End.X          flavors=0 vrf=0 nh_id=32 via 2001:db8:11::1 dev if4
+```
+
+The same ping now works, with no decap SID configured anywhere:
+
+``` shell
+$ sudo ip netns exec e1 ping 2001:db8:200::100
+3 packets transmitted, 3 received, 0% packet loss
+
+n1>tcpdump -nli n1-s ip6 proto 43 or ip6 proto 41
+17:54:12.428230 IP6 2001:db8:1::1 > fcbb:bbbb:8::: RT6 (len=2, type=4, segleft=0, last-entry=0, tag=0, [0]fcbb:bbbb:8::) IP6 2001:db8:100::100 > 2001:db8:200::100: ICMP6, echo request, id 26488, seq 1, length 64
+17:54:12.428477 IP6 fcbb:bbbb:8:e000:: > fcbb:bbbb:1:40::: IP6 2001:db8:200::100 > 2001:db8:100::100: ICMP6, echo reply, id 26488, seq 1, length 64
+
+$ sudo ip netns exec d cradle stats | grep srv6_usd
+srv6_usd       3
+```
+
+The request is the packet that died a moment ago: `s` still
+encapsulates toward `d`'s node SID, and now `d` counts a USD
+decapsulation and forwards the inner packet to `e2`. The reply rides
+`d`'s BGP service route toward `s`'s End.DT6 SID as before, but it is
+the engine that imposes it now: a single segment needs no SRH, so
+there is none, and the outer source is one of `d`'s own SIDs (which
+one can differ between runs).
+
+With segments still to go, the flavored SID behaves as plain End, so
+it keeps working as a transit segment.
+
+Set the flavor only on a node that runs the engine. On a kernel-only
+node the kernel refuses the flavored route and the End SID is not
+installed at all, not even for transit use such as the TI-LFA repair
+lists below.
+
+Clean up, so the TI-LFA sections start from the kernel data plane:
+
+``` shell
+d#delete segment-routing locator LOC8 flavor
+d#delete interface d-n1 ebpf
+d#delete interface d-r3 ebpf
+d#delete interface d-e2 ebpf
+d#delete system ebpf
+d#commit
+
+s#delete router static ipv6 route 2001:db8:200::/64
+s#commit
+```
+
+The engine stops, the End SID returns to the kernel as plain End, and
+BGP takes the prefix back.
 
 ## Enable TI-LFA
 
