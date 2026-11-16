@@ -1193,6 +1193,18 @@ fn write_v3_asla_sub(
     Ok(())
 }
 
+/// An SRv6 Endpoint Behavior codepoint as the database view prints it: the
+/// number, then its name from the IANA registry, the way this view prints
+/// an LS type or an algorithm — `28 (End (USD))`. The registry is the one
+/// IS-IS decodes with (`isis_packet::Behavior`), so both protocols name a
+/// behavior alike. A codepoint the registry does not know stays a number.
+fn format_srv6_behavior(codepoint: u16) -> String {
+    match isis_packet::Behavior::from(codepoint) {
+        isis_packet::Behavior::Resv(_) => codepoint.to_string(),
+        name => format!("{codepoint} ({name})"),
+    }
+}
+
 /// Render an RFC 9513 SRv6 Locator LSA body TLV-by-TLV.
 fn write_srv6_locator_body(
     out: &mut String,
@@ -1214,7 +1226,11 @@ fn write_srv6_locator_body(
                     match sub {
                         Ospfv3Srv6LocatorSubTlv::EndSid(es) => {
                             writeln!(out, "    SRv6 End SID Sub-TLV:")?;
-                            writeln!(out, "      Endpoint Behavior: {}", es.behavior)?;
+                            writeln!(
+                                out,
+                                "      Endpoint Behavior: {}",
+                                format_srv6_behavior(es.behavior)
+                            )?;
                             writeln!(out, "      SID: {}", es.sid)?;
                             for s2 in &es.subs {
                                 if let Ospfv3Srv6LocatorSubTlv::SidStructure(st) = s2 {
@@ -1284,7 +1300,11 @@ fn write_v3_sub_tlv(
         }
         Ospfv3SubTlv::Srv6EndXSid(endx) => {
             writeln!(out, "    SRv6 End.X SID Sub-TLV:")?;
-            writeln!(out, "      Endpoint Behavior: {}", endx.behavior)?;
+            writeln!(
+                out,
+                "      Endpoint Behavior: {}",
+                format_srv6_behavior(endx.behavior)
+            )?;
             writeln!(out, "      Flags: 0x{:02x}", endx.flags)?;
             writeln!(out, "      Algorithm: {}", endx.algo)?;
             writeln!(out, "      Weight: {}", endx.weight)?;
@@ -1295,7 +1315,11 @@ fn write_v3_sub_tlv(
         }
         Ospfv3SubTlv::Srv6LanEndXSid(lan) => {
             writeln!(out, "    SRv6 LAN End.X SID Sub-TLV:")?;
-            writeln!(out, "      Endpoint Behavior: {}", lan.behavior)?;
+            writeln!(
+                out,
+                "      Endpoint Behavior: {}",
+                format_srv6_behavior(lan.behavior)
+            )?;
             writeln!(out, "      Flags: 0x{:02x}", lan.flags)?;
             writeln!(out, "      Algorithm: {}", lan.algo)?;
             writeln!(out, "      Weight: {}", lan.weight)?;
@@ -2707,6 +2731,23 @@ fn show_ospfv3_srv6(
 #[cfg(test)]
 mod srv6_show_tests {
     use super::*;
+
+    // The database view names an Endpoint Behavior beside its codepoint.
+    #[test]
+    fn database_names_the_endpoint_behavior() {
+        assert_eq!(format_srv6_behavior(1), "1 (End)");
+        assert_eq!(format_srv6_behavior(5), "5 (End.X)");
+        // The flavored variants are codepoints of their own.
+        assert_eq!(format_srv6_behavior(28), "28 (End (USD))");
+        assert_eq!(format_srv6_behavior(29), "29 (End (PSP, USD))");
+        // The uSID behaviors keep their short names.
+        assert_eq!(format_srv6_behavior(43), "43 (uN)");
+        assert_eq!(format_srv6_behavior(44), "44 (uN (PSP))");
+        assert_eq!(format_srv6_behavior(52), "52 (uA)");
+        // Not in the registry: the number is all there is to say.
+        assert_eq!(format_srv6_behavior(0), "0");
+        assert_eq!(format_srv6_behavior(60000), "60000");
+    }
 
     // Pin the text layout: locator line, End SID line, and the End.X
     // table with the installed (global) nexthop and LIB twin.

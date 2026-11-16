@@ -43,8 +43,9 @@ Feature: A flavored SRv6 locator keeps its SIDs in the kernel
     And I apply config "z3.yaml" to namespace "z3"
     And I apply config "h3.yaml" to namespace "h3"
     # What z2 advertises does not change: End with PSP & USD is 29, and
-    # only z2 can be its origin (z1 and z3 advertise 1, plain End).
-    Then show command "show ospfv3 database detail" in namespace "z1" should eventually contain "Endpoint Behavior: 29"
+    # only z2 can be its origin (z1 and z3 advertise 1, plain End). The
+    # database view names the codepoint.
+    Then show command "show ospfv3 database detail" in namespace "z1" should eventually contain "Endpoint Behavior: 29 (End (PSP, USD))"
     # The End SID is in the kernel although the kernel refuses USD.
     And kernel route "fcbb:bbbb:2::" in namespace "z2" should eventually contain "seg6local action End"
     # One End.X SID per adjacency, although the kernel refuses PSP there.

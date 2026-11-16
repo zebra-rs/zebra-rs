@@ -393,8 +393,7 @@ d#commit
 `system ebpf enabled` makes zebra-rs spawn the cradle engine, each
 `interface ... ebpf enabled` attaches a port to it, and the flavor
 applies to the End SID of the locator. OSPFv3 now advertises that SID
-with the flavored codepoint: 28 is "End with USD", where the other
-nodes say 1, plain End.
+with the flavored codepoint, 28, where the other nodes say `1 (End)`.
 
 ``` shell
 n1>show ospfv3 database detail
@@ -404,7 +403,7 @@ n1>show ospfv3 database detail
     Algorithm: 0
     Metric: 0
     SRv6 End SID Sub-TLV:
-      Endpoint Behavior: 28
+      Endpoint Behavior: 28 (End (USD))
       SID: fcbb:bbbb:8::
 ```
 
