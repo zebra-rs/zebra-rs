@@ -52,6 +52,7 @@ mod label_check;
 mod mac;
 mod nd;
 mod nsap;
+mod ordered;
 mod ospf;
 mod parse;
 mod pim;

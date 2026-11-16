@@ -60,6 +60,25 @@ Feature: A static SRv6 segment list is visited in the order it is written
     And ping from "z1" to "2001:db8:300::101" should eventually succeed
     And ping from "z1" to "2001:db8:300::102" should eventually succeed
 
+  Scenario: A list rewritten in one commit is applied as written
+    Given the test topology exists
+    # A commit is dispatched from a line diff, which says what changed
+    # but not where. A segment put between two existing ones arrived as
+    # a single Set and was appended: [2, e064, 3] instead of [2, 3,
+    # e064], which ends at a segment that cannot deliver.
+    When I apply command "delete router static ipv6 route 2001:db8:300::100/128\nset router static ipv6 route 2001:db8:300::100/128 segments fcbb:bbbb:2::\nset router static ipv6 route 2001:db8:300::100/128 segments fcbb:bbbb:3::\nset router static ipv6 route 2001:db8:300::100/128 segments fcbb:bbbb:3:e064::" in namespace "z1"
+    Then kernel route "2001:db8:300::100" in namespace "z1" should eventually contain "segs 3 [ fcbb:bbbb:2:: fcbb:bbbb:3:: fcbb:bbbb:3:e064:: ]"
+    And show command "show ipv6 route" in namespace "z1" should eventually contain "via seg6 [fcbb:bbbb:2::, fcbb:bbbb:3::, fcbb:bbbb:3:e064::]"
+    And ping from "z1" to "2001:db8:300::100" should eventually succeed
+    # Two segments swapped in one commit: the same two lines in the
+    # other order. One of them used to be lost.
+    When I apply command "delete router static ipv6 route 2001:db8:300::101/128 segments\nset router static ipv6 route 2001:db8:300::101/128 segments fcbb:bbbb:3:e064::\nset router static ipv6 route 2001:db8:300::101/128 segments fcbb:bbbb:2::" in namespace "z1"
+    Then kernel route "2001:db8:300::101" in namespace "z1" should eventually contain "segs 2 [ fcbb:bbbb:3:e064:: fcbb:bbbb:2:: ]"
+    # And back, which delivers again.
+    When I apply command "delete router static ipv6 route 2001:db8:300::101/128 segments\nset router static ipv6 route 2001:db8:300::101/128 segments fcbb:bbbb:2::\nset router static ipv6 route 2001:db8:300::101/128 segments fcbb:bbbb:3:e064::" in namespace "z1"
+    Then kernel route "2001:db8:300::101" in namespace "z1" should eventually contain "segs 2 [ fcbb:bbbb:2:: fcbb:bbbb:3:e064:: ]"
+    And ping from "z1" to "2001:db8:300::101" should eventually succeed
+
   Scenario: Teardown topology
     Given the test topology exists
     When I stop zebra-rs in namespace "z1"

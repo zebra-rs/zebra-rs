@@ -132,6 +132,8 @@ module config-static {
           leaf-list label {
             ext:help "MPLS labels to push";
             type uint32;
+            // The stack is pushed in this order, outermost first.
+            ordered-by user;
           }
         }
         leaf distance {
@@ -303,6 +305,7 @@ module config-static {
           leaf-list label {
             ext:help "MPLS labels to push";
             type uint32;
+            ordered-by user;
             description
               "MPLS label stack imposed toward this nexthop, outermost
                first — the IPv6 sibling of the IPv4 nexthop's `label`
@@ -333,6 +336,7 @@ module config-static {
         leaf-list segments {
           ext:help "SRv6 segment list";
           type inet:ipv6-address;
+          ordered-by user;
           description
             "The segments in the order the packet visits them, the
              first one first, as in `ip -6 route add ... encap seg6
