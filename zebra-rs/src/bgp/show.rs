@@ -555,6 +555,8 @@ fn summary_fib_pending<V: BgpShowView>(bgp: &V) -> Option<BgpFibPendingJson> {
 #[derive(Serialize)]
 struct BgpAfiSafiSummaryJson {
     afi_safi: String,
+    /// The text section's `RIB entries` line.
+    rib_entries: usize,
     peers: Vec<BgpPeerSummaryJson>,
 }
 
@@ -572,6 +574,21 @@ struct BgpPeerSummaryJson {
     msg_sent: u64,
     up_down: String,
     state: String,
+    /// The session state as a word, always: `state` follows the text
+    /// column and turns into the received-prefix count once the session
+    /// is Established, so a consumer that wants the state cannot use it.
+    /// `Idle (Admin)` for a neighbor that is shut down.
+    session_state: String,
+    /// Milliseconds the session has been Established; absent otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    established_msec: Option<u64>,
+    /// The AS this router presents to the neighbor (`local-as` if set).
+    local_as: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
+    /// Hostname from the neighbor's FQDN capability, when it sent one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    hostname: Option<String>,
     pfx_rcvd: u64,
     pfx_sent: u64,
     /// Present while the peer is held past `maximum-prefix`, as in the
@@ -2436,6 +2453,17 @@ fn summary_peer_row_json(
         msg_sent,
         up_down: uptime(&peer.instant),
         state,
+        session_state: summary_state(peer).to_string(),
+        established_msec: (peer.state == State::Established)
+            .then(|| peer.instant.map(|t| t.elapsed().as_millis() as u64))
+            .flatten(),
+        local_as: peer.open_local_as(),
+        description: peer.config.description.clone(),
+        hostname: peer
+            .cap_recv
+            .fqdn
+            .as_ref()
+            .map(|f| f.hostname().to_string()),
         pfx_rcvd,
         pfx_sent,
         maximum_prefix_overflow: super::max_prefix::overflow_show(peer),
@@ -2451,6 +2479,7 @@ fn summary_section_json<V: BgpShowView>(
     let section_counts = counts.filter(|_| afi_safi == AfiSafi::new(Afi::Ip, Safi::Unicast));
     BgpAfiSafiSummaryJson {
         afi_safi: afi_safi_summary_label(afi_safi.afi, afi_safi.safi).to_string(),
+        rib_entries: rib_entries_count(bgp, &afi_safi),
         // `iter_all` for the same reason as the text renderer:
         // interface-keyed (unnumbered) peers must be listed.
         peers: bgp
