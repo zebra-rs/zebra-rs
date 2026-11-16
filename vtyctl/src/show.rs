@@ -13,7 +13,7 @@ pub mod vty {
 /// know) must stop the client here: proceeding to the Show RPC with the
 /// unresolved paths used to end in a silent empty stream and exit 0.
 /// Returns the stderr message, or None when phase 2 may proceed.
-fn exec_reply_error(code: i32, lines: &str) -> Option<String> {
+pub(crate) fn exec_reply_error(code: i32, lines: &str) -> Option<String> {
     use vty::ExecCode;
     match ExecCode::try_from(code) {
         Ok(ExecCode::Success | ExecCode::Show | ExecCode::Redirect | ExecCode::RedirectShow) => {
@@ -48,6 +48,87 @@ fn print_show_output(text: &str, last_ended_with_newline: &mut bool) {
     if !text.is_empty() {
         *last_ended_with_newline = text.ends_with('\n');
     }
+}
+
+/// Why [`fetch`] has no output to return.
+#[derive(Debug)]
+pub enum FetchError {
+    /// The daemon could not be reached.
+    Connect(String),
+    /// The daemon does not have this command (no match, incomplete,
+    /// ambiguous), or no component answered it.
+    Rejected(String),
+    /// The command was accepted and failed.
+    Failed(String),
+}
+
+/// Run a show command and return its whole output, instead of printing
+/// it as it arrives and exiting on failure like [`show`]. For callers
+/// that have to look at the output first (the FRR `vtysh` shim).
+pub async fn fetch(host: &str, command: &str, json: bool) -> Result<String, FetchError> {
+    let uri = crate::endpoint::host_uri(host);
+    let channel = crate::endpoint::connect(&uri)
+        .await
+        .map_err(|e| FetchError::Connect(format!("{uri}: {e}")))?;
+    let mut exec_client = ExecClient::new(channel.clone());
+    let exec_request = ExecRequest {
+        r#type: ExecType::Exec as i32,
+        mode: String::from("exec"),
+        privilege: 15,
+        line: command.to_string(),
+        args: Vec::new(),
+        ..Default::default()
+    };
+    let reply = exec_client
+        .do_exec(Request::new(exec_request))
+        .await
+        .map_err(|e| FetchError::Failed(e.message().to_string()))?
+        .into_inner();
+    if let Some(msg) = exec_reply_error(reply.code, &reply.lines) {
+        return Err(FetchError::Rejected(msg));
+    }
+
+    let mut show_client = ShowClient::new(channel);
+    let request = ShowRequest {
+        line: command.to_string(),
+        json,
+        paths: reply.paths,
+    };
+    let mut out = String::new();
+    let mut got_any = false;
+    match show_client.show(Request::new(request)).await {
+        Ok(response) => {
+            let mut stream = response.into_inner();
+            loop {
+                match stream.message().await {
+                    Ok(Some(part)) => {
+                        got_any = true;
+                        out.push_str(&part.str);
+                    }
+                    Ok(None) => break,
+                    Err(status) if got_any => {
+                        return Err(FetchError::Failed(status.message().to_string()));
+                    }
+                    Err(status) => {
+                        return match exec_show_fallback(reply.code, &reply.lines) {
+                            Some(lines) => Ok(lines.to_string()),
+                            None => Err(FetchError::Rejected(status.message().to_string())),
+                        };
+                    }
+                }
+            }
+        }
+        Err(status) => return Err(FetchError::Failed(status.message().to_string())),
+    }
+    if !got_any {
+        return match exec_show_fallback(reply.code, &reply.lines) {
+            Some(lines) => Ok(lines.to_string()),
+            None => Err(FetchError::Rejected(format!(
+                "no output produced for '{command}' (command not handled by any daemon)"
+            ))),
+        };
+    }
+    Ok(out)
 }
 
 pub async fn show(host: &str, command: &str, json: bool) -> Result<()> {

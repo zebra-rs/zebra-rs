@@ -60,3 +60,42 @@ pub async fn clear(host: &str, command: &str) -> Result<()> {
 
     Ok(())
 }
+
+/// Run a clear command and return its output, reporting a command the
+/// daemon does not have instead of sending it on like [`clear`]. For the
+/// FRR `vtysh` shim, whose callers act on the exit status.
+pub async fn run(host: &str, command: &str) -> Result<String, crate::show::FetchError> {
+    use crate::show::FetchError;
+    let uri = crate::endpoint::host_uri(host);
+    let channel = crate::endpoint::connect(&uri)
+        .await
+        .map_err(|e| FetchError::Connect(format!("{uri}: {e}")))?;
+    let mut exec_client = ExecClient::new(channel.clone());
+    let exec_request = ExecRequest {
+        r#type: ExecType::Exec as i32,
+        mode: String::from("configure"),
+        privilege: 15,
+        line: command.to_string(),
+        args: Vec::new(),
+        ..Default::default()
+    };
+    let reply = exec_client
+        .do_exec(Request::new(exec_request))
+        .await
+        .map_err(|e| FetchError::Failed(e.message().to_string()))?
+        .into_inner();
+    if let Some(msg) = crate::show::exec_reply_error(reply.code, &reply.lines) {
+        return Err(FetchError::Rejected(msg));
+    }
+    let mut clear_client = ClearClient::new(channel);
+    let request = ClearRequest {
+        line: command.to_string(),
+        paths: reply.paths,
+    };
+    let reply = clear_client
+        .clear(Request::new(request))
+        .await
+        .map_err(|e| FetchError::Failed(e.message().to_string()))?
+        .into_inner();
+    Ok(reply.str)
+}
