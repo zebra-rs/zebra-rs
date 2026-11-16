@@ -805,6 +805,19 @@ impl ConfigManager {
         errors
     }
 
+    /// True when config line `line` sets one value of a leaf-list the
+    /// schema marks `ordered-by user`.
+    fn ordered_leaf_list_value(&self, line: &str) -> bool {
+        self.paths(line.to_string())
+            .as_deref()
+            .and_then(<[CommandPath]>::last)
+            .is_some_and(|value| {
+                value.ordered_by_user
+                    && super::configs::ymatch_enum(value.ymatch)
+                        == super::vty::YangMatch::LeafListMatched
+            })
+    }
+
     fn paths(&self, input: String) -> Option<Vec<CommandPath>> {
         let mode = self.modes.get("configure")?;
         let state = State::new();
@@ -933,6 +946,13 @@ impl ConfigManager {
         let mut binding = text_diff.unified_diff();
         let mut diff = binding.context_radius(65535).to_string();
         let diff = trim_first_line(&mut diff);
+        // The diff says which lines changed, not where. A leaf-list whose
+        // order is its meaning is resent from the first position that
+        // differs, or its callback would not end up with the list as
+        // configured (see `config::ordered`).
+        let diff = super::ordered::resend_ordered_leaf_lists(&diff, |line| {
+            self.ordered_leaf_list_value(line)
+        });
 
         let remove_first_char = |s: &str| -> String { s.chars().skip(1).collect() };
 

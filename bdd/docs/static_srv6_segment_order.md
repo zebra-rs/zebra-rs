@@ -37,4 +37,5 @@ h3 is a host with 2001:db8:300::100, ::101 and ::102, one per list.
 |----------|--------|
 | The kernel holds each list in the order written | |
 | Each list delivers through its first segment | |
+| A list rewritten in one commit is applied as written | |
 | Teardown topology | |
