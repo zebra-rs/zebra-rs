@@ -201,9 +201,9 @@ fn build_seg6local_flavors(
         SidBehavior::UN => structure?.ln_bits,
         SidBehavior::UALib => structure?.fun_bits,
         _ => {
-            // Classic End / End.X: a flavor-only Operation attribute (the
-            // kernel supports PSP on End from ~6.6; unsupported combos
-            // fail the install, which the caller logs non-fatally).
+            // Classic End / End.X: a flavor-only Operation attribute. The
+            // kernel refuses the route for a flavor it does not perform;
+            // the caller then walks `kernel_flavor_ladder`.
             if flavor_mask == 0 {
                 return None;
             }
@@ -223,6 +223,48 @@ fn build_seg6local_flavors(
         Seg6LocalFlavors::Lblen(s.lb_bits),
         Seg6LocalFlavors::Nflen(nflen),
     ]))
+}
+
+/// The RFC 8986 §4.16 flavor masks to offer the kernel for one SID, in
+/// order: the configured one, then PSP alone, then none.
+///
+/// The kernel performs few of these flavors and answers `EOPNOTSUPP` for
+/// the whole route when the mask holds one it does not: through 6.8, and
+/// mainline at 7.4, PSP on End (and uN) is all there is; USP and USD are
+/// refused everywhere, PSP on End.X too. Without a second attempt a
+/// flavored SID is missing from the kernel altogether, which costs more
+/// than the flavor: a segment list that only passes through the SID, such
+/// as a TI-LFA repair list, needs nothing but the plain behavior.
+///
+/// PSP alone is the one middle step because it is the only flavor any
+/// kernel performs. The NEXT-C-SID operation is not part of this mask (it
+/// follows from the behavior), so every step keeps it.
+pub fn kernel_flavor_ladder(flavors: u8) -> Vec<u8> {
+    let mut ladder = vec![flavors];
+    for step in [flavors & crate::rib::FLAVOR_PSP, 0] {
+        if !ladder.contains(&step) {
+            ladder.push(step);
+        }
+    }
+    ladder
+}
+
+/// The flavor names of a mask, for a log line: `psp,usd`, or `none`.
+pub fn flavor_names(flavors: u8) -> String {
+    let names: Vec<&str> = [
+        (crate::rib::FLAVOR_PSP, "psp"),
+        (crate::rib::FLAVOR_USP, "usp"),
+        (crate::rib::FLAVOR_USD, "usd"),
+    ]
+    .into_iter()
+    .filter(|(bit, _)| flavors & bit != 0)
+    .map(|(_, name)| name)
+    .collect();
+    if names.is_empty() {
+        "none".to_string()
+    } else {
+        names.join(",")
+    }
 }
 
 // Build the inner Vec<RouteLwTunnelEncap> for a seg6local install.
@@ -532,5 +574,89 @@ mod tests {
             e,
             RouteLwTunnelEncap::Seg6Local(RouteSeg6LocalIpTunnel::Flavors(_))
         )));
+    }
+
+    /// The `SEG6_LOCAL_FLV_OPERATION` mask of an encap, if it has one.
+    fn flavor_ops(encaps: &[RouteLwTunnelEncap]) -> Option<u32> {
+        encaps.iter().find_map(|e| match e {
+            RouteLwTunnelEncap::Seg6Local(RouteSeg6LocalIpTunnel::Flavors(f)) => {
+                f.iter().find_map(|a| match a {
+                    Seg6LocalFlavors::Operation(op) => Some(u32::from(*op)),
+                    _ => None,
+                })
+            }
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn kernel_flavor_ladder_ends_at_no_flavor() {
+        use crate::rib::{FLAVOR_PSP, FLAVOR_USD, FLAVOR_USP};
+        // No flavor: one attempt, as before.
+        assert_eq!(kernel_flavor_ladder(0), vec![0]);
+        // PSP alone is already the middle step.
+        assert_eq!(kernel_flavor_ladder(FLAVOR_PSP), vec![FLAVOR_PSP, 0]);
+        // No PSP to keep: straight to the plain behavior.
+        assert_eq!(kernel_flavor_ladder(FLAVOR_USD), vec![FLAVOR_USD, 0]);
+        assert_eq!(
+            kernel_flavor_ladder(FLAVOR_USP | FLAVOR_USD),
+            vec![FLAVOR_USP | FLAVOR_USD, 0]
+        );
+        // PSP survives a refused USD.
+        assert_eq!(
+            kernel_flavor_ladder(FLAVOR_PSP | FLAVOR_USD),
+            vec![FLAVOR_PSP | FLAVOR_USD, FLAVOR_PSP, 0]
+        );
+    }
+
+    #[test]
+    fn flavor_names_lists_the_set_bits() {
+        use crate::rib::{FLAVOR_PSP, FLAVOR_USD, FLAVOR_USP};
+        assert_eq!(flavor_names(0), "none");
+        assert_eq!(flavor_names(FLAVOR_USD), "usd");
+        assert_eq!(
+            flavor_names(FLAVOR_PSP | FLAVOR_USP | FLAVOR_USD),
+            "psp,usp,usd"
+        );
+    }
+
+    #[test]
+    fn last_ladder_step_is_the_plain_behavior() {
+        use crate::rib::{FLAVOR_PSP, FLAVOR_USD};
+        let psp = u32::from(Seg6LocalFlavorOps::Psp);
+        let usd = u32::from(Seg6LocalFlavorOps::Usd);
+        let next_csid = u32::from(Seg6LocalFlavorOps::NextCsid);
+
+        // Classic End: the last step carries no Flavors attribute at all,
+        // which is the route the kernel took before flavors existed.
+        let ops: Vec<Option<u32>> = kernel_flavor_ladder(FLAVOR_PSP | FLAVOR_USD)
+            .into_iter()
+            .map(|f| {
+                let encaps =
+                    build_seg6local_lwtunnel(SidBehavior::End, None, None, None, 0, &[], f)
+                        .expect("encap built");
+                flavor_ops(&encaps)
+            })
+            .collect();
+        assert_eq!(ops, vec![Some(psp | usd), Some(psp), None]);
+
+        // uN: NEXT-C-SID is the behavior, not a flavor to drop — without
+        // it the kernel would read a uSID carrier as a full SID.
+        let structure = Some(SidStructure {
+            lb_bits: 32,
+            ln_bits: 16,
+            fun_bits: 16,
+            arg_bits: 64,
+        });
+        let ops: Vec<Option<u32>> = kernel_flavor_ladder(FLAVOR_USD)
+            .into_iter()
+            .map(|f| {
+                let encaps =
+                    build_seg6local_lwtunnel(SidBehavior::UN, None, None, structure, 0, &[], f)
+                        .expect("encap built");
+                flavor_ops(&encaps)
+            })
+            .collect();
+        assert_eq!(ops, vec![Some(next_csid | usd), Some(next_csid)]);
     }
 }
