@@ -52,6 +52,32 @@ pub fn flavor_bit(s: &str) -> Option<u8> {
     }
 }
 
+/// The names of the flavors in a mask, in the order psp, usp, usd.
+pub fn flavor_names(flavors: u8) -> Vec<&'static str> {
+    [
+        (FLAVOR_PSP, "psp"),
+        (FLAVOR_USP, "usp"),
+        (FLAVOR_USD, "usd"),
+    ]
+    .into_iter()
+    .filter(|(bit, _)| flavors & bit != 0)
+    .map(|(_, name)| name)
+    .collect()
+}
+
+/// What a show line puts after a behavior that has flavors: `" (PSP,
+/// USD)"`, or nothing for none. `End (PSP, USD)` is how the IS-IS
+/// database view names the advertised behavior, so a local SID reads the
+/// same in every show.
+pub fn flavor_suffix(flavors: u8) -> String {
+    let names = flavor_names(flavors);
+    if names.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", names.join(", ").to_uppercase())
+    }
+}
+
 /// Applied snapshot of an SRv6 locator, exported to the rest of the system
 /// once a config commit lands. Keyed by name in `Rib::locators`.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]

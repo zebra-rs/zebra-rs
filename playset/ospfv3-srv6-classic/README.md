@@ -409,10 +409,16 @@ n1>show ospfv3 database detail
 ```
 
 The kernel refuses a USD-flavored route, so it keeps the SID as plain
-End. The flavored one is in the engine (`flavors=4` is the USD bit),
-which sees the packets of its ports before the kernel does:
+End, and the route table says both: the SID as it is advertised, then
+the flavor the kernel left out. The flavored one is in the engine
+(`flavors=4` is the USD bit), which sees the packets of its ports
+before the kernel does:
 
 ``` shell
+d>show ipv6 route
+...
+O  *> fcbb:bbbb:8::/128 [110/0] is directly connected, sr0, seg6local End (USD) [USD not in kernel], 00:00:07
+
 d>ip -6 route show fcbb:bbbb:8::
 fcbb:bbbb:8::  encap seg6local action End dev sr0 proto ospf metric 1024 pref medium
 

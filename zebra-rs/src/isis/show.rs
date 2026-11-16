@@ -1965,7 +1965,8 @@ fn write_local_sids(buf: &mut String, isis: &Isis) -> std::fmt::Result {
             prefix: format!("{}/{}", masked, prefix_len),
             interface: iface,
             nexthop: "-".to_string(),
-            action: behavior.to_string(),
+            // With the locator's flavors, as the SID is advertised.
+            action: format!("{}{}", behavior, crate::rib::flavor_suffix(locator.flavors)),
             nh6: None,
         });
     }
@@ -1990,7 +1991,17 @@ fn write_local_sids(buf: &mut String, isis: &Isis) -> std::fmt::Result {
                         .first()
                         .map(|a: &Ipv6Addr| a.to_string())
                         .unwrap_or_else(|| "-".to_string()),
-                    action: behavior.to_string(),
+                    // An adjacency SID takes only psp of the locator's
+                    // flavors.
+                    action: format!(
+                        "{}{}",
+                        behavior,
+                        crate::rib::flavor_suffix(
+                            isis.sr_locator
+                                .as_ref()
+                                .map_or(0, |l| l.flavors & crate::rib::FLAVOR_PSP)
+                        )
+                    ),
                     nh6: super::link::nbr_v6ll_pick(&nbr.addr6l),
                 });
             }
