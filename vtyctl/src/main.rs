@@ -7,6 +7,7 @@ pub mod vty {
 pub mod apply;
 pub mod clear;
 pub mod endpoint;
+pub mod frr;
 pub mod mcp;
 pub mod show;
 pub mod watch;
@@ -83,6 +84,12 @@ enum Commands {
         #[arg(help = "Config path to watch, e.g. 'router bgp' (omit for the whole config)")]
         path: Vec<String>,
     },
+    /// FRR vtysh compatibility: `vtyctl vtysh -c 'show bgp summary json'`
+    #[command(disable_help_flag = true)]
+    Vtysh {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Start MCP (Model Context Protocol) server for AI assistant integration
     Mcp {
         #[arg(
@@ -128,11 +135,19 @@ fn print_help() {
     eprintln!("  clear       Clear commands.");
     eprintln!("  show        Show commands.");
     eprintln!("  watch       Watch running-config commits.");
+    eprintln!("  vtysh       Take an FRR vtysh command line (-c 'show ...').");
     eprintln!("  mcp         Start MCP server for AI assistant integration.");
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Installed under the name `vtysh` (SONiC's bgp container links it
+    // there), the binary takes FRR's vtysh command line instead of its own.
+    let mut argv = std::env::args();
+    if frr::is_vtysh_name(&argv.next().unwrap_or_default()) {
+        std::process::exit(frr::run(DEFAULT_ENDPOINT, argv.collect()).await);
+    }
+
     let cli = Cli::parse();
 
     match &cli.command {
@@ -152,6 +167,10 @@ async fn main() -> Result<()> {
             command,
         }) => {
             show::show(endpoint(host, &cli.vty_socket), command, *json).await?;
+        }
+        Some(Commands::Vtysh { args }) => {
+            let code = frr::run(endpoint(&None, &cli.vty_socket), args.clone()).await;
+            std::process::exit(code);
         }
         Some(Commands::Watch { host, json, path }) => {
             watch::watch(endpoint(host, &cli.vty_socket), *json, path.clone()).await?;

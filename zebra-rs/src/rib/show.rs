@@ -141,6 +141,13 @@ pub struct RouteEntry {
     pub metric: u32,
     pub nexthops: Vec<NexthopJson>,
     pub interface_name: Option<String>,
+    /// The forwarding plane acknowledged this route (the FPM offload
+    /// ack) — the text renderer's `offloaded` tail. What SONiC's
+    /// `route_check` reads to tell a programmed route from a pending one.
+    pub offloaded: bool,
+    /// Time since the entry was last installed or changed, as the text
+    /// renderer prints it.
+    pub uptime: String,
     /// The VRF the route is in, in the `show ip|ipv6 route vrf` views;
     /// without it, the routes of every VRF ran together in one list.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -297,6 +304,8 @@ fn rib_entry_to_json(rib: &Rib, prefix: &Ipv4Net, e: &RibEntry) -> RouteEntry {
         metric: e.metric,
         nexthops,
         interface_name,
+        offloaded: e.offloaded,
+        uptime: format_uptime(e.time.elapsed()),
         vrf: None,
     }
 }
@@ -448,6 +457,8 @@ fn rib_entry_to_json_v6(rib: &Rib, prefix: &Ipv6Net, e: &RibEntry) -> RouteEntry
         metric: e.metric,
         nexthops,
         interface_name,
+        offloaded: e.offloaded,
+        uptime: format_uptime(e.time.elapsed()),
         vrf: None,
     }
 }

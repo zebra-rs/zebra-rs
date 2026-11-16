@@ -17,7 +17,7 @@ content has been merged here.
 | 2 — offload ack + `suppress-fib-pending` | done |
 | 3 — `docker-fpm-zebra-rs` | done; selected by `SONIC_ROUTING_STACK=zebra-rs` |
 | 4 — config bridge | startup instance template ported; 3 of 6 peer families ported; **bgpcfgd backend wired** for those three |
-| 5 — `vtysh` / JSON compatibility | not started |
+| 5 — `vtysh` / JSON compatibility | **started**: shim in `vtyctl`; `show ip bgp summary`, `show ip route`, `route_check`, bgpmon work on VS; packaging open |
 | 6 — lifecycle | shutdown ordering set; restart leftovers handled; restarting-speaker GR (`select-defer-time`) open |
 | 7 — packaging | **the full image builds**: `make target/sonic-vs.img.gz` with `SONIC_ROUTING_STACK = zebra-rs`, through the slave, and boots |
 | 8, 9 | not started |
@@ -28,26 +28,32 @@ on the box — was booted under KVM beside a stock FRR `sonic-vs`, back to back 
 two links. From the image's stock `config_db.json`, with no manual configuration:
 bgpcfgd configures all 32 neighbors, both real sessions establish, the ECMP route
 is acknowledged as offloaded, APPL_DB holds the same 34 route rows as the FRR
-baseline with the same fields, ASIC_DB is programmed, and traffic forwards. The
-caveat that matters: the zebra-rs in that image carried the three fixes of §2.7
-as an uncommitted patch on the submodule's working tree.
+baseline with the same fields, ASIC_DB is programmed, and traffic forwards.
+
+The first such image carried the three zebra-rs fixes of §2.7 as a patch on the
+submodule's working tree. They have since merged (zebra-rs #2680, `a56ac35c`),
+the pin moved to it, and the build and the first-boot checks above were repeated
+on an image built from committed trees only (sonic-buildimage
+`zebra-rs-container` at `055854151`, local, not pushed): same results. The
+runtime changes through CONFIG_DB and the restart with leftovers were not
+repeated on that image.
 
 **What to do next, in order:**
 
-1. **Land the zebra-rs changes of §2.7 upstream and move the pin again.** The
-   SONiC tree now passes `--claim-main-bgp`, which only a zebra-rs carrying that
-   change accepts; built from the committed pin, the daemon does not start. Then
-   commit the SONiC-side changes of §2.6, which are also uncommitted.
-2. **Repeat the build and the VS run from committed trees only**, so the result
-   no longer rests on a working-tree patch. Add the lab's checks (session state,
+1. ~~Land the zebra-rs changes of §2.7 upstream and move the pin again~~ —
+   done: zebra-rs #2680, pin at `a56ac35c`, SONiC-side changes committed locally.
+2. **Push `zebra-rs-container`**, and add the lab's checks (session state,
    APPL_DB row diff against FRR, ASIC_DB, ping, neighbor shutdown/remove/re-add,
-   restart with leftovers) as the Phase 7 CI smoke test.
+   restart with leftovers) as the Phase 7 CI smoke test. The build and first
+   boot from committed trees are done.
 3. **Finish Phase 4**: port the managers bgpcfgd currently leaves out under
    zebra-rs (§2.6), device-global (TSA) first; give `managers_allow_list` a
    dialect. `sentinels` is ported; the three remaining families are read and
    each waits on a zebra-rs feature (§2.5).
-4. **Start Phase 5 in parallel** — `show ip bgp summary` and every other
-   `vtysh`-backed command fail on a zebra-rs box today.
+4. **Continue Phase 5** — the shim answers `show ip bgp summary`, `show ip
+   route`, `route_check` and bgpmon on the VS, but only installed by hand:
+   package it, and rebuild with the sonic-utilities fork that registers the BGP
+   commands for this routing stack.
 5. **Close the zebra-rs feature gaps** that block families: `update-source
    <interface>` first (it unblocks `monitors` outright), then `bestpath
    peer-type multipath-relax`, `set originator-id`, `clear bgp neighbor-group`,
@@ -327,7 +333,7 @@ The traps, all now guarded against by `validate-templates.sh` and
 | `suppress-fib-pending` gate | `bgpd.main.conf.j2:107` | 2 | **done** (`bgp-suppress-fib-pending.md`) |
 | `bestpath as-path multipath-relax` | `bgpd.main.conf.j2:115` | 4 | **done** (`bgp-multipath.md`) |
 | `aggregate-address` | `managers_aggregate_address` | 4 | open — no BGP aggregate in the schema (*schema read*) |
-| FRR-schema JSON emulation | every `vtysh … json` consumer | 5 | not started |
+| FRR-schema JSON emulation | every `vtysh … json` consumer | 5 | summary and route JSON done (`vtyctl/src/frr/`); neighbors, peer-group, bfd open |
 | EOIU / end-of-RIB signalling to STATE_DB | warm reboot | 6 | not started |
 | Restarting-speaker GR (`select-defer-time`) | warm reboot | 6 | open — see §2.4 |
 | BMP client | `bgpd.main.conf.j2:129-140`, `docker-sonic-bmp` | 8 | open (optional) |
@@ -621,10 +627,66 @@ waived for the exit.
 
 ---
 
-### Phase 5 — Operational compatibility (`vtysh`, JSON, telemetry) — NOT STARTED
+### Phase 5 — Operational compatibility (`vtysh`, JSON, telemetry) — STARTED
 
 Goal: `show ip bgp summary`, `show ip route`, `bgpmon`, and `route_check` keep
 working — for operators, tooling, and every existing sonic-mgmt test.
+
+**State, 2026-11-16.** The shim exists: `vtyctl/src/frr/` (`command.rs` maps an
+FRR command line, `json.rs` re-shapes zebra-rs JSON into FRR's schema). It is
+reached as `vtyctl vtysh -c '…'` and by running the binary under the name
+`vtysh`. Its rule is that a `json` command it does not know is **refused**, not
+passed through: zebra-rs's own JSON read by an FRR-schema consumer means "no
+peers" or "no routes" with no error.
+
+Tried on the VS with the new binaries copied into the running bgp container,
+the FRR host wrappers (`vtysh`, `rvtysh`) copied to the host, and
+sonic-utilities patched by hand as described under "open" below:
+
+| Consumer | Command it sends | Result |
+|---|---|---|
+| `show ip bgp summary` | `show ip bgp vrf default summary json` | prints all 32 neighbors, state/PfxRcd, names |
+| `show ipv6 bgp summary` (no v6 neighbors) | falls back to `show ip bgp vrf default json` | prints the header |
+| `show ip route`, `show ipv6 route` | `show ip route json` | prints, ECMP included |
+| `show ip route 10.1.0.2` | `show ip route 10.1.0.2 json` | prints the entry |
+| `show ip bgp neighbors [X] [advertised-routes]` | `show ip bgp vrf default neighbor …` | zebra-rs text |
+| `show ip bgp network` | `show ip bgp vrf default` | zebra-rs text |
+| `route_check.py` | `show ip route json`, `show ipv6 route json` | exit 0 |
+| `fast-reboot-filter-routes.py` | `show ip route connected json` | 36 prefixes |
+| `bgpmon` (run by hand) | `show bgp summary json` | STATE_DB `NEIGH_STATE_TABLE` has all 32 neighbors |
+| `config bgp shutdown neighbor` then summary | — | `Idle (Admin)`, `peerState: Admin` |
+| `clear ip bgp X soft in` | same | accepted |
+
+zebra-rs gained what the schemas needed and its JSON did not have: `offloaded`
+and `uptime` on a route; `session_state`, `established_msec`, `local_as`,
+`description`, `hostname` on a summary peer (the existing `state` is the text
+column, a prefix count once Established); `rib_entries` per family.
+
+Emitted as zero because zebra-rs does not keep them: `tableVersion`, `inq`,
+`outq`, and every `*Memory` field. `show ip bgp summary` therefore prints
+"using 0 bytes of memory".
+
+**Open:**
+
+- **sonic-utilities did not register `show ip bgp` / `clear ip bgp` on a
+  zebra-rs image.** It derives the routing stack from the bgp container's image
+  name (`docker-fpm-zebra-rs` → `zebra`) and only knew `frr` and `quagga`. On
+  the VS the two `routing_stack == "frr"` tests in `show/main.py` and
+  `clear/main.py` were edited in place. The change now lives in a fork,
+  `zebra-rs/sonic-utilities` branch `zebra-rs-routing-stack` (upstream pin plus
+  one commit), and sonic-buildimage's submodule points at it (local commit, not
+  yet built). Upstreaming it to sonic-net is open.
+- **Packaging** (sonic-buildimage): install the binary as `/usr/bin/vtysh` in
+  the container, ship the host wrappers through `_BASE_IMAGE_FILES`, and run
+  `bgpmon` under supervisord. None of it is done; the VS run was by hand.
+- **Refused today, with their consumers:** `show bgp neighbors X json` (EOIU
+  marker), `show bfd peers json` (`bfdmon`, `managers_bfd`),
+  `show bgp peer-group X json` and `show bgp vrfs json` (`managers_bgp`, FRR
+  path only), `clear bgp peer-group` (no zebra-rs equivalent), any non-default
+  VRF, and everything `generate_dump` asks for in JSON.
+- The BGP table has no JSON in zebra-rs, so `show ip bgp json` answers the
+  header only and has no `routes` key.
+- vtysh completion and help (`show/vtysh_helper.py`) are not served.
 
 1. **Inventory and classify** the `vtysh` call sites (15 non-test files in
    `sonic-utilities`, plus `bgpmon`, `bfdmon`, `bgp_eoiu_marker.py`, bgpcfgd).
@@ -785,15 +847,14 @@ shippable.
 | 2 | Offload ack + `suppress-fib-pending` | 3 | done |
 | 3 | `docker-fpm-zebra-rs` boots on VS; eBGP works | 4, 5 | done |
 | 4 | CONFIG_DB → zebra-rs bridge | 5, 6 | instance + 3/6 families, backend wired; most managers not ported |
-| 5 | `vtysh` shim + FRR-schema JSON | 6, 9 | not started |
+| 5 | `vtysh` shim + FRR-schema JSON | 6, 9 | shim and the first two schemas done; packaging and the rest open |
 | 6 | Warm/fast reboot, GR, TSA | 9 | ordering done; restarter open |
 | 7 | `.deb` + docker + CI in sonic-buildimage | 9, and in practice 4 | full VS image builds and boots; dbgsym, multi-arch, CI open |
 | 8 | VRF, SRv6, EVPN, BMP, multi-ASIC | 9 | VRF encoding only |
 | 9 | sonic-mgmt, scale, hardware, default flip | — | not started |
 
-Phase 7 steps 1–3 are done, step 3 on a working-tree patch; it needs repeating
-once §2.7 is upstream and pinned. 4 and 5 are independent and can run in
-parallel.
+Phase 7 steps 1–3 are done, step 3 from committed trees. 4 and 5 are
+independent and can run in parallel.
 
 ## 5. Explicit non-goals
 
