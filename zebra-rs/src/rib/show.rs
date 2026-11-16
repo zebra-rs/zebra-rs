@@ -568,9 +568,9 @@ pub fn rib_entry_show(
 /// The `seg6local` text of a local SID route. A SID of the registry
 /// prints with the flavors its locator gave it, `End (USD)`, which is what
 /// it is advertised as. The kernel refuses the flavors it does not
-/// perform and is then given the SID without them, so when it left some
-/// out the line also says what the kernel holds: `End (USD) [kernel:
-/// End]`. A static SID has no registry row and no flavors.
+/// perform and is then given the SID without them, so the line also names
+/// the ones it left out: `End (USD) [USD not in kernel]`. A static SID has
+/// no registry row and no flavors.
 fn seg6local_text(rib: &Rib, prefix: &Ipv6Net, action: super::SidBehavior) -> String {
     let Some(sid) = rib
         .sids
@@ -587,11 +587,11 @@ fn seg6local_text(rib: &Rib, prefix: &Ipv6Net, action: super::SidBehavior) -> St
 /// out are known.
 fn seg6local_flavored(action: super::SidBehavior, flavors: u8, left_out: u8) -> String {
     let mut text = format!("{}{}", action, super::flavor_suffix(flavors));
-    if flavors & left_out != 0 {
+    let missing = super::flavor_names(flavors & left_out);
+    if !missing.is_empty() {
         text.push_str(&format!(
-            " [kernel: {}{}]",
-            action,
-            super::flavor_suffix(flavors & !left_out)
+            " [{} not in kernel]",
+            missing.join(", ").to_uppercase()
         ));
     }
     text
@@ -3108,8 +3108,8 @@ mod tests {
         assert!(!json.contains("flavors"), "{json}");
     }
 
-    /// The `seg6local` text of a route line: the SID's flavors, and what
-    /// the kernel holds when it left some of them out.
+    /// The `seg6local` text of a route line: the SID's flavors, and the
+    /// ones the kernel left out.
     #[test]
     fn seg6local_text_says_what_the_kernel_left_out() {
         use crate::rib::{FLAVOR_PSP, FLAVOR_USD};
@@ -3121,16 +3121,21 @@ mod tests {
         // It refused USD and holds plain End.
         assert_eq!(
             seg6local_flavored(end, FLAVOR_USD, FLAVOR_USD),
-            "End (USD) [kernel: End]"
+            "End (USD) [USD not in kernel]"
         );
         // It kept PSP.
         assert_eq!(
             seg6local_flavored(end, FLAVOR_PSP | FLAVOR_USD, FLAVOR_USD),
-            "End (PSP, USD) [kernel: End (PSP)]"
+            "End (PSP, USD) [USD not in kernel]"
+        );
+        // It refused both.
+        assert_eq!(
+            seg6local_flavored(end, FLAVOR_PSP | FLAVOR_USD, FLAVOR_PSP | FLAVOR_USD),
+            "End (PSP, USD) [PSP, USD not in kernel]"
         );
         assert_eq!(
             seg6local_flavored(SidBehavior::EndX, FLAVOR_PSP, FLAVOR_PSP),
-            "End.X (PSP) [kernel: End.X]"
+            "End.X (PSP) [PSP not in kernel]"
         );
         // A record left from an earlier flavor of this SID is not a
         // flavor it has now.

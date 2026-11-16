@@ -55,11 +55,12 @@ Feature: A flavored SRv6 locator keeps its SIDs in the kernel
 
   Scenario: The show commands print the flavors
     Given the test topology exists
-    # The route line prints the SID as it is advertised, then what the
-    # kernel holds, since the kernel left USD out (and, on the End.X
-    # SIDs, PSP).
-    Then show command "show ipv6 route" in namespace "z2" should eventually contain "seg6local End (PSP, USD) [kernel: End"
-    And show command "show ipv6 route" in namespace "z2" should eventually contain "seg6local End.X (PSP) [kernel: End.X] nh6"
+    # The route line prints the SID as it is advertised, then names the
+    # flavors the kernel left out: USD on the End SID (with PSP too on a
+    # kernel that does not perform it), PSP on the End.X SIDs.
+    Then show command "show ipv6 route" in namespace "z2" should eventually contain "seg6local End (PSP, USD) ["
+    And show command "show ipv6 route" in namespace "z2" should eventually contain "USD not in kernel], "
+    And show command "show ipv6 route" in namespace "z2" should eventually contain "seg6local End.X (PSP) [PSP not in kernel] nh6"
     # The SID registry and the OSPFv3 view print the flavors too.
     And show command "show segment-routing srv6 sid" in namespace "z2" should contain "End (PSP, USD)"
     And show command "show segment-routing srv6 sid" in namespace "z2" should contain "End.X (PSP)"
