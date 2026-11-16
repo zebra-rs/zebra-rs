@@ -5513,7 +5513,14 @@ module config {
              End.X/uA SIDs allocated from this locator (End.X SIDs take
              only psp — their usp/usd variants are not implemented).
              psp pops the SRH at the penultimate segment, usp pops it
-             at the ultimate segment, usd decapsulates there.";
+             at the ultimate segment, usd decapsulates there.
+
+             The SIDs are advertised with the configured flavors. The
+             Linux kernel performs only psp, and only on End/uN: a SID
+             is installed there without the flavors the kernel refuses,
+             and the log names them. A segment list that relies on such
+             a flavor (one ending at a usd SID) is not served by the
+             kernel data plane.";
         }
       }
 

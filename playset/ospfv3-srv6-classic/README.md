@@ -408,11 +408,13 @@ n1>show ospfv3 database detail
       SID: fcbb:bbbb:8::
 ```
 
-The SID has left the kernel, which refuses a USD-flavored route, and
-lives in the engine (`flavors=4` is the USD bit):
+The kernel refuses a USD-flavored route, so it keeps the SID as plain
+End. The flavored one is in the engine (`flavors=4` is the USD bit),
+which sees the packets of its ports before the kernel does:
 
 ``` shell
 d>ip -6 route show fcbb:bbbb:8::
+fcbb:bbbb:8::  encap seg6local action End dev sr0 proto ospf metric 1024 pref medium
 
 $ sudo ip netns exec d cradle dump srv6
 localsid fcbb:bbbb:8::/128 End            flavors=4 vrf=0 nh_id=0
@@ -445,10 +447,10 @@ one can differ between runs).
 With segments still to go, the flavored SID behaves as plain End, so
 it keeps working as a transit segment.
 
-Set the flavor only on a node that runs the engine. On a kernel-only
-node the kernel refuses the flavored route and the End SID is not
-installed at all, not even for transit use such as the TI-LFA repair
-lists below.
+Set the flavor only on a node that runs the engine. A kernel-only
+node advertises the flavor all the same, but its kernel keeps the SID
+as plain End (zebra-rs logs a warning naming the flavor left out), so
+a segment list that ends at the SID is still dropped there.
 
 Clean up, so the TI-LFA sections start from the kernel data plane:
 

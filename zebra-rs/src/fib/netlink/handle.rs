@@ -588,6 +588,10 @@ pub struct FibHandle {
     /// route at the same `(table, prefix, priority)` replaced the leftover
     /// in the kernel, so the sweep must leave that key alone.
     srv6_installed: std::sync::Mutex<BTreeSet<(u32, IpNet, u32)>>,
+    /// SIDs the kernel took only without (part of) their configured
+    /// flavor, as `(address, flavors left out)`: each is reported once,
+    /// not at every re-install of an adjacency SID.
+    srv6_flavor_reported: std::sync::Mutex<BTreeSet<(Ipv6Addr, u8)>>,
     /// The ids of the next-hop objects an earlier run left (`RTPROT_ZEBRA`),
     /// found by the startup dump. The RIB reserves them, so nothing of this
     /// run uses one; the leftover sweep deletes those nothing names any
@@ -930,6 +934,7 @@ impl FibHandle {
             evpn_l3vni_bridge: std::sync::Mutex::new(BTreeMap::new()),
             srv6_leftovers: std::sync::Mutex::new(BTreeMap::new()),
             srv6_installed: std::sync::Mutex::new(BTreeSet::new()),
+            srv6_flavor_reported: std::sync::Mutex::new(BTreeSet::new()),
             nexthop_leftovers: std::sync::Mutex::new(BTreeSet::new()),
             vni_ifindex_map: BTreeMap::new(),
             vni_bridge_map: BTreeMap::new(),
@@ -3151,71 +3156,89 @@ impl FibHandle {
         if ifindex != 0 {
             msg.attributes.push(RouteAttribute::Oif(ifindex));
         }
-        let Some((encap, encap_type)) = super::srv6::build_seg6local_attrs(
-            sid.behavior,
-            sid.nh6,
-            None,
-            sid.structure,
-            sid.table_id,
-            &sid.segs,
-            sid.flavors,
-        ) else {
-            tracing::warn!(
-                "seg6local route encap build skipped for {} (End.X / uA without IPv6 nexthop)",
-                sid.addr
-            );
-            return;
-        };
-        msg.attributes.push(encap);
-        msg.attributes.push(encap_type);
-
-        if fib_srv6() {
-            tracing::info!(
-                "[route_sid_install] addr={}/{} behavior={:?} ifindex={} nh6={:?} gid={} \
-                 use_nhid={} kind={:?} protocol={:?} attrs={:?}",
-                sid.addr,
-                msg.header.destination_prefix_length,
-                sid.behavior,
-                ifindex,
-                sid.nh6,
-                gid,
-                self.use_nhid,
-                msg.header.kind,
-                msg.header.protocol,
-                msg.attributes,
-            );
-        }
-
+        // The kernel refuses the whole route for a flavor it does not
+        // perform, so offer it the configured mask first and then the
+        // weaker ones (`kernel_flavor_ladder`): a SID installed without
+        // its flavor still serves every segment list that only passes
+        // through it, and a SID that is missing serves none.
         let replaced = self.leftover_key(&msg);
-        let mut req = NetlinkMessage::from(RouteNetlinkMessage::NewRoute(msg));
-        req.header.flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE;
-        let mut ok = true;
-        let mut response = self.handle.clone().request(req).unwrap();
-        while let Some(m) = response.next().await {
-            if let NetlinkPayload::Error(e) = m.payload {
-                ok = false;
-                // warn level so kernel rejections show up without
-                // requiring `system tracing fib srv6` — silent failures
-                // here are how a misshaped seg6local install slips through.
+        let ladder = super::srv6::kernel_flavor_ladder(sid.flavors);
+        for (step, &flavors) in ladder.iter().enumerate() {
+            let Some((encap, encap_type)) = super::srv6::build_seg6local_attrs(
+                sid.behavior,
+                sid.nh6,
+                None,
+                sid.structure,
+                sid.table_id,
+                &sid.segs,
+                flavors,
+            ) else {
                 tracing::warn!(
-                    "NewRoute SID install error: addr={} behavior={:?} \
-                     prefix_len={} table={} kind={:?} ifindex={} nh6={:?} \
-                     gid={} use_nhid={} err={}",
+                    "seg6local route encap build skipped for {} (End.X / uA without IPv6 nexthop)",
+                    sid.addr
+                );
+                return;
+            };
+            let mut attempt = msg.clone();
+            attempt.attributes.push(encap);
+            attempt.attributes.push(encap_type);
+
+            if fib_srv6() {
+                tracing::info!(
+                    "[route_sid_install] addr={}/{} behavior={:?} ifindex={} nh6={:?} gid={} \
+                     use_nhid={} kind={:?} protocol={:?} attrs={:?}",
                     sid.addr,
+                    attempt.header.destination_prefix_length,
                     sid.behavior,
-                    prefix_len,
-                    table,
-                    kind,
                     ifindex,
                     sid.nh6,
                     gid,
                     self.use_nhid,
-                    e
+                    attempt.header.kind,
+                    attempt.header.protocol,
+                    attempt.attributes,
                 );
             }
-        }
-        if ok {
-            self.note_installed(replaced);
+
+            let mut req = NetlinkMessage::from(RouteNetlinkMessage::NewRoute(attempt));
+            req.header.flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE;
+            let mut error = None;
+            let mut response = self.handle.clone().request(req).unwrap();
+            while let Some(m) = response.next().await {
+                if let NetlinkPayload::Error(e) = m.payload {
+                    error = Some(e);
+                }
+            }
+            let Some(e) = error else {
+                if flavors != sid.flavors {
+                    self.report_flavor_left_out(sid, flavors);
+                }
+                self.note_installed(replaced);
+                return;
+            };
+            let refused_flavor = e.to_io().raw_os_error() == Some(libc::EOPNOTSUPP);
+            if refused_flavor && step + 1 < ladder.len() {
+                continue;
+            }
+            // warn level so kernel rejections show up without
+            // requiring `system tracing fib srv6` — silent failures
+            // here are how a misshaped seg6local install slips through.
+            tracing::warn!(
+                "NewRoute SID install error: addr={} behavior={:?} \
+                 prefix_len={} table={} kind={:?} ifindex={} nh6={:?} \
+                 gid={} use_nhid={} err={}",
+                sid.addr,
+                sid.behavior,
+                prefix_len,
+                table,
+                kind,
+                ifindex,
+                sid.nh6,
+                gid,
+                self.use_nhid,
+                e
+            );
+            return;
         }
     }
 
@@ -4744,6 +4767,42 @@ impl FibHandle {
             .get(&(table_id, prefix))
             .filter(|(_, tracked)| *tracked == metric)
             .map(|(encap, _)| encap.l3vni)
+    }
+
+    /// The kernel took `sid` with `installed` in place of its configured
+    /// flavors. Say so once per SID: the SID stays advertised with the
+    /// flavor, and a sender that relies on it (a segment list ending at a
+    /// USD SID) still loses its packets on the kernel data plane. With the
+    /// eBPF tee active the engine was given the SID with its flavors and
+    /// sees the packets of its ports first, so there it is no warning.
+    fn report_flavor_left_out(&self, sid: &crate::rib::Sid, installed: u8) {
+        let left_out = sid.flavors & !installed;
+        if !self
+            .srv6_flavor_reported
+            .lock()
+            .unwrap()
+            .insert((sid.addr, left_out))
+        {
+            return;
+        }
+        let left_out = super::srv6::flavor_names(left_out);
+        let installed = super::srv6::flavor_names(installed);
+        if self.cradle.is_some() {
+            tracing::info!(
+                "kernel refuses SRv6 flavor {left_out} for {:?} SID {}: installed there with \
+                 flavor {installed}; the eBPF data plane holds the SID with its flavors",
+                sid.behavior,
+                sid.addr,
+            );
+        } else {
+            tracing::warn!(
+                "kernel refuses SRv6 flavor {left_out} for {:?} SID {}: installed with flavor \
+                 {installed}; the SID stays advertised with a flavor this data plane does not \
+                 perform",
+                sid.behavior,
+                sid.addr,
+            );
+        }
     }
 
     /// The SRv6 leftover's key a route install would replace, if any:

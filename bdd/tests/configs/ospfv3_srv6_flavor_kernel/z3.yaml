@@ -1,0 +1,36 @@
+# z3 — plain locator and a pinned End.DT6 SID, the last segment of z1's
+# list. z3-h3 is not in OSPFv3, so the host h3 on 2001:db8:300::/64 is
+# reachable from z1 only through that segment list.
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8::3/128
+- if-name: z3-z2
+  ipv6:
+    address: 2001:db8:23::3/64
+- if-name: z3-h3
+  ipv6:
+    address: 2001:db8:300::1/64
+segment-routing:
+  locator:
+  - name: LOC3
+    prefix: fcbb:bbbb:3::/48
+router:
+  ospfv3:
+    router-id: 10.0.0.3
+    segment-routing:
+      srv6:
+        locator: LOC3
+    area:
+    - area-id: 0.0.0.0
+      interface:
+      - if-name: lo
+        enabled: true
+      - if-name: z3-z2
+        enabled: true
+        network-type: point-to-point
+  static:
+    ipv6:
+      route:
+      - prefix: fcbb:bbbb:3:e064::/128
+        action: End.DT6
