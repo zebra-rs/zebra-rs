@@ -588,10 +588,12 @@ pub struct FibHandle {
     /// route at the same `(table, prefix, priority)` replaced the leftover
     /// in the kernel, so the sweep must leave that key alone.
     srv6_installed: std::sync::Mutex<BTreeSet<(u32, IpNet, u32)>>,
-    /// SIDs the kernel took only without (part of) their configured
-    /// flavor, as `(address, flavors left out)`: each is reported once,
-    /// not at every re-install of an adjacency SID.
-    srv6_flavor_reported: std::sync::Mutex<BTreeSet<(Ipv6Addr, u8)>>,
+    /// The flavors the kernel left out of each SID at its last install,
+    /// by SID address; no entry when it took them all. `show ipv6 route`
+    /// reads it to say what the kernel holds. An entry outlives an
+    /// uninstall on purpose: a change is what gets logged, so an
+    /// adjacency SID that comes back the same way is not reported again.
+    srv6_flavor_left_out: std::sync::Mutex<BTreeMap<Ipv6Addr, u8>>,
     /// The ids of the next-hop objects an earlier run left (`RTPROT_ZEBRA`),
     /// found by the startup dump. The RIB reserves them, so nothing of this
     /// run uses one; the leftover sweep deletes those nothing names any
@@ -934,7 +936,7 @@ impl FibHandle {
             evpn_l3vni_bridge: std::sync::Mutex::new(BTreeMap::new()),
             srv6_leftovers: std::sync::Mutex::new(BTreeMap::new()),
             srv6_installed: std::sync::Mutex::new(BTreeSet::new()),
-            srv6_flavor_reported: std::sync::Mutex::new(BTreeSet::new()),
+            srv6_flavor_left_out: std::sync::Mutex::new(BTreeMap::new()),
             nexthop_leftovers: std::sync::Mutex::new(BTreeSet::new()),
             vni_ifindex_map: BTreeMap::new(),
             vni_bridge_map: BTreeMap::new(),
@@ -3210,9 +3212,7 @@ impl FibHandle {
                 }
             }
             let Some(e) = error else {
-                if flavors != sid.flavors {
-                    self.report_flavor_left_out(sid, flavors);
-                }
+                self.note_flavor_left_out(sid, flavors);
                 self.note_installed(replaced);
                 return;
             };
@@ -4769,21 +4769,35 @@ impl FibHandle {
             .map(|(encap, _)| encap.l3vni)
     }
 
-    /// The kernel took `sid` with `installed` in place of its configured
-    /// flavors. Say so once per SID: the SID stays advertised with the
-    /// flavor, and a sender that relies on it (a segment list ending at a
-    /// USD SID) still loses its packets on the kernel data plane. With the
-    /// eBPF tee active the engine was given the SID with its flavors and
-    /// sees the packets of its ports first, so there it is no warning.
-    fn report_flavor_left_out(&self, sid: &crate::rib::Sid, installed: u8) {
-        let left_out = sid.flavors & !installed;
-        if !self
-            .srv6_flavor_reported
+    /// The flavors the kernel left out of the SID at `addr` when it was
+    /// last installed; 0 when it took them all, or holds no such SID.
+    pub fn sid_flavors_left_out(&self, addr: &Ipv6Addr) -> u8 {
+        self.srv6_flavor_left_out
             .lock()
             .unwrap()
-            .insert((sid.addr, left_out))
+            .get(addr)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// The kernel took `sid` with the flavors `installed`. Record what it
+    /// left out, and say so when that is news: the SID stays advertised
+    /// with the flavor, and a sender that relies on it (a segment list
+    /// ending at a USD SID) still loses its packets on the kernel data
+    /// plane. With the eBPF tee active the engine was given the SID with
+    /// its flavors and sees the packets of its ports first, so there it
+    /// is no warning.
+    fn note_flavor_left_out(&self, sid: &crate::rib::Sid, installed: u8) {
+        let left_out = sid.flavors & !installed;
         {
-            return;
+            let mut map = self.srv6_flavor_left_out.lock().unwrap();
+            if left_out == 0 {
+                map.remove(&sid.addr);
+                return;
+            }
+            if map.insert(sid.addr, left_out) == Some(left_out) {
+                return;
+            }
         }
         let left_out = super::srv6::flavor_names(left_out);
         let installed = super::srv6::flavor_names(installed);

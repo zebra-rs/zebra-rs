@@ -332,6 +332,16 @@ pub struct Sid {
 }
 
 impl Sid {
+    /// The behavior with its flavors, as the show commands print it:
+    /// `End`, `End (USD)`, `uN (PSP, USD)`, `End.X (PSP)`.
+    pub fn behavior_text(&self) -> String {
+        format!(
+            "{}{}",
+            self.behavior,
+            super::locator::flavor_suffix(self.flavors)
+        )
+    }
+
     /// IPv6 prefix the FIB / RIB indexes this SID under. End / End.X /
     /// uA install at /128; uN is a *prefix* install (the locator's
     /// LB+LN portion) so the NEXT-CSID flavor matches every function

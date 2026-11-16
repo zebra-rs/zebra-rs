@@ -43,6 +43,20 @@ Feature: IS-IS advertises PSP-flavored SRv6 endpoint behaviors
     And ping from "z1" to "2001:db8::2" should eventually succeed
     And ping from "z2" to "2001:db8::1" should eventually succeed
 
+  Scenario: The show commands print the flavor of the local SIDs
+    Given the test topology exists
+    # z1's own SIDs print with PSP in the route table, the IS-IS local
+    # SID table and the SID registry. The kernel performs PSP on uN but
+    # not on an adjacency SID, which the route line says.
+    Then show command "show ipv6 route" in namespace "z1" should eventually contain "seg6local uN (PSP)"
+    And show command "show ipv6 route" in namespace "z1" should eventually contain "seg6local uA (PSP) [kernel: uA]"
+    And show command "show isis route" in namespace "z1" should contain "seg6local uN (PSP)"
+    And show command "show isis route" in namespace "z1" should contain "seg6local uA (PSP)"
+    And show command "show segment-routing srv6 sid" in namespace "z1" should contain "uN (PSP)"
+    # The flavorless peer prints the bare behaviors.
+    And show command "show isis route" in namespace "z2" should contain "seg6local uN"
+    And show command "show segment-routing srv6 sid" in namespace "z2" should not contain "(PSP)"
+
   Scenario: Teardown topology
     Given the test topology exists
     When I stop zebra-rs in namespace "z1"

@@ -2546,6 +2546,10 @@ struct Ospfv3Srv6LocatorJson {
 struct Ospfv3Srv6EndSidJson {
     sid: String,
     behavior: &'static str,
+    /// The locator's RFC 8986 §4.16 flavors on this SID; left out when
+    /// there are none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    flavors: Vec<&'static str>,
 }
 
 #[derive(Serialize)]
@@ -2554,8 +2558,20 @@ struct Ospfv3Srv6EndXJson {
     neighbor_router_id: String,
     sid: String,
     behavior: &'static str,
+    /// An adjacency SID takes only `psp` of the locator's flavors.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    flavors: Vec<&'static str>,
     nexthop: Option<String>,
     lib_sid: Option<String>,
+}
+
+/// A behavior with its flavors as a show line prints it: `End (USD)`.
+fn flavored(behavior: &str, flavors: &[&'static str]) -> String {
+    if flavors.is_empty() {
+        behavior.to_string()
+    } else {
+        format!("{} ({})", behavior, flavors.join(", ").to_uppercase())
+    }
 }
 
 #[derive(Serialize)]
@@ -2580,26 +2596,38 @@ fn render_ospfv3_srv6_text(v: &Ospfv3Srv6Json) -> Result<String, std::fmt::Error
         },
     }
     if let Some(end) = &v.end_sid {
-        writeln!(out, "  End SID: {} ({})", end.sid, end.behavior)?;
+        writeln!(
+            out,
+            "  End SID: {} ({})",
+            end.sid,
+            flavored(end.behavior, &end.flavors)
+        )?;
     }
     if v.end_x_sids.is_empty() {
         return Ok(out);
     }
     writeln!(out)?;
     writeln!(out, "Local SRv6 End.X SIDs:")?;
+    // `End.X (PSP)` is wider than the 8 columns `End.X` was given.
+    let behaviors: Vec<String> = v
+        .end_x_sids
+        .iter()
+        .map(|row| flavored(row.behavior, &row.flavors))
+        .collect();
+    let beh_w = behaviors.iter().map(String::len).max().unwrap_or(0).max(8);
     writeln!(
         out,
-        " {:<10} {:<15} {:<24} {:<8} {:<24} LIB",
+        " {:<10} {:<15} {:<24} {:<beh_w$} {:<24} LIB",
         "Interface", "Neighbor", "SID", "Behavior", "Nexthop"
     )?;
-    for row in &v.end_x_sids {
+    for (row, behavior) in v.end_x_sids.iter().zip(&behaviors) {
         writeln!(
             out,
-            " {:<10} {:<15} {:<24} {:<8} {:<24} {}",
+            " {:<10} {:<15} {:<24} {:<beh_w$} {:<24} {}",
             row.interface,
             row.neighbor_router_id,
             row.sid,
-            row.behavior,
+            behavior,
             row.nexthop.as_deref().unwrap_or("-"),
             row.lib_sid.as_deref().unwrap_or("-"),
         )?;
@@ -2639,9 +2667,13 @@ fn show_ospfv3_srv6(
                 .and_then(|l| l.prefix)
                 .map(|_| if usid { "usid" } else { "classic" }),
         });
+    // The End SID carries every flavor of the locator, an adjacency SID
+    // only psp: the masks `srv6.rs` advertises and installs them with.
+    let flavors = top.sr_locator.as_ref().map_or(0, |l| l.flavors);
     let end_sid = top.sr_end_sid.map(|sid| Ospfv3Srv6EndSidJson {
         sid: sid.to_string(),
         behavior: if usid { "uN" } else { "End" },
+        flavors: crate::rib::flavor_names(flavors),
     });
     let end_x_sids: Vec<Ospfv3Srv6EndXJson> = top
         .endx_sids
@@ -2655,6 +2687,7 @@ fn show_ospfv3_srv6(
             neighbor_router_id: rid.to_string(),
             sid: state.addr.to_string(),
             behavior: if usid { "uA" } else { "End.X" },
+            flavors: crate::rib::flavor_names(flavors & crate::rib::FLAVOR_PSP),
             nexthop: state.nh6.map(|a| a.to_string()),
             lib_sid: state.lib_addr.map(|a| a.to_string()),
         })
@@ -2688,12 +2721,14 @@ mod srv6_show_tests {
             end_sid: Some(Ospfv3Srv6EndSidJson {
                 sid: "fcbb:bbbb:1::".into(),
                 behavior: "uN",
+                flavors: vec![],
             }),
             end_x_sids: vec![Ospfv3Srv6EndXJson {
                 interface: "i2".into(),
                 neighbor_router_id: "10.0.0.2".into(),
                 sid: "fcbb:bbbb:1:e000::".into(),
                 behavior: "uA",
+                flavors: vec![],
                 nexthop: Some("2001:db8:12::2".into()),
                 lib_sid: Some("fcbb:bbbb:e000::".into()),
             }],
@@ -2705,6 +2740,45 @@ mod srv6_show_tests {
         assert!(text.contains("fcbb:bbbb:1:e000::"));
         assert!(text.contains("2001:db8:12::2"));
         assert!(text.contains("fcbb:bbbb:e000::"));
+        // A locator without flavors prints as it always did, and its
+        // JSON has no `flavors` key.
+        assert!(text.contains(" fcbb:bbbb:1:e000::       uA       2001:db8:12::2"));
+        assert!(!serde_json::to_string(&v).unwrap().contains("flavors"));
+    }
+
+    // A flavored locator: the End SID shows every flavor, the End.X SID
+    // the psp it takes, and the Behavior column widens to hold it.
+    #[test]
+    fn srv6_show_prints_the_flavors() {
+        let v = Ospfv3Srv6Json {
+            locator: Some(Ospfv3Srv6LocatorJson {
+                name: "LOC2".into(),
+                prefix: Some("fcbb:bbbb:2::/48".into()),
+                behavior: Some("classic"),
+            }),
+            end_sid: Some(Ospfv3Srv6EndSidJson {
+                sid: "fcbb:bbbb:2::".into(),
+                behavior: "End",
+                flavors: vec!["psp", "usd"],
+            }),
+            end_x_sids: vec![Ospfv3Srv6EndXJson {
+                interface: "z2-z1".into(),
+                neighbor_router_id: "10.0.0.1".into(),
+                sid: "fcbb:bbbb:2:e000::".into(),
+                behavior: "End.X",
+                flavors: vec!["psp"],
+                nexthop: Some("2001:db8:12::1".into()),
+                lib_sid: None,
+            }],
+        };
+        let text = render_ospfv3_srv6_text(&v).unwrap();
+        assert!(text.contains("End SID: fcbb:bbbb:2:: (End (PSP, USD))"));
+        // Header and row stay aligned under the wider column.
+        assert!(text.contains(" SID                      Behavior    Nexthop"));
+        assert!(text.contains(" fcbb:bbbb:2:e000::       End.X (PSP) 2001:db8:12::1"));
+        let json = serde_json::to_string(&v).unwrap();
+        assert!(json.contains(r#""behavior":"End","flavors":["psp","usd"]"#));
+        assert!(json.contains(r#""behavior":"End.X","flavors":["psp"]"#));
     }
 
     // The unconfigured / unresolved degradations.

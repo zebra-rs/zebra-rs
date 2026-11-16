@@ -256,15 +256,7 @@ pub fn kernel_flavor_ladder(flavors: u8) -> Vec<u8> {
 
 /// The flavor names of a mask, for a log line: `psp,usd`, or `none`.
 pub fn flavor_names(flavors: u8) -> String {
-    let names: Vec<&str> = [
-        (crate::rib::FLAVOR_PSP, "psp"),
-        (crate::rib::FLAVOR_USP, "usp"),
-        (crate::rib::FLAVOR_USD, "usd"),
-    ]
-    .into_iter()
-    .filter(|(bit, _)| flavors & bit != 0)
-    .map(|(_, name)| name)
-    .collect();
+    let names = crate::rib::flavor_names(flavors);
     if names.is_empty() {
         "none".to_string()
     } else {

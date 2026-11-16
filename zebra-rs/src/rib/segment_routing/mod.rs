@@ -10,6 +10,7 @@ pub use block::{Block, BlockBuilder, BlockConfig, DEFAULT_BLOCK_NAME};
 pub mod locator;
 pub use locator::{
     FLAVOR_PSP, FLAVOR_USD, FLAVOR_USP, Locator, LocatorBehavior, LocatorBuilder, LocatorConfig,
+    flavor_names, flavor_suffix,
 };
 
 pub mod sid;

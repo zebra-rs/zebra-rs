@@ -28,4 +28,5 @@ adjacency and SPF are unaffected.
 | Scenario | Result |
 |----------|--------|
 | The flavored codepoints appear in the peer's database | |
+| The show commands print the flavor of the local SIDs | |
 | Teardown topology | |

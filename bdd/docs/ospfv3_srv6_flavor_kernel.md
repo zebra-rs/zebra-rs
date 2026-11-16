@@ -36,5 +36,6 @@ h3 is a host, 2001:db8:300::100; z3-h3 is not in OSPFv3.
 | Scenario | Result |
 |----------|--------|
 | The flavored SIDs are in the kernel | |
+| The show commands print the flavors | |
 | A segment list passes through the flavored End SID | |
 | Teardown topology | |

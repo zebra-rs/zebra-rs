@@ -53,6 +53,22 @@ Feature: A flavored SRv6 locator keeps its SIDs in the kernel
     # The operator is told which flavor the kernel left out.
     And daemon log in namespace "z2" should eventually contain "kernel refuses SRv6 flavor usd for End SID fcbb:bbbb:2::"
 
+  Scenario: The show commands print the flavors
+    Given the test topology exists
+    # The route line prints the SID as it is advertised, then what the
+    # kernel holds, since the kernel left USD out (and, on the End.X
+    # SIDs, PSP).
+    Then show command "show ipv6 route" in namespace "z2" should eventually contain "seg6local End (PSP, USD) [kernel: End"
+    And show command "show ipv6 route" in namespace "z2" should eventually contain "seg6local End.X (PSP) [kernel: End.X] nh6"
+    # The SID registry and the OSPFv3 view print the flavors too.
+    And show command "show segment-routing srv6 sid" in namespace "z2" should contain "End (PSP, USD)"
+    And show command "show segment-routing srv6 sid" in namespace "z2" should contain "End.X (PSP)"
+    And show command "show ospfv3 srv6" in namespace "z2" should contain "End SID: fcbb:bbbb:2:: (End (PSP, USD))"
+    And show command "show ospfv3 srv6" in namespace "z2" should contain "End.X (PSP)"
+    # A locator without flavors prints as before.
+    And show command "show ipv6 route" in namespace "z1" should contain "seg6local End, "
+    And show command "show ospfv3 srv6" in namespace "z1" should contain "End SID: fcbb:bbbb:1:: (End)"
+
   Scenario: A segment list passes through the flavored End SID
     Given the test topology exists
     # 2001:db8:300::/64 is known to z1 only by this route: first z2's

@@ -565,6 +565,38 @@ pub fn rib_entry_show(
     Ok(buf)
 }
 
+/// The `seg6local` text of a local SID route. A SID of the registry
+/// prints with the flavors its locator gave it, `End (USD)`, which is what
+/// it is advertised as. The kernel refuses the flavors it does not
+/// perform and is then given the SID without them, so when it left some
+/// out the line also says what the kernel holds: `End (USD) [kernel:
+/// End]`. A static SID has no registry row and no flavors.
+fn seg6local_text(rib: &Rib, prefix: &Ipv6Net, action: super::SidBehavior) -> String {
+    let Some(sid) = rib
+        .sids
+        .get(&prefix.addr())
+        .filter(|sid| sid.behavior == action)
+    else {
+        return action.to_string();
+    };
+    let left_out = rib.fib_handle.sid_flavors_left_out(&sid.addr);
+    seg6local_flavored(action, sid.flavors, left_out)
+}
+
+/// `seg6local_text` once the SID's flavors and the ones the kernel left
+/// out are known.
+fn seg6local_flavored(action: super::SidBehavior, flavors: u8, left_out: u8) -> String {
+    let mut text = format!("{}{}", action, super::flavor_suffix(flavors));
+    if flavors & left_out != 0 {
+        text.push_str(&format!(
+            " [kernel: {}{}]",
+            action,
+            super::flavor_suffix(flavors & !left_out)
+        ));
+    }
+    text
+}
+
 // IPv6 route entry display function
 pub fn rib_entry_show_v6(
     rib: &Rib,
@@ -637,7 +669,8 @@ pub fn rib_entry_show_v6(
                     write!(
                         buf,
                         " is directly connected, {}, seg6local {}",
-                        iface, action
+                        iface,
+                        seg6local_text(rib, prefix, action)
                     )
                     .unwrap();
                     if let IpAddr::V6(nh6) = uni.addr
@@ -2529,6 +2562,13 @@ fn sid_show_text(
         .max()
         .unwrap_or(0)
         .max(SID_COL);
+    // So does the behavior column: `End (PSP, USD)` is wider than `End.X`.
+    let beh_w = sids
+        .values()
+        .map(|sid| sid.behavior_text().len() + 2)
+        .max()
+        .unwrap_or(0)
+        .max(BEHAVIOR_COL);
     writeln!(
         buf,
         " {sid:<sid_w$}{behavior:<beh_w$}{context:<ctx_w$}{owner:<own_w$}{loc:<loc_w$}{alloc:<alloc_w$}",
@@ -2538,7 +2578,6 @@ fn sid_show_text(
         owner = "Protocol",
         loc = "Locator",
         alloc = "AllocationType",
-        beh_w = BEHAVIOR_COL,
         ctx_w = CONTEXT_COL,
         own_w = OWNER_COL,
         loc_w = LOCATOR_COL,
@@ -2557,7 +2596,7 @@ fn sid_show_text(
         // gap before each remaining column, matching the design doc
         // sample. Each stops 2 short of its column, so the next starts
         // under its header.
-        sid_w = sid_w + BEHAVIOR_COL - 2,
+        sid_w = sid_w + beh_w - 2,
         ctx_w = CONTEXT_COL - 2,
         own_w = OWNER_COL - 2,
         loc_w = LOCATOR_COL - 2,
@@ -2569,13 +2608,12 @@ fn sid_show_text(
             buf,
             " {addr:<sid_w$}{behavior:<beh_w$}{context:<ctx_w$}{owner:<own_w$}{loc:<loc_w$}{alloc:<alloc_w$}",
             addr = sid.addr.to_string(),
-            behavior = sid.behavior.to_string(),
+            behavior = sid.behavior_text(),
             context = sid.context.to_string(),
             owner = sid.owner.to_string(),
             loc = sid.locator,
             alloc = sid.allocation_type.to_string(),
-            beh_w = BEHAVIOR_COL,
-            ctx_w = CONTEXT_COL,
+                ctx_w = CONTEXT_COL,
             own_w = OWNER_COL,
             loc_w = LOCATOR_COL,
             alloc_w = ALLOC_COL,
@@ -2606,6 +2644,10 @@ struct SidTable {
 struct SidJson {
     sid: String,
     behavior: String,
+    /// The SID's RFC 8986 §4.16 flavors (`psp`, `usp`, `usd`); left out
+    /// when it has none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    flavors: Vec<&'static str>,
     context: String,
     owner: String,
     locator: String,
@@ -2621,6 +2663,7 @@ impl From<&super::Sid> for SidJson {
         Self {
             sid: s.addr.to_string(),
             behavior: s.behavior.to_string(),
+            flavors: super::flavor_names(s.flavors),
             context: s.context.to_string(),
             owner: s.owner.to_string(),
             locator: s.locator.clone(),
@@ -3023,6 +3066,96 @@ mod tests {
         // Short SIDs keep the default column.
         let out = sid_show_text(&BTreeMap::new(), &BTreeMap::new());
         assert_underlined(&out, &["Context", "Protocol", "Locator", "AllocationType"]);
+    }
+
+    /// A flavored SID prints its flavors, and the Behavior column widens
+    /// for them the way the SID column does for a long SID.
+    #[test]
+    fn sid_show_prints_the_flavors() {
+        use crate::rib::{FLAVOR_PSP, FLAVOR_USD};
+        let mut sids: BTreeMap<Ipv6Addr, Sid> = BTreeMap::new();
+        let mut end = sid("fcbb:bbbb:2::", SidBehavior::End, SidContext::None);
+        end.flavors = FLAVOR_PSP | FLAVOR_USD;
+        let mut endx = sid(
+            "fcbb:bbbb:2:e000::",
+            SidBehavior::EndX,
+            SidContext::Interface("z2-z1".into()),
+        );
+        endx.flavors = FLAVOR_PSP;
+        let json = serde_json::to_string(&SidJson::from(&end)).unwrap();
+        sids.insert(end.addr, end);
+        sids.insert(endx.addr, endx);
+
+        let out = sid_show_text(&sids, &BTreeMap::new());
+        assert!(
+            out.contains(" fcbb:bbbb:2::       End (PSP, USD)  -"),
+            "{out}"
+        );
+        assert!(
+            out.contains(" fcbb:bbbb:2:e000::  End.X (PSP)     Interface 'z2-z1'"),
+            "{out}"
+        );
+        assert_underlined(&out, &["Context", "Protocol", "Locator", "AllocationType"]);
+
+        // JSON keeps the bare behavior and lists the flavors beside it; a
+        // SID without flavors has no such key.
+        assert!(
+            json.contains(r#""behavior":"End","flavors":["psp","usd"]"#),
+            "{json}"
+        );
+        let plain = sid("fcbb:bbbb:3::", SidBehavior::End, SidContext::None);
+        let json = serde_json::to_string(&SidJson::from(&plain)).unwrap();
+        assert!(!json.contains("flavors"), "{json}");
+    }
+
+    /// The `seg6local` text of a route line: the SID's flavors, and what
+    /// the kernel holds when it left some of them out.
+    #[test]
+    fn seg6local_text_says_what_the_kernel_left_out() {
+        use crate::rib::{FLAVOR_PSP, FLAVOR_USD};
+        let end = SidBehavior::End;
+        // No flavors: the line is what it always was.
+        assert_eq!(seg6local_flavored(end, 0, 0), "End");
+        // The kernel took the flavor: nothing to add.
+        assert_eq!(seg6local_flavored(end, FLAVOR_PSP, 0), "End (PSP)");
+        // It refused USD and holds plain End.
+        assert_eq!(
+            seg6local_flavored(end, FLAVOR_USD, FLAVOR_USD),
+            "End (USD) [kernel: End]"
+        );
+        // It kept PSP.
+        assert_eq!(
+            seg6local_flavored(end, FLAVOR_PSP | FLAVOR_USD, FLAVOR_USD),
+            "End (PSP, USD) [kernel: End (PSP)]"
+        );
+        assert_eq!(
+            seg6local_flavored(SidBehavior::EndX, FLAVOR_PSP, FLAVOR_PSP),
+            "End.X (PSP) [kernel: End.X]"
+        );
+        // A record left from an earlier flavor of this SID is not a
+        // flavor it has now.
+        assert_eq!(seg6local_flavored(end, FLAVOR_PSP, FLAVOR_USD), "End (PSP)");
+    }
+
+    /// A route line finds the flavors in the SID registry by the route's
+    /// prefix; a static SID, which has no registry row, prints bare.
+    #[tokio::test]
+    async fn seg6local_text_reads_the_sid_registry() {
+        use crate::rib::FLAVOR_USD;
+        let mut rib = Rib::new(false).expect("rib");
+        let mut end = sid("fcbb:bbbb:2::", SidBehavior::End, SidContext::None);
+        end.flavors = FLAVOR_USD;
+        rib.sids.insert(end.addr, end);
+
+        let prefix: Ipv6Net = "fcbb:bbbb:2::/128".parse().unwrap();
+        assert_eq!(seg6local_text(&rib, &prefix, SidBehavior::End), "End (USD)");
+        // Same address, another behavior: not that registry SID.
+        assert_eq!(
+            seg6local_text(&rib, &prefix, SidBehavior::EndDT6),
+            "End.DT6"
+        );
+        let other: Ipv6Net = "fcbb:bbbb:9::/128".parse().unwrap();
+        assert_eq!(seg6local_text(&rib, &other, SidBehavior::End), "End");
     }
 
     /// The `show vrf` underlines sit under their headers; Router-ID's and
