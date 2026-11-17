@@ -1,39 +1,12 @@
 //! Configure-mode `compare`: what `commit` would change.
 
 use super::super::manager::ConfigManager;
+use super::super::manager::test_support::{self, commit, run};
 use super::*;
-use tokio::sync::mpsc;
 
 fn manager(name: &str) -> ConfigManager {
     let path = std::env::temp_dir().join(format!("zebra-rs-compare-{name}-{}", std::process::id()));
-    let (rib_tx, _rib_rx) = mpsc::unbounded_channel();
-    let (rib_inbound_tx, _rib_inbound_rx) = mpsc::unbounded_channel();
-    let (policy_tx, _policy_rx) = mpsc::unbounded_channel();
-    ConfigManager::new(
-        concat!(env!("CARGO_MANIFEST_DIR"), "/yang").to_string(),
-        Vec::new(),
-        Some(path.to_string_lossy().into_owned()),
-        rib_tx,
-        rib_inbound_tx,
-        policy_tx,
-        Default::default(),
-    )
-    .expect("manager builds")
-}
-
-/// Type a line in a configure-mode session and return what it prints.
-fn run(cm: &ConfigManager, line: &str) -> String {
-    let mode = cm.modes.get("configure").expect("configure mode");
-    let (code, output, _) = cm.execute(mode, line);
-    assert_eq!(code, ExecCode::Show, "`{line}`: {output:?}");
-    output
-}
-
-fn committed(cm: &ConfigManager, lines: &[&str]) {
-    for line in lines {
-        assert_eq!(run(cm, line), "", "`{line}`");
-    }
-    assert_eq!(run(cm, "commit"), "");
+    test_support::manager(&path, Vec::new(), Default::default())
 }
 
 const BASE: &[&str] = &[
@@ -52,7 +25,7 @@ async fn no_changes_prints_nothing() {
     let cm = manager("none");
     assert_eq!(run(&cm, "compare"), "");
     assert_eq!(run(&cm, "compare formal"), "");
-    committed(&cm, BASE);
+    commit(&cm, BASE);
     assert_eq!(run(&cm, "compare"), "");
     assert_eq!(run(&cm, "compare formal"), "");
 }
@@ -63,7 +36,7 @@ async fn no_changes_prints_nothing() {
 #[tokio::test]
 async fn changed_leaf_keeps_only_its_blocks() {
     let cm = manager("leaf");
-    committed(&cm, BASE);
+    commit(&cm, BASE);
     run(&cm, "set router bgp neighbor 10.0.0.3 description new");
     assert_eq!(
         run(&cm, "compare"),
@@ -90,7 +63,7 @@ async fn changed_leaf_keeps_only_its_blocks() {
 #[tokio::test]
 async fn several_changes_share_their_blocks() {
     let cm = manager("several");
-    committed(&cm, BASE);
+    commit(&cm, BASE);
     run(&cm, "set router bgp neighbor 10.0.0.2 description two");
     run(&cm, "set router bgp neighbor 10.0.0.4 remote-as 65004");
     run(&cm, "set system hostname r1");
@@ -125,7 +98,7 @@ async fn several_changes_share_their_blocks() {
 #[tokio::test]
 async fn delete_shows_removed_lines() {
     let cm = manager("delete");
-    committed(&cm, BASE);
+    commit(&cm, BASE);
     run(&cm, "delete router bgp neighbor 10.0.0.3");
     assert_eq!(
         run(&cm, "compare"),
@@ -146,7 +119,7 @@ async fn delete_shows_removed_lines() {
 #[tokio::test]
 async fn compare_changes_nothing() {
     let cm = manager("readonly");
-    committed(&cm, BASE);
+    commit(&cm, BASE);
     run(&cm, "set system hostname r1");
     let first = run(&cm, "compare");
     assert_eq!(first, "+system {\n+  hostname r1;\n+}\n");
@@ -164,7 +137,7 @@ async fn compare_changes_nothing() {
 #[tokio::test]
 async fn formal_matches_what_commit_diffs() {
     let cm = manager("formal");
-    committed(&cm, BASE);
+    commit(&cm, BASE);
     run(&cm, "set router bgp neighbor 10.0.0.3 description old");
     assert_eq!(run(&cm, "compare formal"), "");
     run(&cm, "delete interface eth1 ipv4 address 10.1.0.1/24");

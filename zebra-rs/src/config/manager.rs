@@ -2755,7 +2755,8 @@ pub(crate) mod test_support {
     ///
     /// The far ends of its channels are dropped. A test therefore
     /// commits no `router <proto>` block: that spawns a protocol task,
-    /// which needs a tokio runtime these tests do not have.
+    /// which needs a tokio runtime these tests do not have. One that
+    /// must have such a block is a `#[tokio::test]`.
     pub fn manager(path: &Path, features: Vec<String>, labels: SharedLabelSpace) -> ConfigManager {
         let (rib_tx, _rib_rx) = mpsc::unbounded_channel();
         let (rib_inbound_tx, _rib_inbound_rx) = mpsc::unbounded_channel();
@@ -2772,11 +2773,28 @@ pub(crate) mod test_support {
         .expect("manager builds")
     }
 
-    /// Type a line in a configure-mode session, without committing.
-    pub fn edit(cm: &ConfigManager, line: &str) {
+    /// Type a line in a configure-mode session and return what it
+    /// prints. The session takes the line: one it refuses fails the
+    /// test.
+    pub fn run(cm: &ConfigManager, line: &str) -> String {
         let mode = cm.modes.get("configure").expect("configure mode");
         let (code, output, _paths) = cm.execute(mode, line);
         assert_eq!(code, ExecCode::Show, "`{line}`: {output:?}");
+        output
+    }
+
+    /// Type a line in a configure-mode session, without committing.
+    pub fn edit(cm: &ConfigManager, line: &str) {
+        run(cm, line);
+    }
+
+    /// Type `lines` in a configure-mode session and commit them. Each
+    /// is taken with nothing printed, and so is the commit.
+    pub fn commit(cm: &ConfigManager, lines: &[&str]) {
+        for line in lines {
+            assert_eq!(run(cm, line), "", "`{line}`");
+        }
+        assert_eq!(run(cm, "commit"), "");
     }
 
     /// The running config, as a commit diffs it.
