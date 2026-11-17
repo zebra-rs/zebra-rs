@@ -219,6 +219,23 @@ listed, and neither is the empty configuration of a daemon that started
 with no config file, or with one that sets nothing: the list is then
 empty until the first commit.
 
+From a program, `vtyctl show 'show commit history'` prints the same
+listing, and with `-j` the commits as a JSON array, newest first, empty
+when there is none:
+
+```
+$ vtyctl show -j 'show commit history'
+[
+  {
+    "number": 0,
+    "time": "2026-11-17T09:41:07Z",
+    "revision": "1794906748-3",
+    "config-file": false
+  },
+  …
+]
+```
+
 `rollback <n>` puts the configuration of commit `n` in the candidate, in
 place of what is there, uncommitted edits included. Nothing changes
 until `commit`, so the usual sequence is to look first:
