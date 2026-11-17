@@ -40,6 +40,12 @@ use tokio::sync::oneshot;
 pub struct ConfigStore {
     pub running: RefCell<Rc<Config>>,
     pub candidate: RefCell<Rc<Config>>,
+    /// The candidate holds a config file whose commit was refused
+    /// (`ConfigManager::load_config`), and nothing has committed or
+    /// dropped it since. It differs from the running config as an
+    /// operator's uncommitted edits do, and is not that: see
+    /// `ConfigManager::deploy`, the one place that tells them apart.
+    pub refused_load: Cell<bool>,
 }
 
 impl ConfigStore {
@@ -47,22 +53,26 @@ impl ConfigStore {
         Self {
             running: RefCell::new(Rc::new(Config::new("".to_string(), None))),
             candidate: RefCell::new(Rc::new(Config::new("".to_string(), None))),
+            refused_load: Cell::new(false),
         }
     }
 
     pub fn commit(&self) {
         let running = carbon_copy(&self.candidate.borrow(), None);
         self.running.replace(running);
+        self.refused_load.set(false);
     }
 
     pub fn discard(&self) {
         let candidate = carbon_copy(&self.running.borrow(), None);
         self.candidate.replace(candidate);
+        self.refused_load.set(false);
     }
 
     pub fn candidate_clear(&self) {
         let candidate = Rc::new(Config::new("".to_string(), None));
         self.candidate.replace(candidate);
+        self.refused_load.set(false);
     }
 }
 
@@ -1512,10 +1522,9 @@ impl ConfigManager {
             // `zebra-rs.conf` conffile is comment-only, and running it
             // through the sniffer stamped `config_format` as YAML, so the
             // first `save` on a default install came out YAML instead of
-            // the CLI default. (Done here, not in `config_to_commands`,
-            // so the `vtyctl apply` path keeps its existing
-            // empty-document behavior — an empty apply must not
-            // clear+commit the running config.)
+            // the CLI default. (Done here, not in `config_to_commands`;
+            // the `vtyctl apply` path has its own test for a document
+            // with nothing in it, in `deploy`.)
             Ok(output) if first_meaningful_line(&output).is_none() => {
                 // Unconditional, unlike the applied summary: the trace
                 // toggle rides in the config file, so a boot that lands
@@ -1592,6 +1601,9 @@ impl ConfigManager {
                 self.config_path.display(),
                 e
             );
+            // The file's lines stay in the candidate, for a session to
+            // complete and commit, or an apply to: see `deploy`.
+            self.store.refused_load.set(true);
         }
         // Gated after the commit so `system tracing config startup` set in
         // this very startup file counts (commit_config applied it above).
@@ -1860,20 +1872,44 @@ impl ConfigManager {
     ///
     /// So when the candidate holds uncommitted edits it is set aside and
     /// the document is applied to a copy of the running config. That
-    /// copy is what is committed. The edits are then put back, and the
-    /// document is run on them too, which keeps them an edit of the *new*
-    /// running config: without it, the operator's next `commit` would
-    /// diff a stale candidate against the running config and undo the
-    /// apply. Where the document and an edit touch the same leaf, the
-    /// document's value is what the candidate ends up with; a line that
-    /// no longer fits the edited tree (a `delete` of what the operator
-    /// already deleted) is skipped.
+    /// copy is what is committed. The edits are then put back as an edit
+    /// of the *new* running config: what the commit changed in the
+    /// running config is changed in them too ([`super::rebase`], which
+    /// also says what becomes of an edit the commit meets). Put back as
+    /// they were, the operator's next `commit` would diff a stale
+    /// candidate against the running config and undo the apply. The
+    /// same is done when the apply is refused: its own `commit` line may
+    /// have changed the running config before the line that was refused.
+    ///
+    /// The document is run once, on the apply's own candidate. A line of
+    /// it that is not a `set` or a `delete` (`commit`, `discard`,
+    /// `clear …`) acts there and on the running config, never on the
+    /// edits.
     ///
     /// A whole-config document (CLI brace, JSON, YAML) replaces the
     /// configuration, so nothing of an edit can be kept next to it: the
     /// candidate becomes the new running config.
+    ///
+    /// One candidate that differs from the running config is not an
+    /// edit: a startup config whose commit was refused
+    /// ([`ConfigStore::refused_load`]). Nobody typed it, so it is not
+    /// set aside. The document runs on it as on any candidate, and so
+    /// either completes it and brings the startup config up, or is
+    /// refused with it, which drops it.
     fn deploy(&self, config: &str) -> DeployResponse {
         let mode = self.modes.get("configure").unwrap();
+
+        // A document with no line in it applies nothing. Its format
+        // cannot be told, and read as the YAML it would default to, it
+        // is a whole config with nothing in it: every line of the
+        // running config would be deleted.
+        if first_meaningful_line(config).is_none() {
+            return DeployResponse {
+                apply_code: ApplyCode::Applied,
+                exec_code: ExecCode::Success,
+                cmd: String::new(),
+            };
+        }
 
         let (format_type, cmds) = match self.config_to_commands(config) {
             Ok(parsed) => parsed,
@@ -1893,20 +1929,32 @@ impl ConfigManager {
             }
         };
 
-        // The interactive sessions' edits, set aside for the duration.
-        // `None` when there are none, which is every apply on a box
-        // nobody is configuring by hand: it then runs on the candidate
-        // as it always did, with no copy and no second pass.
-        let edits = self
-            .has_uncommitted()
-            .then(|| self.store.candidate.borrow().clone());
+        // The interactive sessions' edits, set aside for the duration
+        // with the running config they are an edit of. `None` when there
+        // are none, which is every apply on a box nobody is configuring
+        // by hand: it then runs on the candidate as it always did, with
+        // no copy and nothing to put back.
+        let edits = (!self.store.refused_load.get() && self.has_uncommitted()).then(|| {
+            (
+                self.store.candidate.borrow().clone(),
+                self.store.running.borrow().clone(),
+            )
+        });
         if edits.is_some() {
             self.store.discard();
         }
-        // Leave the candidate as the apply found it: the edits if there
-        // were any, else the running config.
-        let give_up = |edits: Option<Rc<Config>>| match edits {
-            Some(edits) => {
+        // Leave the candidate with what the apply found in it: the
+        // edits, on the running config as it is now, or with no edits
+        // the running config.
+        let put_back = |edits: Option<(Rc<Config>, Rc<Config>)>| match edits {
+            Some((edits, base)) => {
+                let running = self.store.running.borrow().clone();
+                // The same tree: nothing was committed.
+                if !Rc::ptr_eq(&base, &running) {
+                    super::rebase::rebase(&base, &running, &edits, |line| {
+                        self.paths(line.to_string())
+                    });
+                }
                 self.store.candidate.replace(edits);
             }
             None => self.store.discard(),
@@ -1918,7 +1966,7 @@ impl ConfigManager {
         for cmd in cmds.iter() {
             let (code, _output, _paths) = self.execute(mode, cmd);
             if code != ExecCode::Show {
-                give_up(edits);
+                put_back(edits);
                 return DeployResponse {
                     apply_code: ApplyCode::ParseError,
                     exec_code: code,
@@ -1933,7 +1981,7 @@ impl ConfigManager {
         // it, and drop the rejected lines so they don't linger into the
         // next apply.
         if let Err(e) = self.commit_config() {
-            give_up(edits);
+            put_back(edits);
             return DeployResponse {
                 apply_code: ApplyCode::MissingMandatory,
                 exec_code: ExecCode::Success,
@@ -1941,16 +1989,12 @@ impl ConfigManager {
             };
         }
 
-        if let Some(edits) = edits {
-            if format_type == ConfigFormat::SetDelete {
-                self.store.candidate.replace(edits);
-                for cmd in cmds.iter() {
-                    // Skipped when it no longer fits; see above.
-                    let _ = self.execute(mode, cmd);
-                }
-            } else {
-                self.store.discard();
+        if format_type == ConfigFormat::SetDelete {
+            if edits.is_some() {
+                put_back(edits);
             }
+        } else if edits.is_some() {
+            self.store.discard();
         }
 
         DeployResponse {
