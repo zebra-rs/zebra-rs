@@ -1833,6 +1833,129 @@ impl ConfigManager {
         hostname_from_config(&self.store.running.borrow())
     }
 
+    /// Whether the candidate holds edits that are not committed: what
+    /// `commit_config` would dispatch, by the rendering it diffs.
+    fn has_uncommitted(&self) -> bool {
+        let (mut running, mut candidate) = (String::new(), String::new());
+        self.store.running.borrow().list(&mut running);
+        self.store.candidate.borrow().list(&mut candidate);
+        running != candidate
+    }
+
+    /// Apply a streamed-in config document (`vtyctl apply`): run its
+    /// lines and commit them, all or none.
+    ///
+    /// An apply commits **only its own lines**. There is one candidate,
+    /// and configure-mode sessions edit it in place, so applying onto it
+    /// committed whatever an operator had typed and not yet committed —
+    /// and, when the apply was refused, the `discard` that cleaned up
+    /// after it threw those edits away. Either is wrong for a writer the
+    /// operator did not start: a config daemon applying its own batch
+    /// (bgpcfgd on SONiC does, whenever CONFIG_DB changes) published a
+    /// half-typed change.
+    ///
+    /// So when the candidate holds uncommitted edits it is set aside and
+    /// the document is applied to a copy of the running config. That
+    /// copy is what is committed. The edits are then put back, and the
+    /// document is run on them too, which keeps them an edit of the *new*
+    /// running config: without it, the operator's next `commit` would
+    /// diff a stale candidate against the running config and undo the
+    /// apply. Where the document and an edit touch the same leaf, the
+    /// document's value is what the candidate ends up with; a line that
+    /// no longer fits the edited tree (a `delete` of what the operator
+    /// already deleted) is skipped.
+    ///
+    /// A whole-config document (CLI brace, JSON, YAML) replaces the
+    /// configuration, so nothing of an edit can be kept next to it: the
+    /// candidate becomes the new running config.
+    fn deploy(&self, config: &str) -> DeployResponse {
+        let mode = self.modes.get("configure").unwrap();
+
+        let (format_type, cmds) = match self.config_to_commands(config) {
+            Ok(parsed) => parsed,
+            Err(doc_errors) => {
+                // No filename here (the config was streamed in via
+                // `vtyctl apply`), so each error carries its own
+                // `line N:` prefix when the format preserved it.
+                return DeployResponse {
+                    apply_code: ApplyCode::ParseError,
+                    exec_code: ExecCode::Nomatch,
+                    cmd: doc_errors
+                        .iter()
+                        .map(DocError::to_string)
+                        .collect::<Vec<_>>()
+                        .join("; "),
+                };
+            }
+        };
+
+        // The interactive sessions' edits, set aside for the duration.
+        // `None` when there are none, which is every apply on a box
+        // nobody is configuring by hand: it then runs on the candidate
+        // as it always did, with no copy and no second pass.
+        let edits = self
+            .has_uncommitted()
+            .then(|| self.store.candidate.borrow().clone());
+        if edits.is_some() {
+            self.store.discard();
+        }
+        // Leave the candidate as the apply found it: the edits if there
+        // were any, else the running config.
+        let give_up = |edits: Option<Rc<Config>>| match edits {
+            Some(edits) => {
+                self.store.candidate.replace(edits);
+            }
+            None => self.store.discard(),
+        };
+
+        if format_type != ConfigFormat::SetDelete {
+            self.store.candidate_clear();
+        }
+        for cmd in cmds.iter() {
+            let (code, _output, _paths) = self.execute(mode, cmd);
+            if code != ExecCode::Show {
+                give_up(edits);
+                return DeployResponse {
+                    apply_code: ApplyCode::ParseError,
+                    exec_code: code,
+                    cmd: cmd.clone(),
+                };
+            }
+        }
+        // Commit validation (mandatory / `ext:non-empty`, the
+        // `config::check` leaf values, and the `config::label_check`
+        // MPLS label checks) runs inside `commit_config` and returns
+        // Err *before* any dispatch. Surface it instead of swallowing
+        // it, and drop the rejected lines so they don't linger into the
+        // next apply.
+        if let Err(e) = self.commit_config() {
+            give_up(edits);
+            return DeployResponse {
+                apply_code: ApplyCode::MissingMandatory,
+                exec_code: ExecCode::Success,
+                cmd: e.to_string(),
+            };
+        }
+
+        if let Some(edits) = edits {
+            if format_type == ConfigFormat::SetDelete {
+                self.store.candidate.replace(edits);
+                for cmd in cmds.iter() {
+                    // Skipped when it no longer fits; see above.
+                    let _ = self.execute(mode, cmd);
+                }
+            } else {
+                self.store.discard();
+            }
+        }
+
+        DeployResponse {
+            apply_code: ApplyCode::Applied,
+            exec_code: ExecCode::Success,
+            cmd: String::new(),
+        }
+    }
+
     pub async fn process_message(&mut self, m: Message) {
         match m {
             Message::Execute(req) => {
@@ -1864,67 +1987,7 @@ impl ConfigManager {
                 let _ = req.resp.send(resp);
             }
             Message::Deploy(req) => {
-                let mode = self.modes.get("configure").unwrap();
-
-                let (format_type, cmds) = match self.config_to_commands(&req.config) {
-                    Ok(parsed) => parsed,
-                    Err(doc_errors) => {
-                        // No filename here (the config was streamed in via
-                        // `vtyctl apply`), so each error carries its own
-                        // `line N:` prefix when the format preserved it.
-                        let resp = DeployResponse {
-                            apply_code: ApplyCode::ParseError,
-                            exec_code: ExecCode::Nomatch,
-                            cmd: doc_errors
-                                .iter()
-                                .map(DocError::to_string)
-                                .collect::<Vec<_>>()
-                                .join("; "),
-                        };
-                        let _ = req.resp.send(resp);
-                        return;
-                    }
-                };
-
-                if format_type != ConfigFormat::SetDelete {
-                    self.store.candidate_clear();
-                }
-                for cmd in cmds.iter() {
-                    let (code, _output, _paths) = self.execute(mode, cmd);
-                    if code != ExecCode::Show {
-                        let resp = DeployResponse {
-                            apply_code: ApplyCode::ParseError,
-                            exec_code: code,
-                            cmd: cmd.clone(),
-                        };
-                        // Discard candidate config.
-                        self.store.discard();
-                        let _ = req.resp.send(resp);
-                        return;
-                    }
-                }
-                // Commit validation (mandatory / `ext:non-empty`, the
-                // `config::check` leaf values, and the `config::label_check`
-                // MPLS label checks) runs inside `commit_config` and returns
-                // Err *before* any dispatch. Surface it instead
-                // of swallowing it, and revert the candidate so the
-                // rejected lines don't linger into the next apply.
-                if let Err(e) = self.commit_config() {
-                    self.store.discard();
-                    let resp = DeployResponse {
-                        apply_code: ApplyCode::MissingMandatory,
-                        exec_code: ExecCode::Success,
-                        cmd: e.to_string(),
-                    };
-                    let _ = req.resp.send(resp);
-                    return;
-                }
-
-                let resp = DeployResponse {
-                    apply_code: ApplyCode::Applied,
-                    exec_code: ExecCode::Success,
-                    cmd: String::new(),
-                };
+                let resp = self.deploy(&req.config);
                 let _ = req.resp.send(resp);
             }
             Message::DisplayTx(req) => {
@@ -10089,3 +10152,7 @@ module test-insomnia-gated {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "apply_isolation_tests.rs"]
+mod apply_isolation_tests;
