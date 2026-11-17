@@ -6,9 +6,10 @@ use super::parse::{Match, MatchType};
 use super::vty::{CommandPath, YangMatch};
 
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
+use std::cell::RefCell;
 use std::collections::{HashSet, VecDeque};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-use std::{cell::RefCell, rc::Rc};
+use std::rc::{Rc, Weak};
 
 const INDENT_LEVEL: usize = 2;
 
@@ -180,7 +181,11 @@ pub struct Config {
     pub configs: RefCell<Vec<Rc<Config>>>,
     pub keys: RefCell<Vec<Rc<Config>>>,
     pub presence: bool,
-    pub parent: Option<Rc<Config>>,
+    /// The node this one is under; dangling on a root. Not owned: a tree
+    /// is owned from its root down, through `configs` and `keys`. Owned
+    /// both ways, a tree the store replaced (every commit and discard
+    /// replaces one) kept itself alive and was never freed.
+    pub parent: Weak<Config>,
     pub mandatory: Vec<String>,
     pub sort_priority: RefCell<i32>,
     /// `ext:non-empty` requirement text (empty = unset). When set on a
@@ -197,13 +202,34 @@ impl Config {
     pub fn new(name: String, parent: Option<Rc<Config>>) -> Self {
         Config {
             name,
-            parent,
+            parent: under(parent.as_ref()),
             ..Default::default()
         }
     }
 
     pub fn has_dir(&self) -> bool {
         !self.configs.borrow().is_empty() || !self.keys.borrow().is_empty()
+    }
+
+    /// Whether `other` is this tree node for node: every name, value,
+    /// leaf-list member, list entry and child, in the same order.
+    ///
+    /// That is everything [`Self::list`] reads, so two trees this calls
+    /// the same render the same lines. It is a way to know that without
+    /// rendering either, for the usual case of a tree and its own copy.
+    /// It is not a second definition: two trees it tells apart may still
+    /// render alike, and whoever needs to know renders them.
+    pub fn same_as(&self, other: &Config) -> bool {
+        fn all_same(ours: &[Rc<Config>], theirs: &[Rc<Config>]) -> bool {
+            ours.len() == theirs.len() && ours.iter().zip(theirs).all(|(a, b)| a.same_as(b))
+        }
+        self.name == other.name
+            && self.prefix == other.prefix
+            && self.presence == other.presence
+            && *self.value.borrow() == *other.value.borrow()
+            && *self.list.borrow() == *other.list.borrow()
+            && all_same(&self.keys.borrow(), &other.keys.borrow())
+            && all_same(&self.configs.borrow(), &other.configs.borrow())
     }
 
     pub fn lookup(&self, name: &String) -> Option<Rc<Config>> {
@@ -229,7 +255,7 @@ impl Config {
             return;
         }
 
-        if let Some(parent) = self.parent.as_ref() {
+        if let Some(parent) = self.parent.upgrade() {
             if !parent.prefix.is_empty() {
                 parent.prefix_write(out);
             }
@@ -474,7 +500,7 @@ impl Config {
     /// and silently drop every value.
     pub fn list_command(&self) -> Vec<String> {
         let mut commands = Vec::new();
-        if let Some(parent) = self.parent.as_ref() {
+        if let Some(parent) = self.parent.upgrade() {
             for com in parent.list_command().iter() {
                 commands.push(com.clone());
             }
@@ -545,7 +571,7 @@ impl Config {
     }
 
     pub fn parents(&self, p: &mut VecDeque<String>) {
-        if let Some(parent) = &self.parent {
+        if let Some(parent) = self.parent.upgrade() {
             if !parent.name.is_empty() {
                 p.push_front(parent.name.clone());
             }
@@ -613,6 +639,12 @@ impl Config {
     }
 }
 
+/// The `parent` of a node under `parent`: a reference that does not own
+/// it. A root has none.
+fn under(parent: Option<&Rc<Config>>) -> Weak<Config> {
+    parent.map(Rc::downgrade).unwrap_or_default()
+}
+
 pub fn carbon_copy(conf: &Rc<Config>, parent: Option<Rc<Config>>) -> Rc<Config> {
     let p = Rc::new(Config {
         name: conf.name.clone(),
@@ -624,7 +656,7 @@ pub fn carbon_copy(conf: &Rc<Config>, parent: Option<Rc<Config>>) -> Rc<Config> 
         sort_priority: conf.sort_priority.clone(),
         non_empty: conf.non_empty.clone(),
         ordered_by_user: conf.ordered_by_user,
-        parent,
+        parent: under(parent.as_ref()),
         ..Default::default()
     });
     for conf in conf.configs.borrow().iter() {
@@ -661,7 +693,7 @@ fn config_set_dir(config: &Rc<Config>, cpath: &CommandPath) -> Rc<Config> {
         None => {
             let n = Rc::new(Config {
                 name: cpath.name.clone(),
-                parent: Some(config.clone()),
+                parent: under(Some(config)),
                 presence: (ymatch_enum(cpath.ymatch) == YangMatch::DirMatched),
                 mandatory: cpath.mandatory.clone(),
                 sort_priority: cpath.sort_priority.into(),
@@ -687,7 +719,7 @@ fn config_set_key(config: &Rc<Config>, cpath: &CommandPath) -> Rc<Config> {
         None => {
             let n = Rc::new(Config {
                 name: cpath.name.clone(),
-                parent: Some(config.clone()),
+                parent: under(Some(config)),
                 prefix: cpath.key.clone(),
                 mandatory: cpath.mandatory.clone(),
                 sort_priority: cpath.sort_priority.into(),
@@ -832,9 +864,9 @@ pub fn delete(paths: Vec<CommandPath>, mut config: Rc<Config>) -> bool {
         }
     }
 
-    while let Some(parent) = config.parent.as_ref() {
+    while let Some(parent) = config.parent.upgrade() {
         config_delete(parent.clone(), &config.name);
-        config = parent.clone();
+        config = parent;
         if config.has_dir() || config.has_prefix() || config.presence {
             // Exception: an empty entry of an `ext:non-empty` list is dead
             // config — a bare `... <key>` (e.g. `router isis afi-safi ipv4`)
@@ -850,7 +882,7 @@ pub fn delete(paths: Vec<CommandPath>, mut config: Rc<Config>) -> bool {
                 && config.list.borrow().is_empty()
                 && (config
                     .parent
-                    .as_ref()
+                    .upgrade()
                     .is_some_and(|p| !p.non_empty.is_empty())
                     || (config.presence && !config.non_empty.is_empty()));
             if !prunable_empty_entry {
@@ -1470,6 +1502,125 @@ mod tests {
         let lsp = root.lookup(&"lsp".to_string()).unwrap();
         let label = lsp.lookup(&"label".to_string()).unwrap();
         assert_eq!(*label.list.borrow(), vec!["200".to_string()]);
+    }
+
+    /// A tree is owned from its root down. A node does not keep its
+    /// parent alive, so a tree nobody holds the root of is freed, and a
+    /// copy stands on its own.
+    #[test]
+    fn a_tree_is_freed_with_its_root() {
+        let step = |name: &str, ymatch: YangMatch| CommandPath {
+            name: name.to_string(),
+            ymatch: ymatch as i32,
+            ..Default::default()
+        };
+        let hostname = vec![
+            step("system", YangMatch::Dir),
+            step("hostname", YangMatch::Leaf),
+            step("r1", YangMatch::LeafMatched),
+        ];
+        let root = Rc::new(Config::new("".to_string(), None));
+        set(hostname, root.clone());
+        let copy = carbon_copy(&root, None);
+
+        // References that hold nothing: to the root, a container, a leaf.
+        let (root_ref, system, leaf) = {
+            let system = root.lookup(&"system".to_string()).unwrap();
+            let leaf = system.lookup(&"hostname".to_string()).unwrap();
+            (
+                Rc::downgrade(&root),
+                Rc::downgrade(&system),
+                Rc::downgrade(&leaf),
+            )
+        };
+        // The way up still works while the root is held.
+        assert_eq!(
+            leaf.upgrade().unwrap().list_command(),
+            ["system", "hostname", "r1"]
+        );
+
+        drop(root);
+        assert!(root_ref.upgrade().is_none(), "the root");
+        assert!(system.upgrade().is_none(), "a container under it");
+        assert!(leaf.upgrade().is_none(), "a leaf under that");
+
+        // The copy is its own tree, whole.
+        let mut lines = String::new();
+        copy.list(&mut lines);
+        assert_eq!(lines, "system hostname r1\n");
+    }
+
+    /// `same_as` tells two trees apart by anything `list` reads, and
+    /// calls a tree and its copy the same.
+    #[test]
+    fn same_as_is_a_tree_and_its_copy() {
+        let step = |name: &str, ymatch: YangMatch| CommandPath {
+            name: name.to_string(),
+            ymatch: ymatch as i32,
+            ..Default::default()
+        };
+        let hostname = |value: &str| {
+            vec![
+                step("system", YangMatch::Dir),
+                step("hostname", YangMatch::Leaf),
+                step(value, YangMatch::LeafMatched),
+            ]
+        };
+        let label = |value: &str| {
+            vec![
+                step("lsp", YangMatch::Dir),
+                step("label", YangMatch::LeafList),
+                step(value, YangMatch::LeafListMatched),
+            ]
+        };
+        let user = |name: &str| {
+            vec![
+                step("user", YangMatch::Key),
+                CommandPath {
+                    key: "name".to_string(),
+                    ..step(name, YangMatch::KeyMatched)
+                },
+            ]
+        };
+        let tree = |paths: Vec<Vec<CommandPath>>| {
+            let root = Rc::new(Config::new("".to_string(), None));
+            for path in paths {
+                set(path, root.clone());
+            }
+            root
+        };
+        let base = || vec![hostname("r1"), label("100"), label("200"), user("a")];
+        let one = tree(base());
+
+        assert!(one.same_as(&one));
+        assert!(one.same_as(&carbon_copy(&one, None)));
+        assert!(one.same_as(&tree(base())));
+
+        // A leaf value, a leaf-list member, the order of two members, a
+        // list entry, and a node more.
+        let differ = [
+            vec![hostname("r2"), label("100"), label("200"), user("a")],
+            vec![hostname("r1"), label("100"), label("300"), user("a")],
+            vec![hostname("r1"), label("200"), label("100"), user("a")],
+            vec![hostname("r1"), label("100"), label("200"), user("b")],
+            vec![
+                hostname("r1"),
+                label("100"),
+                label("200"),
+                user("a"),
+                user("b"),
+            ],
+            vec![hostname("r1"), label("100"), label("200")],
+        ];
+        for other in differ {
+            let other = tree(other);
+            let (mut ours, mut theirs) = (String::new(), String::new());
+            one.list(&mut ours);
+            other.list(&mut theirs);
+            assert_ne!(ours, theirs);
+            assert!(!one.same_as(&other), "{theirs}");
+            assert!(!other.same_as(&one), "{theirs}");
+        }
     }
 
     /// A delete names its target in full. A key that is only the start

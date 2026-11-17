@@ -947,10 +947,7 @@ impl ConfigManager {
             let errors = errors.join("\n");
             return Err(anyhow::anyhow!(errors));
         }
-        let mut running = String::new();
-        let mut candidate = String::new();
-        self.store.running.borrow().list(&mut running);
-        self.store.candidate.borrow().list(&mut candidate);
+        let (running, candidate) = self.renderings();
 
         let text_diff = TextDiff::from_lines(&running, &candidate);
         let mut binding = text_diff.unified_diff();
@@ -1849,12 +1846,34 @@ impl ConfigManager {
         hostname_from_config(&self.store.running.borrow())
     }
 
-    /// Whether the candidate holds edits that are not committed: what
-    /// `commit_config` would dispatch, by the rendering it diffs.
-    fn has_uncommitted(&self) -> bool {
+    /// The running config and the candidate as a commit diffs them: one
+    /// line for each thing set, [`Config::list`]. A commit dispatches
+    /// the lines that differ, so these two are also what says whether
+    /// there is anything to commit ([`Self::has_uncommitted`]).
+    fn renderings(&self) -> (String, String) {
         let (mut running, mut candidate) = (String::new(), String::new());
         self.store.running.borrow().list(&mut running);
         self.store.candidate.borrow().list(&mut candidate);
+        (running, candidate)
+    }
+
+    /// Whether the candidate holds edits that are not committed: whether
+    /// a commit would dispatch anything.
+    ///
+    /// Every apply asks, nearly always of a candidate that is the
+    /// running config's own copy. That much is seen without rendering
+    /// either tree ([`Config::same_as`]); only trees that differ are
+    /// rendered, and the renderings decide.
+    fn has_uncommitted(&self) -> bool {
+        if self
+            .store
+            .running
+            .borrow()
+            .same_as(&self.store.candidate.borrow())
+        {
+            return false;
+        }
+        let (running, candidate) = self.renderings();
         running != candidate
     }
 
@@ -1940,7 +1959,13 @@ impl ConfigManager {
                 self.store.running.borrow().clone(),
             )
         });
-        if edits.is_some() {
+        // The apply's own candidate. For `set`/`delete` lines it is the
+        // running config, which they change: a copy of it when the
+        // candidate holds the edits, and with no edits the candidate as
+        // it is. A whole-config document starts from nothing.
+        if format_type != ConfigFormat::SetDelete {
+            self.store.candidate_clear();
+        } else if edits.is_some() {
             self.store.discard();
         }
         // Leave the candidate with what the apply found in it: the
@@ -1960,9 +1985,6 @@ impl ConfigManager {
             None => self.store.discard(),
         };
 
-        if format_type != ConfigFormat::SetDelete {
-            self.store.candidate_clear();
-        }
         for cmd in cmds.iter() {
             let (code, _output, _paths) = self.execute(mode, cmd);
             if code != ExecCode::Show {
@@ -1989,12 +2011,11 @@ impl ConfigManager {
             };
         }
 
-        if format_type == ConfigFormat::SetDelete {
-            if edits.is_some() {
-                put_back(edits);
-            }
-        } else if edits.is_some() {
-            self.store.discard();
+        // The candidate is what was committed. The edits go back on it
+        // after `set`/`delete` lines; a whole-config document replaced
+        // the configuration and them with it.
+        if format_type == ConfigFormat::SetDelete && edits.is_some() {
+            put_back(edits);
         }
 
         DeployResponse {
@@ -2629,6 +2650,55 @@ fn hostname_from_config(config: &Config) -> Option<String> {
     (!value.is_empty()).then_some(value)
 }
 
+/// What the tests that need a whole [`ConfigManager`] share: the one
+/// way to build it, and a session's view of it.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::*;
+    use crate::rib::label_space::SharedLabelSpace;
+    use std::path::Path;
+
+    /// A `ConfigManager` on the shipped `yang/` tree, its startup config
+    /// at `path`, started with `--feature` for each of `features`, its
+    /// label space `labels`.
+    ///
+    /// The far ends of its channels are dropped. A test therefore
+    /// commits no `router <proto>` block: that spawns a protocol task,
+    /// which needs a tokio runtime these tests do not have.
+    pub fn manager(path: &Path, features: Vec<String>, labels: SharedLabelSpace) -> ConfigManager {
+        let (rib_tx, _rib_rx) = mpsc::unbounded_channel();
+        let (rib_inbound_tx, _rib_inbound_rx) = mpsc::unbounded_channel();
+        let (policy_tx, _policy_rx) = mpsc::unbounded_channel();
+        ConfigManager::new(
+            concat!(env!("CARGO_MANIFEST_DIR"), "/yang").to_string(),
+            features,
+            Some(path.to_string_lossy().into_owned()),
+            rib_tx,
+            rib_inbound_tx,
+            policy_tx,
+            labels,
+        )
+        .expect("manager builds")
+    }
+
+    /// Type a line in a configure-mode session, without committing.
+    pub fn edit(cm: &ConfigManager, line: &str) {
+        let mode = cm.modes.get("configure").expect("configure mode");
+        let (code, output, _paths) = cm.execute(mode, line);
+        assert_eq!(code, ExecCode::Show, "`{line}`: {output:?}");
+    }
+
+    /// The running config, as a commit diffs it.
+    pub fn running(cm: &ConfigManager) -> String {
+        cm.renderings().0
+    }
+
+    /// The candidate, as a commit diffs it.
+    pub fn candidate(cm: &ConfigManager) -> String {
+        cm.renderings().1
+    }
+}
+
 #[cfg(test)]
 mod hostname_lookup_tests {
     use super::*;
@@ -2804,26 +2874,11 @@ mod startup_load_tests {
         let path = std::env::temp_dir().join(format!("zebra-rs-{}-{}", name, std::process::id()));
         std::fs::write(&path, content).expect("temp config written");
 
-        let (rib_tx, _rib_rx) = mpsc::unbounded_channel();
-        let (rib_inbound_tx, _rib_inbound_rx) = mpsc::unbounded_channel();
-        let (policy_tx, _policy_rx) = mpsc::unbounded_channel();
-        let cm = ConfigManager::new(
-            concat!(env!("CARGO_MANIFEST_DIR"), "/yang").to_string(),
-            Vec::new(),
-            Some(path.to_string_lossy().into_owned()),
-            rib_tx,
-            rib_inbound_tx,
-            policy_tx,
-            Default::default(),
-        )
-        .expect("manager builds");
-
+        let cm = test_support::manager(&path, Vec::new(), Default::default());
         cm.load_config();
         let _ = std::fs::remove_file(&path);
 
-        let mut running = String::new();
-        cm.store.running.borrow().list(&mut running);
-        running
+        test_support::running(&cm)
     }
 
     /// Regression for the reported "set/delete startup config is not
@@ -2887,19 +2942,7 @@ mod save_config_tests {
     /// As [`manager_with_config`], started with `--feature` for each of
     /// `features`.
     fn manager_with_features(path: &Path, features: Vec<String>) -> ConfigManager {
-        let (rib_tx, _rib_rx) = mpsc::unbounded_channel();
-        let (rib_inbound_tx, _rib_inbound_rx) = mpsc::unbounded_channel();
-        let (policy_tx, _policy_rx) = mpsc::unbounded_channel();
-        ConfigManager::new(
-            concat!(env!("CARGO_MANIFEST_DIR"), "/yang").to_string(),
-            features,
-            Some(path.to_string_lossy().into_owned()),
-            rib_tx,
-            rib_inbound_tx,
-            policy_tx,
-            Default::default(),
-        )
-        .expect("manager builds")
+        test_support::manager(path, features, Default::default())
     }
 
     fn temp_path(name: &str) -> PathBuf {
@@ -3871,24 +3914,13 @@ mod save_config_tests {
 /// two dirty predicates and a refactor could silently drift them apart.
 #[cfg(test)]
 mod uncommitted_predicate_tests {
+    use super::test_support::edit;
     use super::*;
 
     fn manager() -> ConfigManager {
         let path =
             std::env::temp_dir().join(format!("zebra-rs-uncommitted-{}", std::process::id()));
-        let (rib_tx, _rib_rx) = mpsc::unbounded_channel();
-        let (rib_inbound_tx, _rib_inbound_rx) = mpsc::unbounded_channel();
-        let (policy_tx, _policy_rx) = mpsc::unbounded_channel();
-        ConfigManager::new(
-            concat!(env!("CARGO_MANIFEST_DIR"), "/yang").to_string(),
-            Vec::new(),
-            Some(path.to_string_lossy().into_owned()),
-            rib_tx,
-            rib_inbound_tx,
-            policy_tx,
-            Default::default(),
-        )
-        .expect("manager builds")
+        test_support::manager(&path, Vec::new(), Default::default())
     }
 
     /// Run a show command the way `vtyhelper -u` does — exec mode.
@@ -3897,12 +3929,6 @@ mod uncommitted_predicate_tests {
         let (code, output, _paths) = cm.execute(mode, input);
         assert_eq!(code, ExecCode::Show, "`{input}` did not answer Show");
         output
-    }
-
-    fn edit(cm: &ConfigManager, input: &str) {
-        let mode = cm.modes.get("configure").expect("configure mode");
-        let (code, _output, _paths) = cm.execute(mode, input);
-        assert_eq!(code, ExecCode::Show, "`{input}` was rejected");
     }
 
     /// The helper's predicate, spelled exactly as it is over the wire.
@@ -3928,6 +3954,76 @@ mod uncommitted_predicate_tests {
         assert_eq!(exec_show(&cm, "show candidate-config formal"), candidate);
     }
 
+    /// `has_uncommitted`, which an apply asks before it sets edits
+    /// aside, is the helper's predicate: both say whether the two
+    /// renderings a commit diffs differ.
+    #[test]
+    fn has_uncommitted_is_the_helper_s_predicate() {
+        let cm = manager();
+        let agree = |what: &str| {
+            let (running, candidate) = cm.renderings();
+            assert_eq!(cm.has_uncommitted(), running != candidate, "{what}");
+            assert_eq!(cm.has_uncommitted(), uncommitted(&cm), "{what}");
+            cm.has_uncommitted()
+        };
+        assert!(!agree("a fresh manager"));
+
+        edit(&cm, "set system hostname r1");
+        assert!(agree("an uncommitted set"));
+        cm.commit_config().expect("commit succeeds");
+        assert!(!agree("committed"));
+
+        // Typed and taken back: nothing a commit would dispatch.
+        edit(&cm, "set system router-id 10.0.0.1");
+        assert!(agree("a second set"));
+        edit(&cm, "delete system router-id");
+        assert!(!agree("set and deleted again"));
+
+        // The value the running config already has, and another: a
+        // change of nothing but a leaf's value.
+        edit(&cm, "set system hostname r1");
+        assert!(!agree("the same value set again"));
+        edit(&cm, "set system hostname r2");
+        assert!(agree("another value"));
+        edit(&cm, "set system hostname r1");
+        assert!(!agree("and back"));
+
+        edit(&cm, "set vrf blue ipv4 route-target import 65000:1");
+        assert!(agree("a leaf-list member"));
+        cm.store.discard();
+        assert!(!agree("discarded"));
+    }
+
+    /// The trees are compared first, to spare rendering them when the
+    /// candidate is the running config's own copy. Trees that differ
+    /// are not thereby an edit: the renderings decide, as for a commit.
+    #[test]
+    fn has_uncommitted_is_decided_by_the_renderings() {
+        let cm = manager();
+        edit(&cm, "set system hostname r1");
+        cm.commit_config().expect("commit succeeds");
+
+        // A candidate whose tree is not the running one node for node,
+        // and whose lines are: the leaf flagged as a presence container,
+        // which a node with nothing under it prints the same line for.
+        let root = Rc::new(Config::new(String::new(), None));
+        let system = Rc::new(Config::new("system".to_string(), Some(root.clone())));
+        let hostname = Rc::new(Config {
+            presence: true,
+            ..Config::new("hostname".to_string(), Some(system.clone()))
+        });
+        hostname.value.replace("r1".to_string());
+        system.configs.borrow_mut().push(hostname);
+        root.configs.borrow_mut().push(system);
+        assert!(!cm.store.running.borrow().same_as(&root));
+        cm.store.candidate.replace(root);
+
+        let (running, candidate) = cm.renderings();
+        assert_eq!(running, candidate);
+        assert!(!cm.has_uncommitted());
+        assert!(!uncommitted(&cm));
+    }
+
     #[test]
     fn predicate_tracks_commit_and_discard() {
         let cm = manager();
@@ -3948,6 +4044,7 @@ mod uncommitted_predicate_tests {
 
 #[cfg(test)]
 mod label_commit_tests {
+    use super::test_support::{edit, running};
     use super::*;
     use crate::rib::label_space::SharedLabelSpace;
 
@@ -3955,35 +4052,11 @@ mod label_commit_tests {
     /// at `path`, its label space `labels`. Nothing here commits a
     /// `router <proto>` block, so no protocol task is spawned.
     fn manager(path: &Path, labels: SharedLabelSpace) -> ConfigManager {
-        let (rib_tx, _rib_rx) = mpsc::unbounded_channel();
-        let (rib_inbound_tx, _rib_inbound_rx) = mpsc::unbounded_channel();
-        let (policy_tx, _policy_rx) = mpsc::unbounded_channel();
-        ConfigManager::new(
-            concat!(env!("CARGO_MANIFEST_DIR"), "/yang").to_string(),
-            Vec::new(),
-            Some(path.to_string_lossy().into_owned()),
-            rib_tx,
-            rib_inbound_tx,
-            policy_tx,
-            labels,
-        )
-        .expect("manager builds")
+        test_support::manager(path, Vec::new(), labels)
     }
 
     fn temp_path(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!("zebra-rs-label-{}-{}", name, std::process::id()))
-    }
-
-    fn edit(cm: &ConfigManager, input: &str) {
-        let mode = cm.modes.get("configure").expect("configure mode");
-        let (code, _output, _paths) = cm.execute(mode, input);
-        assert_eq!(code, ExecCode::Show, "`{input}` was rejected");
-    }
-
-    fn running(cm: &ConfigManager) -> String {
-        let mut running = String::new();
-        cm.store.running.borrow().list(&mut running);
-        running
     }
 
     /// Every leaf the label checks read comes out of a config's rendering
