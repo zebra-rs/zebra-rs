@@ -47,13 +47,14 @@ repeated on that image.
    restart with leftovers) as the Phase 7 CI smoke test. The build and first
    boot from committed trees are done.
 3. **Finish Phase 4**: port the managers bgpcfgd currently leaves out under
-   zebra-rs (§2.6), device-global (TSA) first; give `managers_allow_list` a
-   dialect. `sentinels` is ported; the three remaining families are read and
+   zebra-rs (§2.6); give `managers_allow_list` a dialect. Device-global's TSA
+   is ported and verified on VS (W-ECMP and IDF isolation are not);
+   `sentinels` is ported; the three remaining families are read and
    each waits on a zebra-rs feature (§2.5).
 4. **Continue Phase 5** — the shim answers `show ip bgp summary`, `show ip
-   route`, `route_check` and bgpmon on the VS, but only installed by hand:
-   package it, and rebuild with the sonic-utilities fork that registers the BGP
-   commands for this routing stack.
+   route`, `route_check` and bgpmon on the VS, packaged in the image together
+   with the sonic-utilities fork that registers the BGP commands for this
+   routing stack. The rest of the FRR-schema JSON commands are open.
 5. **Close the zebra-rs feature gaps** that block families: `update-source
    <interface>` first (it unblocks `monitors` outright), then `bestpath
    peer-type multipath-relax`, `set originator-id`, `clear bgp neighbor-group`,
@@ -420,13 +421,13 @@ is still open.
 
 | Open | Detail |
 |---|---|
-| **Managers left out under zebra-rs** | Only `BGP_NEIGHBOR` (`general`), `BGP_PEER_RANGE` (`dynamic`) and `BGP_SENTINELS` are driven. Ignored, with one warning at start: internal, monitors, voq_chassis, allow-list, BBR, static routes, advertise-network, BGP profiles, device-global (**TSA, WCMP, IDF isolation**), aggregate-address, SRv6, prefix-list, software BFD, set-src. A box with TSA enabled in CONFIG_DB is **not** isolated. |
+| **Managers left out under zebra-rs** | Only `BGP_NEIGHBOR` (`general`), `BGP_PEER_RANGE` (`dynamic`) and `BGP_SENTINELS` are driven. Ignored, with one warning at start: internal, monitors, voq_chassis, allow-list, BBR, static routes, advertise-network, BGP profiles, device-global's **WCMP and IDF isolation** (refused with a log message; TSA is honored), aggregate-address, SRv6, prefix-list, software BFD, set-src. |
 | No route source address | FRR's set-src route-map gives BGP routes `src <Loopback0>` in the kernel; zebra-rs installs them without. Locally originated traffic to BGP destinations uses the egress interface address. |
 | Kernel routes carry `onlink` | zebra-rs installs BGP nexthops `onlink`; FRR does not. No effect seen; recorded because it is a visible diff. |
 | VRF peers | The zebra-rs branches of `managers_bgp.py` refuse a non-default VRF. |
 | `dynamic` range update | `get_existing_ip_ranges` still shells out to `vtysh`, so changing a BGP_PEER_RANGE's `ip_range` in place does not work. (Deleting one does: the listen-range families now delete the neighbor-group, not a neighbor of that name.) Neither `dynamic` nor `sentinels` has been exercised on VS — template acceptance only. |
 | Stale APPL_DB rows across a stack swap | Rows written under one stack and not re-announced by the next stay in APPL_DB until an `fpmsyncd` restart replays into a clean table. Belongs to Phase 6 reconciliation. |
-| No host-side files | No `_BASE_IMAGE_FILES`, so no host `vtysh`, `TSA`/`TSB`/`TSC`. |
+| Host-side files | Shipped: `vtysh`, `rvtysh`, `vty`, `TSA`/`TSB`/`TSC`/`TS`, `platform_utils`. Not shipped: `idf_isolation`, `prefix_list`. |
 | Flag naming | The selector is `SONIC_ROUTING_STACK = zebra-rs`; there is no `INCLUDE_ZEBRA_RS`. |
 
 ### 2.7 What the VS run found in zebra-rs
@@ -592,9 +593,11 @@ Remaining, in order:
    shutdown / startup / remove / re-add cycle through CONFIG_DB works on VS. What
    it showed about the "no FRR-style diffing needed" claim: true for scalar
    leaves, false for leaf-lists, hence the backend's filter against the running
-   config. Next here is porting the managers still left out, device-global (TSA)
-   first, since leaving it out is the one omission that is unsafe rather than
-   merely missing.
+   config. Deletes need the same filter: zebra-rs rejects a `delete` of a path
+   that is not configured, and that discards the whole commit. Device-global's
+   TSA, the one omission that was unsafe rather than merely missing, is ported
+   (`sudo TSA`/`TSC`/`TSB` verified on VS against an FRR peer, IPv4). Next
+   here is the rest of the managers still left out.
 2. **`sentinels` — done** (§2.5), including `maximum-prefix`.
 3. **`voq_chassis`, `internal`, `monitors`** — each waits on one or two
    zebra-rs features: `update-source <interface>` (`internal`, `monitors`),
@@ -608,7 +611,9 @@ Remaining, in order:
 6. **Remaining managers**, each with unit tests under `src/sonic-bgpcfgd/tests/`:
    `managers_prefix_list`, `managers_rm`, `managers_as_path`, `managers_static_rt`
    (replaces staticd), `managers_bfd` (native BFD — this gets simpler),
-   `managers_device_global` (TSA/TSB, WCMP, IDF isolation), `managers_bbr` (needs
+   `managers_device_global` (TSA/TSB done; WCMP needs `set extcommunity
+   bandwidth`, IDF isolation needs the `CHECK_IDF_ISOLATION` call chain in the
+   policies template), `managers_bbr` (needs
    `clear bgp neighbor-group`), `managers_aggregate_address` (needs BGP
    `aggregate-address`), `managers_advertise_rt`, `managers_setsrc`,
    `managers_intf`, `managers_srv6`, `managers_chassis_app_db`.
@@ -713,8 +718,10 @@ Emitted as zero because zebra-rs does not keep them: `tableVersion`, `inq`,
    shim's output through the real consumer code
    (`bgp_util.process_bgp_summary_json`, `route_check.py`'s parser). Reuse
    `src/sonic-utilities/tests/bgp_commands_test.py` fixtures as the oracle.
-5. **Host-side files**: ship `vtysh`, `rvtysh`, `TSA/TSB/TSC/TS`,
-   `idf_isolation`, `prefix_list` via `$(DOCKER_FPM_ZEBRA_RS)_BASE_IMAGE_FILES`.
+5. **Host-side files**: `vtysh`, `rvtysh`, `TSA/TSB/TSC/TS` and
+   `platform_utils` are shipped via `$(DOCKER_FPM_ZEBRA_RS)_BASE_IMAGE_FILES`,
+   and so is `vty`, a wrapper for zebra-rs's interactive shell, now built into
+   the `.deb`. `idf_isolation` and `prefix_list` remain.
 6. **Native path, longer term**: new SONiC code should use zebra-rs's gRPC/JSON
    or MCP server (`vtyctl/src/mcp/`) directly. The shim is compatibility, not
    architecture.
@@ -750,7 +757,9 @@ knobs and `preserve-fw-state`.
    are replayed by bgpcfgd on start rather than expected to persist.
 5. **Fast reboot**: `fast-reboot-filter-routes.py` path (needs
    `show ip route connected json`).
-6. **TSA/TSB/TSC** via CONFIG_DB; confirm route-map application and withdrawal.
+6. **TSA/TSB/TSC** via CONFIG_DB — done on VS for IPv4: policy entries applied,
+   a test prefix withdrawn and restored, the mode kept across a container
+   restart. IPv6, multi-ASIC and chassis are not exercised.
 
 **Exit:** warm reboot on VS with zebra-rs shows no dataplane loss and clean
 APPL_DB reconciliation; fast reboot and TSA/TSB behave as with FRR.
