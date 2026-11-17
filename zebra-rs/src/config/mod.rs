@@ -58,6 +58,7 @@ mod ordered;
 mod ospf;
 mod parse;
 mod pim;
+mod private;
 mod rebase;
 mod resolver;
 mod show_provider;

@@ -372,24 +372,63 @@ The timer is in the daemon's memory: a daemon that restarts while a
 commit is pending starts from the config file, which does not have the
 change.
 
+### Each session has its own candidate
+
+The candidate is the session's: the vty shell you are typing in. Two
+operators in configure mode do not see each other's uncommitted edits,
+and `commit` commits the edits of the session that typed it and nobody
+else's. `discard`, `load` and `rollback` likewise change only the
+candidate of their own session.
+
+When someone else commits (another session, or a `vtyctl apply`), the
+running config changes under your candidate. Your edits stay, as edits
+of the new running config: `compare` still shows what you typed and
+nothing of what was committed. Your next `commit` goes ahead and says
+so:
+
+```
+host(config)# commit
+Note: others committed while these edits were pending; see `show commit history`
+```
+
+Where the other commit set or deleted the very leaf you had edited, your
+edit is kept, and your `commit` is refused once so that you can look:
+
+```
+host(config)# commit
+% Another commit changed what this session has edited. Your edits are kept:
+  router bgp neighbor 10.0.0.1 description: committed other, yours mine
+% `compare` shows what `commit` would now change; `commit` again to proceed
+host(config)# compare formal
+-router bgp neighbor 10.0.0.1 description other
++router bgp neighbor 10.0.0.1 description mine
+host(config)# commit
+```
+
+Typed again, `commit` commits your value over theirs; `discard` takes
+theirs. One case is not yours to decide: a leaf you edited inside a list
+entry the other commit deleted goes with the entry.
+
+A candidate lasts as long as its shell. It is still there after any idle
+time, and it is gone when the shell exits.
+
 ### Leaving the shell with uncommitted changes
 
-Edits live in the candidate until you `commit`, and until this release
-nothing stopped a session from simply ending on top of them. Now, when
-you leave the vty shell — typed `exit` at the exec prompt, Ctrl-D, or a
-closing terminal — after having entered configure mode at some point,
-the shell checks whether the candidate still differs from running and
-asks:
+Edits live in the session's candidate until you `commit`, and the
+candidate ends with the shell. So when you leave the vty shell — typed
+`exit` at the exec prompt, Ctrl-D, or a closing terminal — after having
+entered configure mode at some point, the shell checks whether the
+candidate still differs from running and asks:
 
 ```
 host# exit
-You have uncommitted changes. Commit? [y=commit n=discard other=keep]
+You have uncommitted changes. Commit? [y=commit other=discard]
 ```
 
-`y` commits, `n` discards, and anything else — `keep`, including just
-pressing Enter or waiting out the 30-second timeout — leaves the edits
-in the candidate for the next session. The shell exits in every case;
-the answer never cancels the exit.
+`y` commits; a commit refused for the reason above is not repeated, and
+the edits are then lost with the session. Anything else — `n`, just pressing Enter, or waiting out
+the 30-second timeout — loses the edits with the session. The shell
+exits in every case; the answer never cancels the exit.
 
 Three cases stay silent: a session that never entered configure mode, a
 session with no terminal to ask on (a script piping commands in), and a

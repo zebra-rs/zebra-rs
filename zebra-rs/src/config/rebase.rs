@@ -168,7 +168,7 @@ pub fn rebase(
     }
 }
 
-fn kind(step: &CommandPath) -> YangMatch {
+pub(super) fn kind(step: &CommandPath) -> YangMatch {
     ymatch_enum(step.ymatch)
 }
 
@@ -198,7 +198,7 @@ fn find(root: &Rc<Config>, path: &[CommandPath]) -> Option<Rc<Config>> {
 /// plain container is not asked about. It has no line of its own and is
 /// there while something is under it, so its absence says only that
 /// every leaf under it is gone.
-fn deleted_by_edit(base: &Rc<Config>, ours: &Rc<Config>, path: &[CommandPath]) -> bool {
+pub(super) fn deleted_by_edit(base: &Rc<Config>, ours: &Rc<Config>, path: &[CommandPath]) -> bool {
     (0..path.len()).any(|at| {
         matches!(
             kind(&path[at]),

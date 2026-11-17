@@ -43,6 +43,9 @@ impl ConfigManager {
     /// has been edited since, if anything, and restarts the timer; the
     /// configuration to go back to is still the one before the first.
     pub fn commit_confirmed(&self, minutes: u64) -> String {
+        if let Some(refusal) = self.commit_refusal() {
+            return refusal;
+        }
         let changed = self.has_uncommitted();
         if !changed && self.confirm.borrow().is_none() {
             return "% Nothing to commit\n".to_string();
@@ -77,7 +80,10 @@ impl ConfigManager {
             });
         }
         let unit = if minutes == 1 { "minute" } else { "minutes" };
-        format!("Commit will be rolled back in {minutes} {unit} unless confirmed by `commit`\n")
+        format!(
+            "Commit will be rolled back in {minutes} {unit} unless confirmed by `commit`\n{}",
+            self.commit_note()
+        )
     }
 
     /// A plain `commit` in configure mode succeeded: the commit awaiting

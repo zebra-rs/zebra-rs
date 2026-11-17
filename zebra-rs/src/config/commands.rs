@@ -445,12 +445,15 @@ pub(super) fn prettify_json(compact: String) -> String {
 }
 
 fn commit(config: &ConfigManager) -> (ExecCode, String) {
+    if let Some(refusal) = config.commit_refusal() {
+        return (ExecCode::Show, refusal);
+    }
     let result = config.commit_config();
     match result {
         Ok(_) => {
             // Typed by an operator: it confirms a `commit confirmed`.
             config.confirm_commit();
-            (ExecCode::Show, String::from(""))
+            (ExecCode::Show, config.commit_note())
         }
         Err(err) => (ExecCode::Show, err.to_string()),
     }
@@ -616,3 +619,7 @@ mod rollback_tests;
 #[cfg(test)]
 #[path = "confirm_tests.rs"]
 mod confirm_tests;
+
+#[cfg(test)]
+#[path = "private_tests.rs"]
+mod private_tests;

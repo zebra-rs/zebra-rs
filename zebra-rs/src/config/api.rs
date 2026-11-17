@@ -56,6 +56,8 @@ pub struct ExecuteRequest {
     pub input: String,
     /// The login name of the session, for the commit history.
     pub user: Option<String>,
+    /// The session, whose candidate the command runs on.
+    pub session: Option<super::session::SessionKey>,
     pub resp: Sender<ExecuteResponse>,
 }
 
@@ -79,6 +81,8 @@ pub struct CompletionRequest {
     pub mode: String,
     pub input: String,
     pub interactive: bool,
+    /// The session, whose candidate says what is there to complete.
+    pub session: Option<super::session::SessionKey>,
     pub resp: Sender<CompletionResponse>,
 }
 
@@ -94,6 +98,7 @@ impl ExecuteRequest {
             mode: mode.to_string(),
             input: input.to_string(),
             user: None,
+            session: None,
             resp,
         }
     }
@@ -118,6 +123,7 @@ impl CompletionRequest {
             mode: mode.to_string(),
             input: input.to_string(),
             interactive,
+            session: None,
             resp,
         }
     }
@@ -166,6 +172,11 @@ pub enum Message {
     Execute(ExecuteRequest),
     Completion(CompletionRequest),
     Deploy(DeployRequest),
+    /// The shell of a session is gone: its candidate goes with it
+    /// (`config::private`).
+    SessionEnd {
+        key: super::session::SessionKey,
+    },
     /// The timer of a `commit confirmed` ran out (`config::confirm`).
     ConfirmTimeout {
         generation: u64,

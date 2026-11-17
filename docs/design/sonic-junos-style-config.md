@@ -71,9 +71,9 @@ container restarts.
   Subscribe` (*read*: `proto/config.proto`) streams a snapshot and then one
   event per commit, as `set`/`delete` path changes or as a JSON subtree. An
   out-of-process daemon consumes its part of the configuration this way now.
-- zebra-rs has **one candidate, shared by every configure-mode session**. A
-  writer that applies a document no longer commits what a session has pending
-  in it (§8.1).
+- zebra-rs has **a candidate for each session**. A commit, by another session
+  or by a writer that applies a document, commits nothing a session has
+  pending, and the session keeps its edits over it (§8.1).
 
 ## 3. The central decision: who owns the truth
 
@@ -252,7 +252,7 @@ persistence of SONiC configuration stays `config save` and `config_db.json`
 
 ## 8. What zebra-rs needs first
 
-### 8.1 A candidate per session — the apply half is done
+### 8.1 A candidate per session — done
 
 *Measured, before the fix.* zebra-rs has one candidate. An uncommitted `set`
 typed in one configure session was committed by an unrelated `vtyctl apply`
@@ -279,22 +279,33 @@ fix: an uncommitted neighbor description stayed out of the running config
 while bgpcfgd committed a static route. The version that is merged has run in
 the unit suite and BDD only.
 
+**Closed between sessions.** Each vty session that enters configure mode now
+has a candidate of its own (`zebra-rs/src/config/private.rs`). What one
+operator types is not in another's `show`, and `commit`, `discard`, `load` and
+`rollback` are of the session that typed them. A commit by anyone else is
+carried into a session's candidate the same way: the session's edits are then
+edits of the new running config. The candidate ends with the session's shell.
+*Measured* on a SONiC VS: a session's uncommitted neighbor description stayed
+out of the running config while a second session committed another one, and
+was still the first session's only pending change afterwards.
+
+This is Junos `configure private` as the only mode, with one difference. A
+global configure lock (`configure exclusive`) was not built: bgpcfgd must
+never be blocked by an idle operator.
+
 What that does not give:
 
-- **Sessions still share one candidate.** Two operators in configure mode edit
-  the same tree, and either one's `commit` commits both. So does `load`.
-- **A conflict is settled, not reported.** Where an apply and an edit set the
-  same leaf, the candidate takes the applied value and the operator is not
-  told. The rebase of §7 wants the commit refused until the operator has looked.
-- **A whole-config document** (CLI block, JSON, YAML) replaces the
-  configuration and the pending edits with it. Only an apply of `set`/`delete`
-  lines keeps them.
-
-What remains to build is therefore the private candidate per session (Junos
-`configure private`), with the machine writers — bgpcfgd's `vtyctl apply`, and
-the bridge — each using their own. A global configure lock (`configure
-exclusive`) is simpler and is not enough here, because bgpcfgd must never be
-blocked by an idle operator.
+- **A lock.** There is no `configure exclusive`, for the reason above.
+- **An `update` step.** Where a commit and a session's edit set the same leaf,
+  the session keeps its edit and its next `commit` is refused once, naming the
+  leaf with both values (IOS-XR warns at commit in the same way; Junos refuses
+  a private commit until the operator has run `update`). Other commits made
+  meanwhile are mentioned when the session's commit goes through, not shown
+  line by line. The import of §7 can use the same notice for a CONFIG_DB
+  change made behind an open candidate.
+- **The machine writers have no candidate of their own to keep.** An apply
+  builds its candidate, commits it and is done, which is all bgpcfgd needs.
+  The bridge of §6 can work the same way.
 
 ### 8.2 History, compare, rollback, commit confirmed
 

@@ -96,6 +96,15 @@ pub struct Session {
     pub enable_hard_deadline: Option<Instant>,
 }
 
+/// The callback of [`SessionTable::on_shell_gone`].
+struct ShellGone(Box<dyn Fn(SessionKey) + Send + Sync>);
+
+impl std::fmt::Debug for ShellGone {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ShellGone")
+    }
+}
+
 /// Default Linux group whose members may `enable` without a password.
 pub const CONFIG_GROUP_NAME: &str = "zebra-rs";
 
@@ -184,6 +193,9 @@ pub struct SessionTable {
     /// Gid of the configure-authorization group (`zebra-rs` by default).
     /// `None` when the group does not exist at daemon startup.
     config_group_gid: Option<u32>,
+    /// Told the key of a session whose shell is gone: see
+    /// [`Self::on_shell_gone`].
+    shell_gone: std::sync::OnceLock<ShellGone>,
 }
 
 #[cfg(target_os = "linux")]
@@ -198,6 +210,7 @@ impl SessionTable {
         std::sync::Arc::new(Self {
             sessions: DashMap::new(),
             config_group_gid,
+            shell_gone: std::sync::OnceLock::new(),
         })
     }
 
@@ -467,18 +480,28 @@ impl SessionTable {
         let now = Instant::now();
         let mut removed_idle = 0usize;
         let mut removed_gone = 0usize;
-        self.sessions.retain(|_key, session| {
+        let mut gone = Vec::new();
+        self.sessions.retain(|key, session| {
             let leased = matches!(Self::lease_of(session, now), AdminLease::Remaining(_));
             if !leased && now.saturating_duration_since(session.last_active) > idle_ttl {
                 removed_idle += 1;
+                // Counted as idle, and its shell may be dead as well.
+                if !reader.process_exists(session.bash_pid as i32) {
+                    gone.push(*key);
+                }
                 return false;
             }
             if !reader.process_exists(session.bash_pid as i32) {
                 removed_gone += 1;
+                gone.push(*key);
                 return false;
             }
             true
         });
+        // Outside `retain`, which holds the map's locks.
+        for key in gone {
+            self.shell_is_gone(key);
+        }
         GcStats {
             removed_idle,
             removed_gone,
@@ -487,8 +510,29 @@ impl SessionTable {
     }
 
     /// Remove a session by key. Returns true if an entry was present.
+    ///
+    /// Every caller removes a session because its shell is gone (it
+    /// logged out, or died), so the shell is reported gone: also when
+    /// the entry had already lapsed for being idle, which is not the
+    /// end of the shell and is not reported.
     pub fn remove(&self, key: &SessionKey) -> bool {
+        self.shell_is_gone(*key);
         self.sessions.remove(key).is_some()
+    }
+
+    /// Call `told` with the key of each session whose shell is gone,
+    /// from now on. What is kept for a session beyond its entry here
+    /// (its candidate, in the config manager) ends then, and not when
+    /// the entry lapses for being idle. Set once; a second call is
+    /// ignored.
+    pub fn on_shell_gone(&self, told: impl Fn(SessionKey) + Send + Sync + 'static) {
+        let _ = self.shell_gone.set(ShellGone(Box::new(told)));
+    }
+
+    fn shell_is_gone(&self, key: SessionKey) {
+        if let Some(told) = self.shell_gone.get() {
+            (told.0)(key);
+        }
     }
 
     /// Whether a session with `key` is currently present.
@@ -1629,6 +1673,55 @@ mod tests {
         assert_eq!(stats.removed_idle, 1);
         assert_eq!(stats.removed_gone, 0);
         assert_eq!(stats.remaining, 0);
+    }
+
+    /// What is told of the shells that are gone.
+    fn gone_shells(table: &SessionTable) -> std::sync::Arc<Mutex<Vec<SessionKey>>> {
+        let gone = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let told = gone.clone();
+        table.on_shell_gone(move |key| told.lock().unwrap().push(key));
+        gone
+    }
+
+    /// A session that lapses for being idle still has its shell: only a
+    /// session whose shell died is reported gone, also when it was idle
+    /// as well.
+    #[test]
+    fn gc_reports_a_dead_shell_and_not_an_idle_session() {
+        let table = SessionTable::new();
+        let gone = gone_shells(&table);
+        let reader = StubReader::default();
+        let now = Instant::now();
+        let old = now - Duration::from_secs(900);
+        // Idle, shell alive.
+        table.insert_for_test((1000, 1000), old);
+        reader.set_ppid(1000, 100);
+        // Active, shell dead.
+        table.insert_for_test((2000, 2000), now);
+        reader.set_missing(2000);
+        // Idle and shell dead.
+        table.insert_for_test((3000, 3000), old);
+        reader.set_missing(3000);
+
+        let stats = table.gc_once(&reader, Duration::from_secs(600));
+        assert_eq!(stats.removed_idle, 2);
+        assert_eq!(stats.removed_gone, 1);
+        assert_eq!(stats.remaining, 0);
+        let mut gone = gone.lock().unwrap().clone();
+        gone.sort();
+        assert_eq!(gone, [(2000, 2000), (3000, 3000)]);
+    }
+
+    /// `remove` is the shell logging out or dying, and says so: also
+    /// for a session whose entry had lapsed before.
+    #[test]
+    fn remove_reports_the_shell_gone() {
+        let table = SessionTable::new();
+        let gone = gone_shells(&table);
+        table.insert_for_test((1000, 1000), Instant::now());
+        assert!(table.remove(&(1000, 1000)));
+        assert!(!table.remove(&(4000, 4000)));
+        assert_eq!(*gone.lock().unwrap(), [(1000, 1000), (4000, 4000)]);
     }
 
     #[test]

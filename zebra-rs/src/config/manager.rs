@@ -248,6 +248,13 @@ pub struct ConfigManager {
     /// writes to that file.
     pub config_format: RefCell<ConfigFormat>,
     pub store: ConfigStore,
+    /// The candidates of the sessions that have been in configure mode,
+    /// each out of here while a command of its session runs
+    /// (`config::private`).
+    pub candidates: RefCell<HashMap<super::session::SessionKey, super::private::SessionCandidate>>,
+    /// What the session whose command is running is to be told at its
+    /// `commit`; `None` when no session's command is.
+    pub session_notes: RefCell<Option<super::private::Notes>>,
     /// What the last commits produced, for `rollback`.
     pub history: CommitHistory,
     /// Who is being served now: the login name of the session whose
@@ -514,6 +521,8 @@ impl ConfigManager {
             config_format: RefCell::new(ConfigFormat::Cli),
             modes: HashMap::new(),
             store: ConfigStore::new(),
+            candidates: RefCell::new(HashMap::new()),
+            session_notes: RefCell::new(None),
             history: CommitHistory::default(),
             commit_user: RefCell::new(None),
             commit_comment: RefCell::new(None),
@@ -2193,15 +2202,9 @@ impl ConfigManager {
         match m {
             Message::Execute(req) => {
                 let mut resp = ExecuteResponse::new();
-                match self.modes.get(&req.mode) {
-                    Some(mode) => {
-                        self.commit_user.replace(req.user);
-                        (resp.code, resp.output, resp.paths) = self.execute(mode, &req.input);
-                        self.commit_user.replace(None);
-                    }
-                    None => {
-                        resp.code = ExecCode::Nomatch;
-                    }
+                match self.execute_for(req.session, req.user, &req.mode, &req.input) {
+                    Some(reply) => (resp.code, resp.output, resp.paths) = reply,
+                    None => resp.code = ExecCode::Nomatch,
                 }
                 // Stamped after `execute` so a `commit` that changed
                 // the hostname reports the just-promoted value.
@@ -2212,8 +2215,10 @@ impl ConfigManager {
                 let mut resp = CompletionResponse::new();
                 match self.modes.get(&req.mode) {
                     Some(mode) => {
+                        let entered = self.session_enter(req.session, &req.mode);
                         (resp.code, resp.comps) =
                             self.completion(mode, &req.input, req.interactive).await;
+                        self.session_leave(entered);
                     }
                     None => {
                         resp.code = ExecCode::Nomatch;
@@ -2221,6 +2226,7 @@ impl ConfigManager {
                 }
                 let _ = req.resp.send(resp);
             }
+            Message::SessionEnd { key } => self.session_end(&key),
             Message::ConfirmTimeout { generation } => self.confirm_timeout(generation),
             Message::Deploy(req) => {
                 self.commit_user.replace(req.user);

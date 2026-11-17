@@ -148,11 +148,12 @@ impl ExecService {
         &self,
         mode: &str,
         input: &str,
-        user: Option<String>,
+        session: Option<SessionKey>,
     ) -> ExecuteResponse {
         let (tx, rx) = oneshot::channel();
         let mut req = ExecuteRequest::new(mode, input, tx);
-        req.user = user;
+        req.user = session.and_then(|key| self.sessions.username(&key));
+        req.session = session;
         self.tx.send(Message::Execute(req)).await.unwrap();
         rx.await.unwrap()
     }
@@ -162,9 +163,11 @@ impl ExecService {
         mode: &str,
         input: &str,
         interactive: bool,
+        session: Option<SessionKey>,
     ) -> CompletionResponse {
         let (tx, rx) = oneshot::channel();
-        let req = CompletionRequest::new(mode, input, interactive, tx);
+        let mut req = CompletionRequest::new(mode, input, interactive, tx);
+        req.session = session;
         self.tx.send(Message::Completion(req)).await.unwrap();
         rx.await.unwrap()
     }
@@ -245,9 +248,8 @@ impl Exec for ExecService {
         let request = request.get_ref();
         match request.r#type {
             x if x == ExecType::Exec as i32 => {
-                let user = key.and_then(|key| self.sessions.username(&key));
                 let resp = self
-                    .execute_request(&request.mode, &request.line, user)
+                    .execute_request(&request.mode, &request.line, key)
                     .await;
                 if request.mode == "exec" && enters_configure(&resp) {
                     enforce_admin_key(&self.sessions, key)?;
@@ -267,13 +269,13 @@ impl Exec for ExecService {
             })),
             x if x == ExecType::CompleteFirstCommands as i32 => {
                 let resp = self
-                    .completion_request(&request.mode, &request.line, request.interactive)
+                    .completion_request(&request.mode, &request.line, request.interactive, key)
                     .await;
                 self.reply(ExecCode::Success, first_commands(&resp))
             }
             x if x == ExecType::Complete as i32 => {
                 let resp = self
-                    .completion_request(&request.mode, &request.line, request.interactive)
+                    .completion_request(&request.mode, &request.line, request.interactive, key)
                     .await;
                 self.reply(ExecCode::Success, comp_commands(&resp))
             }
@@ -281,7 +283,7 @@ impl Exec for ExecService {
                 let mut input = request.line.clone();
                 input.push(' ');
                 let resp = self
-                    .completion_request(&request.mode, &input, request.interactive)
+                    .completion_request(&request.mode, &input, request.interactive, key)
                     .await;
                 self.reply(ExecCode::Success, comp_commands(&resp))
             }
@@ -888,6 +890,22 @@ pub fn serve(cli: Cli, addr: VtyAddr) -> anyhow::Result<()> {
         tracing::debug!("VTY configure-authorization group not found; PAM-only fallback");
     }
     let sessions = SessionTable::with_config_group(config_group_gid);
+    // A session's candidate lives in the config manager and ends with
+    // the session's shell.
+    let ended_tx = cli.tx.clone();
+    sessions.on_shell_gone(move |key| {
+        let tx = ended_tx.clone();
+        match tokio::runtime::Handle::try_current() {
+            Ok(runtime) => {
+                runtime.spawn(async move {
+                    let _ = tx.send(Message::SessionEnd { key }).await;
+                });
+            }
+            Err(_) => {
+                let _ = tx.try_send(Message::SessionEnd { key });
+            }
+        }
+    });
     let enable_rate = EnableRateLimiter::new();
 
     let exec_service = ExecService {

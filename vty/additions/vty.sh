@@ -62,10 +62,10 @@ declare -A _cli_array_pre
 declare -i _cli_first_level_registered=0
 
 # 1 once this shell has entered configure mode. Gates the exit-time
-# uncommitted-changes prompt in _cli_exit_hook: the candidate config is
-# global to the daemon, so without this gate an operator who only ran
-# `show` would be asked about — and could discard — someone else's
-# pending edits. Sticky for the shell's life, including across `disable`: a
+# uncommitted-changes prompt in _cli_exit_hook: a session that has not
+# been in configure mode has no candidate of its own, and what the
+# daemon shows it as the candidate is not its to commit or discard.
+# Sticky for the shell's life, including across `disable`: a
 # session that dropped back to View should still be told, and get the
 # "admin role required" answer, rather than silently walking away.
 declare -i _cli_entered_configure=0
@@ -924,12 +924,16 @@ _cli_exit_hook ()
       # Kept to 70 columns so an 80-column terminal has room for the
       # answer instead of wrapping the question.
       read -t "${CLI_EXIT_PROMPT_TIMEOUT:-30}" -r -p \
-        "You have uncommitted changes. Commit? [y=commit n=discard other=keep] " ans
+        "You have uncommitted changes. Commit? [y=commit other=discard] " ans
       if [[ $? -gt 128 ]]; then
-        # Timed out: leave the candidate alone and close the prompt line.
+        # Timed out: close the prompt line. The edits go with the
+        # session, as for any answer but `y`.
         echo >&2
       else
         echo >&2
+        # The candidate is this session's own and ends with it at the
+        # Logout below, so any answer but `y` loses the edits; `n` says
+        # so to the daemon as well.
         case ${ans} in
           [Yy]*) _cli_exit_config_cmd commit ;;
           [Nn]*) _cli_exit_config_cmd discard ;;
