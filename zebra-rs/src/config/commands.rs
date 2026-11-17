@@ -2,7 +2,7 @@ use super::ExecCode;
 use super::manager::{ConfigFormat, ConfigManager};
 use super::util::trim_first_line;
 use libyang::Entry;
-use similar::TextDiff;
+use similar::{ChangeTag, TextDiff};
 use std::collections::HashMap;
 use std::path::Path;
 use std::rc::Rc;
@@ -48,6 +48,8 @@ pub fn configure_mode_create(entry: Rc<Entry>) -> Mode {
     install_show_config_handlers(&mut mode);
     mode.install_func(String::from("/commit"), commit);
     mode.install_func(String::from("/discard"), discard);
+    mode.install_func(String::from("/compare"), compare);
+    mode.install_func(String::from("/compare/formal"), compare_formal);
     mode.install_func(String::from("/load"), load);
     mode.install_func(String::from("/save"), save);
     mode.install_func(String::from("/save/cli"), save_cli);
@@ -174,6 +176,87 @@ fn show(config: &ConfigManager) -> (ExecCode, String) {
     } else {
         (ExecCode::Show, candidate)
     }
+}
+
+// === compare [ formal ] ===
+//
+// What `commit` would change. Unlike bare `show`, which prints the whole
+// candidate with the changes marked in it, this prints only the changes,
+// and nothing when there are none.
+
+/// The changed lines of the indented block view, each inside the
+/// unchanged blocks that hold it.
+fn compare(config: &ConfigManager) -> (ExecCode, String) {
+    let mut running = String::new();
+    let mut candidate = String::new();
+    config.store.running.borrow().format(&mut running);
+    config.store.candidate.borrow().format(&mut candidate);
+    (ExecCode::Show, compare_block(&running, &candidate))
+}
+
+/// The changed `set` lines. This is the rendering `commit` itself
+/// diffs, so a line is here exactly when a commit would act on it.
+fn compare_formal(config: &ConfigManager) -> (ExecCode, String) {
+    let mut running = String::new();
+    let mut candidate = String::new();
+    config.store.running.borrow().list(&mut running);
+    config.store.candidate.borrow().list(&mut candidate);
+    let mut out = String::new();
+    for change in TextDiff::from_lines(&running, &candidate).iter_all_changes() {
+        let sign = match change.tag() {
+            ChangeTag::Delete => '-',
+            ChangeTag::Insert => '+',
+            ChangeTag::Equal => continue,
+        };
+        out.push(sign);
+        out.push_str(change.value());
+    }
+    (ExecCode::Show, out)
+}
+
+/// Diff two indented block renderings, keeping of the unchanged lines
+/// only those that say where a changed line is: the lines that open the
+/// blocks it is in, and the lines that close them.
+fn compare_block(running: &str, candidate: &str) -> String {
+    let indent = |line: &str| line.len() - line.trim_start_matches(' ').len();
+    // The unchanged lines that open the blocks around this point,
+    // outermost first, and whether each is already printed.
+    let mut open: Vec<(usize, &str, bool)> = Vec::new();
+    let mut out = String::new();
+    let diff = TextDiff::from_lines(running, candidate);
+    for change in diff.iter_all_changes() {
+        let line = change.value();
+        let depth = indent(line);
+        let sign = match change.tag() {
+            ChangeTag::Equal => {
+                if line.trim() == "}" {
+                    // Closes the block opened at this depth.
+                    while let Some((d, _, printed)) = open.pop() {
+                        if d == depth {
+                            if printed {
+                                out.push(' ');
+                                out.push_str(line);
+                            }
+                            break;
+                        }
+                    }
+                } else if line.trim_end().ends_with('{') {
+                    open.push((depth, line, false));
+                }
+                continue;
+            }
+            ChangeTag::Delete => '-',
+            ChangeTag::Insert => '+',
+        };
+        for (_, opener, printed) in open.iter_mut().filter(|(_, _, printed)| !*printed) {
+            out.push(' ');
+            out.push_str(opener);
+            *printed = true;
+        }
+        out.push(sign);
+        out.push_str(line);
+    }
+    out
 }
 
 // === show {candidate,running}-config [ formal | json | yaml ] ===
@@ -315,3 +398,7 @@ fn clear_isis_spf(_config: &ConfigManager) -> (ExecCode, String) {
     let output = String::from("clear isis spf");
     (ExecCode::Show, output)
 }
+
+#[cfg(test)]
+#[path = "compare_tests.rs"]
+mod compare_tests;

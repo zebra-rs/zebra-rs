@@ -132,6 +132,8 @@ under the top level of `configure` mode (not under `show`):
 | `delete <path>` | Remove a leaf or list item from the candidate |
 | `commit` | Validate the candidate, apply diffs to subscribers, then promote candidate → running |
 | `discard` | Revert candidate back to running (drops uncommitted edits) |
+| `compare` | Show what `commit` would change, in the block format |
+| `compare formal` | The same, as `set` lines |
 | `load` | Re-load the on-disk config file into the candidate, then commit |
 | `save` | Write the running config to the on-disk file in its current format |
 | `save { cli \| formal \| json \| yaml }` | Write it in that format instead, and keep the file in that format from then on |
@@ -145,6 +147,48 @@ that file, and the format it wrote, in its reply:
 host(config)# save
 Configuration saved to /etc/zebra-rs/zebra-rs.conf (cli)
 ```
+
+### Seeing what a commit would change
+
+`compare` prints the difference between the candidate and the running
+config: removed lines with `-`, added lines with `+`, and of the
+unchanged lines only the blocks the changes are in. With nothing to
+commit it prints nothing.
+
+```
+host(config)# set router bgp neighbor 10.0.0.3 description new
+host(config)# set system hostname r1
+host(config)# compare
+ router {
+   bgp {
+     neighbor 10.0.0.3 {
+-      description old;
++      description new;
+     }
+   }
+ }
++system {
++  hostname r1;
++}
+```
+
+`show | compare`, as on Junos, gives the same output. The vty shell runs
+the two sides of a `|` as a pipeline, and `compare` does not read what
+`show` prints.
+
+`compare formal` lists the changed `set` lines. It is the rendering
+`commit` itself diffs, so a line appears here exactly when a commit
+would act on it:
+
+```
+host(config)# compare formal
+-router bgp neighbor 10.0.0.3 description old
++router bgp neighbor 10.0.0.3 description new
++system hostname r1
+```
+
+Bare `show` in configure mode is the other view of the same thing: the
+whole candidate, with the changes marked in it.
 
 ### Leaving the shell with uncommitted changes
 
@@ -249,7 +293,7 @@ configure-mode commands without the `show` prefix:
 | `yaml` | `show candidate-config yaml` |
 | `running` | `show running-config formal` |
 | `candidate` | (removed — was effectively a duplicate of `list`) |
-| `diff` | (removed — was running ↔ candidate textual diff) |
+| `diff` | `compare` (bare `show` marks the changes in the whole candidate) |
 
 The reorganization gives candidate and running configs a symmetric
 set of viewers (`show {candidate,running}-config { formal | json |

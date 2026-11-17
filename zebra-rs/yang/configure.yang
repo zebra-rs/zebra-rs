@@ -82,6 +82,20 @@ module configure {
     type empty;
   }
 
+  // What `commit` would change: the candidate against the running
+  // config. Also reached as `show | compare`, the form Junos operators
+  // type: the vty shell runs the two sides of a `|` as a pipeline, and
+  // `compare` does not read the left side. A presence container, as
+  // `save` is, so the bare command is a valid terminal.
+  container compare {
+    ext:help "Show what commit would change";
+    presence "Compare in the indented block format";
+    leaf formal {
+      ext:help "Set-style flat statement listing";
+      type empty;
+    }
+  }
+
   leaf load {
     ext:help "Load config from file";
     type empty;
