@@ -6,6 +6,11 @@
 //! effect on `commit` like any other edit, and that commit is a new
 //! entry 0.
 //!
+//! Only a commit that changed the running config is an entry. A daemon
+//! that starts with no config file, or with one that sets nothing, has
+//! an empty history until the first commit that sets something: the
+//! empty configuration it started from is not a commit to roll back to.
+//!
 //! The history is kept in memory: it starts with the commit of the
 //! config file at startup, when there is one, and is gone when the
 //! daemon stops.
@@ -20,10 +25,12 @@ pub const HISTORY_MAX: usize = 50;
 
 pub struct CommitRecord {
     pub time: DateTime<Utc>,
-    /// The commit of the config file: at startup, or by `load`.
+    /// The commit took lines of the config file: at startup, or by
+    /// `load`.
     pub from_file: bool,
-    /// The running config this commit produced, as `set` lines: the
-    /// document `save formal` writes and the loader reads.
+    /// The running config this commit produced, one line for each thing
+    /// set: `Config::list`, the rendering a commit diffs. Each line is a
+    /// `set` command without the keyword.
     pub config: String,
 }
 
@@ -34,14 +41,12 @@ pub struct CommitHistory {
 }
 
 impl CommitHistory {
-    /// Record what a commit produced. A commit that changed nothing is
-    /// not an entry: it would push a configuration out of the history
-    /// for a copy of the one already at 0.
+    /// Record what a commit produced. The caller records only a commit
+    /// that changed the running config: one that changed nothing would
+    /// push a configuration out of the history for a copy of the one
+    /// already at 0.
     pub fn record(&self, config: String, from_file: bool) {
         let mut records = self.records.borrow_mut();
-        if records.front().is_some_and(|last| last.config == config) {
-            return;
-        }
         records.push_front(CommitRecord {
             time: Utc::now(),
             from_file,

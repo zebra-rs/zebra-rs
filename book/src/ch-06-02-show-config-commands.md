@@ -211,7 +211,10 @@ host(config)# show commit history
 
 `config file` marks the commit of the config file, at startup or by
 `load`. Every commit that changed something is listed, whoever made it:
-a `vtyctl apply` is a commit too.
+a `vtyctl apply` is a commit too. A commit that changed nothing is not
+listed, and neither is the empty configuration of a daemon that started
+with no config file, or with one that sets nothing: the list is then
+empty until the first commit.
 
 `rollback <n>` puts the configuration of commit `n` in the candidate, in
 place of what is there, uncommitted edits included. Nothing changes
@@ -229,7 +232,18 @@ host(config)# commit
 
 That commit is a new commit 0, and what was running becomes commit 1, so
 `rollback 1` again undoes the rollback. Bare `rollback` is `rollback 0`:
-the running config, as `discard` leaves it.
+the running config, as `discard` leaves it. That one works with nothing
+in the list too. A number with no commit behind it is refused, and the
+candidate is left as it was:
+
+```
+host(config)# rollback 7
+% No commit 7: commits 0 to 2 are kept
+```
+
+The same holds for a `rollback <n>` line in a document of `set` lines
+given to `vtyctl apply`: when it names no commit, the apply is refused
+at that line and nothing is committed.
 
 `compare rollback <n>` shows what turns commit `n` into the candidate
 without loading anything, and `show | compare rollback <n>` is the same

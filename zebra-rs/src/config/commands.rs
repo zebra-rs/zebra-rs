@@ -225,6 +225,12 @@ fn rollback_latest(config: &ConfigManager) -> (ExecCode, String) {
 
 /// `rollback <n>`: the candidate becomes the configuration of commit
 /// `n`. Uncommitted edits are replaced, as `discard` drops them.
+///
+/// A number with no commit behind it answers `Nomatch`. `Show` is the
+/// code of a line that was taken: with it, a config file or an apply
+/// that holds the line would go on and commit a configuration that was
+/// not rolled back. Both are refused at the line instead. The reason is
+/// the output, and a session is shown it (`serve::exec_commands`).
 pub(super) fn rollback(config: &ConfigManager, n: usize) -> (ExecCode, String) {
     match config.history_tree(n) {
         Ok(tree) => {
@@ -232,7 +238,7 @@ pub(super) fn rollback(config: &ConfigManager, n: usize) -> (ExecCode, String) {
             config.store.refused_load.set(false);
             (ExecCode::Show, String::new())
         }
-        Err(err) => (ExecCode::Show, format!("{err}\n")),
+        Err(err) => (ExecCode::Nomatch, format!("{err}\n")),
     }
 }
 
@@ -240,7 +246,7 @@ pub(super) fn rollback(config: &ConfigManager, n: usize) -> (ExecCode, String) {
 pub(super) fn compare_rollback(config: &ConfigManager, n: usize) -> (ExecCode, String) {
     let tree = match config.history_tree(n) {
         Ok(tree) => tree,
-        Err(err) => return (ExecCode::Show, format!("{err}\n")),
+        Err(err) => return (ExecCode::Nomatch, format!("{err}\n")),
     };
     let mut earlier = String::new();
     let mut candidate = String::new();

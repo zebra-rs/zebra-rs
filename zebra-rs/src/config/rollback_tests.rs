@@ -6,8 +6,16 @@ use super::*;
 use tokio::sync::mpsc;
 
 fn manager(name: &str) -> ConfigManager {
-    let path =
-        std::env::temp_dir().join(format!("zebra-rs-rollback-{name}-{}", std::process::id()));
+    manager_at(&config_path(name))
+}
+
+/// Where the manager of test `name` has its config file. Nothing is
+/// there unless the test writes it.
+fn config_path(name: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("zebra-rs-rollback-{name}-{}", std::process::id()))
+}
+
+fn manager_at(path: &std::path::Path) -> ConfigManager {
     let (rib_tx, _rib_rx) = mpsc::unbounded_channel();
     let (rib_inbound_tx, _rib_inbound_rx) = mpsc::unbounded_channel();
     let (policy_tx, _policy_rx) = mpsc::unbounded_channel();
@@ -31,6 +39,28 @@ fn run(cm: &ConfigManager, line: &str) -> String {
     output
 }
 
+/// Type a line the session refuses and return the reason it prints.
+fn refused(cm: &ConfigManager, line: &str) -> String {
+    let mode = cm.modes.get("configure").expect("configure mode");
+    let (code, output, _) = cm.execute(mode, line);
+    assert_eq!(code, ExecCode::Nomatch, "`{line}`: {output:?}");
+    output
+}
+
+/// A manager as the daemon is at startup with `file` as its config
+/// file, or with no config file for `None`.
+fn started(name: &str, file: Option<&str>) -> ConfigManager {
+    let path = config_path(name);
+    let _ = std::fs::remove_file(&path);
+    if let Some(file) = file {
+        std::fs::write(&path, file).unwrap();
+    }
+    let cm = manager_at(&path);
+    cm.load_config();
+    let _ = std::fs::remove_file(&path);
+    cm
+}
+
 fn commit(cm: &ConfigManager, lines: &[&str]) {
     for line in lines {
         assert_eq!(run(cm, line), "", "`{line}`");
@@ -38,15 +68,17 @@ fn commit(cm: &ConfigManager, lines: &[&str]) {
     assert_eq!(run(cm, "commit"), "");
 }
 
+/// The running config as the history holds a commit: one line for each
+/// thing set.
 fn running(cm: &ConfigManager) -> String {
     let mut out = String::new();
-    cm.store.running.borrow().formal(&mut out);
+    cm.store.running.borrow().list(&mut out);
     out
 }
 
 fn candidate(cm: &ConfigManager) -> String {
     let mut out = String::new();
-    cm.store.candidate.borrow().formal(&mut out);
+    cm.store.candidate.borrow().list(&mut out);
     out
 }
 
@@ -135,21 +167,24 @@ async fn rollback_replaces_uncommitted_edits() {
 #[tokio::test]
 async fn rollback_to_a_commit_not_kept() {
     let cm = manager("missing");
-    assert_eq!(run(&cm, "rollback 1"), "% No commit to roll back to\n");
+    assert_eq!(
+        refused(&cm, "rollback 1"),
+        "% No commit 1: nothing has been committed\n"
+    );
     commit(&cm, &["set system hostname r1"]);
     assert_eq!(
-        run(&cm, "rollback 1"),
+        refused(&cm, "rollback 1"),
         "% No commit 1: only commit 0 is kept\n"
     );
     commit(&cm, &["set system hostname r2"]);
     run(&cm, "set system hostname edited");
     let edited = candidate(&cm);
     assert_eq!(
-        run(&cm, "rollback 7"),
+        refused(&cm, "rollback 7"),
         "% No commit 7: commits 0 to 1 are kept\n"
     );
     assert_eq!(
-        run(&cm, "compare rollback 7"),
+        refused(&cm, "compare rollback 7"),
         "% No commit 7: commits 0 to 1 are kept\n"
     );
     assert_eq!(candidate(&cm), edited);
@@ -224,35 +259,21 @@ async fn the_oldest_commits_are_dropped() {
     let last = HISTORY_MAX + 4;
     assert_eq!(
         cm.history.config(0).unwrap(),
-        format!("set system hostname r{last}\n")
+        format!("system hostname r{last}\n")
     );
     assert_eq!(
         cm.history.config(HISTORY_MAX - 1).unwrap(),
-        format!("set system hostname r{}\n", last - (HISTORY_MAX - 1))
+        format!("system hostname r{}\n", last - (HISTORY_MAX - 1))
     );
     assert_eq!(run(&cm, &format!("rollback {}", HISTORY_MAX - 1)), "");
-}
-
-/// What an apply by another writer commits is a commit like any other.
-#[tokio::test]
-async fn an_apply_is_a_commit() {
-    let cm = manager("apply");
-    commit(&cm, &["set system hostname r1"]);
-    let mode = cm.modes.get("configure").expect("configure mode");
-    let (code, _, _) = cm.execute(mode, "set system hostname applied");
-    assert_eq!(code, ExecCode::Show);
-    cm.commit_config().expect("commit");
-    assert_eq!(cm.history.len(), 2);
-    assert_eq!(run(&cm, "rollback 1"), "");
-    assert_eq!(candidate(&cm), "set system hostname r1\n");
 }
 
 /// The commit of the config file is marked in the listing.
 #[test]
 fn the_commit_of_the_config_file_is_marked() {
     let history = super::super::history::CommitHistory::default();
-    history.record("set system hostname r1\n".to_string(), true);
-    history.record("set system hostname r2\n".to_string(), false);
+    history.record("system hostname r1\n".to_string(), true);
+    history.record("system hostname r2\n".to_string(), false);
     let listing = history.render();
     let lines: Vec<&str> = listing.lines().collect();
     assert_eq!(lines.len(), 2, "{listing}");
@@ -263,5 +284,125 @@ fn the_commit_of_the_config_file_is_marked() {
     assert!(
         lines[1].starts_with("1   ") && lines[1].ends_with(" UTC  config file"),
         "{listing}"
+    );
+}
+
+/// A daemon that starts with nothing to load has committed nothing: the
+/// empty configuration it starts with is not a commit, which `rollback`
+/// and `commit` would turn into the deletion of all there is.
+#[test]
+fn a_start_with_nothing_to_load_is_not_a_commit() {
+    let files = [
+        ("no-file", None),
+        ("empty-file", Some("")),
+        // The config file as it is shipped.
+        ("comment-file", Some("# zebra-rs configuration\n\n")),
+        // A document the schema refuses: no line of it is run.
+        ("refused-file", Some("{\"no-such-key\": 1}\n")),
+        // A file with no line that is taken.
+        ("no-line-taken", Some("set no such thing\n")),
+    ];
+    for (name, file) in files {
+        let cm = started(name, file);
+        assert_eq!(running(&cm), "", "{name}");
+        assert_eq!(cm.history.len(), 0, "{name}");
+        assert_eq!(run(&cm, "show commit history"), "", "{name}");
+
+        // The first commit after it is commit 0, and the only one.
+        commit(&cm, &["set system hostname r1"]);
+        let listing = run(&cm, "show commit history");
+        assert_eq!(listing.lines().count(), 1, "{name}: {listing}");
+        assert!(!listing.contains("config file"), "{name}: {listing}");
+        assert_eq!(
+            refused(&cm, "rollback 1"),
+            "% No commit 1: only commit 0 is kept\n",
+            "{name}"
+        );
+    }
+}
+
+/// The commit of a config file that sets something is commit 0 at
+/// startup, and is marked.
+#[test]
+fn the_startup_commit_of_the_config_file_is_marked() {
+    let cm = started("startup-file", Some("set system hostname boot\n"));
+    assert_eq!(cm.history.len(), 1);
+    assert_eq!(cm.history.config(0).unwrap(), "system hostname boot\n");
+    let listing = run(&cm, "show commit history");
+    assert!(
+        listing.starts_with("0   ") && listing.ends_with(" UTC  config file\n"),
+        "{listing}"
+    );
+}
+
+/// `load` commits the candidate with the config file's lines in it. With
+/// no file there, what it commits is the session's edits: a commit, and
+/// not one of the config file.
+#[test]
+fn a_load_with_no_config_file_is_not_marked() {
+    let cm = manager("load-no-file");
+    run(&cm, "set system hostname edited");
+    assert_eq!(run(&cm, "load"), "");
+    assert_eq!(running(&cm), "system hostname edited\n");
+    let listing = run(&cm, "show commit history");
+    assert_eq!(listing.lines().count(), 1, "{listing}");
+    assert!(!listing.contains("config file"), "{listing}");
+}
+
+/// And with a file, the commit is marked.
+#[test]
+fn a_load_of_the_config_file_is_marked() {
+    let path = config_path("load-file");
+    let cm = manager_at(&path);
+    commit(&cm, &["set system hostname r1"]);
+    std::fs::write(&path, "set system hostname loaded\n").unwrap();
+    assert_eq!(run(&cm, "load"), "");
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(running(&cm), "system hostname loaded\n");
+    let listing = run(&cm, "show commit history");
+    let lines: Vec<&str> = listing.lines().collect();
+    assert_eq!(lines.len(), 2, "{listing}");
+    assert!(lines[0].ends_with(" UTC  config file"), "{listing}");
+    assert!(lines[1].ends_with(" UTC"), "{listing}");
+}
+
+/// Bare `rollback` and `rollback 0` are `discard` with nothing in the
+/// history too. A startup config whose commit was refused is the case:
+/// nothing is committed, and its lines are in the candidate.
+#[test]
+fn rollback_to_the_running_config_needs_no_commit() {
+    // `vni` is mandatory, so the commit of this file is refused.
+    let file = "set system hostname boot\nset vxlan vx1 local-address 10.0.0.1\n";
+    for line in ["rollback", "rollback 0", "discard"] {
+        let cm = started("refused-startup", Some(file));
+        assert_eq!(cm.history.len(), 0, "the startup commit was refused");
+        assert_ne!(candidate(&cm), "", "the file's lines are in the candidate");
+        assert_ne!(run(&cm, "compare rollback 0"), "", "`{line}`");
+        assert_eq!(run(&cm, "compare rollback 0"), run(&cm, "compare"));
+
+        assert_eq!(run(&cm, line), "", "`{line}`");
+        assert_eq!(candidate(&cm), "", "`{line}`");
+        assert_eq!(run(&cm, "compare rollback 0"), "", "`{line}`");
+        // It is the session's candidate from here on, as after `discard`.
+        assert!(!cm.store.refused_load.get(), "`{line}`");
+    }
+}
+
+/// Commit 0 is the running config whatever the history holds: `rollback
+/// 0` copies it, and reads no entry.
+#[tokio::test]
+async fn rollback_to_commit_0_is_the_running_config() {
+    let cm = manager("zero");
+    let [_one, _two, three] = three_commits(&cm);
+    assert_eq!(cm.history.config(0).unwrap(), running(&cm));
+    run(&cm, "delete router bgp");
+    run(&cm, "set system hostname edited");
+    assert_eq!(run(&cm, "rollback 0"), "");
+    assert_eq!(candidate(&cm), three);
+    assert!(
+        cm.store
+            .running
+            .borrow()
+            .same_as(&cm.store.candidate.borrow())
     );
 }
