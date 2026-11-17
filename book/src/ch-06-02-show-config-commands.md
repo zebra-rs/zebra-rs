@@ -136,6 +136,10 @@ under the top level of `configure` mode (not under `show`):
 | `save` | Write the running config to the on-disk file in its current format |
 | `save { cli \| formal \| json \| yaml }` | Write it in that format instead, and keep the file in that format from then on |
 
+`delete` names what it deletes in full. With `eth10` configured and no
+`eth1`, `delete interface eth1` is refused; it is not read as the start
+of `eth10`.
+
 Both `load` and `save` operate on the file named by `--config-file`, or
 on the resolved default when the flag is absent (see
 [Command Line Options](ch-00-05-command-line-options.md)). `save` names
@@ -175,9 +179,42 @@ left untouched:
 % commit failed (admin role required — run 'enable'); changes left uncommitted.
 ```
 
-Note that the candidate is shared daemon-wide: pending edits from
-another operator, or from a `vtyctl apply`, are part of what this prompt
-offers to commit or discard.
+Note that the candidate is shared by every configure-mode session:
+pending edits from another operator are part of what this prompt offers
+to commit or discard. What a `vtyctl apply` brings is not: it is
+committed by the apply itself (see the next section).
+
+### An apply and uncommitted edits
+
+`vtyctl apply`, and the gRPC `Apply` service behind it, commit **only
+their own lines**. A config daemon uses the same service: on SONiC,
+bgpcfgd applies a batch whenever CONFIG_DB changes. Edits typed in a
+configure-mode session and not yet committed are not committed by an
+apply, and are not lost when an apply is refused.
+
+After the apply the edits are still pending, as edits of the new running
+config. Where the apply changed something an edit also touches:
+
+| The apply and the edit | The candidate afterwards |
+|---|---|
+| Both set the same leaf | The applied value, when the apply changed the leaf. A line that says what the running config already says changes nothing in the edits. |
+| The apply deletes a leaf the edit set | The leaf is deleted. |
+| One deletes a list entry, the other sets something under it | The entry stays deleted, whole. |
+| Both add the same member to a leaf-list | The member, once. |
+| The apply changes a list whose order matters (a segment list, a label stack) | The applied list, whatever the edit made of it. |
+| Both add an entry to an `ordered-by user` list (interface addresses) | The applied entries in their order, then the edit's. |
+
+The applied value replaces the pending one without a notice. `show` in
+configure mode prints what is still pending.
+
+Three more rules of an apply:
+
+- A whole-config document (CLI block, JSON or YAML) replaces the
+  configuration, and uncommitted edits with it. Only a `set`/`delete`
+  document leaves them pending.
+- A document with no line in it, or with comments only, applies nothing.
+- A `delete` of something that is not configured is refused, and then
+  nothing of the document is applied.
 
 ### The format `save` writes
 

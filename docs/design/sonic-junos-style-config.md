@@ -70,7 +70,9 @@ container restarts.
   Subscribe` (*read*: `proto/config.proto`) streams a snapshot and then one
   event per commit, as `set`/`delete` path changes or as a JSON subtree. An
   out-of-process daemon consumes its part of the configuration this way now.
-- zebra-rs has **one candidate, shared by every writer** (*measured*, §8.1).
+- zebra-rs has **one candidate, shared by every configure-mode session**. A
+  writer that applies a document no longer commits what a session has pending
+  in it (§8.1).
 
 ## 3. The central decision: who owns the truth
 
@@ -236,7 +238,9 @@ a daemon — must reach zebra-rs, or `compare` and `rollback` lie.
   both changed the same leaf — is reported at `commit`, which is refused until
   the operator resolves it. Junos's private candidate behaves this way: a
   commit is refused when the database changed underneath it, until the
-  operator updates. It needs the per-session candidate of §8.1.
+  operator updates. zebra-rs rebases already (§8.1), but settles a conflict
+  for the applied value without a word; reporting it, and refusing the commit,
+  needs the per-session candidate of §8.1.
 - **Echo.** The bridge sees its own writes come back as notifications and must
   not import them as external changes.
 
@@ -247,11 +251,11 @@ persistence of SONiC configuration stays `config save` and `config_db.json`
 
 ## 8. What zebra-rs needs first
 
-### 8.1 A candidate per session — a hazard that exists today
+### 8.1 A candidate per session — the apply half is done
 
-*Measured.* zebra-rs has one candidate. An uncommitted `set` typed in one
-configure session was committed by an unrelated `vtyctl apply` from another
-writer:
+*Measured, before the fix.* zebra-rs has one candidate. An uncommitted `set`
+typed in one configure session was committed by an unrelated `vtyctl apply`
+from another writer:
 
 ```
 session 1:  set router bgp neighbor 10.0.0.1 description shared-candidate-probe   (no commit)
@@ -259,14 +263,37 @@ session 2:  vtyctl apply  →  set router bgp neighbor 10.0.0.3 description othe
 running:    both lines present
 ```
 
-On a zebra-rs SONiC image this is live now: bgpcfgd applies a batch whenever
-CONFIG_DB changes, and it would publish whatever an operator had half-typed in
-`vty`. It should be fixed whether or not the rest of this document is built.
+On a zebra-rs SONiC image that was live: bgpcfgd applies a batch whenever
+CONFIG_DB changes, and it published whatever an operator had half-typed in
+`vty`.
 
-The fix is a private candidate per session (Junos `configure private`), with
-the machine writers — bgpcfgd's `vtyctl apply`, and the bridge — each using
-their own. A global configure lock (`configure exclusive`) is simpler and is
-not enough here, because bgpcfgd must never be blocked by an idle operator.
+**Closed for an apply.** An apply now commits only its own lines
+(`ConfigManager::deploy`). When the candidate holds uncommitted edits it sets
+them aside, runs its document on a copy of the running config and commits
+that. The edits are then put back as edits of the new running config: what the
+commit changed is changed in them too (`zebra-rs/src/config/rebase.rs`, which
+states what becomes of an edit the commit meets). A refused apply leaves the
+edits as they were. *Measured* on a SONiC VS with the first version of the
+fix: an uncommitted neighbor description stayed out of the running config
+while bgpcfgd committed a static route. The version that is merged has run in
+the unit suite and BDD only.
+
+What that does not give:
+
+- **Sessions still share one candidate.** Two operators in configure mode edit
+  the same tree, and either one's `commit` commits both. So does `load`.
+- **A conflict is settled, not reported.** Where an apply and an edit set the
+  same leaf, the candidate takes the applied value and the operator is not
+  told. The rebase of §7 wants the commit refused until the operator has looked.
+- **A whole-config document** (CLI block, JSON, YAML) replaces the
+  configuration and the pending edits with it. Only an apply of `set`/`delete`
+  lines keeps them.
+
+What remains to build is therefore the private candidate per session (Junos
+`configure private`), with the machine writers — bgpcfgd's `vtyctl apply`, and
+the bridge — each using their own. A global configure lock (`configure
+exclusive`) is simpler and is not enough here, because bgpcfgd must never be
+blocked by an idle operator.
 
 ### 8.2 History, compare, rollback, commit confirmed
 
@@ -357,8 +384,8 @@ it loads it as data: YANG files in the image, present only on SONiC.
 Each phase is useful on its own and none commits us to the next.
 
 1. **zebra-rs transaction features**, no SONiC involved: per-session candidate
-   (§8.1, which also closes today's hazard), history, `compare`, `rollback`,
-   `commit confirmed`.
+   (§8.1; the hazard it was to close is closed for an apply already), history,
+   `compare`, `rollback`, `commit confirmed`.
 2. **Read-only mirror.** The `sonic` subtree generated from SONiC's YANG, the
    bridge importing CONFIG_DB. `show configuration sonic …` in `vty` with
    completion and help; no writes. Proves the schema generation and the import
