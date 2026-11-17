@@ -6,7 +6,7 @@ and open work, is [`sonic-zebra-rs-plan.md`](sonic-zebra-rs-plan.md); this
 document describes the state that plan has reached.
 
 State described: zebra-rs `main` at `5b003a5c`, sonic-buildimage
-`zebra-rs/sonic-buildimage` branch `zebra-rs-container` at `c01c37c8e`,
+`zebra-rs/sonic-buildimage` branch `zebra-rs-container` at `0830fc901`,
 sonic-utilities `zebra-rs/sonic-utilities` branch `zebra-rs-routing-stack` at
 `a6e35897`. A `sonic-vs` image built from those three boots from a stock
 `config_db.json`, peers with an FRR SONiC over eBGP, and programs the ASIC.
@@ -204,13 +204,13 @@ detect a rejected commit rather than assume success.
 | `bgpcfgd/main.py` | `do_work()` dispatches on `is_zebra_rs()`. `do_work_zebra_rs()` builds the `ZebraRs` backend and starts only the managers whose templates are ported: the metadata and interface managers, and `BGPPeerMgrBase` for `BGP_NEIGHBOR` (`general`), `BGP_PEER_RANGE` (`dynamic`) and `BGP_SENTINELS` (`sentinels`), and `DeviceGlobalCfgMgr` for `BGP_DEVICE_GLOBAL`. The tables it ignores are named in a startup warning. |
 | `bgpcfgd/managers_bgp.py` | zebra-rs branches where FRR syntax was built in code rather than in a template: peer-group text is pushed as plain lines instead of being wrapped in vtysh context; delete is `delete router bgp neighbor X` or `… neighbor-group X` for the listen-range families; admin shutdown is `neighbor X enabled false`; known peers are read from the formal running config; a neighbor in a non-default VRF is refused. A peer configured while the device is isolated gets the TSA entries in the same commit. |
 | `bgpcfgd/managers_device_global.py` | Runs under zebra-rs for TSA: on a change of `tsa_enabled` it finds the outbound policies in the formal running config (`policy out` of a neighbor or a neighbor-group) and renders the isolate or unisolate template for each. W-ECMP and IDF isolation are refused with a log message. |
-| `tests/test_zebra_rs.py`, `tests/test_zebra_rs_tsa.py` | Tests for the backend and for TSA. |
+| `bgpcfgd/managers_static_rt.py` | Runs under zebra-rs for `STATIC_ROUTE`, in CONFIG_DB and APPL_DB: a route becomes `router static ipv4\|ipv6 route P nexthop A` lines (`nexthop blackhole` for a blackhole) and an optional `distance`. A change adds next hops before removing them; a route left without next hops is deleted whole. The first route turns on `redistribute static` for both families, the last one turns it off. Routes zebra-rs cannot express are refused whole with an error: `advertise=false`, an interface-only or link-local next hop, another vrf, next hops with different distances. |
+| `tests/test_zebra_rs.py`, `tests/test_zebra_rs_tsa.py`, `tests/test_zebra_rs_static_rt.py` | Tests for the backend, TSA and static routes. |
 | `tests/conftest.py` (new) | Clears `SONIC_ROUTING_STACK` for every test. The build exports a variable of that name, so in a zebra-rs build the FRR tests would otherwise run against the zebra-rs backend. |
 
 **Left out under zebra-rs**, and therefore not functional on a zebra-rs image:
 W-ECMP and IDF isolation (the other two functions of the device-global
-manager), the allow-list manager, BFD, static-route, SRv6, route-map,
-prefix-list, and the monitor, internal and VoQ-chassis peer families.
+manager), the allow-list manager, BFD, SRv6, route-map, prefix-list, and the monitor, internal and VoQ-chassis peer families.
 
 ### 4.4 New: templates, `dockers/docker-fpm-zebra-rs/zebra-rs/`
 
@@ -374,7 +374,7 @@ started as `zebra-rs --claim-main-bgp --config-file /etc/zebra-rs/zebra-rs.conf`
 | Admin shutdown | zebra-rs | `zebra-rs/src/bgp/config.rs`, `peer.rs` |
 | FRR vtysh compatibility | zebra-rs | `vtyctl/src/frr/` |
 | FPM capture tool, golden captures, rigs | zebra-rs | `tools/fpm-tap/` |
-| bgpcfgd backend | sonic-buildimage | `src/sonic-bgpcfgd/bgpcfgd/{dialect,zebra_rs,main,managers_bgp,managers_device_global}.py` |
+| bgpcfgd backend | sonic-buildimage | `src/sonic-bgpcfgd/bgpcfgd/{dialect,zebra_rs,main,managers_bgp,managers_device_global,managers_static_rt}.py` |
 | Container, templates | sonic-buildimage | `dockers/docker-fpm-zebra-rs/` |
 | Package and build rules | sonic-buildimage | `rules/zebra-rs.mk`, `rules/docker-fpm-zebra-rs.mk`, `src/sonic-zebra-rs/` |
 | BGP CLI registration | sonic-utilities (fork) | `show/main.py`, `clear/main.py` |
@@ -387,14 +387,19 @@ ASIC_DB, forwarding, `show ip bgp summary`, `show ip route`, `route_check.py`,
 bgpmon, `sonic-clear ip bgp`, the `vty` shell from the host, and `sudo TSA` /
 `TSC` / `TSB` through CONFIG_DB (a test prefix withdrawn and the loopback
 re-advertised with the traffic-shift community, then both restored; the mode
-kept across a restart of the container). On an earlier image of the same code: IPv6 eBGP,
+kept across a restart of the container). With the changed files installed into
+that image by hand, not from a rebuilt one: static routes through CONFIG_DB
+(`config route add` and `del`, ECMP, blackhole, distance), in the kernel and
+APPL_DB and received by the peer. On an earlier image of the same code: IPv6 eBGP,
 and neighbor shutdown, startup, remove and re-add through CONFIG_DB, and a
 container restart with leftover routes.
 
 Not covered, and the reason a zebra-rs image is not a drop-in replacement yet:
 
 - **The bgpcfgd managers left out** (§4.3), W-ECMP and IDF isolation among
-  them. TSA was observed for IPv4 only, on a single-ASIC VS; the multi-ASIC and
+  them. A static route with `advertise=false` is refused, because zebra-rs
+  does not apply the policy of a redistribute source; so are the next hop
+  forms zebra-rs has no syntax for. TSA was observed for IPv4 only, on a single-ASIC VS; the multi-ASIC and
   chassis paths of the host scripts have not run.
 - **Three template families** wait on zebra-rs features: `update-source
   <interface>`, `set originator-id`, `bestpath peer-type multipath-relax`.
