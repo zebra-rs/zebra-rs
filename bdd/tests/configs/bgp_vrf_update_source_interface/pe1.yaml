@@ -1,0 +1,33 @@
+# PE1 (AS 65000). The CE1 neighbor of VRF vrf-cust has `update-source
+# ce2`: the session to CE1 (10.1.0.2, on interface `ce1`) is to be
+# sourced from the address of `ce2`, another interface of the same VRF.
+# That is not the address the kernel picks for a session to CE1 (it
+# picks 10.1.0.1, of `ce1`), so which address CE1 sees says whether the
+# statement was applied.
+#
+# `ce2` has no address here: the scenarios give it one with a `set`
+# command.
+vrf:
+- name: vrf-cust
+  ipv4:
+    route-target:
+      import: [65000:100]
+      export: [65000:100]
+interface:
+- {if-name: lo, ipv4: {address: 1.1.1.1/32}}
+- {if-name: ce1, vrf: vrf-cust, ipv4: {address: 10.1.0.1/30}}
+- {if-name: ce2, vrf: vrf-cust}
+router:
+  bgp:
+    global: {as: 65000, router-id: 1.1.1.1}
+    vrf:
+    - name: vrf-cust
+      rd: 65000:1
+      neighbor:
+      - remote-address: 10.1.0.2
+        remote-as: 65001
+        timers: {connect-retry-time: 5, idle-hold-time: 3}
+        update-source: ce2
+        afi-safi:
+        - name: ipv4
+          enabled: true
