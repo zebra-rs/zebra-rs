@@ -27,7 +27,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, SecondsFormat, Utc};
 
 /// How many configurations are kept: entries 0 to 49, as Junos has.
 pub const HISTORY_MAX: usize = 50;
@@ -94,9 +94,16 @@ impl CommitHistory {
         self.records.borrow().len()
     }
 
+    /// Read the configuration of entry `n` where it is kept. It is as
+    /// long as the running config, and a reader has no use for a copy.
+    pub fn with_config<R>(&self, n: usize, read: impl FnOnce(&str) -> R) -> Option<R> {
+        self.records.borrow().get(n).map(|r| read(&r.config))
+    }
+
     /// The configuration of entry `n`.
+    #[cfg(test)]
     pub fn config(&self, n: usize) -> Option<String> {
-        self.records.borrow().get(n).map(|r| r.config.clone())
+        self.with_config(n, str::to_string)
     }
 
     /// The number the commit with this revision has now, when it is
@@ -131,6 +138,28 @@ impl CommitHistory {
             };
             out.push_str(&format!("{n:<4}{time}  {revision}{note}\n"));
         }
+        out
+    }
+
+    /// The same listing for a program: an array, newest first, of what
+    /// [`Self::render`] prints for each entry.
+    pub fn render_json(&self) -> String {
+        let commits: Vec<serde_json::Value> = self
+            .records
+            .borrow()
+            .iter()
+            .enumerate()
+            .map(|(n, record)| {
+                serde_json::json!({
+                    "number": n,
+                    "time": record.time.to_rfc3339_opts(SecondsFormat::Secs, true),
+                    "revision": record.revision,
+                    "config-file": record.from_file,
+                })
+            })
+            .collect();
+        let mut out = serde_json::to_string_pretty(&commits).unwrap_or_else(|_| "[]".into());
+        out.push('\n');
         out
     }
 }

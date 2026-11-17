@@ -1,10 +1,13 @@
 //! Commit history, `rollback <n>` and `compare rollback <n>`.
 
 use super::super::Completion;
+use super::super::api::{DisplayRequest, DisplayTxRequest, Message};
 use super::super::history::HISTORY_MAX;
 use super::super::manager::ConfigManager;
 use super::*;
-use tokio::sync::mpsc;
+use std::time::Duration;
+use tokio::sync::{mpsc, oneshot};
+use tokio::time::timeout;
 
 fn manager(name: &str) -> ConfigManager {
     manager_at(&config_path(name))
@@ -46,6 +49,36 @@ fn refused(cm: &ConfigManager, line: &str) -> String {
     let (code, output, _) = cm.execute(mode, line);
     assert_eq!(code, ExecCode::Nomatch, "`{line}`: {output:?}");
     output
+}
+
+/// What `vtyctl show` and MCP are answered for an exec-mode `line`: the
+/// second phase of a show, which a session's own reply does not go
+/// through. The text, or the JSON of `-j`.
+async fn shown(cm: &mut ConfigManager, line: &str, json: bool) -> String {
+    let paths = {
+        let mode = cm.modes.get("exec").expect("exec mode");
+        cm.execute(mode, line).2
+    };
+    let (resp, answered) = oneshot::channel();
+    cm.process_message(Message::DisplayTx(DisplayTxRequest {
+        paths: paths.clone(),
+        resp,
+    }))
+    .await;
+    let wait = Duration::from_secs(5);
+    let answer = timeout(wait, answered)
+        .await
+        .expect("no answer to the show")
+        .expect("the manager answers");
+    let (resp, mut output) = mpsc::channel(4);
+    answer
+        .tx
+        .send(DisplayRequest { paths, json, resp })
+        .expect("the answer takes the request");
+    timeout(wait, output.recv())
+        .await
+        .expect("no output")
+        .expect("output")
 }
 
 /// A manager as the daemon is at startup with `file` as its config
@@ -287,6 +320,22 @@ fn the_commit_of_the_config_file_is_marked() {
     assert!(
         lines[1].starts_with("1   ") && lines[1].ends_with(" UTC  1794906748-1  config file"),
         "{listing}"
+    );
+
+    // And the same for a program.
+    let json: serde_json::Value = serde_json::from_str(&history.render_json()).unwrap();
+    assert_eq!(json.as_array().unwrap().len(), 2, "{json}");
+    assert_eq!(json[0]["number"], 0);
+    assert_eq!(json[0]["revision"], "1794906748-2");
+    assert_eq!(json[0]["config-file"], false);
+    assert_eq!(json[1]["number"], 1);
+    assert_eq!(json[1]["revision"], "1794906748-1");
+    assert_eq!(json[1]["config-file"], true);
+    // The time as RFC 3339, in UTC as the listing has it.
+    let time = json[0]["time"].as_str().unwrap();
+    assert!(
+        chrono::DateTime::parse_from_rfc3339(time).is_ok() && time.ends_with('Z'),
+        "{time}"
     );
 }
 
@@ -598,5 +647,92 @@ async fn completion_lists_the_revisions() {
             !comps.contains(&"commit".to_string()),
             "`{command}`: {comps:?}"
         );
+    }
+}
+
+/// An earlier commit loaded again is the tree that was committed, node
+/// for node: list entries, the members of a leaf-list, the nodes that
+/// are there with nothing under them. It is built for the command and
+/// is nobody else's: the session's candidate is not what it is built on,
+/// and an edit of what was loaded leaves the commit as it was.
+#[tokio::test]
+async fn an_earlier_commit_is_rebuilt_as_it_was() {
+    let cm = manager("rebuilt");
+    commit(
+        &cm,
+        &[
+            "set system hostname r1",
+            "set interface eth0 ipv4 address 10.0.0.1/24",
+            "set interface eth1 ipv4 address 10.1.0.1/24",
+            "set interface eth10",
+            "set vrf blue ipv4 route-target import 65000:3",
+            "set vrf blue ipv4 route-target import 65000:1",
+            "set vrf blue ipv4 route-target import 65000:2",
+            "set router bgp global as 65001",
+            "set router bgp neighbor 10.0.0.2 remote-as 65002",
+            "set router bgp neighbor 10.0.0.2 description first",
+        ],
+    );
+    let committed = cm.store.running.borrow().clone();
+    let lines = running(&cm);
+    commit(
+        &cm,
+        &[
+            "delete interface eth1",
+            "delete vrf blue",
+            "set system hostname r2",
+        ],
+    );
+    commit(&cm, &["set system hostname r3"]);
+    assert!(!cm.store.running.borrow().same_as(&committed));
+
+    // Comparing reads the commit. The session's candidate is the tree it
+    // was, edit and all.
+    run(&cm, "set system hostname edited");
+    let session = cm.store.candidate.borrow().clone();
+    let edited = candidate(&cm);
+    assert_ne!(run(&cm, "compare rollback 2"), "");
+    assert!(Rc::ptr_eq(&session, &cm.store.candidate.borrow()));
+    assert_eq!(candidate(&cm), edited);
+
+    for _ in 0..2 {
+        assert_eq!(run(&cm, "rollback 2"), "");
+        assert_eq!(candidate(&cm), lines);
+        assert!(
+            cm.store.candidate.borrow().same_as(&committed),
+            "{}",
+            run(&cm, "show candidate-config")
+        );
+        assert!(!Rc::ptr_eq(&committed, &cm.store.candidate.borrow()));
+        // What is loaded is the session's to edit, and the commit is
+        // there to load again.
+        run(&cm, "delete interface eth0");
+        assert!(!cm.store.candidate.borrow().same_as(&committed));
+    }
+}
+
+/// `vtyctl show` and MCP are answered the listing by the manager, as a
+/// session is: as text, as JSON for `-j`, and with nothing committed an
+/// empty listing in place of no answer.
+#[tokio::test]
+async fn the_show_path_answers_the_history() {
+    let mut cm = manager("show-path");
+    assert_eq!(shown(&mut cm, "show commit history", false).await, "");
+    assert_eq!(shown(&mut cm, "show commit history", true).await, "[]\n");
+
+    commit(&cm, &["set system hostname r1"]);
+    commit(&cm, &["set system hostname r2"]);
+    let listing = run(&cm, "show commit history");
+    assert_eq!(listing.lines().count(), 2);
+    assert_eq!(shown(&mut cm, "show commit history", false).await, listing);
+
+    let json = shown(&mut cm, "show commit history", true).await;
+    let json: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let revisions = cm.history.revisions();
+    assert_eq!(json.as_array().unwrap().len(), 2, "{json}");
+    for n in 0..2 {
+        assert_eq!(json[n]["number"], n);
+        assert_eq!(json[n]["revision"], revisions[n]);
+        assert_eq!(json[n]["config-file"], false);
     }
 }

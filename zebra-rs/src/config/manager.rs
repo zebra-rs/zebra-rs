@@ -1740,43 +1740,46 @@ impl ConfigManager {
         output
     }
 
-    /// The configuration of commit `n` of the history as a tree.
+    /// The configuration of commit `n` of the history, as a tree of its
+    /// own for the caller to keep or to read.
     ///
     /// Commit 0 is the running config, and is copied from it. That holds
     /// with nothing in the history too, where the running config is the
     /// empty one the daemon started with: `rollback 0` is `discard`
     /// whatever was committed.
     ///
-    /// An earlier commit is built the way a config file is loaded: its
-    /// lines run as `set` commands on an empty candidate. The session's
-    /// candidate is set aside for that and is back when this returns.
+    /// An earlier commit is built from the lines the history keeps: each
+    /// is read against the schema and set on a new root, as a commit
+    /// reads the lines it dispatches ([`Self::paths`]). Nothing a session
+    /// holds is touched for it. It was built on the session's candidate,
+    /// set aside meanwhile, with each line run as a typed command; that
+    /// matched every word against the tree built so far, which on a
+    /// configuration of thousands of lines took the config task seconds.
+    /// The lines are read where they are kept, not copied.
     pub fn history_tree(&self, n: usize) -> Result<Rc<Config>, String> {
         if n == 0 {
             return Ok(carbon_copy(&self.store.running.borrow(), None));
         }
-        let Some(config) = self.history.config(n) else {
-            return Err(match self.history.len() {
+        let root = Rc::new(Config::new("".to_string(), None));
+        let built = self.history.with_config(n, |config| {
+            for line in config.lines() {
+                match self.paths(line.to_string()) {
+                    Some(paths) => set(paths, root.clone()),
+                    // The line was committed by this process, under this
+                    // schema.
+                    None => return Err(format!("% Commit {n} cannot be loaded: {line}\n")),
+                }
+            }
+            Ok(())
+        });
+        match built {
+            Some(Ok(())) => Ok(root),
+            Some(Err(refused)) => Err(refused),
+            None => Err(match self.history.len() {
                 0 => format!("% No commit {n}: nothing has been committed\n"),
                 1 => format!("% No commit {n}: only commit 0 is kept\n"),
                 len => format!("% No commit {n}: commits 0 to {} are kept\n", len - 1),
-            });
-        };
-        let mode = self.modes.get("configure").expect("configure mode");
-        let empty = Rc::new(Config::new("".to_string(), None));
-        let candidate = self.store.candidate.replace(empty);
-        let mut refused = None;
-        for line in config.lines() {
-            let (code, _, _) = self.execute(mode, &format!("set {line}"));
-            if code != ExecCode::Show {
-                refused = Some(line);
-                break;
-            }
-        }
-        let tree = self.store.candidate.replace(candidate);
-        match refused {
-            // The line was committed by this process, under this schema.
-            Some(line) => Err(format!("% Commit {n} cannot be loaded: {line}\n")),
-            None => Ok(tree),
+            }),
         }
     }
 
@@ -2149,6 +2152,20 @@ impl ConfigManager {
                 if req.paths.iter().any(|p| p.name == "version") {
                     let v = crate::version::VersionInfo::current();
                     reply_static_show(req, v.format_version(), v.format_json());
+                    return;
+                }
+                // `show commit history`: the history is the manager's. A
+                // session has it from the exec-mode handler; this is what
+                // `vtyctl show` and MCP get, `-j` included, and what
+                // answers when there is no commit to list.
+                if req
+                    .paths
+                    .iter()
+                    .map(|p| p.name.as_str())
+                    .collect::<Vec<_>>()
+                    == ["show", "commit", "history"]
+                {
+                    reply_static_show(req, self.history.render(), self.history.render_json());
                     return;
                 }
                 // `show running-config [formal|json|yaml]` is owned by the
