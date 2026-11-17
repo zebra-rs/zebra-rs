@@ -144,8 +144,10 @@ hyper-util = { version = "0.1", features = ["tokio"] }
 console-subscriber = "0.5"
 # 2.2 evaluates if-feature on enum arms (feature-gated union values);
 # 2.3 carries `ordered-by user` to the entry tree (the interface
-# address lists); 2.4 moves the parser to parol 5, same parse results.
-libyang = "2.4"
+# address lists); 2.4 moves the parser to parol 5, same parse results;
+# 2.5 reads SONiC's models: every key of a list, typedefs of typedefs,
+# and the restrictions written on a reference to a typedef.
+libyang = "2.5"
 #libyang = { git = "https://github.com/zebra-rs/libyang", rev = "1dada0e" }
 #libyang = { path = "../../libyang" }
 regex = "1.10"
