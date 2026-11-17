@@ -56,6 +56,7 @@ mod ordered;
 mod ospf;
 mod parse;
 mod pim;
+mod rebase;
 mod resolver;
 mod show_provider;
 mod stamp;
