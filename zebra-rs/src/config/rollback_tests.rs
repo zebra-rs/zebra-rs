@@ -4,6 +4,7 @@ use super::super::Completion;
 use super::super::api::{DisplayRequest, DisplayTxRequest, Message};
 use super::super::history::HISTORY_MAX;
 use super::super::manager::ConfigManager;
+use super::super::manager::test_support::{self, candidate, commit, run, running};
 use super::*;
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
@@ -20,27 +21,7 @@ fn config_path(name: &str) -> std::path::PathBuf {
 }
 
 fn manager_at(path: &std::path::Path) -> ConfigManager {
-    let (rib_tx, _rib_rx) = mpsc::unbounded_channel();
-    let (rib_inbound_tx, _rib_inbound_rx) = mpsc::unbounded_channel();
-    let (policy_tx, _policy_rx) = mpsc::unbounded_channel();
-    ConfigManager::new(
-        concat!(env!("CARGO_MANIFEST_DIR"), "/yang").to_string(),
-        Vec::new(),
-        Some(path.to_string_lossy().into_owned()),
-        rib_tx,
-        rib_inbound_tx,
-        policy_tx,
-        Default::default(),
-    )
-    .expect("manager builds")
-}
-
-/// Type a line in a configure-mode session and return what it prints.
-fn run(cm: &ConfigManager, line: &str) -> String {
-    let mode = cm.modes.get("configure").expect("configure mode");
-    let (code, output, _) = cm.execute(mode, line);
-    assert_eq!(code, ExecCode::Show, "`{line}`: {output:?}");
-    output
+    test_support::manager(path, Vec::new(), Default::default())
 }
 
 /// Type a line the session refuses and return the reason it prints.
@@ -95,28 +76,9 @@ fn started(name: &str, file: Option<&str>) -> ConfigManager {
     cm
 }
 
-fn commit(cm: &ConfigManager, lines: &[&str]) {
-    for line in lines {
-        assert_eq!(run(cm, line), "", "`{line}`");
-    }
-    assert_eq!(run(cm, "commit"), "");
-}
-
-/// The running config as the history holds a commit: one line for each
-/// thing set.
-fn running(cm: &ConfigManager) -> String {
-    let mut out = String::new();
-    cm.store.running.borrow().list(&mut out);
-    out
-}
-
-fn candidate(cm: &ConfigManager) -> String {
-    let mut out = String::new();
-    cm.store.candidate.borrow().list(&mut out);
-    out
-}
-
-/// Three commits: the hostname is r1, then r2, then r3 with a neighbor.
+/// Three commits: the hostname is r1, then r2, then r3 with two
+/// interfaces. The running config after each, as the history holds a
+/// commit: one line for each thing set.
 fn three_commits(cm: &ConfigManager) -> [String; 3] {
     commit(cm, &["set system hostname r1"]);
     let one = running(cm);
@@ -126,8 +88,8 @@ fn three_commits(cm: &ConfigManager) -> [String; 3] {
         cm,
         &[
             "set system hostname r3",
-            "set router bgp global as 65001",
-            "set router bgp neighbor 10.0.0.2 remote-as 65002",
+            "set interface eth0 ipv4 address 10.0.0.1/24",
+            "set interface eth1 ipv4 address 10.1.0.1/24",
         ],
     );
     [one, two, running(cm)]
@@ -135,8 +97,8 @@ fn three_commits(cm: &ConfigManager) -> [String; 3] {
 
 /// Commit 0 is what the latest commit produced, and each one before it
 /// is one further back.
-#[tokio::test]
-async fn commits_are_numbered_from_the_latest() {
+#[test]
+fn commits_are_numbered_from_the_latest() {
     let cm = manager("numbered");
     let [one, two, three] = three_commits(&cm);
     assert_eq!(cm.history.len(), 3);
@@ -155,8 +117,8 @@ async fn commits_are_numbered_from_the_latest() {
 
 /// `rollback <n>` changes the candidate only; `commit` makes it the
 /// running config, as a new commit 0 with the others one further back.
-#[tokio::test]
-async fn rollback_takes_effect_on_commit() {
+#[test]
+fn rollback_takes_effect_on_commit() {
     let cm = manager("commit");
     let [_one, two, three] = three_commits(&cm);
     assert_eq!(run(&cm, "rollback 1"), "");
@@ -178,8 +140,8 @@ async fn rollback_takes_effect_on_commit() {
 /// `rollback <n>` replaces uncommitted edits; `rollback 0`, and bare
 /// `rollback`, leave the running config in the candidate as `discard`
 /// does.
-#[tokio::test]
-async fn rollback_replaces_uncommitted_edits() {
+#[test]
+fn rollback_replaces_uncommitted_edits() {
     let cm = manager("edits");
     let [one, _two, three] = three_commits(&cm);
     run(&cm, "set system hostname edited");
@@ -198,8 +160,8 @@ async fn rollback_replaces_uncommitted_edits() {
 
 /// A number with no commit behind it says which there are, and leaves
 /// the candidate as it was.
-#[tokio::test]
-async fn rollback_to_a_commit_not_kept() {
+#[test]
+fn rollback_to_a_commit_not_kept() {
     let cm = manager("missing");
     assert_eq!(
         refused(&cm, "rollback 1"),
@@ -226,21 +188,21 @@ async fn rollback_to_a_commit_not_kept() {
 
 /// `compare rollback <n>` is what turns commit `n` into the candidate,
 /// uncommitted edits included, and changes neither.
-#[tokio::test]
-async fn compare_rollback_shows_what_changed_since() {
+#[test]
+fn compare_rollback_shows_what_changed_since() {
     let cm = manager("compare");
     three_commits(&cm);
     assert_eq!(run(&cm, "compare rollback 0"), "");
     assert_eq!(
         run(&cm, "compare rollback 1"),
-        "+router {
-+  bgp {
-+    global {
-+      as 65001;
-+    }
-+    neighbor 10.0.0.2 {
-+      remote-as 65002;
-+    }
+        "+interface eth0 {
++  ipv4 {
++    address 10.0.0.1/24;
++  }
++}
++interface eth1 {
++  ipv4 {
++    address 10.1.0.1/24;
 +  }
 +}
  system {
@@ -259,8 +221,8 @@ async fn compare_rollback_shows_what_changed_since() {
 }
 
 /// A commit that changes nothing is not a commit to roll back to.
-#[tokio::test]
-async fn a_commit_of_nothing_is_not_recorded() {
+#[test]
+fn a_commit_of_nothing_is_not_recorded() {
     let cm = manager("nothing");
     three_commits(&cm);
     assert_eq!(run(&cm, "commit"), "");
@@ -270,8 +232,8 @@ async fn a_commit_of_nothing_is_not_recorded() {
 }
 
 /// A refused commit is not recorded either.
-#[tokio::test]
-async fn a_refused_commit_is_not_recorded() {
+#[test]
+fn a_refused_commit_is_not_recorded() {
     let cm = manager("refused");
     three_commits(&cm);
     run(
@@ -283,8 +245,8 @@ async fn a_refused_commit_is_not_recorded() {
 }
 
 /// The history keeps the latest commits and drops the oldest.
-#[tokio::test]
-async fn the_oldest_commits_are_dropped() {
+#[test]
+fn the_oldest_commits_are_dropped() {
     let cm = manager("bounded");
     for n in 0..HISTORY_MAX + 5 {
         commit(&cm, &[&format!("set system hostname r{n}")]);
@@ -444,12 +406,12 @@ fn rollback_to_the_running_config_needs_no_commit() {
 
 /// Commit 0 is the running config whatever the history holds: `rollback
 /// 0` copies it, and reads no entry.
-#[tokio::test]
-async fn rollback_to_commit_0_is_the_running_config() {
+#[test]
+fn rollback_to_commit_0_is_the_running_config() {
     let cm = manager("zero");
     let [_one, _two, three] = three_commits(&cm);
     assert_eq!(cm.history.config(0).unwrap(), running(&cm));
-    run(&cm, "delete router bgp");
+    run(&cm, "delete interface eth0");
     run(&cm, "set system hostname edited");
     assert_eq!(run(&cm, "rollback 0"), "");
     assert_eq!(candidate(&cm), three);
@@ -463,8 +425,8 @@ async fn rollback_to_commit_0_is_the_running_config() {
 
 /// A commit's number goes up with every commit after it. Its revision
 /// stays, and loads that commit whatever number it has by then.
-#[tokio::test]
-async fn a_revision_names_a_commit_whatever_its_number() {
+#[test]
+fn a_revision_names_a_commit_whatever_its_number() {
     let cm = manager("revision");
     let [_one, two, _three] = three_commits(&cm);
     let revision = cm.history.revisions()[1].clone();
@@ -655,8 +617,8 @@ async fn completion_lists_the_revisions() {
 /// are there with nothing under them. It is built for the command and
 /// is nobody else's: the session's candidate is not what it is built on,
 /// and an edit of what was loaded leaves the commit as it was.
-#[tokio::test]
-async fn an_earlier_commit_is_rebuilt_as_it_was() {
+#[test]
+fn an_earlier_commit_is_rebuilt_as_it_was() {
     let cm = manager("rebuilt");
     commit(
         &cm,
@@ -668,9 +630,9 @@ async fn an_earlier_commit_is_rebuilt_as_it_was() {
             "set vrf blue ipv4 route-target import 65000:3",
             "set vrf blue ipv4 route-target import 65000:1",
             "set vrf blue ipv4 route-target import 65000:2",
-            "set router bgp global as 65001",
-            "set router bgp neighbor 10.0.0.2 remote-as 65002",
-            "set router bgp neighbor 10.0.0.2 description first",
+            "set vxlan vx1 vni 100",
+            "set vxlan vx1 local-address 10.0.0.1",
+            "set system router-id 10.0.0.1",
         ],
     );
     let committed = cm.store.running.borrow().clone();
