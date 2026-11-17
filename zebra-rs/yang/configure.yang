@@ -82,6 +82,40 @@ module configure {
     type empty;
   }
 
+  // An earlier commit, named one of two ways.
+  //
+  // By its number, typed straight after the command (`rollback 2`): 0 is
+  // the latest commit, and the number of a commit goes up with every
+  // commit made after it. The `commit` list is that number and has no
+  // keyword of its own; the container that uses this names it as its
+  // `ext:default-child`. The range is the depth of the history,
+  // `HISTORY_MAX` in config/history.rs.
+  //
+  // By its revision (`rollback revision 1794906748-3`), which
+  // `show commit history` lists and no later commit changes.
+  grouping earlier-commit {
+    list commit {
+      ext:help "An earlier commit by its number";
+      ext:positional "{rollback|compare rollback} <0-49>";
+      key number;
+      leaf number {
+        ext:help "Commit number: 0 is the latest";
+        type uint8 {
+          range "0..49";
+        }
+      }
+    }
+    list revision {
+      ext:help "An earlier commit by its revision, which does not change";
+      key id;
+      leaf id {
+        ext:help "Revision, as `show commit history` lists it";
+        ext:dynamic "config:revision";
+        type string;
+      }
+    }
+  }
+
   // What `commit` would change: the candidate against the running
   // config. Also reached as `show | compare`, the form Junos operators
   // type: the vty shell runs the two sides of a `|` as a pipeline, and
@@ -94,33 +128,24 @@ module configure {
       ext:help "Set-style flat statement listing";
       type empty;
     }
-    // `compare rollback <n>`: the candidate against an earlier commit.
-    list rollback {
+    // `compare rollback <n>` and `compare rollback revision <id>`: the
+    // candidate against an earlier commit.
+    container rollback {
       ext:help "Compare with an earlier commit";
-      key number;
-      leaf number {
-        ext:help "Commit number: 0 is the latest";
-        type uint8 {
-          range "0..49";
-        }
-      }
+      ext:default-child "commit";
+      uses earlier-commit;
     }
   }
 
   // Put the configuration of an earlier commit in the candidate, in
   // place of what is there. Nothing changes until `commit`. A presence
-  // list, as `clear isis spf` is, so the bare command is a valid
+  // container, as `compare` is, so the bare command is a valid
   // terminal: commit 0, the running config.
-  list rollback {
+  container rollback {
     ext:help "Load an earlier commit into the candidate";
-    ext:presence "Load the latest commit: the running config";
-    key number;
-    leaf number {
-      ext:help "Commit number: 0 is the latest";
-      type uint8 {
-        range "0..49";
-      }
-    }
+    presence "Load the latest commit: the running config";
+    ext:default-child "commit";
+    uses earlier-commit;
   }
 
   leaf load {

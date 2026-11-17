@@ -135,7 +135,9 @@ under the top level of `configure` mode (not under `show`):
 | `compare` | Show what `commit` would change, in the block format |
 | `compare formal` | The same, as `set` lines |
 | `compare rollback <n>` | What changed from commit `n` to the candidate |
+| `compare rollback revision <id>` | The same, for the commit with that revision |
 | `rollback <n>` | Load the configuration of commit `n` into the candidate |
+| `rollback revision <id>` | Load the commit with that revision |
 | `load` | Re-load the on-disk config file into the candidate, then commit |
 | `save` | Write the running config to the on-disk file in its current format |
 | `save { cli \| formal \| json \| yaml }` | Write it in that format instead, and keep the file in that format from then on |
@@ -204,11 +206,12 @@ the latest, which is the running config; commit 1 is the one before it.
 
 ```
 host(config)# show commit history
-0   2026-11-17 09:41:07 UTC
-1   2026-11-17 09:38:52 UTC
-2   2026-11-17 09:12:30 UTC  config file
+0   2026-11-17 09:41:07 UTC  1794906748-3
+1   2026-11-17 09:38:52 UTC  1794906748-2
+2   2026-11-17 09:12:30 UTC  1794906748-1  config file
 ```
 
+Each line is a commit: its number, when it was made, and its revision.
 `config file` marks the commit of the config file, at startup or by
 `load`. Every commit that changed something is listed, whoever made it:
 a `vtyctl apply` is a commit too. A commit that changed nothing is not
@@ -245,9 +248,29 @@ The same holds for a `rollback <n>` line in a document of `set` lines
 given to `vtyctl apply`: when it names no commit, the apply is refused
 at that line and nothing is committed.
 
+The number of a commit is its place in the list, and goes up with every
+commit made after it, by anyone: the commit read as 2 is commit 3 once a
+`vtyctl apply` has landed. Its revision does not change. `rollback
+revision <id>` loads the commit with that revision whatever its number
+is by then, and is refused when that commit is no longer kept:
+
+```
+host(config)# rollback revision 1794906748-2
+host(config)# rollback revision 1794906748-9
+% No commit 1794906748-9
+```
+
+Tab after `revision` lists the revisions kept. A revision is the time
+the daemon started, in seconds since the epoch, and the count of commits
+since. The count is never used twice, and the start time keeps a
+revision noted before a restart from naming another commit after it. Use
+the revision where another writer may commit meanwhile, and in anything
+scripted.
+
 `compare rollback <n>` shows what turns commit `n` into the candidate
 without loading anything, and `show | compare rollback <n>` is the same
-command.
+command. `compare rollback revision <id>` names the commit by its
+revision.
 
 The history is kept in memory. It is gone when the daemon restarts, and
 then starts again from the config file.

@@ -784,7 +784,12 @@ fn a_rollback_line_that_names_no_commit_refuses_the_apply() {
     cm.deploy("set system hostname r1\n");
     edit(&cm, &format!("set {ETH0}"));
 
-    for line in ["rollback 7", "compare rollback 7"] {
+    for line in [
+        "rollback 7",
+        "compare rollback 7",
+        "rollback revision 1-1",
+        "compare rollback revision 1-1",
+    ] {
         // A `set` line first: that is what makes the document one of
         // lines.
         let resp = cm.deploy(&format!(
@@ -819,4 +824,12 @@ fn a_rollback_line_in_the_document_rolls_back() {
     assert_eq!(running(&cm), "system hostname r1\n");
     assert_eq!(cm.history.len(), 3);
     assert_eq!(settings(&candidate(&cm)), [ETH0, "system hostname r1"]);
+
+    // By its revision, a writer rolls back to the commit it means
+    // whatever was committed since it read the history.
+    let revision = cm.history.revisions()[1].clone();
+    cm.deploy("set system hostname r3\n");
+    let resp = cm.deploy(&format!("set {ETH1}\nrollback revision {revision}\n"));
+    assert_eq!(resp.apply_code, ApplyCode::Applied, "{}", resp.cmd);
+    assert_eq!(running(&cm), "system hostname r2\n");
 }

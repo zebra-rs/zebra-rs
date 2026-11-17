@@ -288,6 +288,14 @@ fn comps_default_child_key(comps: &mut Vec<Completion>, parent: &Rc<Entry>) {
         for n in node.union.iter() {
             comps_push_arm(comps, key_leaf, n);
         }
+    } else if node.range.is_some() {
+        // A number in a range has no hint of its kind but the type's
+        // name (`uint8`). Say the range and what the number is, as the
+        // key of a list typed with its keyword does (`rollback <tab>`).
+        let comp = comps_as_key(key_leaf);
+        if !comps.iter().any(|c| c.name == comp.name) {
+            comps.push(comp);
+        }
     } else {
         comps_push_arm(comps, key_leaf, node);
     }

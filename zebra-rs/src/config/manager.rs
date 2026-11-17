@@ -1756,9 +1756,9 @@ impl ConfigManager {
         }
         let Some(config) = self.history.config(n) else {
             return Err(match self.history.len() {
-                0 => format!("% No commit {n}: nothing has been committed"),
-                1 => format!("% No commit {n}: only commit 0 is kept"),
-                len => format!("% No commit {n}: commits 0 to {} are kept", len - 1),
+                0 => format!("% No commit {n}: nothing has been committed\n"),
+                1 => format!("% No commit {n}: only commit 0 is kept\n"),
+                len => format!("% No commit {n}: commits 0 to {} are kept\n", len - 1),
             });
         };
         let mode = self.modes.get("configure").expect("configure mode");
@@ -1775,7 +1775,7 @@ impl ConfigManager {
         let tree = self.store.candidate.replace(candidate);
         match refused {
             // The line was committed by this process, under this schema.
-            Some(line) => Err(format!("% Commit {n} cannot be loaded: {line}")),
+            Some(line) => Err(format!("% Commit {n} cannot be loaded: {line}\n")),
             None => Ok(tree),
         }
     }
@@ -1822,30 +1822,20 @@ impl ConfigManager {
             return (ExecCode::Show, String::new(), state.paths);
         }
 
-        // `rollback <n>` and `compare rollback <n>`: the two commands
-        // whose handler needs a value from the line.
-        let names: Vec<&str> = state.paths.iter().map(|p| p.name.as_str()).collect();
-        let numbered = match names[..] {
-            ["rollback", n] => Some((false, n)),
-            ["compare", "rollback", n] => Some((true, n)),
-            _ => None,
-        };
-        if let Some((compare, n)) = numbered
-            && let Ok(n) = n.parse::<usize>()
-        {
-            let (code, output) = if compare {
-                super::commands::compare_rollback(self, n)
-            } else {
-                super::commands::rollback(self, n)
-            };
-            return (code, output, state.paths);
-        }
-
         // Lookup command.
         let path = paths_str(&state.paths);
         if let Some(f) = mode.fmap.get(&path) {
             let (code, input) = f(self);
             return (code, input, state.paths);
+        }
+        // A command that carries values is installed under its path
+        // without them, and its handler is given them.
+        if !mode.amap.is_empty() {
+            let (path, args) = path_from_command(&state.paths);
+            if let Some(f) = mode.amap.get(&path) {
+                let (code, output) = f(self, args);
+                return (code, output, state.paths);
+            }
         }
 
         // Handle "show"
@@ -1867,6 +1857,11 @@ impl ConfigManager {
         let Some(proto) = dynamics.first() else {
             return Vec::new();
         };
+        // The one completion the manager answers itself: the revisions
+        // of the commits kept, for `rollback revision`.
+        if dynamic == "config:revision" {
+            return self.history.revisions();
+        }
         // The second half names which completion the protocol should
         // answer (`interface`, `vrf`, `neighbor`, …). Carry it as a
         // single synthetic path segment so the handler can dispatch —

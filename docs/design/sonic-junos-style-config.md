@@ -299,15 +299,19 @@ blocked by an idle operator.
 ### 8.2 History, compare, rollback, commit confirmed
 
 - **History** is built, in memory: the configurations of the last 50
-  commits, with the time of each (`show commit history`). Still to do: keep
-  it across a restart, and record the user and a comment (`commit comment
+  commits, with the time and the revision of each (`show commit history`). A
+  commit's number is its place in the list and moves with every commit after
+  it; its revision (`<daemon start>-<count>`) does not, and is what a writer
+  that is not alone on the box names a commit by. Still to do: keep it
+  across a restart, and record the user and a comment (`commit comment
   "…"`).
 - **`show | compare`** is built: configure mode has `compare` and `compare
   formal`, and `show | compare` reaches the same command. `compare rollback
   N` compares the candidate with commit N.
-- **`rollback N`** is built. It loads configuration N into the candidate and
-  takes effect on `commit`, like any other change, and so goes through the
-  same validation and ordered write.
+- **`rollback N`** is built, and `rollback revision ID` beside it. It loads
+  that configuration into the candidate and takes effect on `commit`, like
+  any other change, and so goes through the same validation and ordered
+  write.
 - **`commit confirmed M`** commits, then reverts after M minutes unless a
   plain `commit` arrives. The revert must survive the loss of the session that
   asked for it — that is the case it exists for — so the timer belongs to the
