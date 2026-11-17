@@ -134,6 +134,8 @@ under the top level of `configure` mode (not under `show`):
 | `discard` | Revert candidate back to running (drops uncommitted edits) |
 | `compare` | Show what `commit` would change, in the block format |
 | `compare formal` | The same, as `set` lines |
+| `compare rollback <n>` | What changed from commit `n` to the candidate |
+| `rollback <n>` | Load the configuration of commit `n` into the candidate |
 | `load` | Re-load the on-disk config file into the candidate, then commit |
 | `save` | Write the running config to the on-disk file in its current format |
 | `save { cli \| formal \| json \| yaml }` | Write it in that format instead, and keep the file in that format from then on |
@@ -193,6 +195,48 @@ host(config)# compare formal
 
 Bare `show` in configure mode is the other view of the same thing: the
 whole candidate, with the changes marked in it.
+
+### Going back to an earlier commit
+
+The daemon keeps the configurations of its last 50 commits. Commit 0 is
+the latest, which is the running config; commit 1 is the one before it.
+`show commit history` lists them, in exec and configure mode:
+
+```
+host(config)# show commit history
+0   2026-11-17 09:41:07 UTC
+1   2026-11-17 09:38:52 UTC
+2   2026-11-17 09:12:30 UTC  config file
+```
+
+`config file` marks the commit of the config file, at startup or by
+`load`. Every commit that changed something is listed, whoever made it:
+a `vtyctl apply` is a commit too.
+
+`rollback <n>` puts the configuration of commit `n` in the candidate, in
+place of what is there, uncommitted edits included. Nothing changes
+until `commit`, so the usual sequence is to look first:
+
+```
+host(config)# rollback 1
+host(config)# compare
+ system {
+-  hostname r3;
++  hostname r2;
+ }
+host(config)# commit
+```
+
+That commit is a new commit 0, and what was running becomes commit 1, so
+`rollback 1` again undoes the rollback. Bare `rollback` is `rollback 0`:
+the running config, as `discard` leaves it.
+
+`compare rollback <n>` shows what turns commit `n` into the candidate
+without loading anything, and `show | compare rollback <n>` is the same
+command.
+
+The history is kept in memory. It is gone when the daemon restarts, and
+then starts again from the config file.
 
 ### Leaving the shell with uncommitted changes
 

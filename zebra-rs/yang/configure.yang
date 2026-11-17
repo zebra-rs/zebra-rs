@@ -94,6 +94,33 @@ module configure {
       ext:help "Set-style flat statement listing";
       type empty;
     }
+    // `compare rollback <n>`: the candidate against an earlier commit.
+    list rollback {
+      ext:help "Compare with an earlier commit";
+      key number;
+      leaf number {
+        ext:help "Commit number: 0 is the latest";
+        type uint8 {
+          range "0..49";
+        }
+      }
+    }
+  }
+
+  // Put the configuration of an earlier commit in the candidate, in
+  // place of what is there. Nothing changes until `commit`. A presence
+  // list, as `clear isis spf` is, so the bare command is a valid
+  // terminal: commit 0, the running config.
+  list rollback {
+    ext:help "Load an earlier commit into the candidate";
+    ext:presence "Load the latest commit: the running config";
+    key number;
+    leaf number {
+      ext:help "Commit number: 0 is the latest";
+      type uint8 {
+        range "0..49";
+      }
+    }
   }
 
   leaf load {

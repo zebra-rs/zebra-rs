@@ -209,6 +209,13 @@ module exec {
       ext:help "Show the effective global router ID";
       type empty;
     }
+    container commit {
+      ext:help "Show commits";
+      leaf history {
+        ext:help "The commits `rollback` can load, newest first";
+        type empty;
+      }
+    }
     container candidate-config {
       ext:help "Show the candidate configuration (uncommitted edits)";
       presence "Show candidate config";
