@@ -56,8 +56,8 @@ SONiC's YANG models, and is not atomic. There is no commit-confirm.
 candidate and a running configuration, and `commit` that validates the
 candidate and dispatches the difference, refusing the whole commit when one
 line is rejected. Configure mode has `set`, `delete`, `commit`, `discard`,
-`load` and `save` (*read*: `yang/configure.yang`). It has no `rollback`, no
-commit history, no `compare` and no `commit confirmed`.
+`load`, `save` and `compare` (*read*: `yang/configure.yang`). It has no
+`rollback`, no commit history and no `commit confirmed`.
 
 **zebra-rs on SONiC today.** Routing configuration flows one way:
 CONFIG_DB → bgpcfgd → `vtyctl apply` → zebra-rs. Configuration typed into `vty`
@@ -299,8 +299,9 @@ blocked by an idle operator.
 
 - **History.** Keep the last N committed configurations with time, user and
   comment (`commit comment "…"`).
-- **`show | compare`**, `show | compare rollback N`. zebra-rs already computes
-  a text diff of running against candidate inside `commit`; this exposes it.
+- **`show | compare`** is built: configure mode has `compare` and `compare
+  formal`, and `show | compare` reaches the same command. `compare rollback
+  N` waits for the history.
 - **`rollback N`** loads configuration N into the candidate. It takes effect
   on `commit`, like any other change, and so goes through the same validation
   and ordered write.
