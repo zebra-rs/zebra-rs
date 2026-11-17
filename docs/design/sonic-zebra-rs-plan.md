@@ -58,7 +58,8 @@ repeated on that image.
 5. **Close the zebra-rs feature gaps** that block families: `update-source
    <interface>` first (it unblocks `monitors` outright), then `bestpath
    peer-type multipath-relax`, `set originator-id`, `clear bgp neighbor-group`,
-   `network … policy`.
+   `network … policy`, and applying the policy of a `redistribute` source,
+   which is what `advertise=false` on a static route needs.
 
 **How this was established, and what it does not establish.** Statements about
 zebra-rs were first checked by reading the source and the YANG at `8b59b250`, and
@@ -291,7 +292,8 @@ add-path on neighbors and neighbor-groups, `maximum-paths` and
 `bestpath as-path multipath-relax` (`zebra-bgp-multipath.yang`),
 `suppress-fib-pending`, `maximum-prefix` (*schema read*), `update-source` by
 address, `ebgp-multihop`, dynamic neighbors / listen-range, `table-map`,
-redistribute + policy, the policy engine — prefix-set, as-path-set, community /
+redistribute (its `policy` is accepted but not applied, see
+`bgp-sonic-gaps.md`), the policy engine — prefix-set, as-path-set, community /
 large-community / ext-community, `call`, `set tag` / `match tag`,
 `action next` — `advertise-all-vni`, BFD, MD5/TCP-AO, VRF/L3VPN, SRv6, EVPN,
 IS-IS, OSPF.
@@ -421,7 +423,7 @@ is still open.
 
 | Open | Detail |
 |---|---|
-| **Managers left out under zebra-rs** | Only `BGP_NEIGHBOR` (`general`), `BGP_PEER_RANGE` (`dynamic`) and `BGP_SENTINELS` are driven. Ignored, with one warning at start: internal, monitors, voq_chassis, allow-list, BBR, static routes, advertise-network, BGP profiles, device-global's **WCMP and IDF isolation** (refused with a log message; TSA is honored), aggregate-address, SRv6, prefix-list, software BFD, set-src. |
+| **Managers left out under zebra-rs** | `BGP_NEIGHBOR` (`general`), `BGP_PEER_RANGE` (`dynamic`), `BGP_SENTINELS`, `BGP_DEVICE_GLOBAL` (TSA only) and `STATIC_ROUTE` are driven. `STATIC_ROUTE` refuses, with an error per route, what zebra-rs cannot express: `advertise=false`, an interface-only or link-local next hop, another vrf, mixed distances; a bfd route is skipped. Ignored, with one warning at start: internal, monitors, voq_chassis, allow-list, BBR, advertise-network, BGP profiles, device-global's **WCMP and IDF isolation** (refused with a log message; TSA is honored), aggregate-address, SRv6, prefix-list, software BFD, set-src. |
 | No route source address | FRR's set-src route-map gives BGP routes `src <Loopback0>` in the kernel; zebra-rs installs them without. Locally originated traffic to BGP destinations uses the egress interface address. |
 | Kernel routes carry `onlink` | zebra-rs installs BGP nexthops `onlink`; FRR does not. No effect seen; recorded because it is a visible diff. |
 | VRF peers | The zebra-rs branches of `managers_bgp.py` refuse a non-default VRF. |
@@ -610,7 +612,8 @@ Remaining, in order:
    allocation; design that before writing it.
 6. **Remaining managers**, each with unit tests under `src/sonic-bgpcfgd/tests/`:
    `managers_prefix_list`, `managers_rm`, `managers_as_path`, `managers_static_rt`
-   (replaces staticd), `managers_bfd` (native BFD — this gets simpler),
+   (done for the default vrf, verified on VS: it writes `router static` and
+   turns `redistribute static` on with the first route), `managers_bfd` (native BFD — this gets simpler),
    `managers_device_global` (TSA/TSB done; WCMP needs `set extcommunity
    bandwidth`, IDF isolation needs the `CHECK_IDF_ISOLATION` call chain in the
    policies template), `managers_bbr` (needs

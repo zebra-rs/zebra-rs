@@ -304,6 +304,42 @@ availability event, not an implementation detail. Closing this needs
 either a `clear bgp peer-group` command here, or membership resolution in
 the backend.
 
+### `redistribute <source> policy` — accepted, not applied (measured 2026-11-16)
+
+SONiC: `redistribute static route-map STATIC_ROUTE_FILTER`, where the
+route-map matches tag 1. `bgpcfgd` tags a static route 1 or 2 from the
+`advertise` field of `STATIC_ROUTE`, so the route-map is what keeps an
+`advertise=false` route out of BGP.
+
+`router bgp afi-safi ipv4 redistribute static policy NAME` is in the
+schema and commits, but the policy is not evaluated. Measured on the VS:
+with a policy permitting a prefix-set of two prefixes, a static route
+outside the set was originated and reached the FRR peer. The metric
+override of the same container is applied; the policy is not.
+
+The bgpcfgd backend therefore refuses a static route with
+`advertise=false` instead of installing it and leaking it. Closing this
+means applying the policy where the route is injected (including the
+sharded origination path) and re-evaluating when the policy or a set it
+uses changes. zebra-rs static routes carry no tag, so the zebra-rs side
+would match a prefix-set that bgpcfgd maintains, not a tag.
+
+Two smaller differences seen in the same measurement:
+
+- a redistributed static route is originated with origin IGP; FRR uses
+  incomplete;
+- `router static ipv4 route P blackhole true` commits but installs
+  nothing. `… route P nexthop blackhole` installs a blackhole, and that
+  is what bgpcfgd writes.
+
+### Static route forms `STATIC_ROUTE` can ask for
+
+A zebra-rs static route is a prefix, a list of next hop addresses and one
+distance. `STATIC_ROUTE` can also name a next hop by interface only
+(`ifname` with no address), a next hop in another vrf (`nexthop-vrf`),
+and a distance per next hop. None of the three can be written; bgpcfgd
+refuses such a route whole.
+
 ## Closed during the port
 
 Recorded so the list reads as a state, not a history:
