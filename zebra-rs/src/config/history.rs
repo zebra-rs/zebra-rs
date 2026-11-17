@@ -20,12 +20,25 @@
 //! is never used twice, and the start time keeps a revision noted
 //! before a restart from naming a different commit after it.
 //!
-//! The history is kept in memory: it starts with the commit of the
-//! config file at startup, when there is one, and is gone when the
-//! daemon stops.
+//! The daemon keeps the history in a directory, one file a commit, and
+//! reads it back when it starts ([`CommitHistory::keep_in`]). The commit
+//! of the config file at startup is then one more commit: entry 0 when
+//! the file differs from what was last committed, and no entry when it
+//! is the same. A daemon that starts with nothing, where the history has
+//! commits, is an entry too ([`CommitHistory::started_with`]): entry 0 is
+//! always what is running. Without a directory (the unit tests) the history is in
+//! memory only.
+//!
+//! A file is the commit's header, `# key: value` lines, and after it the
+//! configuration, one line for each thing set. Its name is the commit's
+//! sequence number, which only grows: the newest file is the highest. A
+//! commit keeps the revision it was given, which its file holds; the
+//! commits of a restarted daemon have that daemon's start time in theirs.
 
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, SecondsFormat, Utc};
 
@@ -41,6 +54,32 @@ pub enum Origin {
     ConfigFile,
     /// The daemon, taking back a `commit confirmed` nobody confirmed.
     Unconfirmed,
+    /// The daemon started, and not with the configuration last
+    /// committed: with no config file, or one whose commit was refused.
+    Start,
+}
+
+impl Origin {
+    /// The word a commit's file has for it.
+    fn keyword(self) -> &'static str {
+        match self {
+            Origin::Commit => "commit",
+            Origin::ConfigFile => "config-file",
+            Origin::Unconfirmed => "unconfirmed",
+            Origin::Start => "start",
+        }
+    }
+
+    fn from_keyword(word: &str) -> Option<Self> {
+        [
+            Origin::Commit,
+            Origin::ConfigFile,
+            Origin::Unconfirmed,
+            Origin::Start,
+        ]
+        .into_iter()
+        .find(|origin| origin.keyword() == word)
+    }
 }
 
 pub struct CommitRecord {
@@ -53,6 +92,54 @@ pub struct CommitRecord {
     /// set: `Config::list`, the rendering a commit diffs. Each line is a
     /// `set` command without the keyword.
     pub config: String,
+    /// The number its file is named by.
+    seq: u64,
+}
+
+impl CommitRecord {
+    /// The commit as its file holds it.
+    fn to_file(&self) -> String {
+        format!(
+            "# zebra-rs commit\n# revision: {}\n# time: {}\n# origin: {}\n{}",
+            self.revision,
+            self.time.to_rfc3339_opts(SecondsFormat::Secs, true),
+            self.origin.keyword(),
+            self.config
+        )
+    }
+
+    /// Read a commit's file. `None` for a file that is not one: no
+    /// header, or a revision, time or origin this release does not read.
+    fn from_file(seq: u64, text: &str) -> Option<Self> {
+        let mut rest = text.strip_prefix("# zebra-rs commit\n")?;
+        let (mut revision, mut time, mut origin) = (None, None, None);
+        while let Some(line) = rest.strip_prefix("# ") {
+            let (line, after) = line.split_once('\n').unwrap_or((line, ""));
+            rest = after;
+            // A key this release does not know is a later release's.
+            match line.split_once(": ") {
+                Some(("revision", value)) => revision = Some(value.to_string()),
+                Some(("time", value)) => {
+                    time = Some(DateTime::parse_from_rfc3339(value).ok()?.to_utc());
+                }
+                Some(("origin", value)) => origin = Some(Origin::from_keyword(value)?),
+                _ => {}
+            }
+        }
+        Some(Self {
+            revision: revision?,
+            time: time?,
+            origin: origin?,
+            config: rest.to_string(),
+            seq,
+        })
+    }
+}
+
+/// The name of commit `seq`'s file. Padded, so the names sort as the
+/// numbers do.
+fn file_name(seq: u64) -> String {
+    format!("{seq:010}.conf")
 }
 
 pub struct CommitHistory {
@@ -64,6 +151,10 @@ pub struct CommitHistory {
     count: Cell<u64>,
     /// Newest first.
     records: RefCell<VecDeque<CommitRecord>>,
+    /// Where the commits are kept, when they are.
+    dir: RefCell<Option<PathBuf>>,
+    /// The number of the next commit's file.
+    next_seq: Cell<u64>,
 }
 
 impl Default for CommitHistory {
@@ -79,6 +170,8 @@ impl CommitHistory {
             start,
             count: Cell::new(0),
             records: RefCell::default(),
+            dir: RefCell::default(),
+            next_seq: Cell::new(0),
         }
     }
 
@@ -86,17 +179,119 @@ impl CommitHistory {
     /// that changed the running config: one that changed nothing would
     /// push a configuration out of the history for a copy of the one
     /// already at 0.
+    ///
+    /// The config file a daemon starts with is the one case where that
+    /// is not enough: it changes the running config, which is empty
+    /// then, and is still no commit when it is what the history read
+    /// back from its directory has at 0.
     pub fn record(&self, config: String, origin: Origin) {
+        let mut records = self.records.borrow_mut();
+        if origin == Origin::ConfigFile && records.front().is_some_and(|r| r.config == config) {
+            return;
+        }
         let count = self.count.get() + 1;
         self.count.set(count);
-        let mut records = self.records.borrow_mut();
-        records.push_front(CommitRecord {
+        let seq = self.next_seq.get();
+        self.next_seq.set(seq + 1);
+        let record = CommitRecord {
             revision: format!("{}-{count}", self.start),
             time: Utc::now(),
             origin,
             config,
-        });
-        records.truncate(HISTORY_MAX);
+            seq,
+        };
+        let dir = self.dir.borrow();
+        if let Some(dir) = dir.as_deref()
+            && let Err(err) = write_commit(dir, &record)
+        {
+            // The commit is made; only going back to it after a restart
+            // is lost.
+            tracing::warn!(
+                "commit history: cannot write {}: {err}",
+                dir.join(file_name(seq)).display()
+            );
+        }
+        records.push_front(record);
+        while records.len() > HISTORY_MAX {
+            if let (Some(old), Some(dir)) = (records.pop_back(), dir.as_deref()) {
+                let _ = std::fs::remove_file(dir.join(file_name(old.seq)));
+            }
+        }
+    }
+
+    /// The daemon has started with `running` as its configuration.
+    /// Commit 0 is the running config, always: when the history read
+    /// back from its directory has another configuration there (the
+    /// config file is gone, or its commit was refused), the one the
+    /// daemon is running is a commit in front of it, so that `rollback
+    /// 1` is what was running before the restart.
+    pub fn started_with(&self, running: String) {
+        let differs = self
+            .records
+            .borrow()
+            .front()
+            .is_some_and(|last| last.config != running);
+        if differs {
+            self.record(running, Origin::Start);
+        }
+    }
+
+    /// Keep the history in `dir` from now on, starting with the commits
+    /// already there: the newest [`HISTORY_MAX`] of them. Files beyond
+    /// those are removed; a file that is not a commit is left alone and
+    /// said.
+    ///
+    /// A directory that cannot be made or read is reported and the
+    /// history stays in memory: the daemon starts all the same.
+    pub fn keep_in(&self, dir: &Path) {
+        let listing = std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)
+            .and_then(|()| std::fs::read_dir(dir));
+        let listing = match listing {
+            Ok(listing) => listing,
+            Err(err) => {
+                tracing::warn!(
+                    "commit history: {}: {err}; kept in memory only",
+                    dir.display()
+                );
+                return;
+            }
+        };
+        let mut seqs: Vec<u64> = listing
+            .filter_map(|entry| {
+                let name = entry.ok()?.file_name();
+                let seq = name.to_str()?.strip_suffix(".conf")?;
+                (seq.len() == 10).then(|| seq.parse().ok())?
+            })
+            .collect();
+        seqs.sort_unstable_by(|a, b| b.cmp(a));
+        self.next_seq
+            .set(seqs.first().map_or(0, |newest| newest + 1));
+
+        let mut records = VecDeque::new();
+        for seq in seqs {
+            let path = dir.join(file_name(seq));
+            if records.len() == HISTORY_MAX {
+                let _ = std::fs::remove_file(&path);
+                continue;
+            }
+            match std::fs::read_to_string(&path) {
+                Ok(text) => match CommitRecord::from_file(seq, &text) {
+                    Some(record) => records.push_back(record),
+                    None => tracing::warn!(
+                        "commit history: {} is not a commit; skipped",
+                        path.display()
+                    ),
+                },
+                Err(err) => {
+                    tracing::warn!("commit history: {}: {err}; skipped", path.display())
+                }
+            }
+        }
+        self.records.replace(records);
+        self.dir.replace(Some(dir.to_path_buf()));
     }
 
     pub fn len(&self) -> usize {
@@ -144,6 +339,7 @@ impl CommitHistory {
                 Origin::Commit => "",
                 Origin::ConfigFile => "  config file",
                 Origin::Unconfirmed => "  rollback, not confirmed",
+                Origin::Start => "  daemon start",
             };
             out.push_str(&format!("{n:<4}{time}  {revision}{note}\n"));
         }
@@ -172,4 +368,24 @@ impl CommitHistory {
         out.push('\n');
         out
     }
+}
+
+/// Write a commit's file whole or not at all, readable by its owner
+/// only: it is a copy of the configuration, secrets included.
+fn write_commit(dir: &Path, record: &CommitRecord) -> std::io::Result<()> {
+    use std::io::Write;
+    let path = dir.join(file_name(record.seq));
+    let tmp = path.with_extension("tmp");
+    let written = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&tmp)
+        .and_then(|mut file| file.write_all(record.to_file().as_bytes()))
+        .and_then(|()| std::fs::rename(&tmp, &path));
+    if written.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    written
 }

@@ -1763,6 +1763,29 @@ impl ConfigManager {
         output
     }
 
+    /// Load the config file as the daemon does when it starts, and tell
+    /// the commit history what the daemon then runs.
+    pub fn load_startup_config(&self) {
+        self.load_config();
+        let mut running = String::new();
+        self.store.running.borrow().list(&mut running);
+        self.history.started_with(running);
+    }
+
+    /// Keep the commit history in `dir`, or without one in the
+    /// directory beside the config file that is named after it
+    /// (`zebra-rs.conf.commits`). Called before the config file is
+    /// loaded, so that its commit joins the history kept there.
+    pub fn keep_history(&self, dir: Option<&Path>) {
+        let beside = || {
+            let mut name = self.config_path.clone().into_os_string();
+            name.push(".commits");
+            PathBuf::from(name)
+        };
+        self.history
+            .keep_in(&dir.map_or_else(beside, Path::to_path_buf));
+    }
+
     /// The configuration of commit `n` of the history, as a tree of its
     /// own for the caller to keep or to read.
     ///
@@ -2640,7 +2663,7 @@ fn top_from_exec(exec: &Rc<Entry>, name: &str) -> Option<Rc<Entry>> {
 }
 
 pub async fn event_loop(mut config: ConfigManager) {
-    config.load_config();
+    config.load_startup_config();
     loop {
         tokio::select! {
             Some(msg) = config.rx.recv() => {

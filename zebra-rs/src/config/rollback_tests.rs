@@ -698,3 +698,238 @@ async fn the_show_path_answers_the_history() {
         assert_eq!(json[n]["config-file"], false);
     }
 }
+
+/// A manager that keeps its history in `dir`, as the daemon does.
+fn manager_keeping(name: &str, dir: &std::path::Path) -> ConfigManager {
+    let cm = manager(name);
+    cm.keep_history(Some(dir));
+    cm
+}
+
+fn history_dir(name: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "zebra-rs-rollback-{name}-{}.commits",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    dir
+}
+
+fn files(dir: &std::path::Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .expect("history directory")
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    names.sort();
+    names
+}
+
+/// The history is there after a restart, numbered as it was, and a
+/// commit after the restart goes on from it.
+#[tokio::test]
+async fn the_history_survives_a_restart() {
+    let dir = history_dir("restart");
+    let [one, two, three] = {
+        let cm = manager_keeping("restart", &dir);
+        three_commits(&cm)
+    };
+
+    let cm = manager_keeping("restart", &dir);
+    assert_eq!(cm.history.len(), 3);
+    assert_eq!(cm.history.config(0).unwrap(), three);
+    assert_eq!(cm.history.config(1).unwrap(), two);
+    assert_eq!(cm.history.config(2).unwrap(), one);
+    // Each keeps the revision it was given.
+    let revisions = cm.history.revisions();
+    assert_eq!(cm.history.number_of(&revisions[2]), Some(2));
+
+    // The restarted daemon has no config file here and runs nothing.
+    // That is commit 0, as the running config always is, and what was
+    // running before the restart is `rollback 1`.
+    cm.load_startup_config();
+    assert_eq!(running(&cm), "");
+    assert_eq!(cm.history.len(), 4);
+    assert_eq!(cm.history.config(0).unwrap(), "");
+    assert!(
+        run(&cm, "show commit history")
+            .lines()
+            .next()
+            .unwrap()
+            .ends_with("  daemon start")
+    );
+    assert_eq!(cm.history.revisions()[1..], revisions[..]);
+    assert_eq!(run(&cm, "rollback 1"), "");
+    assert_eq!(run(&cm, "commit"), "");
+    assert_eq!(running(&cm), three);
+    assert_eq!(cm.history.len(), 5);
+    assert_eq!(
+        files(&dir),
+        [
+            "0000000000.conf",
+            "0000000001.conf",
+            "0000000002.conf",
+            "0000000003.conf",
+            "0000000004.conf"
+        ]
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A commit's file is its header and the configuration as `set` lines,
+/// and is readable by its owner only.
+#[tokio::test]
+async fn a_commit_s_file() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = history_dir("file");
+    let cm = manager_keeping("file", &dir);
+    commit(&cm, &["set system hostname r1"]);
+    let path = dir.join("0000000000.conf");
+    let text = std::fs::read_to_string(&path).expect("the commit's file");
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines[0], "# zebra-rs commit");
+    assert_eq!(
+        lines[1],
+        format!("# revision: {}", cm.history.revisions()[0])
+    );
+    assert!(
+        lines[2].starts_with("# time: 20") && lines[2].ends_with('Z'),
+        "{text}"
+    );
+    assert_eq!(lines[3], "# origin: commit");
+    assert_eq!(lines[4..], ["system hostname r1"]);
+    let mode =
+        |path: &std::path::Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode(&path), 0o600);
+    assert_eq!(mode(&dir), 0o700);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Only the latest commits have files: the oldest one's is removed with
+/// it, and the numbers go on across a restart.
+#[tokio::test]
+async fn the_oldest_commit_s_file_is_removed() {
+    let dir = history_dir("pruned");
+    {
+        let cm = manager_keeping("pruned", &dir);
+        for n in 0..HISTORY_MAX + 2 {
+            commit(&cm, &[&format!("set system hostname r{n}")]);
+        }
+        let names = files(&dir);
+        assert_eq!(names.len(), HISTORY_MAX);
+        assert_eq!(names[0], "0000000002.conf");
+    }
+    let cm = manager_keeping("pruned", &dir);
+    assert_eq!(cm.history.len(), HISTORY_MAX);
+    commit(&cm, &["set system hostname again"]);
+    let names = files(&dir);
+    assert_eq!(names.len(), HISTORY_MAX);
+    assert_eq!(names[0], "0000000003.conf");
+    assert_eq!(
+        names[HISTORY_MAX - 1],
+        format!("{:010}.conf", HISTORY_MAX + 2)
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A file in the directory that is not a commit is skipped and left
+/// where it is; the commits around it are read.
+#[tokio::test]
+async fn a_file_that_is_not_a_commit_is_skipped() {
+    let dir = history_dir("damaged");
+    {
+        let cm = manager_keeping("damaged", &dir);
+        three_commits(&cm);
+    }
+    std::fs::write(dir.join("0000000001.conf"), "set system hostname r2\n").unwrap();
+    std::fs::write(dir.join("notes.txt"), "not ours\n").unwrap();
+    let cm = manager_keeping("damaged", &dir);
+    assert_eq!(cm.history.len(), 2);
+    assert!(cm.history.config(0).unwrap().contains("hostname r3"));
+    assert_eq!(cm.history.config(1).unwrap(), "system hostname r1\n");
+    assert!(dir.join("0000000001.conf").exists());
+    assert!(dir.join("notes.txt").exists());
+    // The next commit does not reuse a number.
+    commit(&cm, &["set system hostname r4"]);
+    assert!(dir.join("0000000003.conf").exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A directory that cannot be used leaves the history in memory: the
+/// commit is made all the same.
+#[tokio::test]
+async fn an_unusable_directory_keeps_the_history_in_memory() {
+    let file =
+        std::env::temp_dir().join(format!("zebra-rs-rollback-notadir-{}", std::process::id()));
+    std::fs::write(&file, "").unwrap();
+    let cm = manager_keeping("notadir", &file.join("commits"));
+    commit(&cm, &["set system hostname r1"]);
+    commit(&cm, &["set system hostname r2"]);
+    assert_eq!(cm.history.len(), 2);
+    assert_eq!(run(&cm, "rollback 1"), "");
+    let _ = std::fs::remove_file(&file);
+}
+
+/// What the daemon rolled back for want of a confirmation is marked as
+/// that after a restart too.
+#[test]
+fn the_origin_is_kept_in_the_file() {
+    let dir = history_dir("origin");
+    let history = super::super::history::CommitHistory::default();
+    history.keep_in(&dir);
+    history.record("set system hostname r1\n".to_string(), Origin::ConfigFile);
+    history.record("set system hostname r2\n".to_string(), Origin::Commit);
+    history.record("set system hostname r1\n".to_string(), Origin::Unconfirmed);
+    let before = history.render();
+
+    let history = super::super::history::CommitHistory::default();
+    history.keep_in(&dir);
+    assert_eq!(history.render(), before);
+    assert!(
+        before
+            .lines()
+            .next()
+            .unwrap()
+            .ends_with("rollback, not confirmed")
+    );
+    assert!(before.lines().nth(2).unwrap().ends_with("config file"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A daemon that starts with the config file it last committed has made
+/// no new commit; one that starts with another has, and what ran before
+/// is `rollback 1`.
+#[test]
+fn the_config_file_at_a_restart_joins_the_history() {
+    let dir = history_dir("restart-file");
+    let path = config_path("restart-file");
+    let start = |file: &str| {
+        std::fs::write(&path, file).unwrap();
+        let cm = manager_at(&path);
+        cm.keep_history(Some(&dir));
+        cm.load_startup_config();
+        let _ = std::fs::remove_file(&path);
+        cm
+    };
+    {
+        let cm = start("set system hostname r1\n");
+        assert_eq!(cm.history.len(), 1);
+        commit(&cm, &["set system hostname r2"]);
+    }
+    // Saved before the restart: the file is the last commit.
+    {
+        let cm = start("set system hostname r2\n");
+        assert_eq!(running(&cm), "system hostname r2\n");
+        assert_eq!(cm.history.len(), 2);
+    }
+    // Not saved: the file is the older configuration.
+    let cm = start("set system hostname r1\n");
+    assert_eq!(cm.history.len(), 3);
+    let listing = run(&cm, "show commit history");
+    assert!(
+        listing.lines().next().unwrap().ends_with("  config file"),
+        "{listing}"
+    );
+    assert_eq!(run(&cm, "rollback 1"), "");
+    assert_eq!(candidate(&cm), "system hostname r2\n");
+    let _ = std::fs::remove_dir_all(&dir);
+}

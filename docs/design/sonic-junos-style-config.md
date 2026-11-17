@@ -57,7 +57,7 @@ candidate and a running configuration, and `commit` that validates the
 candidate and dispatches the difference, refusing the whole commit when one
 line is rejected. Configure mode has `set`, `delete`, `commit`, `discard`,
 `load`, `save`, `compare` and `rollback` (*read*: `yang/configure.yang`), over
-a history of the last 50 commits that is kept in memory, and `commit
+a history of the last 50 commits that is kept on disk, and `commit
 confirmed`.
 
 **zebra-rs on SONiC today.** Routing configuration flows one way:
@@ -298,12 +298,14 @@ blocked by an idle operator.
 
 ### 8.2 History, compare, rollback, commit confirmed
 
-- **History** is built, in memory: the configurations of the last 50
-  commits, with the time and the revision of each (`show commit history`). A
-  commit's number is its place in the list and moves with every commit after
-  it; its revision (`<daemon start>-<count>`) does not, and is what a writer
-  that is not alone on the box names a commit by. Still to do: keep it
-  across a restart, and record the user and a comment (`commit comment
+- **History** is built: the configurations of the last 50 commits, with the
+  time and the revision of each (`show commit history`), kept in a directory
+  and read back at start (`--commit-history-dir`). A commit's number is its
+  place in the list and moves with every commit after it; its revision
+  (`<daemon start>-<count>`) does not, and is what a writer that is not alone
+  on the box names a commit by. On SONiC the default directory is inside
+  the `bgp` container; the image has to point it at storage that outlives
+  the container. Still to do: record the user and a comment (`commit comment
   "…"`).
 - **`show | compare`** is built: configure mode has `compare` and `compare
   formal`, and `show | compare` reaches the same command. `compare rollback

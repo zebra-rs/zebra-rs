@@ -290,8 +290,21 @@ without loading anything, and `show | compare rollback <n>` is the same
 command. `compare rollback revision <id>` names the commit by its
 revision.
 
-The history is kept in memory. It is gone when the daemon restarts, and
-then starts again from the config file.
+The history is kept on disk and is still there after a restart. It
+lives in a directory beside the config file, named after it
+(`/etc/zebra-rs/zebra-rs.conf.commits`), or in the one given with
+[`--commit-history-dir`](ch-00-05-command-line-options.md). Each commit
+is a file there, readable by its owner only: a header and the
+configuration, one line for each thing set. A commit keeps its revision
+across the restart.
+
+When the daemon starts, the commit of the config file joins that
+history. If the file is what was last committed, nothing is added. If it
+is not (the last commits were never saved, or the file was edited), it
+is the new commit 0, and `rollback 1` brings back what was running
+before the restart. The same holds for a daemon that starts with no
+config file, or with one it refuses: what it runs then is commit 0,
+marked `daemon start`.
 
 ### A commit that takes itself back
 
