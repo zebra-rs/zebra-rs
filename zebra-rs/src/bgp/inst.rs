@@ -9719,6 +9719,10 @@ mod redist_pool_tests;
 mod dump_v4_afi_tests;
 
 #[cfg(test)]
+#[path = "v4_receive_afi_tests.rs"]
+mod v4_receive_afi_tests;
+
+#[cfg(test)]
 #[path = "multipath_pool_tests.rs"]
 mod multipath_pool_tests;
 

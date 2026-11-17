@@ -1236,6 +1236,9 @@ pub struct Peer {
     pub cap_send: BgpCap,
     pub cap_recv: BgpCap,
     pub cap_map: CapAfiMap,
+    /// The receive path has logged, this session, an UPDATE whose IPv4
+    /// unicast it dropped because the session did not enable the family.
+    pub v4_not_enabled_logged: bool,
     /// Adj-RIB-In for the main-owned families (EVPN, flowspec,
     /// BGP-LS). The sharded families' received routes live in
     /// `BgpShard::adj_in` keyed by this peer's `ident` (RIB sharding
@@ -1481,6 +1484,7 @@ impl Peer {
             cap_send: BgpCap::default(),
             cap_recv: BgpCap::default(),
             cap_map: CapAfiMap::new(),
+            v4_not_enabled_logged: false,
             adj_in: MainAdjIn::new(),
             adj_out: AdjRib::new(),
             max_prefix: Default::default(),
@@ -2006,6 +2010,18 @@ impl Peer {
             return true;
         }
         false
+    }
+
+    /// Whether this session enabled `afi`/`safi` on our side: our OPEN
+    /// carried its Multiprotocol capability, built from the configured
+    /// families. Unlike [`Self::is_afi_safi`] it does not need the
+    /// neighbor's capability, so a neighbor that sent none still counts.
+    /// FRR's `peer->afc`.
+    pub fn is_afi_safi_enabled(&self, afi: Afi, safi: Safi) -> bool {
+        self.cap_map
+            .entries
+            .get(&CapMultiProtocol::new(&afi, &safi))
+            .is_some_and(|cap| cap.send)
     }
 
     /// The configured SRv6 `encapsulation-type` for this peer's IPv6
