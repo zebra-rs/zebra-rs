@@ -2,7 +2,7 @@
 
 use super::super::Completion;
 use super::super::api::{DisplayRequest, DisplayTxRequest, Message};
-use super::super::history::HISTORY_MAX;
+use super::super::history::{HISTORY_MAX, Origin};
 use super::super::manager::ConfigManager;
 use super::super::manager::test_support::{self, candidate, commit, run, running};
 use super::*;
@@ -268,8 +268,8 @@ fn the_oldest_commits_are_dropped() {
 #[test]
 fn the_commit_of_the_config_file_is_marked() {
     let history = super::super::history::CommitHistory::starting_at(1794906748);
-    history.record("system hostname r1\n".to_string(), true);
-    history.record("system hostname r2\n".to_string(), false);
+    history.record("system hostname r1\n".to_string(), Origin::ConfigFile);
+    history.record("system hostname r2\n".to_string(), Origin::Commit);
     let listing = history.render();
     let lines: Vec<&str> = listing.lines().collect();
     assert_eq!(lines.len(), 2, "{listing}");

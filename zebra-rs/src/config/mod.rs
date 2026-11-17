@@ -42,6 +42,7 @@ mod bfd;
 mod bgp;
 mod check;
 mod commands;
+mod confirm;
 mod cradle;
 mod dhcpc;
 mod files;

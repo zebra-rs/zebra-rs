@@ -61,6 +61,9 @@ pub fn configure_mode_create(entry: Rc<Entry>) -> Mode {
     mode.install_func(String::from("/show"), show);
     install_show_config_handlers(&mut mode);
     mode.install_func(String::from("/commit"), commit);
+    // `commit confirmed <minutes>` carries a number: see `rollback`.
+    mode.install_func(String::from("/commit/confirmed"), commit_confirmed);
+    mode.install_func_args(String::from("/commit/confirmed"), commit_confirmed_minutes);
     mode.install_func(String::from("/discard"), discard);
     mode.install_func(String::from("/compare"), compare);
     mode.install_func(String::from("/compare/formal"), compare_formal);
@@ -369,7 +372,14 @@ fn compare_block(running: &str, candidate: &str) -> String {
 // `Config::json()` / `Config::yaml()` are the serialized equivalents.
 
 fn show_commit_history(config: &ConfigManager) -> (ExecCode, String) {
-    (ExecCode::Show, config.history.render())
+    let mut output = config.history.render();
+    if let Some(deadline) = config.confirm_deadline() {
+        output.push_str(&format!(
+            "A confirmed commit is pending: rolled back at {} unless `commit` confirms it\n",
+            deadline.format("%Y-%m-%d %H:%M:%S UTC")
+        ));
+    }
+    (ExecCode::Show, output)
 }
 
 fn show_candidate_cli(config: &ConfigManager) -> (ExecCode, String) {
@@ -437,9 +447,30 @@ pub(super) fn prettify_json(compact: String) -> String {
 fn commit(config: &ConfigManager) -> (ExecCode, String) {
     let result = config.commit_config();
     match result {
-        Ok(_) => (ExecCode::Show, String::from("")),
+        Ok(_) => {
+            // Typed by an operator: it confirms a `commit confirmed`.
+            config.confirm_commit();
+            (ExecCode::Show, String::from(""))
+        }
         Err(err) => (ExecCode::Show, err.to_string()),
     }
+}
+
+/// `commit confirmed <minutes>`.
+fn commit_confirmed_minutes(config: &ConfigManager, mut args: Args) -> (ExecCode, String) {
+    match args.u16() {
+        Some(minutes) => (ExecCode::Show, config.commit_confirmed(minutes.into())),
+        // The schema took it as a number of minutes.
+        None => (ExecCode::Nomatch, String::new()),
+    }
+}
+
+/// Bare `commit confirmed`.
+fn commit_confirmed(config: &ConfigManager) -> (ExecCode, String) {
+    (
+        ExecCode::Show,
+        config.commit_confirmed(super::confirm::CONFIRM_MINUTES),
+    )
 }
 
 fn discard(config: &ConfigManager) -> (ExecCode, String) {
@@ -481,23 +512,48 @@ fn save_reply(config: &ConfigManager, saved: std::io::Result<&Path>) -> (ExecCod
     (ExecCode::Show, output)
 }
 
+/// A commit awaiting confirmation is not saved: the file would keep it
+/// when the daemon takes it back, and a restart would bring it back.
+fn save_unconfirmed(config: &ConfigManager) -> Option<(ExecCode, String)> {
+    config.confirm_deadline()?;
+    Some((
+        ExecCode::Show,
+        "% A confirmed commit is pending: `commit` to confirm it, then save\n".to_string(),
+    ))
+}
+
 fn save(config: &ConfigManager) -> (ExecCode, String) {
+    if let Some(refused) = save_unconfirmed(config) {
+        return refused;
+    }
     save_reply(config, config.save_config())
 }
 
 fn save_cli(config: &ConfigManager) -> (ExecCode, String) {
+    if let Some(refused) = save_unconfirmed(config) {
+        return refused;
+    }
     save_reply(config, config.save_config_as(ConfigFormat::Cli))
 }
 
 fn save_formal(config: &ConfigManager) -> (ExecCode, String) {
+    if let Some(refused) = save_unconfirmed(config) {
+        return refused;
+    }
     save_reply(config, config.save_config_as(ConfigFormat::SetDelete))
 }
 
 fn save_json(config: &ConfigManager) -> (ExecCode, String) {
+    if let Some(refused) = save_unconfirmed(config) {
+        return refused;
+    }
     save_reply(config, config.save_config_as(ConfigFormat::Json))
 }
 
 fn save_yaml(config: &ConfigManager) -> (ExecCode, String) {
+    if let Some(refused) = save_unconfirmed(config) {
+        return refused;
+    }
     save_reply(config, config.save_config_as(ConfigFormat::Yaml))
 }
 
@@ -513,3 +569,7 @@ mod compare_tests;
 #[cfg(test)]
 #[path = "rollback_tests.rs"]
 mod rollback_tests;
+
+#[cfg(test)]
+#[path = "confirm_tests.rs"]
+mod confirm_tests;

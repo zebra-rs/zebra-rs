@@ -7,10 +7,11 @@ use super::check;
 use super::commands::Mode;
 use super::commands::{configure_mode_create, exec_mode_create, prettify_json};
 use super::configs::{carbon_copy, delete, set};
+use super::confirm::PendingConfirm;
 use super::cradle::spawn_cradle;
 use super::dhcpc::spawn_dhcpc;
 use super::files::load_config_file;
-use super::history::CommitHistory;
+use super::history::{CommitHistory, Origin};
 use super::isis::{despawn_isis, spawn_isis};
 use super::json::{DocError, json_read};
 use super::label_check;
@@ -249,6 +250,10 @@ pub struct ConfigManager {
     pub store: ConfigStore,
     /// What the last commits produced, for `rollback`.
     pub history: CommitHistory,
+    /// The `commit confirmed` awaiting its confirmation, if one is.
+    pub confirm: RefCell<Option<PendingConfirm>>,
+    /// The number of its timer, and of the next one after it.
+    pub confirm_generation: Cell<u64>,
     pub modes: HashMap<String, Mode>,
     pub tx: Sender<Message>,
     pub rx: Receiver<Message>,
@@ -505,6 +510,8 @@ impl ConfigManager {
             modes: HashMap::new(),
             store: ConfigStore::new(),
             history: CommitHistory::default(),
+            confirm: RefCell::new(None),
+            confirm_generation: Cell::new(0),
             tx,
             rx,
             cm_clients: RefCell::new(HashMap::new()),
@@ -832,7 +839,7 @@ impl ConfigManager {
             })
     }
 
-    fn paths(&self, input: String) -> Option<Vec<CommandPath>> {
+    pub(super) fn paths(&self, input: String) -> Option<Vec<CommandPath>> {
         let mode = self.modes.get("configure")?;
         let state = State::new();
 
@@ -931,7 +938,7 @@ impl ConfigManager {
     /// fails validation: mandatory nodes, the leaf value checks, or a label
     /// check it would newly break.
     pub fn commit_config(&self) -> anyhow::Result<()> {
-        self.commit(false, false)
+        self.commit(false, Origin::Commit)
     }
 
     /// Commit the startup config. As [`Self::commit_config`], except that a
@@ -946,10 +953,21 @@ impl ConfigManager {
     /// is not `startup`: a file that is missing, or sets nothing, is
     /// committed this way too.
     fn commit_startup_config(&self, from_file: bool) -> anyhow::Result<()> {
-        self.commit(true, from_file)
+        let origin = if from_file {
+            Origin::ConfigFile
+        } else {
+            Origin::Commit
+        };
+        self.commit(true, origin)
     }
 
-    fn commit(&self, startup: bool, from_file: bool) -> anyhow::Result<()> {
+    /// Commit the candidate while the daemon runs, as a commit made by
+    /// `origin`.
+    pub(super) fn commit_as(&self, origin: Origin) -> anyhow::Result<()> {
+        self.commit(false, origin)
+    }
+
+    fn commit(&self, startup: bool, origin: Origin) -> anyhow::Result<()> {
         let mut errors = Vec::<String>::new();
         self.store.candidate.borrow().validate(&mut errors);
         if !errors.is_empty() {
@@ -1453,14 +1471,19 @@ impl ConfigManager {
             despawn_stamp(self);
         }
 
+        let base = self.store.running.borrow().clone();
         self.store.commit();
         // The candidate's lines are the running config's now. A commit
         // that changed none is not one to roll back to, and that is what
         // keeps the configuration a daemon starts with nothing in out of
         // the history.
         if running != candidate {
-            self.history.record(candidate, from_file);
+            self.history.record(candidate, origin);
         }
+        // A `commit confirmed` awaits confirmation and this is another
+        // commit (its own takes it out first): going back keeps this one.
+        let committed = self.store.running.borrow().clone();
+        self.confirm_carry(&base, &committed);
 
         // External gRPC subscribers — post-commit, so a reader that
         // fetches state on an event sees the committed tree (the JSON
@@ -1941,7 +1964,7 @@ impl ConfigManager {
     /// running config's own copy. That much is seen without rendering
     /// either tree ([`Config::same_as`]); only trees that differ are
     /// rendered, and the renderings decide.
-    fn has_uncommitted(&self) -> bool {
+    pub(super) fn has_uncommitted(&self) -> bool {
         if self
             .store
             .running
@@ -1952,6 +1975,37 @@ impl ConfigManager {
         }
         let (running, candidate) = self.renderings();
         running != candidate
+    }
+
+    /// The interactive sessions' uncommitted edits, with the running
+    /// config they are an edit of, for a commit that is not theirs to
+    /// be made without them. `None` when there are none.
+    pub(super) fn set_aside_edits(&self) -> Option<(Rc<Config>, Rc<Config>)> {
+        (!self.store.refused_load.get() && self.has_uncommitted()).then(|| {
+            (
+                self.store.candidate.borrow().clone(),
+                self.store.running.borrow().clone(),
+            )
+        })
+    }
+
+    /// Leave the candidate with what [`Self::set_aside_edits`] found in
+    /// it: the edits, on the running config as it is now, or with no
+    /// edits the running config.
+    pub(super) fn put_back(&self, edits: Option<(Rc<Config>, Rc<Config>)>) {
+        match edits {
+            Some((edits, base)) => {
+                let running = self.store.running.borrow().clone();
+                // The same tree: nothing was committed.
+                if !Rc::ptr_eq(&base, &running) {
+                    super::rebase::rebase(&base, &running, &edits, |line| {
+                        self.paths(line.to_string())
+                    });
+                }
+                self.store.candidate.replace(edits);
+            }
+            None => self.store.discard(),
+        }
     }
 
     /// Apply a streamed-in config document (`vtyctl apply`): run its
@@ -2030,12 +2084,7 @@ impl ConfigManager {
         // are none, which is every apply on a box nobody is configuring
         // by hand: it then runs on the candidate as it always did, with
         // no copy and nothing to put back.
-        let edits = (!self.store.refused_load.get() && self.has_uncommitted()).then(|| {
-            (
-                self.store.candidate.borrow().clone(),
-                self.store.running.borrow().clone(),
-            )
-        });
+        let edits = self.set_aside_edits();
         // The apply's own candidate. For `set`/`delete` lines it is the
         // running config, which they change: a copy of it when the
         // candidate holds the edits, and with no edits the candidate as
@@ -2048,19 +2097,7 @@ impl ConfigManager {
         // Leave the candidate with what the apply found in it: the
         // edits, on the running config as it is now, or with no edits
         // the running config.
-        let put_back = |edits: Option<(Rc<Config>, Rc<Config>)>| match edits {
-            Some((edits, base)) => {
-                let running = self.store.running.borrow().clone();
-                // The same tree: nothing was committed.
-                if !Rc::ptr_eq(&base, &running) {
-                    super::rebase::rebase(&base, &running, &edits, |line| {
-                        self.paths(line.to_string())
-                    });
-                }
-                self.store.candidate.replace(edits);
-            }
-            None => self.store.discard(),
-        };
+        let put_back = |edits| self.put_back(edits);
 
         for cmd in cmds.iter() {
             let (code, _output, _paths) = self.execute(mode, cmd);
@@ -2132,6 +2169,7 @@ impl ConfigManager {
                 }
                 let _ = req.resp.send(resp);
             }
+            Message::ConfirmTimeout { generation } => self.confirm_timeout(generation),
             Message::Deploy(req) => {
                 let resp = self.deploy(&req.config);
                 let _ = req.resp.send(resp);

@@ -161,6 +161,10 @@ pub enum Message {
     Execute(ExecuteRequest),
     Completion(CompletionRequest),
     Deploy(DeployRequest),
+    /// The timer of a `commit confirmed` ran out (`config::confirm`).
+    ConfirmTimeout {
+        generation: u64,
+    },
     DisplayTx(DisplayTxRequest),
     ClearTx(ClearTxRequest),
     /// Register a per-instance (e.g. per-VRF) show channel under a

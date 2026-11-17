@@ -57,7 +57,7 @@ candidate and a running configuration, and `commit` that validates the
 candidate and dispatches the difference, refusing the whole commit when one
 line is rejected. Configure mode has `set`, `delete`, `commit`, `discard`,
 `load`, `save`, `compare` and `rollback` (*read*: `yang/configure.yang`), over
-a history of the last 50 commits that is kept in memory. It has no `commit
+a history of the last 50 commits that is kept in memory, and `commit
 confirmed`.
 
 **zebra-rs on SONiC today.** Routing configuration flows one way:
@@ -312,10 +312,11 @@ blocked by an idle operator.
   that configuration into the candidate and takes effect on `commit`, like
   any other change, and so goes through the same validation and ordered
   write.
-- **`commit confirmed M`** commits, then reverts after M minutes unless a
-  plain `commit` arrives. The revert must survive the loss of the session that
-  asked for it — that is the case it exists for — so the timer belongs to the
-  daemon, not the shell.
+- **`commit confirmed M`** is built. It commits, then the daemon rolls the
+  commit back after M minutes unless a plain `commit` arrives. The timer
+  belongs to the daemon, not the shell, so the rollback survives the loss of
+  the session that asked for it, which is the case it exists for. Only the
+  unconfirmed commit is rolled back: what bgpcfgd applied meanwhile is kept.
 
 These are useful to zebra-rs off SONiC as well and can ship first.
 

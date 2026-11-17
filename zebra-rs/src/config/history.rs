@@ -32,14 +32,23 @@ use chrono::{DateTime, SecondsFormat, Utc};
 /// How many configurations are kept: entries 0 to 49, as Junos has.
 pub const HISTORY_MAX: usize = 50;
 
+/// What made a commit.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Origin {
+    /// A `commit`, or a `vtyctl apply`.
+    Commit,
+    /// The config file: at startup, or by `load`.
+    ConfigFile,
+    /// The daemon, taking back a `commit confirmed` nobody confirmed.
+    Unconfirmed,
+}
+
 pub struct CommitRecord {
     /// What names this commit for as long as it is kept, wherever later
     /// commits move it: `<daemon start>-<count>`.
     pub revision: String,
     pub time: DateTime<Utc>,
-    /// The commit took lines of the config file: at startup, or by
-    /// `load`.
-    pub from_file: bool,
+    pub origin: Origin,
     /// The running config this commit produced, one line for each thing
     /// set: `Config::list`, the rendering a commit diffs. Each line is a
     /// `set` command without the keyword.
@@ -77,14 +86,14 @@ impl CommitHistory {
     /// that changed the running config: one that changed nothing would
     /// push a configuration out of the history for a copy of the one
     /// already at 0.
-    pub fn record(&self, config: String, from_file: bool) {
+    pub fn record(&self, config: String, origin: Origin) {
         let count = self.count.get() + 1;
         self.count.set(count);
         let mut records = self.records.borrow_mut();
         records.push_front(CommitRecord {
             revision: format!("{}-{count}", self.start),
             time: Utc::now(),
-            from_file,
+            origin,
             config,
         });
         records.truncate(HISTORY_MAX);
@@ -131,10 +140,10 @@ impl CommitHistory {
         for (n, record) in self.records.borrow().iter().enumerate() {
             let time = record.time.format("%Y-%m-%d %H:%M:%S UTC");
             let revision = &record.revision;
-            let note = if record.from_file {
-                "  config file"
-            } else {
-                ""
+            let note = match record.origin {
+                Origin::Commit => "",
+                Origin::ConfigFile => "  config file",
+                Origin::Unconfirmed => "  rollback, not confirmed",
             };
             out.push_str(&format!("{n:<4}{time}  {revision}{note}\n"));
         }
@@ -154,7 +163,8 @@ impl CommitHistory {
                     "number": n,
                     "time": record.time.to_rfc3339_opts(SecondsFormat::Secs, true),
                     "revision": record.revision,
-                    "config-file": record.from_file,
+                    "config-file": record.origin == Origin::ConfigFile,
+                    "unconfirmed-rollback": record.origin == Origin::Unconfirmed,
                 })
             })
             .collect();

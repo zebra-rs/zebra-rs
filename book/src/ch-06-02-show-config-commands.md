@@ -131,6 +131,7 @@ under the top level of `configure` mode (not under `show`):
 | `set <path>` | Add a leaf or list item to the candidate |
 | `delete <path>` | Remove a leaf or list item from the candidate |
 | `commit` | Validate the candidate, apply diffs to subscribers, then promote candidate → running |
+| `commit confirmed [<minutes>]` | Commit, and roll the commit back after `minutes` (10 by default) unless a `commit` confirms it |
 | `discard` | Revert candidate back to running (drops uncommitted edits) |
 | `compare` | Show what `commit` would change, in the block format |
 | `compare formal` | The same, as `set` lines |
@@ -291,6 +292,47 @@ revision.
 
 The history is kept in memory. It is gone when the daemon restarts, and
 then starts again from the config file.
+
+### A commit that takes itself back
+
+`commit confirmed` is for a change that might cut you off from the
+router. It commits the candidate and starts a timer in the daemon. A
+plain `commit` before the timer runs out confirms the change. Without
+one, the daemon commits the configuration from before, whether or not
+your session is still there:
+
+```
+host(config)# set interface eth0 ipv4 address 192.0.2.1/24
+host(config)# commit confirmed 5
+Commit will be rolled back in 5 minutes unless confirmed by `commit`
+host(config)# commit
+```
+
+- **Minutes:** 1 to 65535, and 10 when left out.
+- **Confirming:** only a `commit` typed in configure mode confirms, in
+  any session. A `vtyctl apply` by another writer does not.
+- **Typed again while pending:** `commit confirmed` commits what has
+  been edited since, if anything, and restarts the timer. The rollback
+  still goes to the configuration before the first one.
+- **What is rolled back:** the unconfirmed commit only. What another
+  writer committed meanwhile is kept, and uncommitted edits are still
+  uncommitted edits afterwards.
+- **Saving:** `save` is refused while a commit is pending, so the config
+  file never holds a change the daemon may take back.
+
+`show commit history` says when a commit is pending, and lists the
+rollback as a commit of its own:
+
+```
+host# show commit history
+0   2026-11-17 09:28:17 UTC  rollback, not confirmed
+1   2026-11-17 09:27:17 UTC
+2   2026-11-17 09:26:30 UTC  config file
+```
+
+The timer is in the daemon's memory: a daemon that restarts while a
+commit is pending starts from the config file, which does not have the
+change.
 
 ### Leaving the shell with uncommitted changes
 
