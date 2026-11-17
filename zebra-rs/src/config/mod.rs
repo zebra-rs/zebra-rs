@@ -45,6 +45,7 @@ mod commands;
 mod cradle;
 mod dhcpc;
 mod files;
+mod history;
 mod ip;
 mod isis;
 mod json;

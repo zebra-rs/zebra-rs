@@ -50,6 +50,9 @@ pub fn configure_mode_create(entry: Rc<Entry>) -> Mode {
     mode.install_func(String::from("/discard"), discard);
     mode.install_func(String::from("/compare"), compare);
     mode.install_func(String::from("/compare/formal"), compare_formal);
+    // `rollback <n>` and `compare rollback <n>` carry a number, which a
+    // handler here is not given: `ConfigManager::execute` runs them.
+    mode.install_func(String::from("/rollback"), rollback_latest);
     mode.install_func(String::from("/load"), load);
     mode.install_func(String::from("/save"), save);
     mode.install_func(String::from("/save/cli"), save_cli);
@@ -86,6 +89,7 @@ fn install_show_config_handlers(mode: &mut Mode) {
         String::from("/show/candidate-config/yaml"),
         show_candidate_yaml,
     );
+    mode.install_func(String::from("/show/commit/history"), show_commit_history);
     mode.install_func(String::from("/show/running-config"), show_running_cli);
     mode.install_func(
         String::from("/show/running-config/formal"),
@@ -214,6 +218,43 @@ fn compare_formal(config: &ConfigManager) -> (ExecCode, String) {
     (ExecCode::Show, out)
 }
 
+/// Bare `rollback`: commit 0.
+fn rollback_latest(config: &ConfigManager) -> (ExecCode, String) {
+    rollback(config, 0)
+}
+
+/// `rollback <n>`: the candidate becomes the configuration of commit
+/// `n`. Uncommitted edits are replaced, as `discard` drops them.
+///
+/// A number with no commit behind it answers `Nomatch`. `Show` is the
+/// code of a line that was taken: with it, a config file or an apply
+/// that holds the line would go on and commit a configuration that was
+/// not rolled back. Both are refused at the line instead. The reason is
+/// the output, and a session is shown it (`serve::exec_commands`).
+pub(super) fn rollback(config: &ConfigManager, n: usize) -> (ExecCode, String) {
+    match config.history_tree(n) {
+        Ok(tree) => {
+            config.store.candidate.replace(tree);
+            config.store.refused_load.set(false);
+            (ExecCode::Show, String::new())
+        }
+        Err(err) => (ExecCode::Nomatch, format!("{err}\n")),
+    }
+}
+
+/// `compare rollback <n>`: what turns commit `n` into the candidate.
+pub(super) fn compare_rollback(config: &ConfigManager, n: usize) -> (ExecCode, String) {
+    let tree = match config.history_tree(n) {
+        Ok(tree) => tree,
+        Err(err) => return (ExecCode::Nomatch, format!("{err}\n")),
+    };
+    let mut earlier = String::new();
+    let mut candidate = String::new();
+    tree.format(&mut earlier);
+    config.store.candidate.borrow().format(&mut candidate);
+    (ExecCode::Show, compare_block(&earlier, &candidate))
+}
+
 /// Diff two indented block renderings, keeping of the unchanged lines
 /// only those that say where a changed line is: the lines that open the
 /// blocks it is in, and the lines that close them.
@@ -264,6 +305,10 @@ fn compare_block(running: &str, candidate: &str) -> String {
 // `Config::format()` renders the CLI / Cisco-style indented block view;
 // `Config::formal()` renders the flat `set`-statement form ("formal");
 // `Config::json()` / `Config::yaml()` are the serialized equivalents.
+
+fn show_commit_history(config: &ConfigManager) -> (ExecCode, String) {
+    (ExecCode::Show, config.history.render())
+}
 
 fn show_candidate_cli(config: &ConfigManager) -> (ExecCode, String) {
     let mut output = String::new();
@@ -402,3 +447,7 @@ fn clear_isis_spf(_config: &ConfigManager) -> (ExecCode, String) {
 #[cfg(test)]
 #[path = "compare_tests.rs"]
 mod compare_tests;
+
+#[cfg(test)]
+#[path = "rollback_tests.rs"]
+mod rollback_tests;

@@ -10,6 +10,7 @@ use super::configs::{carbon_copy, delete, set};
 use super::cradle::spawn_cradle;
 use super::dhcpc::spawn_dhcpc;
 use super::files::load_config_file;
+use super::history::CommitHistory;
 use super::isis::{despawn_isis, spawn_isis};
 use super::json::{DocError, json_read};
 use super::label_check;
@@ -246,6 +247,8 @@ pub struct ConfigManager {
     /// writes to that file.
     pub config_format: RefCell<ConfigFormat>,
     pub store: ConfigStore,
+    /// What the last commits produced, for `rollback`.
+    pub history: CommitHistory,
     pub modes: HashMap<String, Mode>,
     pub tx: Sender<Message>,
     pub rx: Receiver<Message>,
@@ -501,6 +504,7 @@ impl ConfigManager {
             config_format: RefCell::new(ConfigFormat::Cli),
             modes: HashMap::new(),
             store: ConfigStore::new(),
+            history: CommitHistory::default(),
             tx,
             rx,
             cm_clients: RefCell::new(HashMap::new()),
@@ -927,7 +931,7 @@ impl ConfigManager {
     /// fails validation: mandatory nodes, the leaf value checks, or a label
     /// check it would newly break.
     pub fn commit_config(&self) -> anyhow::Result<()> {
-        self.commit(false)
+        self.commit(false, false)
     }
 
     /// Commit the startup config. As [`Self::commit_config`], except that a
@@ -936,11 +940,16 @@ impl ConfigManager {
     /// can fail a check added since. Each IGP then handles the label as it
     /// can (an Adjacency-SID outside the SRLB is advertised unclaimed, a
     /// second configured one on a label is not advertised).
-    fn commit_startup_config(&self) -> anyhow::Result<()> {
-        self.commit(true)
+    ///
+    /// `from_file` says whether the candidate took lines of the config
+    /// file. It is what the commit history marks the commit with, and
+    /// is not `startup`: a file that is missing, or sets nothing, is
+    /// committed this way too.
+    fn commit_startup_config(&self, from_file: bool) -> anyhow::Result<()> {
+        self.commit(true, from_file)
     }
 
-    fn commit(&self, startup: bool) -> anyhow::Result<()> {
+    fn commit(&self, startup: bool, from_file: bool) -> anyhow::Result<()> {
         let mut errors = Vec::<String>::new();
         self.store.candidate.borrow().validate(&mut errors);
         if !errors.is_empty() {
@@ -1445,6 +1454,13 @@ impl ConfigManager {
         }
 
         self.store.commit();
+        // The candidate's lines are the running config's now. A commit
+        // that changed none is not one to roll back to, and that is what
+        // keeps the configuration a daemon starts with nothing in out of
+        // the history.
+        if running != candidate {
+            self.history.record(candidate, from_file);
+        }
 
         // External gRPC subscribers — post-commit, so a reader that
         // fetches state on an event sees the committed tree (the JSON
@@ -1586,13 +1602,17 @@ impl ConfigManager {
                 );
             }
         }
+        // Whether the file gave the candidate anything. With no file,
+        // or with none of its lines taken, what is committed is what the
+        // candidate already held: a session's edits, on `load`.
+        let from_file = summary.as_ref().is_some_and(|(_, applied, _)| *applied > 0);
         // A validation failure (mandatory / `ext:non-empty`, or a leaf
         // value failing `config::check`) rejects the whole startup commit —
         // nothing is dispatched. Log it loudly so a config file the
         // operator hand-edited into an invalid state (e.g. a bare
         // `router isis afi-safi ipv4`) is diagnosable, rather than the
         // daemon silently coming up with no config.
-        if let Err(e) = self.commit_startup_config() {
+        if let Err(e) = self.commit_startup_config(from_file) {
             tracing::error!(
                 "startup config {} rejected by commit validation: {}",
                 self.config_path.display(),
@@ -1720,6 +1740,46 @@ impl ConfigManager {
         output
     }
 
+    /// The configuration of commit `n` of the history as a tree.
+    ///
+    /// Commit 0 is the running config, and is copied from it. That holds
+    /// with nothing in the history too, where the running config is the
+    /// empty one the daemon started with: `rollback 0` is `discard`
+    /// whatever was committed.
+    ///
+    /// An earlier commit is built the way a config file is loaded: its
+    /// lines run as `set` commands on an empty candidate. The session's
+    /// candidate is set aside for that and is back when this returns.
+    pub fn history_tree(&self, n: usize) -> Result<Rc<Config>, String> {
+        if n == 0 {
+            return Ok(carbon_copy(&self.store.running.borrow(), None));
+        }
+        let Some(config) = self.history.config(n) else {
+            return Err(match self.history.len() {
+                0 => format!("% No commit {n}: nothing has been committed"),
+                1 => format!("% No commit {n}: only commit 0 is kept"),
+                len => format!("% No commit {n}: commits 0 to {} are kept", len - 1),
+            });
+        };
+        let mode = self.modes.get("configure").expect("configure mode");
+        let empty = Rc::new(Config::new("".to_string(), None));
+        let candidate = self.store.candidate.replace(empty);
+        let mut refused = None;
+        for line in config.lines() {
+            let (code, _, _) = self.execute(mode, &format!("set {line}"));
+            if code != ExecCode::Show {
+                refused = Some(line);
+                break;
+            }
+        }
+        let tree = self.store.candidate.replace(candidate);
+        match refused {
+            // The line was committed by this process, under this schema.
+            Some(line) => Err(format!("% Commit {n} cannot be loaded: {line}")),
+            None => Ok(tree),
+        }
+    }
+
     pub fn clear(&self, paths: &[CommandPath]) {
         for tx in self.cm_clients.borrow().values() {
             tx.send(ConfigRequest::new(paths.to_vec(), ConfigOp::Clear))
@@ -1760,6 +1820,25 @@ impl ConfigManager {
         if state.clear {
             self.clear(&state.paths);
             return (ExecCode::Show, String::new(), state.paths);
+        }
+
+        // `rollback <n>` and `compare rollback <n>`: the two commands
+        // whose handler needs a value from the line.
+        let names: Vec<&str> = state.paths.iter().map(|p| p.name.as_str()).collect();
+        let numbered = match names[..] {
+            ["rollback", n] => Some((false, n)),
+            ["compare", "rollback", n] => Some((true, n)),
+            _ => None,
+        };
+        if let Some((compare, n)) = numbered
+            && let Ok(n) = n.parse::<usize>()
+        {
+            let (code, output) = if compare {
+                super::commands::compare_rollback(self, n)
+            } else {
+                super::commands::rollback(self, n)
+            };
+            return (code, output, state.paths);
         }
 
         // Lookup command.

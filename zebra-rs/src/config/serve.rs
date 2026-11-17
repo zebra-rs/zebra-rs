@@ -468,6 +468,12 @@ fn comp_commands(resp: &CompletionResponse) -> String {
 }
 
 fn exec_commands(resp: &ExecuteResponse) -> (ExecCode, String, Vec<CommandPath>) {
+    // A command that was understood and refused says why itself
+    // (`rollback 7` with no commit 7). The vty prints what follows
+    // `Show`; for `NoMatch` it has only "No such command".
+    if resp.code == ExecCode::Nomatch && !resp.output.is_empty() {
+        return (ExecCode::Show, resp.output.clone(), resp.paths.clone());
+    }
     if resp.code == ExecCode::Nomatch {
         return (
             ExecCode::Nomatch,
@@ -1038,6 +1044,23 @@ fn bind_path_uds(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A refusal that says why is shown to the session as what it says.
+    /// One with no words of its own is the vty's "No such command".
+    #[test]
+    fn a_refusal_with_a_reason_is_shown() {
+        let mut resp = ExecuteResponse::new();
+        resp.code = ExecCode::Nomatch;
+        let (code, output, _) = exec_commands(&resp);
+        assert_eq!((code, output.as_str()), (ExecCode::Nomatch, "NoMatch\n"));
+
+        resp.output = "% No commit 7: only commit 0 is kept\n".to_string();
+        let (code, output, _) = exec_commands(&resp);
+        assert_eq!(
+            (code, output.as_str()),
+            (ExecCode::Show, "% No commit 7: only commit 0 is kept\n")
+        );
+    }
 
     #[test]
     fn vty_addr_parse_recognizes_all_forms() {

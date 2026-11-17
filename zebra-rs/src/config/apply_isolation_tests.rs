@@ -748,3 +748,75 @@ fn a_replaced_tree_is_freed() {
     assert_eq!(lines(&running(&cm)), ["system hostname replaced"]);
     assert_eq!(candidate(&cm), running(&cm));
 }
+
+/// What an apply commits is a commit of the history like any other, and
+/// it is the apply's own lines: an edit set aside for it is in no
+/// commit.
+#[test]
+fn an_apply_is_a_commit_of_the_history() {
+    let cm = manager("history");
+    cm.deploy("set system hostname r1\n");
+    assert_eq!(cm.history.len(), 1);
+    edit(&cm, &format!("set {ETH0}"));
+
+    let resp = cm.deploy("set system hostname applied\n");
+    assert_eq!(resp.apply_code, ApplyCode::Applied, "{}", resp.cmd);
+    assert_eq!(cm.history.len(), 2);
+    assert_eq!(cm.history.config(0).unwrap(), "system hostname applied\n");
+    assert_eq!(cm.history.config(1).unwrap(), "system hostname r1\n");
+
+    // One that changes nothing is not.
+    let resp = cm.deploy("set system hostname applied\n");
+    assert_eq!(resp.apply_code, ApplyCode::Applied, "{}", resp.cmd);
+    assert_eq!(cm.history.len(), 2);
+    // Nor is one that is refused.
+    let resp = cm.deploy("set system hostname refused\nset no such thing\n");
+    assert_eq!(resp.apply_code, ApplyCode::ParseError);
+    assert_eq!(cm.history.len(), 2);
+}
+
+/// A `rollback` line that names no commit refuses the document at that
+/// line. Taken as run, the lines after it would be committed on a
+/// configuration that was not rolled back.
+#[test]
+fn a_rollback_line_that_names_no_commit_refuses_the_apply() {
+    let cm = manager("rollback-line-refused");
+    cm.deploy("set system hostname r1\n");
+    edit(&cm, &format!("set {ETH0}"));
+
+    for line in ["rollback 7", "compare rollback 7"] {
+        // A `set` line first: that is what makes the document one of
+        // lines.
+        let resp = cm.deploy(&format!(
+            "set system hostname before\n{line}\nset system hostname after\n"
+        ));
+        assert_eq!(resp.apply_code, ApplyCode::ParseError, "`{line}`");
+        assert_eq!(resp.exec_code, ExecCode::Nomatch, "`{line}`");
+        assert_eq!(resp.cmd, line);
+        assert_eq!(running(&cm), "system hostname r1\n", "`{line}`");
+        assert_eq!(cm.history.len(), 1, "`{line}`");
+        assert_eq!(
+            settings(&candidate(&cm)),
+            [ETH0, "system hostname r1"],
+            "`{line}`: the edit is as it was"
+        );
+    }
+}
+
+/// One that names a commit rolls the running config back to it, on the
+/// apply's own candidate as its other lines run: the operator's edit is
+/// put back on the result. It replaces what the lines before it set, as
+/// a `discard` line does.
+#[test]
+fn a_rollback_line_in_the_document_rolls_back() {
+    let cm = manager("rollback-line");
+    cm.deploy("set system hostname r1\n");
+    cm.deploy("set system hostname r2\n");
+    edit(&cm, &format!("set {ETH0}"));
+
+    let resp = cm.deploy(&format!("set {ETH1}\nrollback 1\n"));
+    assert_eq!(resp.apply_code, ApplyCode::Applied, "{}", resp.cmd);
+    assert_eq!(running(&cm), "system hostname r1\n");
+    assert_eq!(cm.history.len(), 3);
+    assert_eq!(settings(&candidate(&cm)), [ETH0, "system hostname r1"]);
+}
