@@ -81,11 +81,13 @@ router bgp {
 ```
 
 The session's local address is taken from the neighbour's
-`update-source` (falling back to an unspecified address of the right
-family); there is no separate BFD source knob. This is the address the
-BFD control packets are actually sourced from, and the one `show bfd
-peers` reports as `Local address`. Changing `update-source` on a
-BFD-enabled neighbour rebuilds the session with the new source.
+[`update-source`](ch-02-49-bgp-update-source.md) (falling back to an
+unspecified address of the right family); there is no separate BFD
+source knob. This is the address the BFD control packets are actually
+sourced from, and the one `show bfd peers` reports as `Local address`.
+Changing `update-source` on a BFD-enabled neighbour rebuilds the session
+with the new source. With `update-source <interface>` the address is the
+one the interface gives; while it gives none there is no BFD session.
 
 ## Echo
 

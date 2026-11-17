@@ -15,10 +15,13 @@ use crate::rib::api::FdbEntry;
 use super::auth::AoConfig;
 use super::peer::BgpTop;
 use super::route_clean;
+use super::update_source::UpdateSource;
 use super::{
     AssistedReplicationRole, BGP_PORT, Bgp, EvpnBumTunnel,
-    inst::{Callback, EvpnEncap},
-    peer::{AllowAsIn, LocalAs, OtcLocalRole, PasswordEncoding, Peer, PeerType, RemovePrivateAs},
+    inst::{Callback, EvpnEncap, Message},
+    peer::{
+        AllowAsIn, Event, LocalAs, OtcLocalRole, PasswordEncoding, Peer, PeerType, RemovePrivateAs,
+    },
     timer,
 };
 
@@ -614,7 +617,10 @@ fn config_peer_neighbor_group(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Op
     if outcome.ao_refresh {
         apply_ao_refresh_all(bgp);
     }
-    // Not only on `bfd_reapply`: the group's remote-as may have just
+    // The group may have given (or taken away) an `update-source
+    // <interface>`: find what it gives this neighbor.
+    update_source_resolve(bgp, peer_ident);
+    // Not only on `source_changed`: the group's remote-as may have just
     // set the session type BFD infers its hop mode from. A no-op when
     // the session key is unchanged.
     let _ = bfd_apply(bgp, addr);
@@ -1580,7 +1586,13 @@ pub(super) fn bfd_apply_ident(bgp: &mut Bgp, ident: usize) -> Option<()> {
         // would collapse onto one `{local: ::, remote: ::, ifindex: 0}`
         // entry. The RA path re-runs `bfd_apply_ident` once a real
         // link-local lands, at which point this flips back to enabled.
-        let enable = eff.enable && !addr.is_unspecified();
+        //
+        // Nor for a neighbor whose `update-source <interface>` has given
+        // no address: the wildcard local below would send the control
+        // packets from whatever the kernel picks, to a peer that expects
+        // them from the interface's address. `update_source_resolve`
+        // callers reconcile again once the interface gives one.
+        let enable = eff.enable && !addr.is_unspecified() && !peer.update_source_pending();
         let local = peer
             .config
             .transport
@@ -4344,6 +4356,8 @@ pub(super) fn apply_passive(peer: &mut Peer, want: bool) -> bool {
     false
 }
 
+/// `router bgp neighbor <addr> update-source <addr|ifname>`, and the
+/// IETF spelling `transport local-address`: the same statement.
 fn config_transport_local_address(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let peer_addr = if let Some(addr) = args.v4addr() {
         IpAddr::V4(addr)
@@ -4352,22 +4366,20 @@ fn config_transport_local_address(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -
         IpAddr::V6(addr)
     };
 
-    {
+    let ident = {
         let peer = bgp.peers.get_mut(&peer_addr)?;
 
         // Record the verbatim statement, then resolve through the
         // neighbor-group precedence — a Delete falls back to the
         // group's source (or none).
         if op == ConfigOp::Set {
-            let source = if let Some(addr) = args.v4addr() {
-                IpAddr::V4(addr)
-            } else {
-                let addr = args.v6addr()?;
-                IpAddr::V6(addr)
-            };
-            // Address family of the source must match the peer; an
-            // invalid statement is refused outright (not recorded).
-            if source.is_ipv4() != peer_addr.is_ipv4() {
+            let source = UpdateSource::parse(&args.string()?);
+            // Address family of a source address must match the peer;
+            // an invalid statement is refused outright (not recorded).
+            // An interface gives the peer its own family's address.
+            if let UpdateSource::Addr(addr) = &source
+                && addr.is_ipv4() != peer_addr.is_ipv4()
+            {
                 return None;
             }
             peer.config.knobs_explicit.update_source = Some(source);
@@ -4375,10 +4387,14 @@ fn config_transport_local_address(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -
             peer.config.knobs_explicit.update_source = None;
         }
         let want = super::neighbor_group::resolve_knob(&bgp.neighbor_groups, &peer.config, |k| {
-            k.update_source
+            k.update_source.clone()
         });
-        apply_update_source(peer, want);
-    }
+        apply_update_source(peer, want.as_ref());
+        peer.ident
+    };
+
+    // An interface name is only a name so far: find what it gives.
+    update_source_resolve(bgp, ident);
 
     // IOS-XR semantics: an async BFD session inherits the neighbor's
     // update-source as its local address (see `bfd_apply`, which reads
@@ -4392,31 +4408,142 @@ fn config_transport_local_address(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -
     bfd_apply(bgp, peer_addr)
 }
 
-/// Write a resolved `update-source` onto the peer. The connect path
-/// reads it at dial time, so no bounce — parity with the per-neighbor
-/// callback, which has never bounced on a source change. A source
-/// whose address family doesn't match the peer is skipped with a
-/// warning: a group serves IPv4 and IPv6 members alike, so a v4
-/// `update-source` simply doesn't apply to a v6 member
-/// (interface-keyed link-local peers included). Returns `true` when
-/// the stored value changed — the caller owes a `bfd_apply`
-/// reconcile.
-pub(super) fn apply_update_source(peer: &mut Peer, want: Option<IpAddr>) -> bool {
-    if let Some(source) = want
-        && source.is_ipv4() != peer.address.is_ipv4()
-    {
-        tracing::warn!(
-            peer = %peer.display_name(),
-            source = %source,
-            "bgp: update-source address family does not match the peer; not applied to this member",
-        );
+/// Write a resolved `update-source` statement onto the peer. The
+/// connect path reads it at dial time, so no bounce — parity with the
+/// per-neighbor callback, which has never bounced on a source change.
+///
+/// An address lands in `transport.update_source` as it is. An
+/// interface name lands in `transport.update_source_if` and leaves the
+/// address empty — the neighbor is pending — until the caller runs
+/// [`update_source_resolve`], which needs the instance's interface
+/// table and so cannot run here, under the peer borrow. A name that is
+/// already in force keeps the address it resolved to.
+///
+/// A statement that does not apply to this member gives it no source,
+/// with a warning: a group serves IPv4 and IPv6 members alike, so a v4
+/// address is not for a v6 member, nor an interface for a member
+/// reached over a link-local address
+/// ([`Peer::update_source_interface_applies`]). No source, not the one
+/// it had: the source an earlier statement gave is not what the
+/// configuration says now.
+///
+/// Returns `true` when what is stored changed — the caller owes
+/// [`update_source_resolve`] and a `bfd_apply` reconcile.
+pub(super) fn apply_update_source(peer: &mut Peer, want: Option<&UpdateSource>) -> bool {
+    let (addr, ifname) = match want {
+        None => (None, None),
+        Some(UpdateSource::Addr(source)) => {
+            if source.is_ipv4() == peer.address.is_ipv4() {
+                (Some(*source), None)
+            } else {
+                tracing::warn!(
+                    peer = %peer.display_name(),
+                    source = %source,
+                    "bgp: update-source address family does not match the peer; not applied to this member",
+                );
+                (None, None)
+            }
+        }
+        Some(UpdateSource::Interface(name)) => {
+            if peer.update_source_interface_applies() {
+                // The address stays for an unchanged name; a new name
+                // has given none yet.
+                let transport = &peer.config.transport;
+                let addr = (transport.update_source_if.as_deref() == Some(name.as_str()))
+                    .then_some(transport.update_source)
+                    .flatten();
+                (addr, Some(name.clone()))
+            } else {
+                tracing::warn!(
+                    peer = %peer.display_name(),
+                    interface = %name,
+                    "bgp: update-source by interface does not apply to a link-local neighbor; not applied to this member",
+                );
+                (None, None)
+            }
+        }
+    };
+    let transport = &mut peer.config.transport;
+    if transport.update_source == addr && transport.update_source_if == ifname {
         return false;
     }
-    if peer.config.transport.update_source == want {
+    transport.update_source = addr;
+    transport.update_source_if = ifname;
+    true
+}
+
+/// Find the address an `update-source <interface>` gives one neighbor
+/// now, and store it as the neighbor's source. Nothing to do for a
+/// neighbor with the address form or no statement.
+///
+/// To be run whenever what [`super::update_source::resolve`] reads may
+/// have changed: the statement (the config callbacks and the
+/// neighbor-group sweep, after [`apply_update_source`]), the interface
+/// table or an interface's addresses (the `RibRx` link and address
+/// events, through [`update_source_resolve_all`]).
+///
+/// A neighbor that was held for want of an address (`fsm_start` parks
+/// it in Active) is sent `Event::Start`, so it dials the moment the
+/// interface gives one. A session that is up is left alone when the
+/// address moves: it keeps the one it was opened with — as it does when
+/// an `update-source <address>` is changed — and the next connect binds
+/// the new one.
+///
+/// Returns `true` when the source changed; the caller owes a
+/// `bfd_apply` reconcile then (the BFD session is keyed by it).
+pub(super) fn update_source_resolve(bgp: &mut Bgp, ident: usize) -> bool {
+    use super::peer::State;
+    let Some((ifname, address)) = bgp.peers.get_by_idx(ident).and_then(|peer| {
+        let ifname = peer.config.transport.update_source_if.clone()?;
+        Some((ifname, peer.address))
+    }) else {
         return false;
+    };
+    // By the name of a link that exists now: `link_index_by_name` alone
+    // also answers for a deleted or renamed link, with an ifindex that
+    // another link may hold since.
+    let want = bgp
+        .live_link_index(&ifname)
+        .and_then(|ifindex| super::update_source::resolve(&bgp.interface_addrs, ifindex, address));
+    let Some(peer) = bgp.peers.get_mut_by_idx(ident) else {
+        return false;
+    };
+    let had = peer.config.transport.update_source;
+    if had == want {
+        return false;
+    }
+    match want {
+        Some(source) => tracing::info!(
+            peer = %peer.display_name(),
+            interface = %ifname,
+            source = %source,
+            "bgp: update-source interface gives this neighbor its source address",
+        ),
+        None => tracing::warn!(
+            peer = %peer.display_name(),
+            interface = %ifname,
+            "bgp: update-source interface has no usable address for this neighbor; it is not dialed",
+        ),
     }
     peer.config.transport.update_source = want;
+    let kick = had.is_none() && peer.active && !peer.is_passive() && peer.state == State::Active;
+    if kick {
+        let _ = bgp.tx.try_send(Message::Event(ident, Event::Start));
+    }
     true
+}
+
+/// [`update_source_resolve`] for every neighbor, and a BFD reconcile
+/// for each one whose source moved. For the events that change what an
+/// interface gives — a link or an address coming or going — and for
+/// the end of a commit, which catches a statement that reached a
+/// neighbor by a path that did not resolve it.
+pub(super) fn update_source_resolve_all(bgp: &mut Bgp) {
+    for ident in bgp.peers.idents() {
+        if update_source_resolve(bgp, ident) {
+            let _ = bfd_apply_ident(bgp, ident);
+        }
+    }
 }
 
 /// `[no] router bgp neighbor <addr> ttl-security` — enable GTSM (RFC
@@ -12065,6 +12192,528 @@ mod neighbor_group_wiring_tests {
             src(&bgp, "2001:db8::2"),
             None,
             "v6 member must skip the mismatched-family source",
+        );
+    }
+
+    /// A group address that is not of a member's family gives that
+    /// member no source — not the one an earlier statement gave it,
+    /// which the configuration no longer says.
+    #[tokio::test]
+    async fn group_update_source_of_the_other_family_leaves_no_source() {
+        use super::super::neighbor_group::config_neighbor_group_update_source;
+        let mut bgp = fresh_bgp();
+        config_neighbor_group_remote_as(&mut bgp, arg_words(&["G", "65000"]), ConfigOp::Set)
+            .unwrap();
+        config_peer(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+        config_peer_neighbor_group(&mut bgp, arg_words(&["10.0.0.1", "G"]), ConfigOp::Set).unwrap();
+
+        config_neighbor_group_update_source(
+            &mut bgp,
+            arg_words(&["G", "192.0.2.10"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+        assert_eq!(
+            source_of(&bgp, "10.0.0.1"),
+            (Some("192.0.2.10".parse().unwrap()), None)
+        );
+
+        config_neighbor_group_update_source(
+            &mut bgp,
+            arg_words(&["G", "2001:db8::10"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+        assert_eq!(
+            source_of(&bgp, "10.0.0.1"),
+            (None, None),
+            "the v4 source went with the statement that gave it",
+        );
+    }
+
+    // ---- `update-source <interface>` -------------------------------------
+
+    /// (effective address, interface) of a neighbor's source.
+    fn source_of(bgp: &Bgp, addr: &str) -> (Option<IpAddr>, Option<String>) {
+        let transport = &bgp
+            .peers
+            .get(&addr.parse().unwrap())
+            .unwrap()
+            .config
+            .transport;
+        (transport.update_source, transport.update_source_if.clone())
+    }
+
+    fn pending(bgp: &Bgp, addr: &str) -> bool {
+        bgp.peers
+            .get(&addr.parse().unwrap())
+            .unwrap()
+            .update_source_pending()
+    }
+
+    /// The source follows the interface: nothing while the interface or
+    /// its address is missing, the address when it is there, and again
+    /// nothing when it goes. An interface of the same name that comes
+    /// back gives its new address.
+    #[tokio::test]
+    async fn update_source_interface_follows_the_interface() {
+        use crate::rib::api::RibRx;
+        let mut bgp = fresh_bgp();
+        config_peer(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+        config_remote_as(&mut bgp, arg_words(&["10.0.0.1", "65001"]), ConfigOp::Set).unwrap();
+
+        // Written before the interface is known (config replay at
+        // startup races the link dump).
+        config_transport_local_address(
+            &mut bgp,
+            arg_words(&["10.0.0.1", "Loopback0"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+        let named = |source| (source, Some("Loopback0".to_string()));
+        assert_eq!(source_of(&bgp, "10.0.0.1"), named(None));
+        assert!(pending(&bgp, "10.0.0.1"));
+
+        // The interface, still without an address.
+        bgp.process_rib_msg(RibRx::LinkAdd(named_link(7, "Loopback0")));
+        assert_eq!(source_of(&bgp, "10.0.0.1"), named(None));
+
+        // An address of the other family does not serve.
+        bgp.process_rib_msg(RibRx::AddrAdd(link_addr_on("2001:db8::32/128", 7)));
+        assert!(pending(&bgp, "10.0.0.1"));
+
+        // Nor does another interface's.
+        bgp.process_rib_msg(RibRx::LinkAdd(named_link(8, "Ethernet0")));
+        bgp.process_rib_msg(RibRx::AddrAdd(link_addr_on("10.0.0.2/24", 8)));
+        assert!(pending(&bgp, "10.0.0.1"));
+
+        bgp.process_rib_msg(RibRx::AddrAdd(link_addr_on("10.1.0.32/32", 7)));
+        assert_eq!(
+            source_of(&bgp, "10.0.0.1"),
+            named(Some("10.1.0.32".parse().unwrap()))
+        );
+        assert!(!pending(&bgp, "10.0.0.1"));
+
+        // The loopback is renumbered.
+        bgp.process_rib_msg(RibRx::AddrDel(link_addr_on("10.1.0.32/32", 7)));
+        assert!(pending(&bgp, "10.0.0.1"));
+        bgp.process_rib_msg(RibRx::AddrAdd(link_addr_on("10.1.0.33/32", 7)));
+        assert_eq!(
+            source_of(&bgp, "10.0.0.1"),
+            named(Some("10.1.0.33".parse().unwrap()))
+        );
+
+        // The interface is deleted. Another link that takes its ifindex
+        // is not Loopback0, though the name is still remembered with
+        // that ifindex (`Bgp::live_link_index`).
+        bgp.process_rib_msg(RibRx::LinkDel(7));
+        assert!(pending(&bgp, "10.0.0.1"));
+        bgp.process_rib_msg(RibRx::LinkAdd(named_link(7, "Ethernet4")));
+        bgp.process_rib_msg(RibRx::AddrAdd(link_addr_on("10.9.9.9/24", 7)));
+        assert_eq!(
+            source_of(&bgp, "10.0.0.1"),
+            named(None),
+            "Ethernet4's address is not Loopback0's",
+        );
+
+        // Loopback0 comes back under a new ifindex.
+        bgp.process_rib_msg(RibRx::LinkAdd(named_link(9, "Loopback0")));
+        assert!(pending(&bgp, "10.0.0.1"));
+        bgp.process_rib_msg(RibRx::AddrAdd(link_addr_on("10.1.0.34/32", 9)));
+        assert_eq!(
+            source_of(&bgp, "10.0.0.1"),
+            named(Some("10.1.0.34".parse().unwrap()))
+        );
+
+        // An address in place of the name, and no statement at all.
+        config_transport_local_address(
+            &mut bgp,
+            arg_words(&["10.0.0.1", "192.0.2.1"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+        assert_eq!(
+            source_of(&bgp, "10.0.0.1"),
+            (Some("192.0.2.1".parse().unwrap()), None)
+        );
+        config_transport_local_address(
+            &mut bgp,
+            arg_words(&["10.0.0.1", "192.0.2.1"]),
+            ConfigOp::Delete,
+        )
+        .unwrap();
+        assert_eq!(source_of(&bgp, "10.0.0.1"), (None, None));
+        assert!(!pending(&bgp, "10.0.0.1"));
+    }
+
+    // Each event that changes what an interface gives must make the
+    // choice again by itself. One test per event, and each set up so
+    // that only its own event can produce the outcome: the statement is
+    // resolved by its callback where a resolved start is needed.
+
+    /// A neighbor 10.0.0.1 with `update-source Loopback0`.
+    fn bgp_with_source_loopback0(before: impl FnOnce(&mut Bgp)) -> Bgp {
+        let mut bgp = fresh_bgp();
+        before(&mut bgp);
+        config_peer(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+        config_remote_as(&mut bgp, arg_words(&["10.0.0.1", "65001"]), ConfigOp::Set).unwrap();
+        config_transport_local_address(
+            &mut bgp,
+            arg_words(&["10.0.0.1", "Loopback0"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+        bgp
+    }
+
+    fn loopback0_gives(bgp: &Bgp, source: Option<&str>) -> bool {
+        source_of(bgp, "10.0.0.1")
+            == (
+                source.map(|s| s.parse().unwrap()),
+                Some("Loopback0".to_string()),
+            )
+    }
+
+    #[tokio::test]
+    async fn update_source_interface_resolves_on_address_add() {
+        use crate::rib::api::RibRx;
+        let mut bgp = bgp_with_source_loopback0(|bgp| {
+            bgp.process_rib_msg(RibRx::LinkAdd(named_link(7, "Loopback0")));
+        });
+        assert!(loopback0_gives(&bgp, None));
+        bgp.process_rib_msg(RibRx::AddrAdd(link_addr_on("10.1.0.32/32", 7)));
+        assert!(loopback0_gives(&bgp, Some("10.1.0.32")));
+    }
+
+    #[tokio::test]
+    async fn update_source_interface_resolves_on_address_del() {
+        use crate::rib::api::RibRx;
+        let mut bgp = bgp_with_source_loopback0(|bgp| {
+            bgp.process_rib_msg(RibRx::LinkAdd(named_link(7, "Loopback0")));
+            bgp.process_rib_msg(RibRx::AddrAdd(link_addr_on("10.1.0.32/32", 7)));
+        });
+        assert!(loopback0_gives(&bgp, Some("10.1.0.32")));
+        bgp.process_rib_msg(RibRx::AddrDel(link_addr_on("10.1.0.32/32", 7)));
+        assert!(loopback0_gives(&bgp, None));
+    }
+
+    /// The addresses of an ifindex can be known before its name is.
+    #[tokio::test]
+    async fn update_source_interface_resolves_on_link_add() {
+        use crate::rib::api::RibRx;
+        let mut bgp = bgp_with_source_loopback0(|bgp| {
+            bgp.process_rib_msg(RibRx::AddrAdd(link_addr_on("10.1.0.32/32", 7)));
+        });
+        assert!(loopback0_gives(&bgp, None));
+        bgp.process_rib_msg(RibRx::LinkAdd(named_link(7, "Loopback0")));
+        assert!(loopback0_gives(&bgp, Some("10.1.0.32")));
+    }
+
+    #[tokio::test]
+    async fn update_source_interface_resolves_on_link_del() {
+        use crate::rib::api::RibRx;
+        let mut bgp = bgp_with_source_loopback0(|bgp| {
+            bgp.process_rib_msg(RibRx::LinkAdd(named_link(7, "Loopback0")));
+            bgp.process_rib_msg(RibRx::AddrAdd(link_addr_on("10.1.0.32/32", 7)));
+        });
+        assert!(loopback0_gives(&bgp, Some("10.1.0.32")));
+        bgp.process_rib_msg(RibRx::LinkDel(7));
+        assert!(loopback0_gives(&bgp, None));
+    }
+
+    /// The end of a commit resolves a name that reached a neighbor by a
+    /// path that did not.
+    #[tokio::test]
+    async fn update_source_interface_resolves_at_commit_end() {
+        use crate::config::ConfigRequest;
+        use crate::rib::api::RibRx;
+        let mut bgp = fresh_bgp();
+        bgp.process_rib_msg(RibRx::LinkAdd(named_link(7, "Loopback0")));
+        bgp.process_rib_msg(RibRx::AddrAdd(link_addr_on("10.1.0.32/32", 7)));
+        config_peer(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+        let by_name = UpdateSource::Interface("Loopback0".to_string());
+        let peer = bgp.peers.get_mut(&peer_addr()).unwrap();
+        assert!(apply_update_source(peer, Some(&by_name)));
+        assert!(loopback0_gives(&bgp, None));
+        bgp.process_cm_msg(ConfigRequest::new(vec![], ConfigOp::CommitEnd));
+        assert!(loopback0_gives(&bgp, Some("10.1.0.32")));
+    }
+
+    /// A neighbor 10.0.0.1 held for want of a source: `update-source
+    /// Loopback0`, the interface known and without an address, the FSM
+    /// parked in Active as `fsm_start` leaves it.
+    fn bgp_with_held_neighbor() -> (Bgp, usize) {
+        use crate::rib::api::RibRx;
+        let mut bgp = bgp_with_source_loopback0(|bgp| {
+            bgp.process_rib_msg(RibRx::LinkAdd(named_link(7, "Loopback0")));
+        });
+        while bgp.rx.try_recv().is_ok() {}
+        let peer = bgp.peers.get_mut(&peer_addr()).unwrap();
+        peer.state = crate::bgp::peer::State::Active;
+        let ident = peer.ident;
+        (bgp, ident)
+    }
+
+    /// A neighbor whose interface gives no address is not dialed: the
+    /// FSM holds it in Active, with the connect-retry backstop running.
+    #[tokio::test]
+    async fn update_source_interface_without_address_is_held_by_the_fsm() {
+        use crate::bgp::peer::{State, fsm_start};
+        let (mut bgp, _ident) = bgp_with_held_neighbor();
+        let peer = bgp.peers.get_mut(&peer_addr()).unwrap();
+        assert_eq!(fsm_start(peer), State::Active, "held, as the FSM parks it");
+        assert!(peer.task.connect.is_none(), "no dial was started");
+        assert!(peer.timer.connect_retry.is_some(), "the backstop runs");
+    }
+
+    /// The other ways into a dial fail it instead of dialing from
+    /// whatever source the kernel picks.
+    #[tokio::test]
+    async fn update_source_interface_without_address_fails_a_dial() {
+        use crate::bgp::peer::peer_start_connection;
+        let (mut bgp, ident) = bgp_with_held_neighbor();
+        let peer = bgp.peers.get_mut(&peer_addr()).unwrap();
+        let task = peer_start_connection(peer);
+        tokio::task::yield_now().await;
+        assert!(
+            matches!(
+                bgp.rx.try_recv(),
+                Ok(Message::Event(i, Event::DialFail)) if i == ident
+            ),
+            "a dial without the source fails at once",
+        );
+        drop(task);
+    }
+
+    /// A held neighbor is started the moment the interface gives its
+    /// address, not at the connect-retry tick.
+    #[tokio::test]
+    async fn update_source_interface_address_starts_a_held_neighbor() {
+        use crate::rib::api::RibRx;
+        let (mut bgp, ident) = bgp_with_held_neighbor();
+
+        // An address of the other family: still held, and not started.
+        bgp.process_rib_msg(RibRx::AddrAdd(link_addr_on("2001:db8::32/128", 7)));
+        assert!(drain_start_events(&mut bgp).is_empty());
+        assert!(pending(&bgp, "10.0.0.1"));
+
+        bgp.process_rib_msg(RibRx::AddrAdd(link_addr_on("10.1.0.32/32", 7)));
+        assert_eq!(drain_start_events(&mut bgp), vec![ident]);
+        assert!(!pending(&bgp, "10.0.0.1"));
+
+        // The same address announced again (its state moved) changes
+        // nothing and starts nothing.
+        bgp.process_rib_msg(RibRx::AddrAdd(link_addr_on("10.1.0.32/32", 7)));
+        assert!(drain_start_events(&mut bgp).is_empty());
+    }
+
+    /// A session that is up keeps the address it was opened with when
+    /// the interface gives another: no stop, the next connect binds the
+    /// new one. And a passive neighbor is never started.
+    #[tokio::test]
+    async fn update_source_interface_change_does_not_bounce_a_live_session() {
+        use crate::bgp::peer::State;
+        use crate::rib::api::RibRx;
+        let mut bgp = fresh_bgp();
+        for addr in ["10.0.0.1", "10.0.0.2"] {
+            config_peer(&mut bgp, arg_words(&[addr]), ConfigOp::Set).unwrap();
+            config_remote_as(&mut bgp, arg_words(&[addr, "65001"]), ConfigOp::Set).unwrap();
+            config_transport_local_address(
+                &mut bgp,
+                arg_words(&[addr, "Loopback0"]),
+                ConfigOp::Set,
+            )
+            .unwrap();
+        }
+        // 10.0.0.2 only listens: it sits in Active, as a held neighbor
+        // does, and must not be started into a dial.
+        let passive = bgp.peers.get_mut(&"10.0.0.2".parse().unwrap()).unwrap();
+        passive.config.transport.passive = true;
+        passive.state = State::Active;
+        while bgp.rx.try_recv().is_ok() {}
+        bgp.process_rib_msg(RibRx::LinkAdd(named_link(7, "Loopback0")));
+        bgp.process_rib_msg(RibRx::AddrAdd(link_addr_on("10.1.0.32/32", 7)));
+        assert!(!pending(&bgp, "10.0.0.2"));
+        assert!(
+            drain_start_events(&mut bgp).is_empty(),
+            "a passive neighbor is not started; an Idle one has its own timer",
+        );
+        bgp.peers.get_mut(&peer_addr()).unwrap().state = State::Established;
+
+        // A second address, closer to both neighbors, takes over.
+        bgp.process_rib_msg(RibRx::AddrAdd(link_addr_on("10.0.0.32/32", 7)));
+        assert_eq!(
+            source_of(&bgp, "10.0.0.1").0,
+            Some("10.0.0.32".parse().unwrap())
+        );
+        // The first goes: pending for a moment is not the case either,
+        // the second is still there.
+        bgp.process_rib_msg(RibRx::AddrDel(link_addr_on("10.1.0.32/32", 7)));
+        assert!(
+            bgp.rx.try_recv().is_err(),
+            "no stop for the live session, no start for the passive neighbor",
+        );
+        assert_eq!(
+            bgp.peers.get(&peer_addr()).unwrap().state,
+            State::Established
+        );
+    }
+
+    /// One statement on a neighbor-group serves its IPv4 and its IPv6
+    /// members, each with the interface's address of its own family —
+    /// where a group address serves one family only.
+    #[tokio::test]
+    async fn group_update_source_interface_serves_both_families() {
+        use super::super::neighbor_group::config_neighbor_group_update_source;
+        use crate::rib::api::RibRx;
+        let mut bgp = fresh_bgp();
+        bgp.process_rib_msg(RibRx::LinkAdd(named_link(7, "Loopback4096")));
+        bgp.process_rib_msg(RibRx::AddrAdd(link_addr_on("10.1.0.32/32", 7)));
+        bgp.process_rib_msg(RibRx::AddrAdd(link_addr_on("fc00:1::32/128", 7)));
+        config_neighbor_group_remote_as(&mut bgp, arg_words(&["BGPMON", "65000"]), ConfigOp::Set)
+            .unwrap();
+        // One member bound before the statement, one after.
+        config_peer(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+        config_peer_neighbor_group(&mut bgp, arg_words(&["10.0.0.1", "BGPMON"]), ConfigOp::Set)
+            .unwrap();
+        config_neighbor_group_update_source(
+            &mut bgp,
+            arg_words(&["BGPMON", "Loopback4096"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+        config_peer(&mut bgp, arg_words(&["2001:db8::2"]), ConfigOp::Set).unwrap();
+        config_peer_neighbor_group(
+            &mut bgp,
+            arg_words(&["2001:db8::2", "BGPMON"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+
+        let named = |source: &str| {
+            (
+                Some(source.parse().unwrap()),
+                Some("Loopback4096".to_string()),
+            )
+        };
+        assert_eq!(source_of(&bgp, "10.0.0.1"), named("10.1.0.32"));
+        assert_eq!(source_of(&bgp, "2001:db8::2"), named("fc00:1::32"));
+
+        // The neighbor's own statement wins, and gives way again.
+        config_transport_local_address(
+            &mut bgp,
+            arg_words(&["10.0.0.1", "192.0.2.1"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+        assert_eq!(
+            source_of(&bgp, "10.0.0.1"),
+            (Some("192.0.2.1".parse().unwrap()), None)
+        );
+        config_transport_local_address(
+            &mut bgp,
+            arg_words(&["10.0.0.1", "192.0.2.1"]),
+            ConfigOp::Delete,
+        )
+        .unwrap();
+        assert_eq!(source_of(&bgp, "10.0.0.1"), named("10.1.0.32"));
+
+        // The group's statement goes: so does every member's source.
+        config_neighbor_group_update_source(
+            &mut bgp,
+            arg_words(&["BGPMON", "Loopback4096"]),
+            ConfigOp::Delete,
+        )
+        .unwrap();
+        assert_eq!(source_of(&bgp, "10.0.0.1"), (None, None));
+        assert_eq!(source_of(&bgp, "2001:db8::2"), (None, None));
+    }
+
+    /// An interface name is not applied to a neighbor reached over a
+    /// link-local address, nor to a per-VRF neighbor (which is not told
+    /// of its interfaces): each keeps the kernel's choice and is dialed.
+    #[tokio::test]
+    async fn update_source_interface_is_not_applied_where_it_cannot_resolve() {
+        use super::super::neighbor_group::{InheritableKnobs, apply_resolved_session_knobs};
+        let by_name = UpdateSource::Interface("Loopback0".to_string());
+        let mut bgp = fresh_bgp();
+        config_peer(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+        let peer = bgp.peers.get_mut(&peer_addr()).unwrap();
+
+        // An interface-neighbor, dormant and with its link-local.
+        peer.origin = crate::bgp::peer_key::PeerOrigin::Interface { ifindex: 3 };
+        for address in ["::", "fe80::1"] {
+            peer.address = address.parse().unwrap();
+            assert!(!apply_update_source(peer, Some(&by_name)));
+            assert!(!peer.update_source_pending());
+        }
+        // A link-local neighbor typed by address.
+        peer.origin = crate::bgp::peer_key::PeerOrigin::Static;
+        assert!(!apply_update_source(peer, Some(&by_name)));
+        assert!(!peer.update_source_pending());
+
+        // The per-VRF apply path: an address is applied, a name is not.
+        peer.address = peer_addr();
+        let knobs = |source| InheritableKnobs {
+            update_source: Some(source),
+            ..Default::default()
+        };
+        apply_resolved_session_knobs(peer, &knobs(by_name.clone()));
+        assert_eq!(peer.config.transport.update_source_if, None);
+        assert!(!peer.update_source_pending());
+        apply_resolved_session_knobs(peer, &knobs(UpdateSource::parse("192.0.2.1")));
+        assert_eq!(
+            peer.config.transport.update_source,
+            Some("192.0.2.1".parse().unwrap())
+        );
+        // ... and the default-VRF path does take the name.
+        assert!(apply_update_source(peer, Some(&by_name)));
+        assert!(peer.update_source_pending());
+    }
+
+    /// BFD is sourced from the interface's address too: no session
+    /// while the interface gives none (the wildcard would let the kernel
+    /// pick), one from the address once it does, and none again when it
+    /// goes.
+    #[tokio::test]
+    async fn bfd_waits_for_the_update_source_interface() {
+        use crate::rib::api::RibRx;
+        let (mut bgp, mut bfd_rx) = fresh_bgp_with_bfd();
+        config_peer(&mut bgp, arg_words(&["10.0.0.5"]), ConfigOp::Set).unwrap();
+        config_transport_local_address(
+            &mut bgp,
+            arg_words(&["10.0.0.5", "Loopback0"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+        config_peer_bfd_enable(&mut bgp, arg_words(&["10.0.0.5", "true"]), ConfigOp::Set).unwrap();
+        assert!(bfd_rx.try_recv().is_err(), "no session without the source");
+
+        bgp.process_rib_msg(RibRx::LinkAdd(named_link(7, "Loopback0")));
+        assert!(bfd_rx.try_recv().is_err());
+        bgp.process_rib_msg(RibRx::AddrAdd(link_addr_on("10.1.0.32/32", 7)));
+        let key = match bfd_rx
+            .try_recv()
+            .expect("subscribe from the interface address")
+        {
+            ClientReq::Subscribe { key, .. } => key,
+            other => panic!("expected Subscribe, got {other:?}"),
+        };
+        assert_eq!(key.local, "10.1.0.32".parse::<IpAddr>().unwrap());
+        assert_eq!(key.remote, "10.0.0.5".parse::<IpAddr>().unwrap());
+        assert!(bfd_rx.try_recv().is_err(), "subscribed once");
+
+        bgp.process_rib_msg(RibRx::AddrDel(link_addr_on("10.1.0.32/32", 7)));
+        match bfd_rx
+            .try_recv()
+            .expect("unsubscribe when the address goes")
+        {
+            ClientReq::Unsubscribe { key: gone, .. } => assert_eq!(gone, key),
+            other => panic!("expected Unsubscribe, got {other:?}"),
+        }
+        assert!(
+            bfd_rx.try_recv().is_err(),
+            "and no wildcard session in its place"
         );
     }
 

@@ -1,0 +1,40 @@
+# z1 with `update-source lo` on the neighbor itself. `lo` has no address
+# yet: the scenarios give it one with a `set` command, and renumber it.
+# Everything else a session to z2's loopback needs is here, so the
+# missing address is the one thing between z1 and the session.
+interface:
+- if-name: vz1ns
+  ipv6:
+    address: 2001:db8::1/64
+router:
+  static:
+    ipv4:
+      route:
+      - prefix: 10.255.0.2/32
+        nexthop:
+        - address: 10.0.0.2
+    ipv6:
+      route:
+      - prefix: 2001:db8:255::2/128
+        nexthop:
+        - address: 2001:db8::2
+  bgp:
+    global:
+      as: 65001
+      router-id: 10.255.0.1
+    timer:
+      adv-interval:
+        ibgp: 1
+        ebgp: 1
+    neighbor:
+    - remote-address: 10.255.0.2
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      enabled: true
+      remote-as: 65001
+      update-source: lo
+    afi-safi:
+    - name: ipv4
+      network:
+      - prefix: 10.1.1.1/32

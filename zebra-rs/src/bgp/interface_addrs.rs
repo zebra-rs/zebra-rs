@@ -119,6 +119,35 @@ impl InterfaceAddrs {
             || self.global.get(&ifindex).is_some_and(|g| !g.is_empty())
     }
 
+    /// Every IPv4 address recorded on `ifindex`: the candidates of an
+    /// `update-source <interface>` for an IPv4 neighbor
+    /// ([`super::update_source::resolve`]).
+    pub fn v4_on(&self, ifindex: u32) -> impl Iterator<Item = Ipv4Addr> + '_ {
+        self.v4_owner
+            .iter()
+            .filter(move |(_, owner)| **owner == ifindex)
+            .map(|(addr, _)| *addr)
+    }
+
+    /// The global IPv6 addresses on `ifindex` that a socket can bind
+    /// now, with their state: the candidates of an `update-source
+    /// <interface>` for an IPv6 neighbor. Stricter than [`pick`], which
+    /// falls back on a tentative address: the kernel refuses a bind to
+    /// one (`EADDRNOTAVAIL`), so here an address still in duplicate
+    /// address detection does not count until it is through — unless
+    /// it is optimistic (RFC 4429), which is usable at once.
+    pub fn v6_global_bindable(
+        &self,
+        ifindex: u32,
+    ) -> impl Iterator<Item = (Ipv6Addr, AddrFlags)> + '_ {
+        self.global
+            .get(&ifindex)
+            .into_iter()
+            .flatten()
+            .filter(|(_, f)| !f.dadfailed && (!f.tentative || f.optimistic))
+            .map(|(addr, f)| (*addr, *f))
+    }
+
     /// Return the chosen link-local for `ifindex`, or `None` if none
     /// is registered. State-aware: see [`pick`].
     pub fn link_local_for(&self, ifindex: u32) -> Option<Ipv6Addr> {

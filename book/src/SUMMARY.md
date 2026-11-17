@@ -37,6 +37,7 @@
   - [TTL: eBGP Multihop & Security (GTSM)](ch-02-11-bgp-ttl-security.md)
   - [TCP MSS](ch-02-14-bgp-tcp-mss.md)
   - [TCP Port (listen & per-neighbor)](ch-02-23-bgp-port.md)
+  - [update-source (address or interface)](ch-02-49-bgp-update-source.md)
   - [AS Override](ch-02-12-bgp-as-override.md)
   - [Local AS (AS Migration)](ch-02-30-bgp-local-as.md)
   - [allowas-in (Inbound AS_PATH Loop Relaxation)](ch-02-13-bgp-allowas-in.md)

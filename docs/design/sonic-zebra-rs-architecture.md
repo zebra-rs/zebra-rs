@@ -401,8 +401,10 @@ Not covered, and the reason a zebra-rs image is not a drop-in replacement yet:
   does not apply the policy of a redistribute source; so are the next hop
   forms zebra-rs has no syntax for. TSA was observed for IPv4 only, on a single-ASIC VS; the multi-ASIC and
   chassis paths of the host scripts have not run.
-- **Three template families** wait on zebra-rs features: `update-source
-  <interface>`, `set originator-id`, `bestpath peer-type multipath-relax`.
+- **Two template families** wait on zebra-rs features: `internal` on `set
+  originator-id`, `voq_chassis` on `bestpath peer-type multipath-relax`. A
+  third, `monitors`, waited on `update-source <interface>`, which zebra-rs
+  has now; its template is not ported yet.
 - **`dynamic` and `sentinels`** are accepted by the daemon but have not run on
   a VM.
 - **Default VRF only**, in bgpcfgd and in the vtysh compatibility.

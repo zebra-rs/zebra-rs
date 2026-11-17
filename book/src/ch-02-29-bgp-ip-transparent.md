@@ -6,7 +6,7 @@ can use a local address that is **not configured anywhere on the host**:
 normally the kernel rejects a `bind()` to a non-local address and refuses
 to emit packets with a non-local source; IP_TRANSPARENT (which requires
 `CAP_NET_ADMIN`) bypasses both checks. The address itself comes from
-[`update-source`](ch-02-11-bgp-ttl-security.md), so the two are configured
+[`update-source`](ch-02-49-bgp-update-source.md), so the two are configured
 together: **`update-source` names the address you don't own,
 `ip-transparent` makes the kernel accept it.**
 

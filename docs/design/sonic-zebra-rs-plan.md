@@ -55,11 +55,12 @@ repeated on that image.
    route`, `route_check` and bgpmon on the VS, packaged in the image together
    with the sonic-utilities fork that registers the BGP commands for this
    routing stack. The rest of the FRR-schema JSON commands are open.
-5. **Close the zebra-rs feature gaps** that block families: `update-source
-   <interface>` first (it unblocks `monitors` outright), then `bestpath
-   peer-type multipath-relax`, `set originator-id`, `clear bgp neighbor-group`,
-   `network … policy`, and applying the policy of a `redistribute` source,
-   which is what `advertise=false` on a static route needs.
+5. **Close the zebra-rs feature gaps** that block families. `update-source
+   <interface>` is closed (§2.3): it unblocks `monitors` outright, whose
+   template is now to be ported. Then `bestpath peer-type multipath-relax`,
+   `set originator-id`, `clear bgp neighbor-group`, `network … policy`, and
+   applying the policy of a `redistribute` source, which is what
+   `advertise=false` on a static route needs.
 
 **How this was established, and what it does not establish.** Statements about
 zebra-rs were first checked by reading the source and the YANG at `8b59b250`, and
@@ -291,8 +292,8 @@ peer-groups as `neighbor-group`, `allowas-in`, `route-reflector-client`,
 add-path on neighbors and neighbor-groups, `maximum-paths` and
 `bestpath as-path multipath-relax` (`zebra-bgp-multipath.yang`),
 `suppress-fib-pending`, `maximum-prefix` (*schema read*), `update-source` by
-address, `ebgp-multihop`, dynamic neighbors / listen-range, `table-map`,
-redistribute (its `policy` is accepted but not applied, see
+address or by interface, `ebgp-multihop`, dynamic neighbors / listen-range,
+`table-map`, redistribute (its `policy` is accepted but not applied, see
 `bgp-sonic-gaps.md`), the policy engine — prefix-set, as-path-set, community /
 large-community / ext-community, `call`, `set tag` / `match tag`,
 `action next` — `advertise-all-vni`, BFD, MD5/TCP-AO, VRF/L3VPN, SRv6, EVPN,
@@ -347,7 +348,7 @@ The traps, all now guarded against by `validate-templates.sh` and
 | Gap | Blocks | State |
 |---|---|---|
 | `send-community` | `monitors`, `internal`, `voq_chassis` | **not a gap.** Measured on VS: a community set by a zebra-rs egress policy reached the FRR eBGP peer with nothing configured. zebra-rs always sends, so the FRR line is dropped by the template with that stated. Extended/large communities and iBGP not measured. |
-| `update-source <interface>` | `monitors` | open. The leaf is a union of IPv4/IPv6 address only. SONiC uses the interface form so the source follows the loopback. |
+| `update-source <interface>` | `monitors`, `internal` | **closed** in zebra-rs. The leaf takes an interface name beside an address, on a neighbor and on a neighbor-group: the session is sourced from that interface's address of the neighbor's family, the choice follows the interface, and a neighbor whose interface gives no address is not dialed (unit tests, BDD `bgp_update_source_interface`). Default VRF only. No template uses it yet, and it has not run on a VS. |
 | `soft-reconfiguration inbound` | `general`, `sentinels`, `dynamic` | open, and **silently dropped** rather than refused. The assumption that zebra-rs's own soft-reset handling makes this a no-op is untested. |
 | per-neighbour `keepalive` | any tuned timer | open, silently degraded. Only `connect-retry-time` and `hold-time` exist; bgpcfgd's own `timers_1` fixture sets keepalive 5 with a default hold time, which ports to 60. |
 | `set ipv6 next-hop prefer-global` | `general` policy | open, silently degraded. |
@@ -397,8 +398,8 @@ Deliberately *not* gaps: `no bgp default ipv4-unicast` and
 | `general` | **ported**, all fixtures accepted by a live daemon |
 | `dynamic` (BGP_SPEAKER) | **ported** |
 | `sentinels` | **ported**, all fixtures accepted by a live daemon, and `BGP_SENTINELS` is driven by bgpcfgd. Drops `soft-reconfiguration`; `add-path send` vs tx-all-paths still unmeasured (§2.3). FRR's two-community `community-list` entry means *both*; a zebra-rs community-set matches *any*, so the conjunction is spelled out with `call`. |
-| `monitors` | blocked: `update-source <interface>` only (`send-community` turned out not to be a gap, §2.3) |
-| `internal` | **read; blocked.** Multi-ASIC only. Needs `set originator-id` (no such policy action — *schema read*) and `update-source Loopback4096` (interface form). Its `timers 3 10` ports exactly. Present: `set tag`, `set local-preference`, `set community … delete`, `ttl-security`, `allowas-in`, route-reflector client, `next-hop-self` (whether it has FRR's `force` meaning is unchecked). |
+| `monitors` | **unblocked, not ported.** It waited on `update-source <interface>` only, which zebra-rs has now (§2.3; `send-community` turned out not to be a gap). |
+| `internal` | **read; blocked.** Multi-ASIC only. Needs `set originator-id` (no such policy action — *schema read*). Its `update-source Loopback4096` (interface form) is closed (§2.3). Its `timers 3 10` ports exactly. Present: `set tag`, `set local-preference`, `set community … delete`, `ttl-security`, `allowas-in`, route-reflector client, `next-hop-self` (whether it has FRR's `force` meaning is unchecked). |
 | `voq_chassis` | **read; blocked** — on a closer read than the first pass, which called it portable. It needs `bgp bestpath peer-type multipath-relax` (ECMP across eBGP and iBGP paths; no such leaf — *schema read*), which is forwarding behaviour and so refused rather than dropped. What does port: `timers 2 7` exactly (zebra-rs derives keepalive as hold/3), per-neighbor default shutdown, `maximum-paths ibgp` as `maximum-paths-ibgp`, and the policy half, which is `internal`'s under other names. `addpath-tx-all-paths` again. |
 
 `managers_allow_list.py` is **not ported**: it emits FRR syntax and parses FRR's
@@ -601,11 +602,11 @@ Remaining, in order:
    (`sudo TSA`/`TSC`/`TSB` verified on VS against an FRR peer, IPv4). Next
    here is the rest of the managers still left out.
 2. **`sentinels` — done** (§2.5), including `maximum-prefix`.
-3. **`voq_chassis`, `internal`, `monitors`** — each waits on one or two
-   zebra-rs features: `update-source <interface>` (`internal`, `monitors`),
+3. **`monitors`** — port the template: `update-source <interface>`, the one
+   feature it waited on, is in zebra-rs now (§2.3).
+   **`voq_chassis`, `internal`** — each still waits on a zebra-rs feature:
    `set originator-id` (`internal`), `bestpath peer-type multipath-relax`
-   (`voq_chassis`). `update-source <interface>` unblocks the most, and
-   `monitors` outright.
+   (`voq_chassis`).
 5. **`managers_allow_list` dialect abstraction.** It both emits FRR syntax and
    parses FRR running-config for sequence numbers. With `call` in place the
    zebra-rs side can own a separate policy per allow-list and skip sequence

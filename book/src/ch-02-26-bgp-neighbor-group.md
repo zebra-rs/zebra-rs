@@ -96,9 +96,11 @@ command uses:
   capabilities are exchanged only in the OPEN message. Issue
   `clear bgp ipv4 neighbor <X>` when you want a live session to
   renegotiate with the new family set.
-- **`update-source`** propagates to inherited members, but skips
-  members whose address family does not match the configured source
-  address (e.g. an IPv4 source is not applied to an IPv6-only session).
+- **[`update-source`](ch-02-49-bgp-update-source.md)** propagates to
+  inherited members. A source *address* skips members whose address
+  family does not match it (e.g. an IPv4 source is not applied to an
+  IPv6-only session). An *interface name* serves every member: each
+  takes the interface's address of its own family.
 - **Dynamic (listen-range) members** are always passive regardless of
   the group's `passive` setting — an inbound caller materializes the
   peer and drives the connection.

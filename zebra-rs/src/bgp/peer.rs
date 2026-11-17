@@ -296,7 +296,20 @@ pub enum PasswordEncoding {
 #[derive(Debug, Default, Clone)]
 pub struct PeerTransportConfig {
     pub passive: bool,
+    /// The address this neighbor's session is sourced from: bound
+    /// before the connect ([`peer_connect`]) and taken as the local
+    /// address of its BFD session. `update-source <address>` puts the
+    /// address here as it is; `update-source <interface>` puts here
+    /// what the interface gives ([`super::update_source::resolve`]),
+    /// which `config::update_source_resolve` keeps current. `None`
+    /// without [`Self::update_source_if`] leaves the choice to the
+    /// kernel; `None` with it is a neighbor that waits
+    /// ([`Peer::update_source_pending`]).
     pub update_source: Option<IpAddr>,
+    /// `update-source <interface>`: the interface
+    /// [`Self::update_source`] is taken from. `None` for the address
+    /// form and when there is no statement.
+    pub update_source_if: Option<String>,
     /// `port <1-65535>` (FRR `neighbor X port`): TCP destination port
     /// used when this router actively dials the neighbor. `None` is
     /// the IANA default [`BGP_PORT`] (179); deleting the leaf returns
@@ -1730,6 +1743,28 @@ impl Peer {
             && !addr_is_v6_link_local(&self.address)
     }
 
+    /// `update-source <interface>` is in force and the interface has
+    /// given no address: it is unknown, or has no usable address of
+    /// this neighbor's family. Such a neighbor is not dialed
+    /// ([`fsm_start`], [`peer_start_connection`]) and has no BFD
+    /// session — neither may leave from an address the statement did
+    /// not name. An inbound connection is still taken: it arrives on
+    /// the address the remote chose.
+    pub fn update_source_pending(&self) -> bool {
+        self.config.transport.update_source_if.is_some()
+            && self.config.transport.update_source.is_none()
+    }
+
+    /// Whether an `update-source <interface>` applies to this neighbor.
+    /// Not to one reached over an IPv6 link-local address — an
+    /// `interface-neighbor`, dormant (`::`) or not, among them: its
+    /// source is the link it is on, and another interface's global
+    /// address cannot reach it.
+    pub fn update_source_interface_applies(&self) -> bool {
+        !matches!(self.origin, super::peer_key::PeerOrigin::Interface { .. })
+            && !addr_is_v6_link_local(&self.address)
+    }
+
     /// True when the directly-connected-network check is satisfied: either
     /// it does not apply to this peer (see [`Self::connected_check_applies`])
     /// or the neighbor sits on one of our connected subnets
@@ -2504,6 +2539,19 @@ pub fn fsm_start(peer: &mut Peer) -> State {
         bgp_fsm_trace!(
             peer,
             "bgp: holding eBGP session — neighbor is not on a connected network and disable-connected-check is off",
+        );
+        peer.timer.connect_retry = Some(timer::start_connect_retry_timer(peer));
+        return State::Active;
+    }
+    // `update-source <interface>` with no address to give: hold the
+    // active connection the same way. The instance sends Event::Start
+    // when the interface gives one (`config::update_source_resolve`), so
+    // the connect-retry tick is again only a backstop — it cannot find
+    // the address itself, the FSM does not see the interface table.
+    if peer.update_source_pending() {
+        bgp_fsm_trace!(
+            peer,
+            "bgp: holding session — the update-source interface has no usable address for this neighbor",
         );
         peer.timer.connect_retry = Some(timer::start_connect_retry_timer(peer));
         return State::Active;
@@ -3514,6 +3562,15 @@ pub fn peer_start_writer(
 pub fn peer_start_connection(peer: &mut Peer) -> Task<()> {
     let ident = peer.ident;
     let tx = peer.tx.clone();
+    // Never dial without the source `update-source <interface>` asks
+    // for: fail the dial, as FRR's `bgp_update_source()` does when the
+    // interface or its address is missing. `fsm_start` holds such a
+    // neighbor before it gets here; this is for the other ways in.
+    if peer.update_source_pending() {
+        return Task::spawn(async move {
+            let _ = tx.try_send(Message::Event(ident, Event::DialFail));
+        });
+    }
     let address = peer.address;
     let scope_id = peer.scope_id;
     let update_source = peer.config.transport.update_source;
@@ -4249,7 +4306,11 @@ pub(super) fn try_dynamic_accept(
     // reconciles on accept: the session used to wait for an unrelated
     // BFD config change or address event. Run after the connection is
     // taken so the single-hop key's ifindex can come from the socket's
-    // local address.
+    // local address. The group's `update-source <interface>` gives the
+    // session its local address, so find that first.
+    if let Some(ident) = bgp.peers.get(&peer_addr).map(|peer| peer.ident) {
+        super::config::update_source_resolve(bgp, ident);
+    }
     let _ = super::config::bfd_apply(bgp, peer_addr);
     rest
 }
