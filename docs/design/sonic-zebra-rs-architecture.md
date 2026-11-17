@@ -6,7 +6,7 @@ and open work, is [`sonic-zebra-rs-plan.md`](sonic-zebra-rs-plan.md); this
 document describes the state that plan has reached.
 
 State described: zebra-rs `main` at `5b003a5c`, sonic-buildimage
-`zebra-rs/sonic-buildimage` branch `zebra-rs-container` at `7dd5deb54`,
+`zebra-rs/sonic-buildimage` branch `zebra-rs-container` at `c01c37c8e`,
 sonic-utilities `zebra-rs/sonic-utilities` branch `zebra-rs-routing-stack` at
 `a6e35897`. A `sonic-vs` image built from those three boots from a stock
 `config_db.json`, peers with an FRR SONiC over eBGP, and programs the ASIC.
@@ -200,15 +200,17 @@ detect a rejected commit rather than assume success.
 | File | Change |
 |---|---|
 | `bgpcfgd/dialect.py` (new) | `routing_stack()` / `is_zebra_rs()`, read from the `SONIC_ROUTING_STACK` environment variable that the container's supervisord sets. Unset, bgpcfgd behaves exactly as before. |
-| `bgpcfgd/zebra_rs.py` (new) | `ZebraRs`, the counterpart of `frr.py`'s `FRR` class, with the same interface. `write()` runs `vtyctl apply -f` and looks for `error reply:` in the output, because `vtyctl apply` exits 0 on a rejected commit. `get_config()` reads `show running-config formal`. `drop_redundant_sets()` removes `set` lines already in the running config, because `set` on a leaf-list appends and would duplicate members on every re-push. |
-| `bgpcfgd/main.py` | `do_work()` dispatches on `is_zebra_rs()`. `do_work_zebra_rs()` builds the `ZebraRs` backend and starts only the managers whose templates are ported: the metadata and interface managers, and `BGPPeerMgrBase` for `BGP_NEIGHBOR` (`general`), `BGP_PEER_RANGE` (`dynamic`) and `BGP_SENTINELS` (`sentinels`). The tables it ignores are named in a startup warning. |
-| `bgpcfgd/managers_bgp.py` | zebra-rs branches where FRR syntax was built in code rather than in a template: peer-group text is pushed as plain lines instead of being wrapped in vtysh context; delete is `delete router bgp neighbor X` or `… neighbor-group X` for the listen-range families; admin shutdown is `neighbor X enabled false`; known peers are read from the formal running config; a neighbor in a non-default VRF is refused. |
-| `tests/test_zebra_rs.py` | Tests for the backend. |
+| `bgpcfgd/zebra_rs.py` (new) | `ZebraRs`, the counterpart of `frr.py`'s `FRR` class, with the same interface. `write()` runs `vtyctl apply -f` and looks for `error reply:` in the output, because `vtyctl apply` exits 0 on a rejected commit. `get_config()` reads `show running-config formal`. `reconcile()` filters a batch against the running config before it is pushed: it removes `set` lines already present, because `set` on a leaf-list appends and would duplicate members on every re-push, and `delete` lines whose path is not configured, because zebra-rs rejects those and one rejected line discards the whole commit. |
+| `bgpcfgd/main.py` | `do_work()` dispatches on `is_zebra_rs()`. `do_work_zebra_rs()` builds the `ZebraRs` backend and starts only the managers whose templates are ported: the metadata and interface managers, and `BGPPeerMgrBase` for `BGP_NEIGHBOR` (`general`), `BGP_PEER_RANGE` (`dynamic`) and `BGP_SENTINELS` (`sentinels`), and `DeviceGlobalCfgMgr` for `BGP_DEVICE_GLOBAL`. The tables it ignores are named in a startup warning. |
+| `bgpcfgd/managers_bgp.py` | zebra-rs branches where FRR syntax was built in code rather than in a template: peer-group text is pushed as plain lines instead of being wrapped in vtysh context; delete is `delete router bgp neighbor X` or `… neighbor-group X` for the listen-range families; admin shutdown is `neighbor X enabled false`; known peers are read from the formal running config; a neighbor in a non-default VRF is refused. A peer configured while the device is isolated gets the TSA entries in the same commit. |
+| `bgpcfgd/managers_device_global.py` | Runs under zebra-rs for TSA: on a change of `tsa_enabled` it finds the outbound policies in the formal running config (`policy out` of a neighbor or a neighbor-group) and renders the isolate or unisolate template for each. W-ECMP and IDF isolation are refused with a log message. |
+| `tests/test_zebra_rs.py`, `tests/test_zebra_rs_tsa.py` | Tests for the backend and for TSA. |
+| `tests/conftest.py` (new) | Clears `SONIC_ROUTING_STACK` for every test. The build exports a variable of that name, so in a zebra-rs build the FRR tests would otherwise run against the zebra-rs backend. |
 
 **Left out under zebra-rs**, and therefore not functional on a zebra-rs image:
-the device-global manager (TSA/TSB), the allow-list manager, BFD, static-route,
-SRv6, route-map, prefix-list, and the monitor, internal and VoQ-chassis peer
-families.
+W-ECMP and IDF isolation (the other two functions of the device-global
+manager), the allow-list manager, BFD, static-route, SRv6, route-map,
+prefix-list, and the monitor, internal and VoQ-chassis peer families.
 
 ### 4.4 New: templates, `dockers/docker-fpm-zebra-rs/zebra-rs/`
 
@@ -222,6 +224,11 @@ Ports of the FRR templates of the same names, in the `set` dialect.
 - `bgpd/templates/dynamic/` — the same plus `update` and `delete` for
   `BGP_PEER_RANGE` (listen ranges on a neighbor-group).
 - `bgpd/templates/sentinels/` — for `BGP_SENTINELS`.
+- `bgpd/tsa/` — isolate and unisolate. Isolating adds three entries to an
+  outbound policy of external peers: 20 permits the loopbacks and tags them
+  with the traffic-shift community, 30 does the same for routes carrying the
+  internal tag, 40 denies the rest. An internal policy gets one entry adding
+  `no-export`. Unisolating deletes them.
 - `common/functions.conf.j2` — shared macros.
 
 Differences in meaning the templates have to absorb, each found by running:
@@ -312,6 +319,14 @@ Additive JSON fields only; no existing field changed meaning.
 - **The `.deb`** links `/usr/bin/vtysh` to `vtyctl` in the container.
 - **Host wrappers** `vtysh` and `rvtysh` (`base_image_files/`), the same two
   scripts `docker-fpm-frr` installs: they `docker exec bgp vtysh`.
+- **`vty`**, zebra-rs's interactive shell (completion, `?` help, configure
+  mode), is in the `.deb`, and a host wrapper of the same name opens it in the
+  container. `CLI_PAGER=cat vty` turns the pager off. Configuration committed
+  there bypasses CONFIG_DB and is lost when the container restarts.
+- **`TSA`, `TSB`, `TSC`** on the host are `docker-fpm-frr`'s own scripts,
+  referenced from there: they only write and read CONFIG_DB. The container has
+  its own `TSC`, which reads the formal running config and checks entries 20,
+  30 and 40 of the outbound policies of external peers.
 - **bgpmon** runs in the container and fills STATE_DB `NEIGH_STATE_TABLE`.
 - **sonic-utilities** (fork, one commit): it names the routing stack from the
   bgp container's image name — `docker-fpm-zebra-rs` reads as `zebra` — and
@@ -326,12 +341,12 @@ Additive JSON fields only; no existing field changed meaning.
 | `rules/config` | `SONIC_ROUTING_STACK` accepts `zebra-rs`. It has to be set in `rules/config.user`; the make command line does not reach the build slave. |
 | `rules/docker-fpm.mk` | Installs exactly one of `docker-fpm-frr` and `docker-fpm-zebra-rs`. |
 | `rules/zebra-rs.mk` | The `.deb` target, version, and `ZEBRA_RS_RUST_VERSION`. |
-| `rules/docker-fpm-zebra-rs.mk` | The container: depends on the zebra-rs `.deb` and swss, installs the bgpcfgd wheel, container name `bgp`, host wrappers. |
+| `rules/docker-fpm-zebra-rs.mk` | The container: depends on the zebra-rs `.deb` and swss, installs the bgpcfgd wheel, container name `bgp`, host wrappers and the traffic-shift commands. |
 | `sonic-slave-trixie/Dockerfile.j2` | A **second** pinned Rust toolchain (1.97.0) and `cargo-auditable` 0.7.7 under `/usr/.cargo-zebra-rs`. The slave's default Rust (1.86) cannot build zebra-rs and its `cargo-auditable` 0.6.4 panics on edition-2024 crates; raising the default would change what every other Rust package is built with. |
-| `src/sonic-zebra-rs/Makefile` | Builds `zebra-rs`, `vtyctl`, `vtyhelper` with that toolchain and assembles the `.deb` by hand with `dpkg-deb`: binaries, the YANG schemas the daemon loads at runtime, the `vtysh` link. |
+| `src/sonic-zebra-rs/Makefile` | Builds `zebra-rs`, `vtyctl`, `vtyhelper` with that toolchain and `vty` (a patched GNU bash 5.3, whose tarball is fetched and checked against a pinned SHA-256), and assembles the `.deb` by hand with `dpkg-deb`: binaries, the YANG schemas the daemon loads at runtime, the `vtysh` link. |
 | `src/sonic-zebra-rs/Cargo.lock` | zebra-rs does not commit a lock file, so the submodule SHA alone does not pin dependencies. This one does, with `--locked`. |
 | `src/sonic-zebra-rs/zebra-rs` | Submodule, pinned to zebra-rs `main`. |
-| `dockers/docker-fpm-zebra-rs/` | `Dockerfile.j2`, `docker_init.sh`, `supervisord.conf.j2`, `critical_processes.j2`, the templates of §4.4, the validators. |
+| `dockers/docker-fpm-zebra-rs/` | `Dockerfile.j2`, `docker_init.sh`, `supervisord.conf.j2`, `critical_processes.j2`, `TSC`, the templates of §4.4, the validators. |
 
 `docker_init.sh` renders supervisord's configuration, the critical-process list
 and `zebra-rs.conf` with `sonic-cfggen`, then starts supervisord. The daemon is
@@ -359,7 +374,7 @@ started as `zebra-rs --claim-main-bgp --config-file /etc/zebra-rs/zebra-rs.conf`
 | Admin shutdown | zebra-rs | `zebra-rs/src/bgp/config.rs`, `peer.rs` |
 | FRR vtysh compatibility | zebra-rs | `vtyctl/src/frr/` |
 | FPM capture tool, golden captures, rigs | zebra-rs | `tools/fpm-tap/` |
-| bgpcfgd backend | sonic-buildimage | `src/sonic-bgpcfgd/bgpcfgd/{dialect,zebra_rs,main,managers_bgp}.py` |
+| bgpcfgd backend | sonic-buildimage | `src/sonic-bgpcfgd/bgpcfgd/{dialect,zebra_rs,main,managers_bgp,managers_device_global}.py` |
 | Container, templates | sonic-buildimage | `dockers/docker-fpm-zebra-rs/` |
 | Package and build rules | sonic-buildimage | `rules/zebra-rs.mk`, `rules/docker-fpm-zebra-rs.mk`, `src/sonic-zebra-rs/` |
 | BGP CLI registration | sonic-utilities (fork) | `show/main.py`, `clear/main.py` |
@@ -369,14 +384,18 @@ started as `zebra-rs --claim-main-bgp --config-file /etc/zebra-rs/zebra-rs.conf`
 Verified on a `sonic-vs` under KVM against an FRR `sonic-vs`: first boot from a
 stock configuration, eBGP IPv4 with ECMP, APPL_DB parity with FRR (34 rows),
 ASIC_DB, forwarding, `show ip bgp summary`, `show ip route`, `route_check.py`,
-bgpmon, `sonic-clear ip bgp`. On an earlier image of the same code: IPv6 eBGP,
+bgpmon, `sonic-clear ip bgp`, the `vty` shell from the host, and `sudo TSA` /
+`TSC` / `TSB` through CONFIG_DB (a test prefix withdrawn and the loopback
+re-advertised with the traffic-shift community, then both restored; the mode
+kept across a restart of the container). On an earlier image of the same code: IPv6 eBGP,
 and neighbor shutdown, startup, remove and re-add through CONFIG_DB, and a
 container restart with leftover routes.
 
 Not covered, and the reason a zebra-rs image is not a drop-in replacement yet:
 
-- **TSA/TSB and the other bgpcfgd managers left out** (§4.3). A box with TSA
-  set in CONFIG_DB is not isolated.
+- **The bgpcfgd managers left out** (§4.3), W-ECMP and IDF isolation among
+  them. TSA was observed for IPv4 only, on a single-ASIC VS; the multi-ASIC and
+  chassis paths of the host scripts have not run.
 - **Three template families** wait on zebra-rs features: `update-source
   <interface>`, `set originator-id`, `bestpath peer-type multipath-relax`.
 - **`dynamic` and `sentinels`** are accepted by the daemon but have not run on
