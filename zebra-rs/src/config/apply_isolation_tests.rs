@@ -6,6 +6,7 @@
 //! thrown away when the apply is refused, and afterwards they are still
 //! an edit of the running config the apply produced.
 
+use super::test_support::{candidate, edit, running};
 use super::*;
 
 fn manager(name: &str) -> ConfigManager {
@@ -23,38 +24,7 @@ fn manager_at(name: &str) -> (ConfigManager, std::path::PathBuf) {
 }
 
 fn manager_with_path(path: &std::path::Path) -> ConfigManager {
-    let (rib_tx, _rib_rx) = mpsc::unbounded_channel();
-    let (rib_inbound_tx, _rib_inbound_rx) = mpsc::unbounded_channel();
-    let (policy_tx, _policy_rx) = mpsc::unbounded_channel();
-    ConfigManager::new(
-        concat!(env!("CARGO_MANIFEST_DIR"), "/yang").to_string(),
-        Vec::new(),
-        Some(path.to_string_lossy().into_owned()),
-        rib_tx,
-        rib_inbound_tx,
-        policy_tx,
-        Default::default(),
-    )
-    .expect("manager builds")
-}
-
-/// Type a line in a configure-mode session, without committing.
-fn edit(cm: &ConfigManager, line: &str) {
-    let mode = cm.modes.get("configure").expect("configure mode");
-    let (code, output, _) = cm.execute(mode, line);
-    assert_eq!(code, ExecCode::Show, "`{line}`: {output:?}");
-}
-
-fn running(cm: &ConfigManager) -> String {
-    let mut out = String::new();
-    cm.store.running.borrow().list(&mut out);
-    out
-}
-
-fn candidate(cm: &ConfigManager) -> String {
-    let mut out = String::new();
-    cm.store.candidate.borrow().list(&mut out);
-    out
+    test_support::manager(path, Vec::new(), Default::default())
 }
 
 fn lines(text: &str) -> Vec<&str> {
@@ -738,4 +708,43 @@ fn an_ordered_leaf_list_under_an_entry_the_edit_deleted_stays_deleted() {
 
     assert_eq!(segments(&running(&cm)), ["2001:db8::b", "2001:db8::a"]);
     assert_eq!(candidate(&cm), "", "the route is still deleted");
+}
+
+/// A tree the store replaces is freed. Every commit and every discard
+/// replaces one, and an apply that finds edits makes a copy of the
+/// running config besides: each used to stay allocated for good, a
+/// node and its parent holding each other.
+#[test]
+fn a_replaced_tree_is_freed() {
+    let cm = manager("freed");
+    cm.deploy(&format!("set {ETH0}\n"));
+    edit(&cm, &format!("set {ETH1}"));
+    let root = |tree: &RefCell<Rc<Config>>| Rc::downgrade(&tree.borrow());
+    let (old_running, edits) = (root(&cm.store.running), root(&cm.store.candidate));
+
+    // An apply with edits pending: the running config it replaced is
+    // gone, the edits are the candidate still.
+    cm.deploy("set system hostname applied\n");
+    assert!(
+        old_running.upgrade().is_none(),
+        "the replaced running config"
+    );
+    assert!(Rc::ptr_eq(
+        &edits.upgrade().expect("the edits"),
+        &cm.store.candidate.borrow()
+    ));
+
+    // A discard replaces the candidate, a whole-config document both.
+    cm.store.discard();
+    assert!(edits.upgrade().is_none(), "the discarded candidate");
+    edit(&cm, &format!("set {ETH1}"));
+    let (old_running, edits) = (root(&cm.store.running), root(&cm.store.candidate));
+    cm.deploy("system {\n    hostname replaced;\n}\n");
+    assert!(old_running.upgrade().is_none());
+    assert!(
+        edits.upgrade().is_none(),
+        "edits a whole-config document replaced"
+    );
+    assert_eq!(lines(&running(&cm)), ["system hostname replaced"]);
+    assert_eq!(candidate(&cm), running(&cm));
 }

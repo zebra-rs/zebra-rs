@@ -295,7 +295,7 @@ impl ZmcpServer {
             }),
             json!({
                 "name": "apply-config",
-                "description": "Apply configuration changes and commit them atomically. Each element of 'commands' must be a single 'set ...' or 'delete ...' line in the syntax shown by get-config format 'formal'. The daemon validates and commits all lines as one transaction: on any error nothing is applied and the error detail (including the offending line) is returned, so a failed call is safe to correct and retry.",
+                "description": "Apply configuration changes and commit them atomically. Each element of 'commands' must be a single 'set ...' or 'delete ...' line in the syntax shown by get-config format 'formal'. The daemon validates and commits all lines as one transaction: on any error nothing is applied and the error detail (including the offending line) is returned, so a failed call is safe to correct and retry. Edits an operator has pending in a configure session are left pending: this call neither commits nor drops them.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {

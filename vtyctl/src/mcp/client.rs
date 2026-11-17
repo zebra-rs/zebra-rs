@@ -155,9 +155,12 @@ impl ZebraClient {
 
     /// Apply configuration lines and commit them atomically.
     ///
-    /// The daemon's Apply service is transactional: a line that fails to
-    /// parse, or a failed schema validation at commit, discards the whole
-    /// candidate and nothing is applied. It is also admin-gated — sessions
+    /// The daemon's Apply service is transactional: when a line fails to
+    /// parse, or schema validation fails at commit, nothing of the call
+    /// is applied. Edits an operator has typed in a configure-mode
+    /// session and not committed are no part of the transaction: a call
+    /// that succeeds does not commit them, and one that fails does not
+    /// drop them. It is also admin-gated — sessions
     /// from uid 0 hold the Admin role automatically; anything else is
     /// refused with "admin role required".
     pub async fn apply_config(&self, lines: &[String]) -> Result<String> {
