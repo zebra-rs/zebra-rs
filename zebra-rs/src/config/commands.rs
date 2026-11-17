@@ -1,6 +1,6 @@
-use super::ExecCode;
 use super::manager::{ConfigFormat, ConfigManager};
 use super::util::trim_first_line;
+use super::{Args, ExecCode};
 use libyang::Entry;
 use similar::{ChangeTag, TextDiff};
 use std::collections::HashMap;
@@ -9,10 +9,19 @@ use std::rc::Rc;
 
 type FuncMap = HashMap<String, fn(&ConfigManager) -> (ExecCode, String)>;
 
+/// The handler of a command that carries values: `rollback 2`,
+/// `rollback revision <id>`. It is given them as a protocol's callback
+/// is given the values of a `set` line.
+type ArgFunc = fn(&ConfigManager, Args) -> (ExecCode, String);
+
 #[derive(Debug)]
 pub struct Mode {
     pub entry: Rc<Entry>,
     pub fmap: FuncMap,
+    /// Keyed by the command's path without its values, as
+    /// `path_from_command` splits a line: `/rollback/revision` for
+    /// `rollback revision <id>`.
+    pub amap: HashMap<String, ArgFunc>,
 }
 
 impl Mode {
@@ -20,11 +29,16 @@ impl Mode {
         Self {
             entry,
             fmap: HashMap::new(),
+            amap: HashMap::new(),
         }
     }
 
     pub fn install_func(&mut self, path: String, f: fn(&ConfigManager) -> (ExecCode, String)) {
         self.fmap.insert(path, f);
+    }
+
+    pub fn install_func_args(&mut self, path: String, f: ArgFunc) {
+        self.amap.insert(path, f);
     }
 }
 
@@ -50,9 +64,20 @@ pub fn configure_mode_create(entry: Rc<Entry>) -> Mode {
     mode.install_func(String::from("/discard"), discard);
     mode.install_func(String::from("/compare"), compare);
     mode.install_func(String::from("/compare/formal"), compare_formal);
-    // `rollback <n>` and `compare rollback <n>` carry a number, which a
-    // handler here is not given: `ConfigManager::execute` runs them.
+    // An earlier commit is named by its number, which the schema calls
+    // `commit` and the operator does not type (`rollback 2`), or by its
+    // revision (`rollback revision <id>`).
     mode.install_func(String::from("/rollback"), rollback_latest);
+    mode.install_func_args(String::from("/rollback/commit"), rollback_number);
+    mode.install_func_args(String::from("/rollback/revision"), rollback_revision);
+    mode.install_func_args(
+        String::from("/compare/rollback/commit"),
+        compare_rollback_number,
+    );
+    mode.install_func_args(
+        String::from("/compare/rollback/revision"),
+        compare_rollback_revision,
+    );
     mode.install_func(String::from("/load"), load);
     mode.install_func(String::from("/save"), save);
     mode.install_func(String::from("/save/cli"), save_cli);
@@ -220,33 +245,70 @@ fn compare_formal(config: &ConfigManager) -> (ExecCode, String) {
 
 /// Bare `rollback`: commit 0.
 fn rollback_latest(config: &ConfigManager) -> (ExecCode, String) {
-    rollback(config, 0)
+    rollback(config, Ok(0))
 }
 
-/// `rollback <n>`: the candidate becomes the configuration of commit
-/// `n`. Uncommitted edits are replaced, as `discard` drops them.
+/// `rollback <n>`.
+fn rollback_number(config: &ConfigManager, args: Args) -> (ExecCode, String) {
+    rollback(config, commit_number(args))
+}
+
+/// `rollback revision <id>`.
+fn rollback_revision(config: &ConfigManager, args: Args) -> (ExecCode, String) {
+    rollback(config, revision_number(config, args))
+}
+
+/// `compare rollback <n>`.
+fn compare_rollback_number(config: &ConfigManager, args: Args) -> (ExecCode, String) {
+    compare_rollback(config, commit_number(args))
+}
+
+/// `compare rollback revision <id>`.
+fn compare_rollback_revision(config: &ConfigManager, args: Args) -> (ExecCode, String) {
+    compare_rollback(config, revision_number(config, args))
+}
+
+/// The commit number a line carries. The schema took it as one, so there
+/// is nothing to say when it is not.
+fn commit_number(mut args: Args) -> Result<usize, String> {
+    args.u8().map(usize::from).ok_or_else(String::new)
+}
+
+/// The number the commit of the revision a line carries has now. No
+/// other commit will do: a revision that is not kept, or was never
+/// given, is refused.
+fn revision_number(config: &ConfigManager, mut args: Args) -> Result<usize, String> {
+    let revision = args.string().unwrap_or_default();
+    config
+        .history
+        .number_of(&revision)
+        .ok_or_else(|| format!("% No commit {revision}\n"))
+}
+
+/// The candidate becomes the configuration of commit `n`. Uncommitted
+/// edits are replaced, as `discard` drops them.
 ///
-/// A number with no commit behind it answers `Nomatch`. `Show` is the
-/// code of a line that was taken: with it, a config file or an apply
-/// that holds the line would go on and commit a configuration that was
-/// not rolled back. Both are refused at the line instead. The reason is
-/// the output, and a session is shown it (`serve::exec_commands`).
-pub(super) fn rollback(config: &ConfigManager, n: usize) -> (ExecCode, String) {
-    match config.history_tree(n) {
+/// A line that names no commit answers `Nomatch`. `Show` is the code of
+/// a line that was taken: with it, a config file or an apply that holds
+/// the line would go on and commit a configuration that was not rolled
+/// back. Both are refused at the line instead. The reason is the output,
+/// and a session is shown it (`serve::exec_commands`).
+fn rollback(config: &ConfigManager, n: Result<usize, String>) -> (ExecCode, String) {
+    match n.and_then(|n| config.history_tree(n)) {
         Ok(tree) => {
             config.store.candidate.replace(tree);
             config.store.refused_load.set(false);
             (ExecCode::Show, String::new())
         }
-        Err(err) => (ExecCode::Nomatch, format!("{err}\n")),
+        Err(err) => (ExecCode::Nomatch, err),
     }
 }
 
-/// `compare rollback <n>`: what turns commit `n` into the candidate.
-pub(super) fn compare_rollback(config: &ConfigManager, n: usize) -> (ExecCode, String) {
-    let tree = match config.history_tree(n) {
+/// What turns commit `n` into the candidate.
+fn compare_rollback(config: &ConfigManager, n: Result<usize, String>) -> (ExecCode, String) {
+    let tree = match n.and_then(|n| config.history_tree(n)) {
         Ok(tree) => tree,
-        Err(err) => return (ExecCode::Nomatch, format!("{err}\n")),
+        Err(err) => return (ExecCode::Nomatch, err),
     };
     let mut earlier = String::new();
     let mut candidate = String::new();

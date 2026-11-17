@@ -1,5 +1,6 @@
 //! Commit history, `rollback <n>` and `compare rollback <n>`.
 
+use super::super::Completion;
 use super::super::history::HISTORY_MAX;
 use super::super::manager::ConfigManager;
 use super::*;
@@ -271,18 +272,20 @@ async fn the_oldest_commits_are_dropped() {
 /// The commit of the config file is marked in the listing.
 #[test]
 fn the_commit_of_the_config_file_is_marked() {
-    let history = super::super::history::CommitHistory::default();
+    let history = super::super::history::CommitHistory::starting_at(1794906748);
     history.record("system hostname r1\n".to_string(), true);
     history.record("system hostname r2\n".to_string(), false);
     let listing = history.render();
     let lines: Vec<&str> = listing.lines().collect();
     assert_eq!(lines.len(), 2, "{listing}");
+    // Number, time, revision: the start of the history and the count of
+    // commits since.
     assert!(
-        lines[0].starts_with("0   ") && lines[0].ends_with(" UTC"),
+        lines[0].starts_with("0   ") && lines[0].ends_with(" UTC  1794906748-2"),
         "{listing}"
     );
     assert!(
-        lines[1].starts_with("1   ") && lines[1].ends_with(" UTC  config file"),
+        lines[1].starts_with("1   ") && lines[1].ends_with(" UTC  1794906748-1  config file"),
         "{listing}"
     );
 }
@@ -329,8 +332,10 @@ fn the_startup_commit_of_the_config_file_is_marked() {
     assert_eq!(cm.history.len(), 1);
     assert_eq!(cm.history.config(0).unwrap(), "system hostname boot\n");
     let listing = run(&cm, "show commit history");
+    let revision = &cm.history.revisions()[0];
     assert!(
-        listing.starts_with("0   ") && listing.ends_with(" UTC  config file\n"),
+        listing.starts_with("0   ")
+            && listing.ends_with(&format!(" UTC  {revision}  config file\n")),
         "{listing}"
     );
 }
@@ -362,8 +367,8 @@ fn a_load_of_the_config_file_is_marked() {
     let listing = run(&cm, "show commit history");
     let lines: Vec<&str> = listing.lines().collect();
     assert_eq!(lines.len(), 2, "{listing}");
-    assert!(lines[0].ends_with(" UTC  config file"), "{listing}");
-    assert!(lines[1].ends_with(" UTC"), "{listing}");
+    assert!(lines[0].ends_with("  config file"), "{listing}");
+    assert!(!lines[1].contains("config file"), "{listing}");
 }
 
 /// Bare `rollback` and `rollback 0` are `discard` with nothing in the
@@ -405,4 +410,193 @@ async fn rollback_to_commit_0_is_the_running_config() {
             .borrow()
             .same_as(&cm.store.candidate.borrow())
     );
+}
+
+/// A commit's number goes up with every commit after it. Its revision
+/// stays, and loads that commit whatever number it has by then.
+#[tokio::test]
+async fn a_revision_names_a_commit_whatever_its_number() {
+    let cm = manager("revision");
+    let [_one, two, _three] = three_commits(&cm);
+    let revision = cm.history.revisions()[1].clone();
+    assert!(
+        run(&cm, "show commit history")
+            .lines()
+            .nth(1)
+            .unwrap()
+            .ends_with(&format!(" UTC  {revision}")),
+    );
+
+    // Another writer commits meanwhile: what was commit 1 is commit 2.
+    commit(&cm, &["set system hostname r4"]);
+    assert_eq!(cm.history.number_of(&revision), Some(2));
+    assert_ne!(cm.history.config(1).unwrap(), two);
+
+    let against = run(&cm, &format!("compare rollback revision {revision}"));
+    assert_ne!(against, "");
+    assert_eq!(against, run(&cm, "compare rollback 2"));
+    assert_eq!(run(&cm, &format!("rollback revision {revision}")), "");
+    assert_eq!(candidate(&cm), two);
+    assert_eq!(
+        run(&cm, &format!("compare rollback revision {revision}")),
+        ""
+    );
+
+    // The commit of it is a new one, with a revision of its own.
+    assert_eq!(run(&cm, "commit"), "");
+    assert_eq!(running(&cm), two);
+    assert_eq!(cm.history.number_of(&revision), Some(3));
+    assert_ne!(cm.history.revisions()[0], revision);
+    // The keyword is abbreviated as any other.
+    assert_eq!(run(&cm, &format!("rollback rev {revision}")), "");
+}
+
+/// A revision is the start of the history and the count of commits
+/// since. The count goes on when the oldest commits are dropped: a
+/// revision is never given twice, and that of a commit no longer kept
+/// names nothing.
+#[test]
+fn a_revision_is_not_used_twice() {
+    let cm = manager("revision-count");
+    commit(&cm, &["set system hostname first"]);
+    let first = cm.history.revisions()[0].clone();
+    let (start, count) = first.split_once('-').expect("start-count");
+    assert!(start.parse::<i64>().is_ok(), "{first}");
+    assert_eq!(count, "1");
+    // A commit that changes nothing is not counted.
+    assert_eq!(run(&cm, "commit"), "");
+
+    for n in 0..HISTORY_MAX + 4 {
+        commit(&cm, &[&format!("set system hostname r{n}")]);
+    }
+    let revisions = cm.history.revisions();
+    assert_eq!(revisions.len(), HISTORY_MAX);
+    assert_eq!(revisions[0], format!("{start}-{}", HISTORY_MAX + 5));
+    assert_eq!(revisions[HISTORY_MAX - 1], format!("{start}-6"));
+    assert_eq!(
+        refused(&cm, &format!("rollback revision {first}")),
+        format!("% No commit {first}\n")
+    );
+}
+
+/// A revision that names no commit is refused, and the candidate is
+/// left as it was. The number that happens to be in it is not taken for
+/// a commit number.
+#[test]
+fn a_revision_with_no_commit_is_refused() {
+    let cm = manager("revision-missing");
+    assert_eq!(
+        refused(&cm, "rollback revision 1-1"),
+        "% No commit 1-1\n",
+        "with nothing committed"
+    );
+    commit(&cm, &["set system hostname r1"]);
+    commit(&cm, &["set system hostname r2"]);
+    run(&cm, "set system hostname edited");
+    let edited = candidate(&cm);
+    for revision in ["1-1", "1", "0", "nothing"] {
+        for command in ["rollback revision", "compare rollback revision"] {
+            assert_eq!(
+                refused(&cm, &format!("{command} {revision}")),
+                format!("% No commit {revision}\n")
+            );
+        }
+    }
+    assert_eq!(candidate(&cm), edited);
+}
+
+/// What the grammar takes for an earlier commit: a number the history
+/// can hold, typed with no keyword, or `revision` and one.
+#[test]
+fn the_commands_that_name_an_earlier_commit() {
+    let cm = manager("grammar");
+    let mode = cm.modes.get("configure").expect("configure mode");
+    let code = |line: &str| {
+        let (code, output, _) = cm.execute(mode, line);
+        (code, output)
+    };
+    commit(&cm, &["set system hostname r1"]);
+
+    // The deepest number is the last the history keeps, and one more is
+    // no command: the schema's range is the history's depth.
+    assert_eq!(
+        code(&format!("rollback {}", HISTORY_MAX - 1)),
+        (
+            ExecCode::Nomatch,
+            format!("% No commit {}: only commit 0 is kept\n", HISTORY_MAX - 1)
+        )
+    );
+    for command in ["rollback", "compare rollback"] {
+        assert_eq!(
+            code(&format!("{command} {HISTORY_MAX}")),
+            (ExecCode::Nomatch, String::new()),
+            "`{command}`"
+        );
+        // The number has no keyword, and a revision is not typed in
+        // its place.
+        assert_eq!(
+            code(&format!("{command} commit 0")).0,
+            ExecCode::Nomatch,
+            "`{command}`"
+        );
+        let revision = &cm.history.revisions()[0];
+        assert_eq!(
+            code(&format!("{command} {revision}")).0,
+            ExecCode::Nomatch,
+            "`{command}`"
+        );
+        assert_eq!(
+            code(&format!("{command} revision")).0,
+            ExecCode::Incomplete,
+            "`{command}`"
+        );
+    }
+    // `compare rollback` needs to be told which; `rollback` is commit 0.
+    assert_eq!(code("compare rollback").0, ExecCode::Incomplete);
+    assert_eq!(code("rollback"), (ExecCode::Show, String::new()));
+}
+
+/// Completion lists the revisions kept, so that one is picked and not
+/// typed, and offers the number with no keyword for it.
+#[tokio::test]
+async fn completion_lists_the_revisions() {
+    let cm = manager("completion");
+    commit(&cm, &["set system hostname r1"]);
+    commit(&cm, &["set system hostname r2"]);
+    let mode = cm.modes.get("configure").expect("configure mode");
+    let names = |comps: Vec<Completion>| -> Vec<String> {
+        comps.into_iter().map(|comp| comp.name).collect()
+    };
+    let deepest = HISTORY_MAX - 1;
+
+    for command in ["rollback", "compare rollback"] {
+        let (_, comps) = cm
+            .completion(mode, &format!("{command} revision "), true)
+            .await;
+        let comps = names(comps);
+        for revision in cm.history.revisions() {
+            assert!(comps.contains(&revision), "`{command}`: {comps:?}");
+        }
+
+        let (_, comps) = cm.completion(mode, &format!("{command} "), true).await;
+        // The number is offered as its range, with what it is.
+        let number = comps
+            .iter()
+            .find(|comp| comp.name.contains(&deepest.to_string()))
+            .unwrap_or_else(|| panic!("`{command}`: no number in {comps:?}"));
+        assert_eq!(number.help, "Commit number: 0 is the latest", "`{command}`");
+        let comps = names(comps);
+        assert!(
+            !comps.contains(&"uint8".to_string()),
+            "`{command}`: {comps:?}"
+        );
+        assert!(
+            comps.contains(&"revision".to_string()),
+            "`{command}`: {comps:?}"
+        );
+        assert!(
+            !comps.contains(&"commit".to_string()),
+            "`{command}`: {comps:?}"
+        );
+    }
 }
