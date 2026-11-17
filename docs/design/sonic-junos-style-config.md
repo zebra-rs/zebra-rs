@@ -1,0 +1,409 @@
+# A Junos-style configuration experience on SONiC — Design
+
+A proposal, not a description of something built. It asks whether `vty` and
+zebra-rs can front the whole configuration of a SONiC device — ports, VLANs,
+ACLs and routing alike — with a candidate configuration, `commit`, `compare`,
+`rollback` and `commit confirmed`, and it recommends how.
+
+Related: [`sonic-zebra-rs-architecture.md`](sonic-zebra-rs-architecture.md)
+for what runs today, [`sonic-zebra-rs-plan.md`](sonic-zebra-rs-plan.md) for the
+port's plan of record. This document is a direction beyond that plan, not a
+phase of it.
+
+Statements marked *measured* were observed on the two-VM `sonic-vs` lab on
+2026-11-16. Statements marked *read* come from the source tree and were not
+run. Everything else is design.
+
+## 1. Goal
+
+An operator logs in, types `vty`, and configures the device the way they would
+a Junos or zebra-rs router:
+
+```
+sonic> configure
+sonic# set sonic PORT Ethernet0 admin_status up
+sonic# set sonic VLAN Vlan100 vlanid 100
+sonic# set sonic VLAN_MEMBER Vlan100 Ethernet0 tagging_mode untagged
+sonic# show | compare
+sonic# commit confirmed 5
+sonic# commit
+sonic# rollback 1
+```
+
+Nothing takes effect until `commit`. A commit is validated as a whole and
+either goes in or is refused. Earlier configurations can be compared and
+restored. A change that cuts the operator off reverts by itself.
+
+### Non-goals
+
+- Replacing SONiC's own interfaces. `config`, `show`, gNMI, REST, ZTP and
+  `config reload` keep working and keep their meaning.
+- Changing anything below CONFIG_DB. The daemons that consume CONFIG_DB are
+  untouched.
+- A Junos configuration *language*. The aim is Junos's transaction model. A
+  friendlier hierarchy than SONiC's tables is a later, separable step (§5.2).
+
+## 2. Where things stand
+
+**SONiC.** Configuration is CONFIG_DB, a Redis database of tables. A writer
+changes a table and the daemon that subscribes to it reacts. There is no
+candidate: a change is live when written. `config checkpoint` and `config
+rollback` exist (*read*: `sonic-utilities`, Generic Config Updater); rollback
+is applied as an ordered sequence of small CONFIG_DB changes, validated against
+SONiC's YANG models, and is not atomic. There is no commit-confirm.
+
+**zebra-rs.** It has the transaction half: a YANG-driven configuration tree, a
+candidate and a running configuration, and `commit` that validates the
+candidate and dispatches the difference, refusing the whole commit when one
+line is rejected. Configure mode has `set`, `delete`, `commit`, `discard`,
+`load` and `save` (*read*: `yang/configure.yang`). It has no `rollback`, no
+commit history, no `compare` and no `commit confirmed`.
+
+**zebra-rs on SONiC today.** Routing configuration flows one way:
+CONFIG_DB → bgpcfgd → `vtyctl apply` → zebra-rs. Configuration typed into `vty`
+goes straight to zebra-rs, is not in CONFIG_DB, and is lost when the `bgp`
+container restarts.
+
+**Two facts that shape the design:**
+
+- zebra-rs already exports its commits. `zebra.config.v1.ConfigService/
+  Subscribe` (*read*: `proto/config.proto`) streams a snapshot and then one
+  event per commit, as `set`/`delete` path changes or as a JSON subtree. An
+  out-of-process daemon consumes its part of the configuration this way now.
+- zebra-rs has **one candidate, shared by every writer** (*measured*, §8.1).
+
+## 3. The central decision: who owns the truth
+
+Two designs are possible.
+
+**A. zebra-rs is the master.** Its running configuration is authoritative and
+CONFIG_DB is an output it regenerates.
+
+**B. CONFIG_DB stays the master.** zebra-rs holds a mirror of it, edits a
+candidate against that mirror, and a commit is a validated write to CONFIG_DB.
+
+**This document recommends B.** The reasons:
+
+- SONiC has many writers to CONFIG_DB that we do not control: the `config`
+  commands, gNMI and REST through the management framework, ZTP, `config
+  reload`, `load_minigraph`, the config updater, and daemons that write
+  CONFIG_DB themselves. Under A each is a second master and the two copies
+  drift. Under B each is just another change to the mirror.
+- Every existing SONiC procedure — upgrade, warm reboot, `config save`,
+  troubleshooting with `sonic-db-cli` — reads CONFIG_DB and stays correct.
+- B can be adopted table by table and abandoned without migration. A cannot.
+
+The cost of B is that "commit" means *accepted, validated and written to
+CONFIG_DB*, not *applied to hardware* (§6.3). That is a property of SONiC, and
+A would not change it.
+
+## 4. Architecture
+
+```
+            operator
+               │  vty (configure, set, show | compare, commit, rollback)
+               ▼
+        ┌─────────────────────────────┐
+        │ zebra-rs config manager     │
+        │  candidate / running        │
+        │  subtree `sonic` (mirror)   │◄──── other subtrees (router bgp, …)
+        │  commit history             │      stay as they are
+        └───────┬─────────────▲───────┘
+   pre-commit   │ changes     │ import of external changes
+   check, then  ▼             │
+        ┌─────────────────────┴───────┐
+        │ CONFIG_DB bridge (new)      │   validate against SONiC YANG,
+        │                             │   order the changes, write
+        └───────┬─────────────▲───────┘
+                ▼             │ keyspace notifications
+            ┌───────────────────────┐
+            │       CONFIG_DB       │◄──── config, gNMI, ZTP, reload, …
+            └───────────┬───────────┘
+                        ▼
+        portsyncd, vlanmgrd, intfmgrd, bgpcfgd, …   (unchanged)
+```
+
+Three pieces are new:
+
+1. **A `sonic` subtree** in zebra-rs's configuration, whose schema is SONiC's
+   own YANG (§5).
+2. **The CONFIG_DB bridge**, which keeps that subtree and CONFIG_DB equal in
+   both directions (§6, §7).
+3. **Transaction features in zebra-rs** that it lacks today: commit history,
+   `rollback`, `compare`, `commit confirmed`, and a candidate that is safe with
+   several writers (§8).
+
+## 5. Schema
+
+### 5.1 First: the tables as they are
+
+SONiC ships a YANG model for its tables (*read*: `src/sonic-yang-models`, 147
+model files in the tree we build). The first schema is generated from those
+models, not written by hand:
+
+| SONiC YANG | In `vty` |
+|---|---|
+| table container `PORT` with list `PORT_LIST` keyed `name` | `set sonic PORT Ethernet0 …` |
+| leaf `admin_status` | `set sonic PORT Ethernet0 admin_status up` |
+| list with two keys (`VLAN_MEMBER`: vlan, port) | `set sonic VLAN_MEMBER Vlan100 Ethernet0 …` |
+| leaf-list (`BGP_PEER_RANGE` `ip_range`) | one `set` line per member |
+| a single fixed-key entry (`DEVICE_METADATA` `localhost`) | `set sonic DEVICE_METADATA localhost hostname …` |
+
+Completion comes with the schema: `vty` builds it from the YANG zebra-rs has
+loaded, enumerations included. `?` help needs a small addition. zebra-rs takes
+its help text from an `ext:help` statement, which SONiC's models do not have;
+the generator has to derive it from each node's `description`.
+
+This is not pretty — it is CONFIG_DB with a transaction around it — but it
+covers every modelled table on the first day, needs no per-feature code, and
+cannot disagree with SONiC about what is valid.
+
+### 5.2 Later: a hierarchy people would choose
+
+`set interface Ethernet0 vlan members 100` instead of three table rows needs a
+mapping per feature, in both directions, kept current as SONiC's tables change.
+SONiC's management framework took this route (OpenConfig models translated to
+CONFIG_DB) and the translation layer is where its effort went.
+
+It is deliberately out of the first phases. It can be added one feature at a
+time on top of §5.1 — a friendly subtree whose commit rewrites into `sonic`
+table lines before the bridge sees them — and the table form stays as the
+complete fallback.
+
+### 5.3 What is not in the models
+
+Tables without a YANG model cannot be in the subtree. The bridge leaves them
+alone: it writes only keys under tables it has a schema for, and never deletes
+a key it does not model. (The config updater has the same boundary, with its
+`--ignore-non-yang-tables` option.)
+
+## 6. Commit
+
+### 6.1 Sequence
+
+1. **Baseline.** The `sonic` subtree of the running configuration equals
+   CONFIG_DB, kept so by the import path (§7). The candidate starts from it.
+2. **Edit.** `set`/`delete` change only the candidate.
+3. **`commit`.** zebra-rs runs its own schema validation, then asks the bridge
+   to check the resulting `sonic` subtree (pre-commit, §8.3). The bridge
+   validates it against SONiC's YANG, including the cross-table constraints
+   (a VLAN member needs its VLAN and its port).
+4. **Refuse or proceed.** A failed check refuses the commit and changes
+   nothing, as a rejected line does today.
+5. **Write.** The bridge orders the changes so that every intermediate state
+   is valid — create before reference, dereference before delete — and writes
+   them to CONFIG_DB.
+6. **Record.** zebra-rs stores the committed configuration in its history.
+
+### 6.2 Reuse the config updater for steps 3 and 5
+
+Validation against SONiC's YANG and the ordering of a change set are exactly
+what the Generic Config Updater does for `config apply-patch` and `config
+replace` (*read*: `generic_config_updater/`: `gu_common.py`, `patch_sorter.py`,
+`change_applier.py`, and per-table service validators). The bridge should call
+it as a library with "make CONFIG_DB equal this target", not reimplement it.
+
+That brings its limits with it. Sorting a large change is slow, the applier
+waits on service validators, and only tables the updater supports can be
+changed. Those are acceptable for interactive commits and should be measured
+before anything is promised (§11).
+
+### 6.3 What commit means, stated honestly
+
+| Junos | Here |
+|---|---|
+| Commit is atomic across the device | Atomic in zebra-rs: all of the candidate or none. The write to CONFIG_DB is a sequence. |
+| Commit fails if a daemon rejects it | A SONiC daemon applies its table asynchronously and usually reports a failure only in the log. |
+| Commit returns when applied | Commit returns when CONFIG_DB is written and the updater's validators pass. |
+
+If the write fails midway the bridge must say so and reconcile: the mirror is
+re-imported from CONFIG_DB, so the running configuration shows the device's
+real state, and the operator is told the commit was partial. Hiding a partial
+write behind a successful `commit` would be the worst outcome of this design.
+
+## 7. Keeping the mirror true
+
+CONFIG_DB changes that did not come from a commit — a `config` command, gNMI,
+a daemon — must reach zebra-rs, or `compare` and `rollback` lie.
+
+- The bridge subscribes to CONFIG_DB keyspace notifications and applies each
+  external change to the `sonic` subtree of the running configuration.
+- An import is not a commit by an operator. It must not create a rollback
+  point on every keystroke of someone's script; imports are coalesced, and
+  recorded in the history as external changes.
+- **Open candidates.** If an operator has uncommitted edits when an external
+  change arrives, the candidate is rebased onto the new baseline. A conflict —
+  both changed the same leaf — is reported at `commit`, which is refused until
+  the operator resolves it. Junos's private candidate behaves this way: a
+  commit is refused when the database changed underneath it, until the
+  operator updates. It needs the per-session candidate of §8.1.
+- **Echo.** The bridge sees its own writes come back as notifications and must
+  not import them as external changes.
+
+At start, the mirror is built from CONFIG_DB before the first session is
+accepted. `/etc/zebra-rs/zebra-rs.conf` does not carry the `sonic` subtree:
+persistence of SONiC configuration stays `config save` and `config_db.json`
+(§9).
+
+## 8. What zebra-rs needs first
+
+### 8.1 A candidate per session — a hazard that exists today
+
+*Measured.* zebra-rs has one candidate. An uncommitted `set` typed in one
+configure session was committed by an unrelated `vtyctl apply` from another
+writer:
+
+```
+session 1:  set router bgp neighbor 10.0.0.1 description shared-candidate-probe   (no commit)
+session 2:  vtyctl apply  →  set router bgp neighbor 10.0.0.3 description other-writer
+running:    both lines present
+```
+
+On a zebra-rs SONiC image this is live now: bgpcfgd applies a batch whenever
+CONFIG_DB changes, and it would publish whatever an operator had half-typed in
+`vty`. It should be fixed whether or not the rest of this document is built.
+
+The fix is a private candidate per session (Junos `configure private`), with
+the machine writers — bgpcfgd's `vtyctl apply`, and the bridge — each using
+their own. A global configure lock (`configure exclusive`) is simpler and is
+not enough here, because bgpcfgd must never be blocked by an idle operator.
+
+### 8.2 History, compare, rollback, commit confirmed
+
+- **History.** Keep the last N committed configurations with time, user and
+  comment (`commit comment "…"`).
+- **`show | compare`**, `show | compare rollback N`. zebra-rs already computes
+  a text diff of running against candidate inside `commit`; this exposes it.
+- **`rollback N`** loads configuration N into the candidate. It takes effect
+  on `commit`, like any other change, and so goes through the same validation
+  and ordered write.
+- **`commit confirmed M`** commits, then reverts after M minutes unless a
+  plain `commit` arrives. The revert must survive the loss of the session that
+  asked for it — that is the case it exists for — so the timer belongs to the
+  daemon, not the shell.
+
+These are useful to zebra-rs off SONiC as well and can ship first.
+
+### 8.3 A pre-commit check by an external party
+
+`ConfigService/Subscribe` delivers after the commit, by design. The bridge
+needs to be asked *before*: "would this subtree be acceptable?", with the power
+to refuse and a message for the operator. That is a new RPC, with a timeout and
+a defined answer when the checker is absent (refuse changes to `sonic`; let
+everything else through).
+
+### 8.4 Ownership of a subtree
+
+Under this design some configuration in zebra-rs is derived, not typed: the
+`router bgp …` lines that bgpcfgd writes from `BGP_NEIGHBOR`. If the operator
+edits them directly, the next bgpcfgd batch may overwrite the edit, and the
+edit is not in CONFIG_DB. zebra-rs needs to know which writer owns which
+subtree, and to refuse or warn on an edit by anyone else. §10 uses this.
+
+## 9. Persistence
+
+| What | Where it is saved | By |
+|---|---|---|
+| The `sonic` subtree | CONFIG_DB, then `config_db.json` | the bridge writes CONFIG_DB; `config save` persists it |
+| Commit history | zebra-rs's own store, outside the container's ephemeral filesystem | zebra-rs |
+| Native zebra-rs configuration | `zebra-rs.conf`, re-rendered from CONFIG_DB at container start | unchanged |
+
+Two consequences to settle in the open questions: whether `commit` should
+imply `config save` (Junos persists on commit; SONiC does not), and where the
+history lives so that it survives a restart of the `bgp` container.
+
+## 10. Routing configuration
+
+BGP is the one area with a loop. If the operator writes `set sonic BGP_NEIGHBOR
+…`, the bridge writes CONFIG_DB, bgpcfgd reads it and applies `router bgp …`
+to the same zebra-rs. That works and needs no new code: bgpcfgd is just another
+CONFIG_DB consumer.
+
+What must be prevented is the second path, editing `router bgp …` directly.
+Three stages:
+
+1. **First:** the native routing subtrees stay writable as today, with the
+   known limit that such edits bypass CONFIG_DB. Nothing regresses.
+2. **Then:** with §8.4, the lines bgpcfgd owns are read-only to operators, who
+   are pointed at the `sonic` tables.
+3. **Eventually, for features SONiC has no table for** — IS-IS, OSPF, most of
+   BGP policy — native configuration is the only way, and it has to persist. A
+   single opaque CONFIG_DB entry holding that configuration, restored by
+   `docker_init.sh`, would give it `config save` and reload without modelling
+   it in SONiC. This is the piece that turns zebra-rs's wider feature set into
+   something a SONiC operator can use, and it deserves its own design.
+
+## 11. Where the bridge runs
+
+| | In the daemon | Separate process (recommended) |
+|---|---|---|
+| Redis and SONiC libraries in zebra-rs | Yes | No |
+| Reuse of the config updater (Python) | Awkward | Direct: the bridge can be Python |
+| A fault in the bridge | Can take routing down | Cannot |
+| zebra-rs off SONiC | Carries dead code | Unaffected |
+| Pre-commit check | A function call | An RPC (§8.3) |
+
+A separate process in the `bgp` container, under supervisord, next to bgpcfgd.
+It uses the interfaces zebra-rs already serves — `Subscribe` for commits,
+`Apply` for imports — plus the one new pre-commit RPC. This is the same shape
+as bgpcfgd and as the existing out-of-process subscriber, and it keeps SONiC
+out of the daemon.
+
+The generated schema (§5.1) is the one SONiC-specific thing zebra-rs loads, and
+it loads it as data: YANG files in the image, present only on SONiC.
+
+## 12. Phases
+
+Each phase is useful on its own and none commits us to the next.
+
+1. **zebra-rs transaction features**, no SONiC involved: per-session candidate
+   (§8.1, which also closes today's hazard), history, `compare`, `rollback`,
+   `commit confirmed`.
+2. **Read-only mirror.** The `sonic` subtree generated from SONiC's YANG, the
+   bridge importing CONFIG_DB. `show configuration sonic …` in `vty` with
+   completion and help; no writes. Proves the schema generation and the import
+   path, and is safe.
+3. **Commit for a few tables**: `PORT`, `VLAN`, `VLAN_MEMBER`, `INTERFACE`,
+   `STATIC_ROUTE`, `BGP_NEIGHBOR`. Pre-commit check, ordered write through the
+   config updater, partial-write handling. Measure commit latency.
+4. **All modelled tables**, and conflict handling for external changes during
+   an open candidate.
+5. **Ownership** of derived subtrees (§8.4, §10 stage 2).
+6. **Native configuration that persists** (§10 stage 3) and a friendlier
+   hierarchy (§5.2), each its own design.
+
+## 13. Open questions
+
+1. **Can zebra-rs load SONiC's YANG as it is?** The models use `must`, `when`
+   and leafrefs across tables. zebra-rs's schema library has to at least parse
+   them; enforcing them can be left to the bridge's pre-commit check. Not
+   tested. This decides whether phase 2 is small.
+2. **How slow is a commit through the config updater?** Its change sorter is
+   known to be expensive on large differences. Measure a one-line change, a
+   50-port change and a full `rollback` on the VS before phase 3 is designed in
+   detail.
+3. **Does `commit` imply `config save`?** Junos operators expect a committed
+   configuration to survive a reboot. SONiC separates the two on purpose.
+4. **Multi-ASIC and chassis.** CONFIG_DB is per namespace and there is one
+   `bgp` container per ASIC. Whether one `vty` session spans them, and where
+   the mirror lives, is not addressed here.
+5. **Where does `vty` run?** A box-wide configuration front end living in the
+   `bgp` container is odd, and restarting that container would drop the
+   operator's session. A host-side or dedicated container for the config
+   manager may be right once it fronts more than routing.
+6. **Authorization.** SONiC has its own users, roles and TACACS+; zebra-rs has
+   its own `enable` and PAM path. One has to follow the other.
+7. **gNMI.** If zebra-rs becomes the transactional front end, the management
+   framework's gNMI writes still go around it. Acceptable under design B, but
+   it means two northbound paths with different guarantees.
+
+## 14. Risks
+
+- **A commit that claims more than happened.** The gap between "written to
+  CONFIG_DB" and "applied" (§6.3) is the central weakness. The mitigation is to
+  say exactly what commit guarantees, and to surface a partial write loudly.
+- **Dependence on SONiC internals.** The schema and the config updater change
+  between SONiC releases. Generating the schema and calling the updater as a
+  library, not copying either, keeps that cost in one place.
+- **Scope.** This is a product direction, larger than the routing port. The
+  phases are ordered so that the first one is worth doing for zebra-rs alone.
