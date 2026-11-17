@@ -4000,6 +4000,17 @@ struct Neighbor<'a> {
     /// `update-source` address can be used. Mirrors
     /// `peer.config.transport.ip_transparent`.
     ip_transparent: bool,
+    /// `update-source`: the address the session is sourced from — the
+    /// one that was written, or the one the interface below gives.
+    /// `None` with no statement, and while the interface gives none.
+    /// Mirrors `peer.config.transport.update_source`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    update_source: Option<IpAddr>,
+    /// `update-source <interface>`: the interface the address above is
+    /// taken from. With no address beside it the neighbor is waiting
+    /// for one and is not dialed (`Peer::update_source_pending`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    update_source_interface: Option<String>,
     /// Name of the IOS-XR-style `neighbor-group` this peer inherits
     /// from, if any. `remote_as_inherited` says whether the peer's
     /// `remote_as` actually came off the group (vs. an explicit
@@ -4315,6 +4326,8 @@ fn fetch<'a>(peer: &'a Peer, shard: &super::shard::BgpShard) -> Neighbor<'a> {
         },
         disable_connected_check: peer.config.transport.disable_connected_check,
         ip_transparent: peer.config.transport.ip_transparent,
+        update_source: peer.config.transport.update_source,
+        update_source_interface: peer.config.transport.update_source_if.clone(),
         neighbor_group: peer.config.neighbor_group.clone(),
         remote_as_inherited: peer.config.remote_as_inherited,
         nd_discovered_secs_ago,
@@ -4626,6 +4639,29 @@ fn render(out: &mut String, neighbor: &Neighbor) -> std::fmt::Result {
             out,
             "  IP transparent enabled (session may use a non-local update-source address)"
         )?;
+    }
+
+    // `update-source`: FRR's "Update source is ..." line. For an
+    // interface, also the address it gives this neighbor — or that it
+    // gives none, which is why such a neighbor stays down: it is not
+    // dialed from any other address.
+    match (&neighbor.update_source_interface, neighbor.update_source) {
+        (Some(ifname), Some(source)) => {
+            writeln!(out, "  Update source is {ifname} ({source})")?;
+        }
+        (Some(ifname), None) => {
+            let family = if neighbor.address.is_ipv4() {
+                "IPv4"
+            } else {
+                "IPv6"
+            };
+            writeln!(
+                out,
+                "  Update source is {ifname} (no usable {family} address; neighbor is not dialed)"
+            )?;
+        }
+        (None, Some(source)) => writeln!(out, "  Update source is {source}")?,
+        (None, None) => {}
     }
 
     if let Some(ref group) = neighbor.neighbor_group {
@@ -7403,6 +7439,55 @@ Neighbor        V         AS   MsgRcvd   MsgSent   TblVer  InQ OutQ  Up/Down Sta
         );
     }
 
+    /// `show bgp neighbor` says where the session is sourced from: the
+    /// address that was written, the interface with the address it
+    /// gives — or with the reason the neighbor is not dialed, which is
+    /// otherwise a neighbor that is down for no visible cause.
+    #[test]
+    fn update_source_line_names_the_interface_and_what_it_gives() {
+        let line = |n: &Neighbor| {
+            let mut out = String::new();
+            render(&mut out, n).unwrap();
+            out.lines()
+                .find(|l| l.contains("Update source"))
+                .map(str::to_string)
+        };
+        let mut n = minimal_neighbor(None);
+        assert_eq!(line(&n), None, "no statement, no line");
+
+        n.update_source = Some("192.0.2.1".parse().unwrap());
+        assert_eq!(line(&n).as_deref(), Some("  Update source is 192.0.2.1"));
+
+        n.update_source_interface = Some("Loopback4096".to_string());
+        assert_eq!(
+            line(&n).as_deref(),
+            Some("  Update source is Loopback4096 (192.0.2.1)")
+        );
+        let v: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&n).unwrap()).unwrap();
+        assert_eq!(v["update_source"], "192.0.2.1");
+        assert_eq!(v["update_source_interface"], "Loopback4096");
+
+        n.update_source = None;
+        assert_eq!(
+            line(&n).as_deref(),
+            Some(
+                "  Update source is Loopback4096 (no usable IPv4 address; neighbor is not dialed)"
+            )
+        );
+        n.address = "2001:db8::1".parse().unwrap();
+        assert_eq!(
+            line(&n).as_deref(),
+            Some(
+                "  Update source is Loopback4096 (no usable IPv6 address; neighbor is not dialed)"
+            )
+        );
+        let v: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&n).unwrap()).unwrap();
+        assert!(v.get("update_source").is_none());
+        assert_eq!(v["update_source_interface"], "Loopback4096");
+    }
+
     /// JSON output for an interface-keyed peer carries the three ND
     /// fields; an address-keyed peer must not carry them.
     #[test]
@@ -7483,6 +7568,8 @@ Neighbor        V         AS   MsgRcvd   MsgSent   TblVer  InQ OutQ  Up/Down Sta
             tcp_mss_synced: None,
             disable_connected_check: false,
             ip_transparent: false,
+            update_source: None,
+            update_source_interface: None,
             neighbor_group: None,
             remote_as_inherited: false,
             nd_discovered_secs_ago: None,
@@ -9044,7 +9131,7 @@ impl NeighborGroupKnobsJson {
     fn from_knobs(k: &InheritableKnobs) -> Self {
         Self {
             passive: k.passive,
-            update_source: k.update_source.map(|a| a.to_string()),
+            update_source: k.update_source.as_ref().map(|s| s.to_string()),
             port: k.port,
             ttl_security: k.ttl_security,
             ebgp_multihop: k.ebgp_multihop,
@@ -9233,8 +9320,8 @@ fn show_bgp_neighbor_group_detail(
     if let Some(v) = k.passive {
         writeln!(buf, "  Passive:   {v}")?;
     }
-    if let Some(addr) = k.update_source {
-        writeln!(buf, "  Update-source: {addr}")?;
+    if let Some(source) = &k.update_source {
+        writeln!(buf, "  Update-source: {source}")?;
     }
     if let Some(p) = k.port {
         writeln!(buf, "  Port:      {p}")?;

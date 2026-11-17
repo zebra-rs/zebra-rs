@@ -3762,6 +3762,10 @@ impl Bgp {
                 // peer that moved is re-synced under its new transform
                 // (review findings #4 / #21).
                 super::config::finish_commit_regroup(self);
+                // Every statement that reached a neighbor in this commit
+                // has had its `update-source <interface>` resolved by its
+                // own callback; this is for a path that did not.
+                super::config::update_source_resolve_all(self);
             }
             ConfigOp::Completion => {
                 // `comps_dynamic` carries the dynamic handler name
@@ -5224,6 +5228,10 @@ impl Bgp {
                 // down — or came back under a new ifindex — is handled
                 // exactly like a LinkDown / LinkUp on it.
                 self.evpn_link_state(&link.name, link.is_up());
+                // The name may be one an `update-source <interface>` was
+                // waiting for (config replay at startup races the link
+                // dump), or have moved to another ifindex.
+                super::config::update_source_resolve_all(self);
             }
             // Fast external failover: a link going operationally down
             // (or disappearing) immediately resets the single-hop eBGP
@@ -5255,6 +5263,10 @@ impl Bgp {
                 self.interface_addrs.purge_ifindex(ifindex);
                 self.connected_subnets.purge_ifindex(ifindex);
                 self.refresh_connected();
+                // The name is no live link's now (`live_link_index`), and
+                // the addresses went with it: an `update-source` by that
+                // name gives nothing until the interface is back.
+                super::config::update_source_resolve_all(self);
                 super::config::bfd_reconcile_all(self);
                 // A leaf AC gone takes its EVIs out of the leaf set; any
                 // AC gone may leave a VNI with leaves only (its IMET
@@ -5273,6 +5285,9 @@ impl Bgp {
                 self.interface_addrs.record(&addr);
                 self.connected_subnets.record(&addr);
                 self.refresh_connected();
+                // An address an `update-source <interface>` can take, or
+                // one that just got through duplicate address detection.
+                super::config::update_source_resolve_all(self);
                 // The connected ifindex keys single-hop BFD sessions (the
                 // XDP data plane attaches by it): re-reconcile so a
                 // session subscribed before this address was learned picks up
@@ -5284,6 +5299,7 @@ impl Bgp {
                 self.interface_addrs.forget(&addr);
                 self.connected_subnets.forget(&addr);
                 self.refresh_connected();
+                super::config::update_source_resolve_all(self);
                 super::config::bfd_reconcile_all(self);
                 self.enhe_next_hop_event(addr.ifindex);
             }

@@ -29,7 +29,6 @@
 //! pass will pick one.
 
 use std::collections::BTreeMap;
-use std::net::IpAddr;
 
 use bgp_packet::{AddPathSendReceive, AddPathValue, Afi, AfiSafi, AfiSafis, Safi};
 
@@ -39,6 +38,7 @@ use super::peer::{
     ALLOWAS_IN_DEFAULT_COUNT, AllowAsIn, Event, Peer, PeerConfig, PeerType, RemovePrivateAs, State,
 };
 use super::peer_key::PeerOrigin;
+use super::update_source::UpdateSource;
 use crate::config::{Args, ConfigOp};
 
 /// The per-neighbor knobs a `neighbor-group` can supply. One struct
@@ -59,7 +59,8 @@ use crate::config::{Args, ConfigOp};
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct InheritableKnobs {
     pub passive: Option<bool>,
-    pub update_source: Option<IpAddr>,
+    /// `update-source`, as written: an address or an interface name.
+    pub update_source: Option<UpdateSource>,
     pub port: Option<u16>,
     pub ttl_security: Option<bool>,
     pub ebgp_multihop: Option<u8>,
@@ -1203,14 +1204,16 @@ pub fn config_neighbor_group_region_id(bgp: &mut Bgp, mut args: Args, op: Config
     Some(())
 }
 
-/// `set router bgp neighbor-group <name> update-source <addr>`.
+/// `set router bgp neighbor-group <name> update-source <addr|ifname>`.
 ///
 /// Like the per-neighbor knob: no bounce (the source is read at dial
-/// time) and a per-member address-family guard — a v4 source applies
-/// only to v4 members, a v6 source only to v6 members (the apply fn
-/// skips mismatches with a warning). Changed members get their BFD
-/// session re-keyed, mirroring the per-neighbor callback's
-/// `bfd_apply` reconcile.
+/// time). An address has a per-member address-family guard — a v4
+/// source applies only to v4 members, a v6 source only to v6 members
+/// (the apply fn skips mismatches with a warning). An interface name
+/// has none to need: each member takes the interface's address of its
+/// own family, so one statement serves both. Changed members get their
+/// source resolved and their BFD session re-keyed, mirroring the
+/// per-neighbor callback.
 pub fn config_neighbor_group_update_source(
     bgp: &mut Bgp,
     mut args: Args,
@@ -1218,7 +1221,7 @@ pub fn config_neighbor_group_update_source(
 ) -> Option<()> {
     let name = args.string()?;
     let value = match op {
-        ConfigOp::Set => Some(args.addr()?),
+        ConfigOp::Set => Some(UpdateSource::parse(&args.string()?)),
         ConfigOp::Delete => None,
         _ => return Some(()),
     };
@@ -1635,9 +1638,10 @@ pub(super) struct InheritOutcome {
     /// MD5 there is no per-peer variant: AO resolution reads the
     /// key-chain table, which the whole-instance sweep already has.
     pub ao_refresh: bool,
-    /// `update-source` changed — run `bfd_apply` so an attached BFD
-    /// session re-keys to the new local address.
-    pub bfd_reapply: bool,
+    /// `update-source` changed — run `update_source_resolve`, which
+    /// finds the address an interface gives, and then `bfd_apply` so
+    /// an attached BFD session re-keys to the new local address.
+    pub source_changed: bool,
 }
 
 /// Resolve the full inheritable-knob record for `config` against `groups`,
@@ -1656,7 +1660,7 @@ pub(super) fn resolve_inherited_knobs(
     // resolve it.
     InheritableKnobs {
         passive: resolve_knob(groups, config, |k| k.passive),
-        update_source: resolve_knob(groups, config, |k| k.update_source),
+        update_source: resolve_knob(groups, config, |k| k.update_source.clone()),
         port: resolve_knob(groups, config, |k| k.port),
         ttl_security: resolve_knob(groups, config, |k| k.ttl_security),
         ebgp_multihop: resolve_knob(groups, config, |k| k.ebgp_multihop),
@@ -1724,8 +1728,26 @@ pub(super) fn apply_resolved_session_knobs(peer: &mut Peer, want: &InheritableKn
         peer,
         want.route_reflector_client.unwrap_or(false),
     );
+    // A per-VRF task is not told of its VRF's interfaces and addresses
+    // yet (`BgpVrf::process_rib_msg` reads routes only), so it cannot
+    // find what an interface gives. Its own `update-source` leaf takes
+    // an address only; an interface name can still reach it from a
+    // neighbor-group shared with default-VRF neighbors, where it names
+    // an interface of the default VRF. Not applied to this member, as an
+    // address of the other family is not: the kernel picks its source.
+    let source = match want.update_source.as_ref() {
+        Some(UpdateSource::Interface(ifname)) => {
+            tracing::warn!(
+                peer = %peer.display_name(),
+                interface = %ifname,
+                "bgp: update-source by interface is not applied to a per-VRF neighbor",
+            );
+            None
+        }
+        source => source,
+    };
     // The BFD re-arm this returns is only meaningful for a live session.
-    let _ = super::config::apply_update_source(peer, want.update_source);
+    let _ = super::config::apply_update_source(peer, source);
     // TCP-MD5 password (active/connect side): apply the already-resolved
     // knob onto `config.transport.md5_password`. The shared FSM connect path
     // (`peer_start_connection`) reads it and keys this peer's VRF-bound
@@ -1825,7 +1847,7 @@ pub(super) fn apply_inherited(
     bounce |= super::config::apply_route_server_client(peer, route_server_client.unwrap_or(false));
     bounce |=
         super::config::apply_route_reflector_client(peer, route_reflector_client.unwrap_or(false));
-    outcome.bfd_reapply = super::config::apply_update_source(peer, update_source);
+    outcome.source_changed = super::config::apply_update_source(peer, update_source.as_ref());
     outcome.mss_refresh = super::config::apply_tcp_mss(peer, tcp_mss);
     outcome.md5_refresh = super::config::apply_md5_password(peer, password);
     outcome.ao_refresh = super::config::apply_ao_config(peer, ao_config);
@@ -1903,7 +1925,7 @@ pub(super) fn sweep_members_inherit(bgp: &mut Bgp, name: &str) {
         if outcome.md5_refresh {
             md5_idents.push(peer.ident);
         }
-        if outcome.bfd_reapply {
+        if outcome.source_changed {
             bfd_idents.push(peer.ident);
         }
     }
@@ -1932,6 +1954,7 @@ pub(super) fn sweep_members_inherit(bgp: &mut Bgp, name: &str) {
         super::config::apply_md5_refresh_for_ident(bgp, ident);
     }
     for ident in bfd_idents {
+        super::config::update_source_resolve(bgp, ident);
         let _ = super::config::bfd_apply_ident(bgp, ident);
     }
 }

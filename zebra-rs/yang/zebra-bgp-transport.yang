@@ -43,6 +43,10 @@ module zebra-bgp-transport {
            remote-as 65501;
            update-source 10.0.0.1;
          }
+         neighbor 10.0.0.6 {
+           remote-as 65501;
+           update-source Loopback0;
+         }
        }
 
      Functionally equivalent to the IETF YANG path
@@ -51,6 +55,15 @@ module zebra-bgp-transport {
      (`peer.config.transport.update_source`) and the same TCP-bind
      site in `peer_connect`. Operators using the FRR vocabulary get
      the flat form without giving up the IETF tree.";
+
+  revision 2026-11-16 {
+    description
+      "`update-source` also takes an interface name: the session is
+       sourced from that interface's address of the neighbor's address
+       family, and follows it when the address changes.";
+    reference
+      "FRR `neighbor X update-source <A.B.C.D|X:X::X:X|IFNAME>`.";
+  }
 
   revision 2026-06-12 {
     description
@@ -93,16 +106,57 @@ module zebra-bgp-transport {
       "FRR-style transport leaves on a BGP neighbor.";
 
     leaf update-source {
-      ext:help "Source address to bind for outbound BGP TCP connect";
+      ext:help "Source address or interface for the BGP TCP session";
+      ext:dynamic "rib:interface";
       type union {
         type inet:ipv4-address;
         type inet:ipv6-address;
+        // An interface name. The pattern is what keeps a mistyped
+        // address (`10.0.0`, `10.0.0.256`, `2001:db8:::1`) a parse
+        // error: a pattern-less string arm takes any word, so each of
+        // those would be read as the name of an interface that never
+        // appears. A name starts with a letter and holds no `:` or
+        // `/` (the kernel allows neither in an interface name); one
+        // that starts with a digit cannot be named here. A pattern
+        // arm matches the rest of the line, which is right for a
+        // value in the last position.
+        type string {
+          pattern '[A-Za-z][^ :/]*';
+        }
       }
       description
-        "Local IP address (IPv4 or IPv6) to bind before the outbound
-         BGP TCP connect to this neighbor. The address family must
-         match the peer's address family. When absent, the kernel
-         picks the source via the routing table.
+        "Where the BGP TCP session to this neighbor is sourced from:
+         a local IP address (IPv4 or IPv6), or the name of an
+         interface. When absent, the kernel picks the source via the
+         routing table.
+
+         An address is bound as it is, before the outbound connect.
+         Its address family must match the neighbor's.
+
+         An interface name stands for that interface's address of the
+         neighbor's address family, so one statement on a
+         neighbor-group serves its IPv4 and its IPv6 members alike.
+         Of several addresses the one that shares the most leading
+         bits with the neighbor's address is taken (the lowest of
+         equals). An IPv6 address that is link-local, tentative or
+         failed duplicate address detection is never taken, a
+         deprecated or temporary one only when there is no other. The
+         choice follows the interface: it is made again whenever the
+         interface or one of its addresses comes or goes. A session
+         that is up keeps the address it was opened with; the new one
+         is used by the next connect.
+
+         While the interface is unknown, or has no usable address of
+         the neighbor's family, the neighbor is not dialed: the
+         session is never sourced from an address the statement did
+         not name. An inbound connection from the neighbor is still
+         accepted. `show bgp neighbor` says which address was taken,
+         or that none was found.
+
+         The interface is one of the BGP instance's own VRF. A
+         neighbor reached over an IPv6 link-local address, an
+         `interface-neighbor` among them, takes its source from the
+         link it is on, and an interface name is not applied to it.
 
          Equivalent to `neighbor X update-source` in FRR / Cisco
          IOS, and to `neighbor/transport/local-address` in

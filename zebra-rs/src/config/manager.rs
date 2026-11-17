@@ -4371,6 +4371,182 @@ mod yang_load_tests {
         }
     }
 
+    /// `update-source` (and its IETF spelling `transport local-address`)
+    /// takes an interface name beside an address, on a neighbor and on a
+    /// neighbor-group. The name arm has a pattern, which is what keeps a
+    /// mistyped address an error instead of the name of an interface
+    /// that never appears. The per-VRF neighbor leaf still takes an
+    /// address only: the per-VRF task cannot find what an interface
+    /// gives, so a name there is refused rather than dropped.
+    #[test]
+    fn bgp_update_source_takes_an_interface_name() {
+        use crate::config::ExecCode;
+        use crate::config::parse::{State, parse};
+        use crate::config::path_from_command;
+        use libyang::to_entry;
+
+        let mut yang = YangStore::new();
+        yang.add_path(concat!(env!("CARGO_MANIFEST_DIR"), "/yang"));
+        yang.read_with_resolve("configure")
+            .unwrap_or_else(|e| panic!("configure failed to load: {e:#}"));
+        yang.identity_resolve();
+        let module = yang.find_module("configure").unwrap();
+        let entry = to_entry(&yang, module);
+
+        // (command, path, the value as the callback gets it)
+        let accepted = [
+            (
+                "set router bgp neighbor 10.0.0.1 update-source 10.0.0.2",
+                "/set/router/bgp/neighbor/update-source",
+                "10.0.0.2",
+            ),
+            (
+                "set router bgp neighbor 2001:db8::1 update-source 2001:db8::2",
+                "/set/router/bgp/neighbor/update-source",
+                "2001:db8::2",
+            ),
+            (
+                "set router bgp neighbor 10.0.0.1 update-source Loopback0",
+                "/set/router/bgp/neighbor/update-source",
+                "Loopback0",
+            ),
+            (
+                "set router bgp neighbor 10.0.0.1 update-source Loopback4096",
+                "/set/router/bgp/neighbor/update-source",
+                "Loopback4096",
+            ),
+            (
+                "set router bgp neighbor 10.0.0.1 update-source Ethernet0.100",
+                "/set/router/bgp/neighbor/update-source",
+                "Ethernet0.100",
+            ),
+            // A hex-only word is a name, not the start of an IPv6 address.
+            (
+                "set router bgp neighbor 10.0.0.1 update-source face",
+                "/set/router/bgp/neighbor/update-source",
+                "face",
+            ),
+            (
+                "set router bgp neighbor-group BGPMON update-source Loopback4096",
+                "/set/router/bgp/neighbor-group/update-source",
+                "Loopback4096",
+            ),
+            (
+                "set router bgp neighbor-group BGPMON update-source 10.0.0.2",
+                "/set/router/bgp/neighbor-group/update-source",
+                "10.0.0.2",
+            ),
+            (
+                "set router bgp neighbor 10.0.0.1 transport local-address Loopback0",
+                "/set/router/bgp/neighbor/transport/local-address",
+                "Loopback0",
+            ),
+            (
+                "set router bgp vrf blue neighbor 10.0.0.1 update-source 10.0.0.2",
+                "/set/router/bgp/vrf/neighbor/update-source",
+                "10.0.0.2",
+            ),
+        ];
+        for (cmd, want_path, want_value) in accepted {
+            let (code, _comps, state) = parse(cmd, entry.clone(), None, State::new());
+            assert_eq!(code, ExecCode::Success, "should parse: {cmd}");
+            let (path, args) = path_from_command(&state.paths);
+            assert_eq!(path, want_path, "path of `{cmd}`");
+            assert_eq!(
+                args.0.back().map(String::as_str),
+                Some(want_value),
+                "value of `{cmd}`"
+            );
+        }
+
+        let refused = [
+            // Mistyped addresses: not interface names.
+            "set router bgp neighbor 10.0.0.1 update-source 10.0.0",
+            "set router bgp neighbor 10.0.0.1 update-source 10.0.0.256",
+            "set router bgp neighbor 10.0.0.1 update-source 2001:db8:::1",
+            "set router bgp neighbor-group BGPMON update-source 10.0.0.256",
+            // A prefix is not an address (FRR: "remove prefix length").
+            "set router bgp neighbor 10.0.0.1 update-source 10.0.0.2/32",
+            // One value.
+            "set router bgp neighbor 10.0.0.1 update-source Loopback0 Loopback1",
+            // The per-VRF leaf: an address only, for now.
+            "set router bgp vrf blue neighbor 10.0.0.1 update-source Loopback0",
+        ];
+        for cmd in refused {
+            let (code, _comps, _state) = parse(cmd, entry.clone(), None, State::new());
+            assert_ne!(code, ExecCode::Success, "should not parse: {cmd}");
+        }
+    }
+
+    /// `update-source ?` offers `<IFNAME>` beside the address hints and
+    /// the names of the interfaces there are, and a name typed in full
+    /// is one complete command, not an ambiguous one: the name arm and
+    /// the interface candidate of that name are the same reading.
+    #[test]
+    fn bgp_update_source_completion_names_interfaces() {
+        use crate::config::ExecCode;
+        use crate::config::parse::{State, parse};
+        use libyang::to_entry;
+
+        let mut yang = YangStore::new();
+        yang.add_path(concat!(env!("CARGO_MANIFEST_DIR"), "/yang"));
+        yang.read_with_resolve("configure")
+            .unwrap_or_else(|e| panic!("configure failed to load: {e:#}"));
+        yang.identity_resolve();
+        let module = yang.find_module("configure").unwrap();
+        let entry = to_entry(&yang, module);
+
+        // Interactive completion: the RIB's interface names are known.
+        let complete = |input: &str| {
+            let mut state = State::new();
+            state.dynamic.insert(
+                "rib:interface".to_string(),
+                vec![
+                    "Ethernet0".to_string(),
+                    "Loopback0".to_string(),
+                    "Loopback4096".to_string(),
+                ],
+            );
+            let (code, comps, _state) = parse(input, entry.clone(), None, state);
+            let names: Vec<String> = comps.into_iter().map(|c| c.name).collect();
+            (code, names)
+        };
+
+        for leaf in [
+            "set router bgp neighbor 10.0.0.1 update-source",
+            "set router bgp neighbor-group G update-source",
+            "set router bgp neighbor 10.0.0.1 transport local-address",
+        ] {
+            let (_code, names) = complete(&format!("{leaf} "));
+            assert_eq!(
+                names,
+                [
+                    "<A.B.C.D>",
+                    "<IFNAME>",
+                    "<X:X::X:X>",
+                    "Ethernet0",
+                    "Loopback0",
+                    "Loopback4096",
+                ],
+                "`{leaf} ?`"
+            );
+
+            let (code, names) = complete(&format!("{leaf} Loopback0"));
+            assert_eq!(code, ExecCode::Success, "`{leaf} Loopback0` is one command");
+            assert_eq!(names, ["<IFNAME>", "Loopback0", "<cr>"]);
+
+            // A prefix of two names is a name itself, and lists both.
+            let (code, names) = complete(&format!("{leaf} Lo"));
+            assert_eq!(code, ExecCode::Success);
+            assert_eq!(names, ["<IFNAME>", "Loopback0", "Loopback4096", "<cr>"]);
+
+            // An address is still read as an address, not as a name.
+            let (code, names) = complete(&format!("{leaf} 10.0.0.2"));
+            assert_eq!(code, ExecCode::Success);
+            assert_eq!(names, ["<A.B.C.D>"]);
+        }
+    }
+
     /// RFC 7947 `route-server-client` (zebra-bgp-route-server.yang): the
     /// presence container must be settable on the global neighbor and the
     /// VRF neighbor (the group copy is pinned with the other group knobs).

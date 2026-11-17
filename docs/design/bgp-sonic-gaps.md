@@ -20,7 +20,8 @@ next person can tell "add a leaf" apart from "implement a feature".
 
 Closed so far: `suppress-fib-pending` (which closes Phase 2), BGP
 multipath, global graceful restart bar `select-defer-time`, `call`,
-`set tag` / `match tag`, `add-path` on a neighbor-group.
+`set tag` / `match tag`, `add-path` on a neighbor-group, `update-source
+<interface>`.
 
 Ranking by blast radius rather than by effort: an instance-level gap
 affects every deployment, a family gap affects the devices in that role.
@@ -219,16 +220,33 @@ standard communities unconditionally, in which case the gap is only a
 no-op compatibility leaf rather than behaviour. FRR needs the knob
 because it defaults to not sending communities to eBGP peers.
 
-### `update-source <interface>` — confirmed absent
+### `update-source <interface>` — closed
 
 SONiC: `neighbor BGPMON update-source Loopback4096` (monitors, on voq
 and chassis-packet).
 
-The address form works — `neighbor-group X update-source <ip>`, and
-`neighbor X transport local-address <ip>` — but an interface name is
-rejected. SONiC uses the interface form specifically so the source
-follows the loopback's address rather than pinning a literal, which a
-template cannot always resolve at render time.
+**Closed.** `update-source` (and `transport local-address`) takes an
+interface name beside an address, on a neighbor and on a neighbor-group:
+`neighbor-group BGPMON update-source Loopback4096`. The session is
+sourced from that interface's address of the neighbor's address family,
+so one group statement serves IPv4 and IPv6 members, and the choice is
+made again whenever the interface or its addresses change — which is
+what SONiC uses the form for: the source follows the loopback rather
+than pinning a literal a template cannot always resolve at render time.
+
+Where it differs from the address form, and from FRR:
+
+- A neighbor whose interface gives no address is **not dialed** (FRR
+  fails the connect the same way). `show bgp neighbor` says so.
+- A change of the address does not reset a session that is up; the next
+  connect binds the new one. FRR resets on a change of the statement.
+- The name starts with a letter (`Loopback4096`, `Ethernet0`,
+  `PortChannel101` all do).
+- Default VRF only: a per-VRF neighbor takes an address.
+
+Not yet done: the `monitors` template is not ported, and the feature has
+not run on a VS — only in the unit suite and BDD
+`bgp_update_source_interface`.
 
 ## Reachable but not confirmed
 

@@ -1,0 +1,82 @@
+# z2, the observer. It never dials (every neighbor is passive), so a
+# session with one of its neighbors comes up only when z1 dials from
+# that neighbor's address.
+#
+# - 10.255.0.1, 10.255.0.3, 2001:db8:255::1: z1's loopback addresses.
+#   A session with one of them is a session z1 sourced from its `lo`.
+# - 10.0.0.1, 2001:db8::1: z1's link addresses, the source the kernel
+#   picks when z1 binds none. A session with one of them is z1 dialing
+#   without the source its `update-source lo` asks for.
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.255.0.2/32
+  ipv6:
+    address: 2001:db8:255::2/128
+- if-name: vz2ns
+  ipv6:
+    address: 2001:db8::2/64
+router:
+  static:
+    ipv4:
+      route:
+      - prefix: 10.255.0.1/32
+        nexthop:
+        - address: 10.0.0.1
+      - prefix: 10.255.0.3/32
+        nexthop:
+        - address: 10.0.0.1
+    ipv6:
+      route:
+      - prefix: 2001:db8:255::1/128
+        nexthop:
+        - address: 2001:db8::1
+  bgp:
+    global:
+      as: 65001
+      router-id: 10.255.0.2
+    timer:
+      adv-interval:
+        ibgp: 1
+        ebgp: 1
+    neighbor:
+    - remote-address: 10.255.0.1
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      enabled: true
+      remote-as: 65001
+      transport:
+        passive-mode: true
+    - remote-address: 10.255.0.3
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      enabled: true
+      remote-as: 65001
+      transport:
+        passive-mode: true
+    - remote-address: 10.0.0.1
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      enabled: true
+      remote-as: 65001
+      transport:
+        passive-mode: true
+    - remote-address: 2001:db8:255::1
+      afi-safi:
+      - name: ipv6
+        enabled: true
+      enabled: true
+      remote-as: 65001
+      transport:
+        passive-mode: true
+    - remote-address: 2001:db8::1
+      afi-safi:
+      - name: ipv6
+        enabled: true
+      enabled: true
+      remote-as: 65001
+      transport:
+        passive-mode: true

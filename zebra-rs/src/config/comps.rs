@@ -118,6 +118,35 @@ pub fn cleaf(entry: &Rc<Entry>) -> Completion {
     }
 }
 
+/// The completion hint of a `string` arm of a union leaf, when the leaf
+/// says what the string names: a leaf that completes interface names
+/// (`ext:dynamic "rib:interface"`) takes `<IFNAME>` beside the hints of
+/// its other arms (`<A.B.C.D>`, `<X:X::X:X>`). `None` leaves the arm
+/// its type name.
+pub fn string_arm_hint(entry: &Entry) -> Option<&'static str> {
+    match entry.extension.get("ext:dynamic").map(String::as_str) {
+        Some("rib:interface") => Some("<IFNAME>"),
+        _ => None,
+    }
+}
+
+/// The completion of a matched `string` type. On a union leaf it is one
+/// arm of several, so it takes the arm's hint ([`string_arm_hint`])
+/// when there is one, not the leaf's `<name:union>`.
+pub fn cstring(entry: &Rc<Entry>) -> Completion {
+    let union = entry
+        .type_node
+        .as_ref()
+        .is_some_and(|node| node.kind == YangType::Union);
+    match string_arm_hint(entry) {
+        Some(hint) if union => {
+            let help = entry.extension.get("ext:help").map_or("", |v| v);
+            Completion::new(hint, help)
+        }
+        _ => cleaf(entry),
+    }
+}
+
 pub fn comps_add_cr(comps: &mut Vec<Completion>) {
     comps.push(Completion::new_name("<cr>"));
 }
@@ -197,7 +226,7 @@ fn comps_as_leaf(comps: &mut Vec<Completion>, entry: &Rc<Entry>) {
             // `summary`), scalar arms their type hints (`<A.B.C.D>`),
             // instead of an opaque `<value:union>`.
             for n in node.union.iter() {
-                comps_push_arm(comps, n);
+                comps_push_arm(comps, entry, n);
             }
             return;
         }
@@ -205,12 +234,14 @@ fn comps_as_leaf(comps: &mut Vec<Completion>, entry: &Rc<Entry>) {
     comps.push(comps_as_key(entry));
 }
 
-/// Push the completion hint(s) for one union arm: an enumeration arm
-/// contributes its keywords, anything else its type hint. Skips names
-/// already present so a keyword that also exists as a sibling node
-/// (e.g. the `summary` leaf next to the `ipv4` default-child whose key
-/// has a `summary` enum arm) is listed once.
-fn comps_push_arm(comps: &mut Vec<Completion>, arm: &TypeNode) {
+/// Push the completion hint(s) for one union arm of `leaf`: an
+/// enumeration arm contributes its keywords, anything else its type
+/// hint — for a `string` arm the leaf's own hint when it has one
+/// ([`string_arm_hint`]). Skips names already present so a keyword that
+/// also exists as a sibling node (e.g. the `summary` leaf next to the
+/// `ipv4` default-child whose key has a `summary` enum arm) is listed
+/// once.
+fn comps_push_arm(comps: &mut Vec<Completion>, leaf: &Entry, arm: &TypeNode) {
     let mut push_unique = |name: &str| {
         if !comps.iter().any(|c| c.name == name) {
             comps.push(Completion::new_name(name));
@@ -222,7 +253,11 @@ fn comps_push_arm(comps: &mut Vec<Completion>, arm: &TypeNode) {
         }
     } else {
         let kind = ytype_from_typedef(&arm.typedef).unwrap_or(arm.kind);
-        push_unique(ytype_str(&kind));
+        let hint = match kind {
+            YangType::String => string_arm_hint(leaf),
+            _ => None,
+        };
+        push_unique(hint.unwrap_or(ytype_str(&kind)));
     }
 }
 
@@ -251,10 +286,10 @@ fn comps_default_child_key(comps: &mut Vec<Completion>, parent: &Rc<Entry>) {
     };
     if node.kind == YangType::Union {
         for n in node.union.iter() {
-            comps_push_arm(comps, n);
+            comps_push_arm(comps, key_leaf, n);
         }
     } else {
-        comps_push_arm(comps, node);
+        comps_push_arm(comps, key_leaf, node);
     }
 }
 

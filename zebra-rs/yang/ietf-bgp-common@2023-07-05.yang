@@ -273,10 +273,17 @@ submodule ietf-bgp-common {
        used by the BGP session to the peer.";
 
     leaf local-address {
-      ext:help "Local address to bind for the BGP session";
+      ext:help "Local address or interface for the BGP session";
+      ext:dynamic "rib:interface";
       type union {
         type inet:ipv4-address;
         type inet:ipv6-address;
+        // zebra-rs: an interface name, as the description below has
+        // always allowed. Same arm, and same reading, as
+        // `update-source` in zebra-bgp-transport.yang.
+        type string {
+          pattern '[A-Za-z][^ :/]*';
+        }
       }
       description
         "Set the local IP (either IPv4 or IPv6) address to use for

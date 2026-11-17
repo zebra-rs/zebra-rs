@@ -1,5 +1,6 @@
 use super::comps::{
     centry, cleaf, cname, comps_add_all, comps_add_config, comps_add_cr, comps_append, crange,
+    cstring,
 };
 use super::configs::config_match;
 use super::ip::*;
@@ -343,7 +344,7 @@ fn match_builder() -> MatchMap {
         })
         .kind(YangType::String)
         .exec(|m, entry, input, node| {
-            m.process(entry, match_string(input, node), cleaf(entry));
+            m.process(entry, match_string(input, node), cstring(entry));
         })
         .kind(YangType::Leafref)
         .exec(|m, entry, input, node| {
@@ -435,8 +436,26 @@ fn entry_match_type(entry: &Rc<Entry>, input: &str, m: &mut Match, s: &mut State
     if let Some(dynamics) = entry.extension.get("ext:dynamic")
         && let Some(candidates) = s.dynamic.get(dynamics)
     {
+        // The leaf's own type may already have taken the whole token: a
+        // `pattern` string and an enum keyword match `Exact`. A candidate
+        // that is that same token is the same reading of the same leaf,
+        // not a second command, so it is listed and not counted — counted,
+        // a fully typed interface name was `Ambiguous` between the name
+        // arm of `update-source` and the interface of that name, and its
+        // completion had no `<cr>`. The execute path never has candidates,
+        // so it always read the token once; this makes completion agree.
+        // A type that matches a word only `Partial` (a pattern-less
+        // string) is counted with its candidates as before.
+        let type_exact = m.matched_type == MatchType::Exact && Rc::ptr_eq(&m.matched_entry, entry);
         for candidate in candidates.iter() {
-            m.match_keyword(entry, input, candidate);
+            let matched = match_keyword(input, candidate);
+            if type_exact && matched.0 == MatchType::Exact {
+                if !m.comps.iter().any(|c| &c.name == candidate) {
+                    m.comps.push(cname(candidate));
+                }
+                continue;
+            }
+            m.process(entry, matched, cname(candidate));
         }
     }
 
