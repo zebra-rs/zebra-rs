@@ -1736,10 +1736,14 @@ impl ConfigManager {
             return (ExecCode::Show, String::new(), state.paths);
         }
 
-        // Handle "delete"
+        // Handle "delete". The parser took every token as at least the
+        // start of something configured; `delete` wants each key and value
+        // in full, and says when the line names nothing that is there.
         if state.delete {
             let paths = path_try_trim("delete", state.paths.clone());
-            delete(paths, candidate);
+            if !delete(paths, candidate) {
+                return (ExecCode::Nomatch, String::new(), state.paths);
+            }
             return (ExecCode::Show, String::new(), state.paths);
         }
 

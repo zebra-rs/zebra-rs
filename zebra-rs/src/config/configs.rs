@@ -761,44 +761,59 @@ fn config_delete(config: Rc<Config>, name: &String) {
     }
 }
 
-pub fn delete(paths: Vec<CommandPath>, mut config: Rc<Config>) {
-    let mut had_list_value = false;
+/// Delete what `paths` names from the tree under `config`. `false`, and
+/// nothing deleted, when the tree holds no such node: a list entry and a
+/// leaf value are named in full.
+///
+/// The per-token guard in `parse` takes a token that is only the *start*
+/// of a configured key or value (`eth1` of `eth10`), because that is how
+/// a keyword is abbreviated. The path it hands over still spells the
+/// token as typed, so the lookup here is what decides. A failed lookup
+/// used to fall through to the cascade below from wherever the walk had
+/// got to: `delete interface eth1` with only `eth10` configured removed
+/// the whole `interface` list.
+///
+/// Leaf-list members are the one place a name may miss: of several
+/// named, the ones that are there are removed and the others passed over
+/// (more copies of a value than the list holds, say). `false` only when
+/// none of them is there.
+pub fn delete(paths: Vec<CommandPath>, mut config: Rc<Config>) -> bool {
+    // Leaf-list members the path names, and how many of them were there.
+    let (mut named, mut removed) = (0, 0);
     for path in paths.iter() {
         match ymatch_enum(path.ymatch) {
             YangMatch::Dir | YangMatch::DirMatched | YangMatch::Leaf | YangMatch::Key => {
-                if let Some(next) = config.lookup(&path.name) {
-                    config = next;
-                } else {
-                    break;
-                }
+                let Some(next) = config.lookup(&path.name) else {
+                    return false;
+                };
+                config = next;
             }
             YangMatch::KeyMatched => {
-                if let Some(next) = config.lookup_key(&path.name) {
-                    config = next;
-                } else {
-                    break;
-                }
+                let Some(next) = config.lookup_key(&path.name) else {
+                    return false;
+                };
+                config = next;
             }
             YangMatch::LeafMatched => {
                 // `as_str()` (not `as_ref()`): the `lua` feature pulls in
                 // `bstr`, whose `PartialEq<String> for &BStr` makes a bare
                 // `as_ref()` here ambiguous. `as_str()` pins it to `&str`.
                 if config.value.borrow().as_str() != path.name {
-                    break;
+                    return false;
                 }
             }
             YangMatch::LeafList => {
-                if let Some(next) = config.lookup(&path.name) {
-                    config = next;
-                } else {
-                    break;
-                }
+                let Some(next) = config.lookup(&path.name) else {
+                    return false;
+                };
+                config = next;
             }
             YangMatch::LeafListMatched => {
-                had_list_value = true;
+                named += 1;
                 let mut lists = config.list.borrow_mut();
                 if let Some(remove_index) = lists.iter().position(|x| *x == path.name) {
                     lists.remove(remove_index);
+                    removed += 1;
                 }
             }
         }
@@ -806,10 +821,15 @@ pub fn delete(paths: Vec<CommandPath>, mut config: Rc<Config>) {
 
     // If specific leaf-list values were deleted but others remain, keep the
     // leaf-list node in place. Only cascade cleanup when the list is empty
-    // (including the no-value `delete <leaf-list>` path, where
-    // had_list_value stays false and cascade removes the whole node).
-    if had_list_value && !config.list.borrow().is_empty() {
-        return;
+    // (including the no-value `delete <leaf-list>` path, where no member
+    // is named and cascade removes the whole node).
+    if named > 0 {
+        if removed == 0 {
+            return false;
+        }
+        if !config.list.borrow().is_empty() {
+            return true;
+        }
     }
 
     while let Some(parent) = config.parent.as_ref() {
@@ -838,6 +858,7 @@ pub fn delete(paths: Vec<CommandPath>, mut config: Rc<Config>) {
             }
         }
     }
+    true
 }
 
 fn config_match_keyword(config: &Rc<Config>, name: &str, input: &str, mx: &mut Match) {
@@ -1449,6 +1470,125 @@ mod tests {
         let lsp = root.lookup(&"lsp".to_string()).unwrap();
         let label = lsp.lookup(&"label".to_string()).unwrap();
         assert_eq!(*label.list.borrow(), vec!["200".to_string()]);
+    }
+
+    /// A delete names its target in full. A key that is only the start
+    /// of a configured one, or a value that is, names nothing: the tree
+    /// is left alone and `delete` says so. It used to remove the node the
+    /// walk had reached, which for a missing list entry is the list.
+    #[test]
+    fn delete_of_what_is_not_there_deletes_nothing() {
+        let dir = |name: &str| CommandPath {
+            name: name.to_string(),
+            ymatch: YangMatch::Dir as i32,
+            ..Default::default()
+        };
+        let list = |name: &str| CommandPath {
+            name: name.to_string(),
+            ymatch: YangMatch::Key as i32,
+            ..Default::default()
+        };
+        let key = |name: &str| CommandPath {
+            name: name.to_string(),
+            ymatch: YangMatch::KeyMatched as i32,
+            key: "name".to_string(),
+            ..Default::default()
+        };
+        let leaf = |name: &str| CommandPath {
+            name: name.to_string(),
+            ymatch: YangMatch::Leaf as i32,
+            ..Default::default()
+        };
+        let value = |name: &str| CommandPath {
+            name: name.to_string(),
+            ymatch: YangMatch::LeafMatched as i32,
+            ..Default::default()
+        };
+        let mtu =
+            |ifname: &str, mtu: &str| vec![list("interface"), key(ifname), leaf("mtu"), value(mtu)];
+
+        let lines = |root: &Rc<Config>| {
+            let mut out = String::new();
+            root.list(&mut out);
+            out
+        };
+
+        let root = Rc::new(Config::new("".to_string(), None));
+        set(mtu("eth10", "1500"), root.clone());
+        set(mtu("lo", "65536"), root.clone());
+        set(
+            vec![dir("system"), leaf("hostname"), value("r10")],
+            root.clone(),
+        );
+        let before = lines(&root);
+
+        // An entry that is not there, `eth1` of `eth10`.
+        assert!(!delete(vec![list("interface"), key("eth1")], root.clone()));
+        assert!(!delete(mtu("eth1", "1500"), root.clone()));
+        // A value that is not the leaf's, `r1` of `r10` and `150` of `1500`.
+        assert!(!delete(
+            vec![dir("system"), leaf("hostname"), value("r1")],
+            root.clone()
+        ));
+        assert!(!delete(mtu("eth10", "150"), root.clone()));
+        // A node that is not there at all.
+        assert!(!delete(vec![dir("router"), dir("bgp")], root.clone()));
+        assert_eq!(lines(&root), before);
+
+        // What is there is deleted, and the list keeps its other entry.
+        assert!(delete(mtu("eth10", "1500"), root.clone()));
+        assert!(delete(vec![list("interface"), key("eth10")], root.clone()));
+        assert_eq!(
+            lines(&root),
+            "interface lo\ninterface lo mtu 65536\nsystem hostname r10\n"
+        );
+    }
+
+    /// Of several leaf-list members named, the ones that are there are
+    /// removed. `delete` answers `false` only when none of them is.
+    #[test]
+    fn delete_of_leaf_list_members_says_when_none_was_there() {
+        let label = |values: &[&str]| {
+            let mut paths = vec![
+                CommandPath {
+                    name: "lsp".to_string(),
+                    ymatch: YangMatch::Dir as i32,
+                    ..Default::default()
+                },
+                CommandPath {
+                    name: "label".to_string(),
+                    ymatch: YangMatch::LeafList as i32,
+                    ..Default::default()
+                },
+            ];
+            paths.extend(values.iter().map(|v| CommandPath {
+                name: v.to_string(),
+                ymatch: YangMatch::LeafListMatched as i32,
+                ..Default::default()
+            }));
+            paths
+        };
+        let members = |root: &Rc<Config>| {
+            let lsp = root.lookup(&"lsp".to_string()).unwrap();
+            lsp.lookup(&"label".to_string())
+                .map(|label| label.list.borrow().clone())
+        };
+        let all = |values: &[&str]| Some(values.iter().map(|v| v.to_string()).collect::<Vec<_>>());
+
+        // [100, 200, 100]
+        let root = build_label_fixture();
+        assert!(!delete(label(&["10"]), root.clone()), "`10` of `100`");
+        assert!(!delete(label(&["300", "400"]), root.clone()));
+        assert_eq!(members(&root), all(&["100", "200", "100"]));
+
+        assert!(
+            delete(label(&["300", "200"]), root.clone()),
+            "200 was there"
+        );
+        assert_eq!(members(&root), all(&["100", "100"]));
+        // No member named: the whole leaf-list.
+        assert!(delete(label(&[]), root.clone()));
+        assert_eq!(members(&root), None);
     }
 
     #[test]

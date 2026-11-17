@@ -576,9 +576,11 @@ pub fn ymatch_complete(ymatch: YangMatch, list_presence: bool, is_delete: bool) 
 /// default-action`) — not only the `ymatch_complete` terminals. This
 /// is sound because the per-token delete guard in [`parse`] has
 /// already returned Nomatch/Ambiguous unless every typed token matched
-/// the candidate config, so the target subtree is known to exist;
-/// `delete()` then removes the final node and prunes emptied
-/// ancestors. `paths.len() > 1` keeps the bare `delete` keyword
+/// the candidate config. The guard takes the start of a key or value
+/// for a match (`eth1` of `eth10`), so it does not by itself say the
+/// target is there: `delete()` looks each name up in full, and removes
+/// the final node and prunes emptied ancestors only when it finds
+/// them all. `paths.len() > 1` keeps the bare `delete` keyword
 /// Incomplete instead of turning it into a silent whole-config wipe.
 fn delete_subtree_terminal(s: &State) -> bool {
     s.delete
