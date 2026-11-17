@@ -250,6 +250,11 @@ pub struct ConfigManager {
     pub store: ConfigStore,
     /// What the last commits produced, for `rollback`.
     pub history: CommitHistory,
+    /// Who is being served now: the login name of the session whose
+    /// command or apply is running. Recorded with a commit it makes.
+    pub commit_user: RefCell<Option<String>>,
+    /// The text of `commit comment <text>`, for the commit it makes.
+    pub commit_comment: RefCell<Option<String>>,
     /// The `commit confirmed` awaiting its confirmation, if one is.
     pub confirm: RefCell<Option<PendingConfirm>>,
     /// The number of its timer, and of the next one after it.
@@ -510,6 +515,8 @@ impl ConfigManager {
             modes: HashMap::new(),
             store: ConfigStore::new(),
             history: CommitHistory::default(),
+            commit_user: RefCell::new(None),
+            commit_comment: RefCell::new(None),
             confirm: RefCell::new(None),
             confirm_generation: Cell::new(0),
             tx,
@@ -1476,9 +1483,15 @@ impl ConfigManager {
         // The candidate's lines are the running config's now. A commit
         // that changed none is not one to roll back to, and that is what
         // keeps the configuration a daemon starts with nothing in out of
-        // the history.
+        // the history. The comment is this commit's, recorded or not.
+        let comment = self.commit_comment.borrow_mut().take();
         if running != candidate {
-            self.history.record(candidate, origin);
+            // The daemon's own commits are nobody's.
+            let user = match origin {
+                Origin::Commit | Origin::Apply => self.commit_user.borrow().clone(),
+                Origin::ConfigFile | Origin::Unconfirmed | Origin::Start => None,
+            };
+            self.history.record(candidate, origin, user, comment);
         }
         // A `commit confirmed` awaits confirmation and this is another
         // commit (its own takes it out first): going back keeps this one.
@@ -1837,6 +1850,20 @@ impl ConfigManager {
     }
 
     pub fn execute(&self, mode: &Mode, input: &str) -> (ExecCode, String, Vec<CommandPath>) {
+        // `commit … comment <text>`: the text is the rest of the line,
+        // spaces and all, which the parser would not take as one value.
+        if let Some((command, comment)) = super::commands::split_commit_comment(input) {
+            let Some(comment) = comment else {
+                return (ExecCode::Incomplete, String::new(), Vec::new());
+            };
+            self.commit_comment.replace(Some(comment));
+            let reply = self.execute(mode, &command);
+            // Not a commit after all, or a refused one: the text is not
+            // the next commit's.
+            self.commit_comment.replace(None);
+            return reply;
+        }
+
         let state = State::new();
 
         let candidate = self.store.candidate.borrow().clone();
@@ -2069,7 +2096,7 @@ impl ConfigManager {
     /// set aside. The document runs on it as on any candidate, and so
     /// either completes it and brings the startup config up, or is
     /// refused with it, which drops it.
-    fn deploy(&self, config: &str) -> DeployResponse {
+    pub(super) fn deploy(&self, config: &str) -> DeployResponse {
         let mode = self.modes.get("configure").unwrap();
 
         // A document with no line in it applies nothing. Its format
@@ -2139,7 +2166,7 @@ impl ConfigManager {
         // Err *before* any dispatch. Surface it instead of swallowing
         // it, and drop the rejected lines so they don't linger into the
         // next apply.
-        if let Err(e) = self.commit_config() {
+        if let Err(e) = self.commit_as(Origin::Apply) {
             put_back(edits);
             return DeployResponse {
                 apply_code: ApplyCode::MissingMandatory,
@@ -2168,7 +2195,9 @@ impl ConfigManager {
                 let mut resp = ExecuteResponse::new();
                 match self.modes.get(&req.mode) {
                     Some(mode) => {
+                        self.commit_user.replace(req.user);
                         (resp.code, resp.output, resp.paths) = self.execute(mode, &req.input);
+                        self.commit_user.replace(None);
                     }
                     None => {
                         resp.code = ExecCode::Nomatch;
@@ -2194,7 +2223,9 @@ impl ConfigManager {
             }
             Message::ConfirmTimeout { generation } => self.confirm_timeout(generation),
             Message::Deploy(req) => {
+                self.commit_user.replace(req.user);
                 let resp = self.deploy(&req.config);
+                self.commit_user.replace(None);
                 let _ = req.resp.send(resp);
             }
             Message::DisplayTx(req) => {

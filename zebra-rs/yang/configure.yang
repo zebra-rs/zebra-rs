@@ -79,6 +79,12 @@ module configure {
   container commit {
     ext:help "Commit candidate config to running config";
     presence "Commit";
+    // The rest of the line is the text, spaces included: the daemon
+    // takes it off the line before the line is parsed.
+    leaf comment {
+      ext:help "A note for the commit history: the rest of the line";
+      type string;
+    }
     list confirmed {
       ext:help "Roll the commit back unless a commit confirms it";
       ext:presence "Roll back in 10 minutes";

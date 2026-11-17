@@ -144,9 +144,15 @@ async fn spawn_vtypam(username: &str, password: &str) -> std::io::Result<i32> {
 }
 
 impl ExecService {
-    async fn execute_request(&self, mode: &str, input: &str) -> ExecuteResponse {
+    async fn execute_request(
+        &self,
+        mode: &str,
+        input: &str,
+        user: Option<String>,
+    ) -> ExecuteResponse {
         let (tx, rx) = oneshot::channel();
-        let req = ExecuteRequest::new(mode, input, tx);
+        let mut req = ExecuteRequest::new(mode, input, tx);
+        req.user = user;
         self.tx.send(Message::Execute(req)).await.unwrap();
         rx.await.unwrap()
     }
@@ -239,7 +245,10 @@ impl Exec for ExecService {
         let request = request.get_ref();
         match request.r#type {
             x if x == ExecType::Exec as i32 => {
-                let resp = self.execute_request(&request.mode, &request.line).await;
+                let user = key.and_then(|key| self.sessions.username(&key));
+                let resp = self
+                    .execute_request(&request.mode, &request.line, user)
+                    .await;
                 if request.mode == "exec" && enters_configure(&resp) {
                     enforce_admin_key(&self.sessions, key)?;
                 }
@@ -619,6 +628,10 @@ impl Apply for ApplyService {
         request: tonic::Request<tonic::Streaming<ApplyRequest>>,
     ) -> Result<tonic::Response<ApplyReply>, tonic::Status> {
         enforce_admin(&self.sessions, &request)?;
+        let user = request
+            .extensions()
+            .get::<SessionContext>()
+            .and_then(|ctx| self.sessions.username(&ctx.key));
 
         let mut stream = request.into_inner();
 
@@ -637,7 +650,11 @@ impl Apply for ApplyService {
         }
 
         let (tx, rx) = oneshot::channel();
-        let deploy = DeployRequest { config, resp: tx };
+        let deploy = DeployRequest {
+            config,
+            user,
+            resp: tx,
+        };
         self.tx.send(Message::Deploy(deploy)).await.unwrap();
         let resp = rx.await.unwrap();
 

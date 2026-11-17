@@ -54,6 +54,8 @@ impl ConfigChannel {
 pub struct ExecuteRequest {
     pub mode: String,
     pub input: String,
+    /// The login name of the session, for the commit history.
+    pub user: Option<String>,
     pub resp: Sender<ExecuteResponse>,
 }
 
@@ -91,6 +93,7 @@ impl ExecuteRequest {
         Self {
             mode: mode.to_string(),
             input: input.to_string(),
+            user: None,
             resp,
         }
     }
@@ -131,6 +134,8 @@ impl CompletionResponse {
 #[derive(Debug)]
 pub struct DeployRequest {
     pub config: String,
+    /// The login name of the caller, for the commit history.
+    pub user: Option<String>,
     pub resp: Sender<DeployResponse>,
 }
 

@@ -305,8 +305,10 @@ blocked by an idle operator.
   (`<daemon start>-<count>`) does not, and is what a writer that is not alone
   on the box names a commit by. On SONiC the default directory is inside
   the `bgp` container; the image has to point it at storage that outlives
-  the container. Still to do: record the user and a comment (`commit comment
-  "…"`).
+  the container. Each commit has its user, how it was made (`commit`,
+  `apply`, the config file, an unconfirmed rollback) and a comment (`commit
+  comment …`). bgpcfgd's applies cannot push operators' commits out: each
+  kind keeps at least half of the history.
 - **`show | compare`** is built: configure mode has `compare` and `compare
   formal`, and `show | compare` reaches the same command. `compare rollback
   N` compares the candidate with commit N.

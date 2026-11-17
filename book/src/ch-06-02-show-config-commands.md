@@ -131,6 +131,7 @@ under the top level of `configure` mode (not under `show`):
 | `set <path>` | Add a leaf or list item to the candidate |
 | `delete <path>` | Remove a leaf or list item from the candidate |
 | `commit` | Validate the candidate, apply diffs to subscribers, then promote candidate → running |
+| `commit comment <text>` | Commit, with a note for the commit history |
 | `commit confirmed [<minutes>]` | Commit, and roll the commit back after `minutes` (10 by default) unless a `commit` confirms it |
 | `discard` | Revert candidate back to running (drops uncommitted edits) |
 | `compare` | Show what `commit` would change, in the block format |
@@ -207,18 +208,39 @@ the latest, which is the running config; commit 1 is the one before it.
 
 ```
 host(config)# show commit history
-0   2026-11-17 09:41:07 UTC  1794906748-3
-1   2026-11-17 09:38:52 UTC  1794906748-2
-2   2026-11-17 09:12:30 UTC  1794906748-1  config file
+0   2026-11-17 09:42:39 UTC  1794906748-3  by alice
+    trying a new description
+1   2026-11-17 09:41:53 UTC  1794906748-2  by root  apply
+2   2026-11-17 09:41:52 UTC  1794906748-1  config file
 ```
 
-Each line is a commit: its number, when it was made, and its revision.
-`config file` marks the commit of the config file, at startup or by
-`load`. Every commit that changed something is listed, whoever made it:
-a `vtyctl apply` is a commit too. A commit that changed nothing is not
-listed, and neither is the empty configuration of a daemon that started
-with no config file, or with one that sets nothing: the list is then
-empty until the first commit.
+Each line is a commit: its number, when it was made, its revision, and
+who made it. A commit that was not a `commit` typed in configure mode
+says what it was:
+
+| Mark | The commit |
+|---|---|
+| `apply` | A `vtyctl apply` by another writer |
+| `config file` | The config file, at startup or by `load` |
+| `rollback, not confirmed` | The daemon, taking back a `commit confirmed` |
+| `daemon start` | A daemon that started without the configuration last committed |
+
+The line under a commit is its comment, given with `commit comment`.
+The comment is the rest of the line, so it needs no quotes:
+
+```
+host(config)# commit comment trying a new description
+host(config)# commit confirmed 5 comment moving the uplink
+```
+
+Every commit that changed something is listed, whoever made it. A commit
+that changed nothing is not listed, and neither is the empty
+configuration of a daemon that started with no config file and no
+history: the list is then empty until the first commit.
+
+Operators' commits and the others each keep at least half of the 50
+places: a writer that applies often does not push the commits an
+operator made out of the history.
 
 From a program, `vtyctl show 'show commit history'` prints the same
 listing, and with `-j` the commits as a JSON array, newest first, empty
@@ -229,9 +251,12 @@ $ vtyctl show -j 'show commit history'
 [
   {
     "number": 0,
-    "time": "2026-11-17T09:41:07Z",
+    "time": "2026-11-17T09:42:39Z",
     "revision": "1794906748-3",
-    "config-file": false
+    "origin": "commit",
+    "config-file": false,
+    "user": "alice",
+    "comment": "trying a new description"
   },
   …
 ]
@@ -338,9 +363,9 @@ rollback as a commit of its own:
 
 ```
 host# show commit history
-0   2026-11-17 09:28:17 UTC  rollback, not confirmed
-1   2026-11-17 09:27:17 UTC
-2   2026-11-17 09:26:30 UTC  config file
+0   2026-11-17 09:28:17 UTC  1794906748-3  rollback, not confirmed
+1   2026-11-17 09:27:17 UTC  1794906748-2  by alice
+2   2026-11-17 09:26:30 UTC  1794906748-1  config file
 ```
 
 The timer is in the daemon's memory: a daemon that restarts while a

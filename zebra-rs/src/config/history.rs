@@ -48,8 +48,10 @@ pub const HISTORY_MAX: usize = 50;
 /// What made a commit.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Origin {
-    /// A `commit`, or a `vtyctl apply`.
+    /// A `commit` typed in configure mode.
     Commit,
+    /// A `vtyctl apply`: a document or lines another writer committed.
+    Apply,
     /// The config file: at startup, or by `load`.
     ConfigFile,
     /// The daemon, taking back a `commit confirmed` nobody confirmed.
@@ -64,15 +66,36 @@ impl Origin {
     fn keyword(self) -> &'static str {
         match self {
             Origin::Commit => "commit",
+            Origin::Apply => "apply",
             Origin::ConfigFile => "config-file",
             Origin::Unconfirmed => "unconfirmed",
             Origin::Start => "start",
         }
     }
 
+    /// An operator's commit, or the daemon's rollback of one: what the
+    /// history is read for. The others are made without anyone asking,
+    /// and often.
+    fn by_operator(self) -> bool {
+        matches!(self, Origin::Commit | Origin::Unconfirmed)
+    }
+
+    /// What the listing says of a commit that is not an operator's
+    /// `commit`.
+    fn note(self) -> Option<&'static str> {
+        match self {
+            Origin::Commit => None,
+            Origin::Apply => Some("apply"),
+            Origin::ConfigFile => Some("config file"),
+            Origin::Unconfirmed => Some("rollback, not confirmed"),
+            Origin::Start => Some("daemon start"),
+        }
+    }
+
     fn from_keyword(word: &str) -> Option<Self> {
         [
             Origin::Commit,
+            Origin::Apply,
             Origin::ConfigFile,
             Origin::Unconfirmed,
             Origin::Start,
@@ -88,6 +111,11 @@ pub struct CommitRecord {
     pub revision: String,
     pub time: DateTime<Utc>,
     pub origin: Origin,
+    /// The login name of who made it, when it was someone's and the
+    /// name is known.
+    pub user: Option<String>,
+    /// The text of `commit comment`.
+    pub comment: Option<String>,
     /// The running config this commit produced, one line for each thing
     /// set: `Config::list`, the rendering a commit diffs. Each line is a
     /// `set` command without the keyword.
@@ -99,13 +127,20 @@ pub struct CommitRecord {
 impl CommitRecord {
     /// The commit as its file holds it.
     fn to_file(&self) -> String {
-        format!(
-            "# zebra-rs commit\n# revision: {}\n# time: {}\n# origin: {}\n{}",
+        let mut file = format!(
+            "# zebra-rs commit\n# revision: {}\n# time: {}\n# origin: {}\n",
             self.revision,
             self.time.to_rfc3339_opts(SecondsFormat::Secs, true),
             self.origin.keyword(),
-            self.config
-        )
+        );
+        if let Some(user) = &self.user {
+            file.push_str(&format!("# user: {user}\n"));
+        }
+        if let Some(comment) = &self.comment {
+            file.push_str(&format!("# comment: {comment}\n"));
+        }
+        file.push_str(&self.config);
+        file
     }
 
     /// Read a commit's file. `None` for a file that is not one: no
@@ -113,6 +148,7 @@ impl CommitRecord {
     fn from_file(seq: u64, text: &str) -> Option<Self> {
         let mut rest = text.strip_prefix("# zebra-rs commit\n")?;
         let (mut revision, mut time, mut origin) = (None, None, None);
+        let (mut user, mut comment) = (None, None);
         while let Some(line) = rest.strip_prefix("# ") {
             let (line, after) = line.split_once('\n').unwrap_or((line, ""));
             rest = after;
@@ -123,6 +159,8 @@ impl CommitRecord {
                     time = Some(DateTime::parse_from_rfc3339(value).ok()?.to_utc());
                 }
                 Some(("origin", value)) => origin = Some(Origin::from_keyword(value)?),
+                Some(("user", value)) => user = Some(value.to_string()),
+                Some(("comment", value)) => comment = Some(value.to_string()),
                 _ => {}
             }
         }
@@ -130,6 +168,8 @@ impl CommitRecord {
             revision: revision?,
             time: time?,
             origin: origin?,
+            user,
+            comment,
             config: rest.to_string(),
             seq,
         })
@@ -184,7 +224,13 @@ impl CommitHistory {
     /// is not enough: it changes the running config, which is empty
     /// then, and is still no commit when it is what the history read
     /// back from its directory has at 0.
-    pub fn record(&self, config: String, origin: Origin) {
+    pub fn record(
+        &self,
+        config: String,
+        origin: Origin,
+        user: Option<String>,
+        comment: Option<String>,
+    ) {
         let mut records = self.records.borrow_mut();
         if origin == Origin::ConfigFile && records.front().is_some_and(|r| r.config == config) {
             return;
@@ -197,6 +243,8 @@ impl CommitHistory {
             revision: format!("{}-{count}", self.start),
             time: Utc::now(),
             origin,
+            user,
+            comment,
             config,
             seq,
         };
@@ -213,7 +261,9 @@ impl CommitHistory {
         }
         records.push_front(record);
         while records.len() > HISTORY_MAX {
-            if let (Some(old), Some(dir)) = (records.pop_back(), dir.as_deref()) {
+            let oldest = oldest_to_drop(&records);
+            let old = records.remove(oldest);
+            if let (Some(old), Some(dir)) = (old, dir.as_deref()) {
                 let _ = std::fs::remove_file(dir.join(file_name(old.seq)));
             }
         }
@@ -232,7 +282,7 @@ impl CommitHistory {
             .front()
             .is_some_and(|last| last.config != running);
         if differs {
-            self.record(running, Origin::Start);
+            self.record(running, Origin::Start, None, None);
         }
     }
 
@@ -328,20 +378,24 @@ impl CommitHistory {
             .collect()
     }
 
-    /// One line an entry, newest first: its number, when it was made and
-    /// its revision.
+    /// One line an entry, newest first: its number, when it was made,
+    /// its revision, who made it, and how when it was not a `commit`.
+    /// Under it, the comment of an entry that has one.
     pub fn render(&self) -> String {
         let mut out = String::new();
         for (n, record) in self.records.borrow().iter().enumerate() {
             let time = record.time.format("%Y-%m-%d %H:%M:%S UTC");
-            let revision = &record.revision;
-            let note = match record.origin {
-                Origin::Commit => "",
-                Origin::ConfigFile => "  config file",
-                Origin::Unconfirmed => "  rollback, not confirmed",
-                Origin::Start => "  daemon start",
-            };
-            out.push_str(&format!("{n:<4}{time}  {revision}{note}\n"));
+            out.push_str(&format!("{n:<4}{time}  {}", record.revision));
+            if let Some(user) = &record.user {
+                out.push_str(&format!("  by {user}"));
+            }
+            if let Some(note) = record.origin.note() {
+                out.push_str(&format!("  {note}"));
+            }
+            out.push('\n');
+            if let Some(comment) = &record.comment {
+                out.push_str(&format!("    {comment}\n"));
+            }
         }
         out
     }
@@ -359,8 +413,10 @@ impl CommitHistory {
                     "number": n,
                     "time": record.time.to_rfc3339_opts(SecondsFormat::Secs, true),
                     "revision": record.revision,
+                    "origin": record.origin.keyword(),
                     "config-file": record.origin == Origin::ConfigFile,
-                    "unconfirmed-rollback": record.origin == Origin::Unconfirmed,
+                    "user": record.user,
+                    "comment": record.comment,
                 })
             })
             .collect();
@@ -368,6 +424,20 @@ impl CommitHistory {
         out.push('\n');
         out
     }
+}
+
+/// Which entry leaves a history that is over its size: the oldest one
+/// of whichever kind has more than half of it, operators' commits or
+/// the others. A writer that applies often (bgpcfgd on SONiC, every time
+/// CONFIG_DB changes) then cannot push the commits an operator made out
+/// of the history, and has half of it for its own.
+fn oldest_to_drop(records: &VecDeque<CommitRecord>) -> usize {
+    let operators = records.iter().filter(|r| r.origin.by_operator()).count();
+    let drop_operator = operators > HISTORY_MAX / 2;
+    records
+        .iter()
+        .rposition(|r| r.origin.by_operator() == drop_operator)
+        .unwrap_or(records.len() - 1)
 }
 
 /// Write a commit's file whole or not at all, readable by its owner

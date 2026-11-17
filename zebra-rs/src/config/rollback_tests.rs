@@ -1,5 +1,6 @@
 //! Commit history, `rollback <n>` and `compare rollback <n>`.
 
+use super::super::ApplyCode;
 use super::super::Completion;
 use super::super::api::{DisplayRequest, DisplayTxRequest, Message};
 use super::super::history::{HISTORY_MAX, Origin};
@@ -268,8 +269,18 @@ fn the_oldest_commits_are_dropped() {
 #[test]
 fn the_commit_of_the_config_file_is_marked() {
     let history = super::super::history::CommitHistory::starting_at(1794906748);
-    history.record("system hostname r1\n".to_string(), Origin::ConfigFile);
-    history.record("system hostname r2\n".to_string(), Origin::Commit);
+    history.record(
+        "system hostname r1\n".to_string(),
+        Origin::ConfigFile,
+        None,
+        None,
+    );
+    history.record(
+        "system hostname r2\n".to_string(),
+        Origin::Commit,
+        None,
+        None,
+    );
     let listing = history.render();
     let lines: Vec<&str> = listing.lines().collect();
     assert_eq!(lines.len(), 2, "{listing}");
@@ -876,9 +887,24 @@ fn the_origin_is_kept_in_the_file() {
     let dir = history_dir("origin");
     let history = super::super::history::CommitHistory::default();
     history.keep_in(&dir);
-    history.record("set system hostname r1\n".to_string(), Origin::ConfigFile);
-    history.record("set system hostname r2\n".to_string(), Origin::Commit);
-    history.record("set system hostname r1\n".to_string(), Origin::Unconfirmed);
+    history.record(
+        "set system hostname r1\n".to_string(),
+        Origin::ConfigFile,
+        None,
+        None,
+    );
+    history.record(
+        "set system hostname r2\n".to_string(),
+        Origin::Commit,
+        None,
+        None,
+    );
+    history.record(
+        "set system hostname r1\n".to_string(),
+        Origin::Unconfirmed,
+        None,
+        None,
+    );
     let before = history.render();
 
     let history = super::super::history::CommitHistory::default();
@@ -932,4 +958,190 @@ fn the_config_file_at_a_restart_joins_the_history() {
     assert_eq!(run(&cm, "rollback 1"), "");
     assert_eq!(candidate(&cm), "system hostname r2\n");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Serve a command as the session of `user` does.
+fn run_as(cm: &ConfigManager, user: &str, line: &str) -> String {
+    cm.commit_user.replace(Some(user.to_string()));
+    let output = run(cm, line);
+    cm.commit_user.replace(None);
+    output
+}
+
+/// A commit is listed with who made it, how, and under it the comment
+/// it was given: the rest of the line, spaces included.
+#[tokio::test]
+async fn a_commit_has_its_user_and_comment() {
+    let dir = history_dir("comment");
+    let cm = manager_keeping("comment", &dir);
+    run(&cm, "set system hostname r1");
+    assert_eq!(
+        run_as(&cm, "alice", "commit comment first one, with spaces"),
+        ""
+    );
+    run(&cm, "set system hostname r2");
+    assert_eq!(run_as(&cm, "bob", "commit"), "");
+    run(&cm, "set system hostname r3");
+    assert_eq!(run(&cm, "commit comment \"quoted text\""), "");
+
+    let listing = run(&cm, "show commit history");
+    let lines: Vec<&str> = listing.lines().collect();
+    assert_eq!(lines.len(), 5, "{listing}");
+    let revisions = cm.history.revisions();
+    assert!(
+        lines[0].starts_with("0   ") && lines[0].ends_with(&format!(" UTC  {}", revisions[0])),
+        "{listing}"
+    );
+    assert_eq!(lines[1], "    quoted text");
+    assert!(
+        lines[2].starts_with("1   ") && lines[2].ends_with(&format!("  {}  by bob", revisions[1])),
+        "{listing}"
+    );
+    assert!(
+        lines[3].starts_with("2   ")
+            && lines[3].ends_with(&format!("  {}  by alice", revisions[2])),
+        "{listing}"
+    );
+    assert_eq!(lines[4], "    first one, with spaces");
+
+    // The same after a restart.
+    let text = std::fs::read_to_string(dir.join("0000000000.conf")).unwrap();
+    assert!(
+        text.contains("# user: alice\n# comment: first one, with spaces\nsystem hostname r1\n"),
+        "{text}"
+    );
+    let restarted = manager_keeping("comment", &dir);
+    assert_eq!(run(&restarted, "show commit history"), listing);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A comment is the commit's it was typed with, and nobody else's: not
+/// a refused commit's successor's, and not kept by a line that is no
+/// commit.
+#[tokio::test]
+async fn a_comment_does_not_outlive_its_line() {
+    let cm = manager("comment-scope");
+    run(
+        &cm,
+        "set router isis interface eth0 te-metric measurement loss interval 45",
+    );
+    assert_ne!(run(&cm, "commit comment refused"), "");
+    run(&cm, "discard");
+    run(&cm, "set system hostname r1");
+    assert_eq!(run(&cm, "commit"), "");
+    assert!(!run(&cm, "show commit history").contains("refused"));
+
+    // Nothing after `comment`: not a command.
+    let mode = cm.modes.get("configure").expect("configure mode");
+    let (code, _, _) = cm.execute(mode, "commit comment");
+    assert_eq!(code, ExecCode::Incomplete);
+    // `comment` as a value elsewhere is a value.
+    run(&cm, "set router bgp neighbor 10.0.0.1 description comment");
+    assert!(candidate(&cm).contains("description comment\n"));
+}
+
+/// `commit confirmed` takes a comment too, with or without its minutes.
+#[tokio::test]
+async fn commit_confirmed_takes_a_comment() {
+    let cm = manager("comment-confirmed");
+    run(&cm, "set system hostname r1");
+    assert!(
+        run(&cm, "commit confirmed 5 comment trying r1")
+            .starts_with("Commit will be rolled back in 5 minutes")
+    );
+    run(&cm, "set system hostname r2");
+    assert!(
+        run(&cm, "commit confirmed comment trying r2")
+            .starts_with("Commit will be rolled back in 10 minutes")
+    );
+    let listing = run(&cm, "show commit history");
+    let lines: Vec<&str> = listing.lines().collect();
+    assert_eq!(lines[1], "    trying r2", "{listing}");
+    assert_eq!(lines[3], "    trying r1", "{listing}");
+}
+
+#[test]
+fn the_comment_is_split_off_the_line() {
+    let split = |line| split_commit_comment(line);
+    let some = |command: &str, text: &str| Some((command.to_string(), Some(text.to_string())));
+    assert_eq!(split("commit comment a b  c"), some("commit", "a b  c"));
+    assert_eq!(split("  commit   comment   a  "), some("commit", "a"));
+    assert_eq!(split("comm comment a"), some("comm", "a"));
+    assert_eq!(
+        split("commit confirmed 5 comment a b"),
+        some("commit confirmed 5", "a b")
+    );
+    assert_eq!(
+        split("commit confirmed comment a"),
+        some("commit confirmed", "a")
+    );
+    assert_eq!(split("commit comment comment"), some("commit", "comment"));
+    assert_eq!(split("commit comment \"a b\""), some("commit", "a b"));
+    assert_eq!(split("commit comment"), Some(("commit".to_string(), None)));
+    assert_eq!(
+        split("commit comment \"\""),
+        Some(("commit".to_string(), None))
+    );
+    assert_eq!(split("commit"), None);
+    assert_eq!(split("commit confirmed 5"), None);
+    assert_eq!(split("com comment a"), None, "`com` is `compare` too");
+    assert_eq!(split("compare comment a"), None);
+    assert_eq!(split("set system hostname comment"), None);
+    assert_eq!(split("commit a b c comment d"), None);
+    assert_eq!(split(""), None);
+}
+
+/// A `vtyctl apply` is listed as that, with its caller.
+#[tokio::test]
+async fn an_apply_is_listed_as_an_apply() {
+    let cm = manager("apply-listed");
+    cm.commit_user.replace(Some("root".to_string()));
+    let resp = cm.deploy("set system hostname applied\n");
+    cm.commit_user.replace(None);
+    assert_eq!(resp.apply_code, ApplyCode::Applied);
+    let listing = run(&cm, "show commit history");
+    assert!(
+        listing.trim_end().ends_with("  by root  apply"),
+        "{listing}"
+    );
+}
+
+/// A writer that applies often does not push an operator's commits out
+/// of the history: each kind keeps up to half of it.
+#[test]
+fn applies_do_not_push_operators_commits_out() {
+    let history = super::super::history::CommitHistory::default();
+    let config = |n: usize| format!("system hostname r{n}\n");
+    for n in 0..3 {
+        history.record(config(n), Origin::Commit, None, None);
+    }
+    for n in 3..3 + 4 * HISTORY_MAX {
+        history.record(config(n), Origin::Apply, None, None);
+    }
+    assert_eq!(history.len(), HISTORY_MAX);
+    // The three commits are the oldest entries, still there.
+    for n in 0..3 {
+        assert_eq!(history.config(HISTORY_MAX - 1 - n).unwrap(), config(n));
+    }
+    // And the applies kept are the latest ones.
+    assert_eq!(history.config(0).unwrap(), config(2 + 4 * HISTORY_MAX));
+    assert_eq!(
+        history.config(HISTORY_MAX - 4).unwrap(),
+        config(3 * HISTORY_MAX + 6)
+    );
+
+    // The other way round: an operator's own commits take at most all
+    // but the applies' half... and never fewer than their own half.
+    let history = super::super::history::CommitHistory::default();
+    for n in 0..HISTORY_MAX {
+        history.record(config(n), Origin::Apply, None, None);
+    }
+    for n in HISTORY_MAX..3 * HISTORY_MAX {
+        history.record(config(n), Origin::Commit, None, None);
+    }
+    assert_eq!(history.len(), HISTORY_MAX);
+    let listing = history.render();
+    let applies = listing.lines().filter(|l| l.ends_with("  apply")).count();
+    assert_eq!(applies, HISTORY_MAX / 2, "{listing}");
+    assert_eq!(history.config(0).unwrap(), config(3 * HISTORY_MAX - 1));
 }

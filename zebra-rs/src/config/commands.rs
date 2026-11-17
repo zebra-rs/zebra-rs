@@ -465,6 +465,49 @@ fn commit_confirmed_minutes(config: &ConfigManager, mut args: Args) -> (ExecCode
     }
 }
 
+/// Split `commit [confirmed [<minutes>]] comment <text>` into the
+/// command without its comment and the text: the rest of the line, less
+/// one pair of quotes around it. `None` for any other line; `Some` with
+/// no text when the line ends at `comment`.
+///
+/// Only a line whose first word is `commit`, or an abbreviation of it
+/// that is not also one of `compare`, is looked at: `comment` anywhere
+/// else is a value (`set … description comment`).
+pub(super) fn split_commit_comment(input: &str) -> Option<(String, Option<String>)> {
+    let line = input.trim();
+    let first = line.split_whitespace().next()?;
+    if first.len() < 4 || !"commit".starts_with(first) {
+        return None;
+    }
+    // The words before `comment`: at most `commit confirmed <minutes>`.
+    let mut rest = line;
+    let mut command = Vec::new();
+    loop {
+        rest = rest.trim_start();
+        let word = rest.split_whitespace().next()?;
+        if word == "comment" {
+            rest = rest[word.len()..].trim();
+            break;
+        }
+        if command.len() == 3 {
+            return None;
+        }
+        command.push(word);
+        rest = &rest[word.len()..];
+    }
+    let text = rest
+        .strip_prefix('"')
+        .and_then(|text| text.strip_suffix('"'))
+        .unwrap_or(rest)
+        .trim();
+    // One line in the listing and in the commit's file.
+    let text: String = text
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    Some((command.join(" "), (!text.is_empty()).then_some(text)))
+}
+
 /// Bare `commit confirmed`.
 fn commit_confirmed(config: &ConfigManager) -> (ExecCode, String) {
     (

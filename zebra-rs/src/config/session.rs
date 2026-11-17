@@ -79,9 +79,8 @@ pub struct Session {
     /// Process the session's lifetime is bound to: the parent shell, or
     /// the client itself when it has no visible parent. Mirrors `key.1`.
     pub bash_pid: u32,
-    /// Resolved via `getpwuid_r` at session creation. Retained for
-    /// future audit logging; not used by the enable/PAM path today.
-    #[allow(dead_code)]
+    /// Resolved via `getpwuid_r` at session creation. Recorded with
+    /// the commits the session makes; not used by the enable/PAM path.
     pub username: Option<String>,
     pub last_active: Instant,
     /// Current authorization role. Defaults to `View`.
@@ -501,6 +500,12 @@ impl SessionTable {
     #[cfg(test)]
     pub fn len(&self) -> usize {
         self.sessions.len()
+    }
+
+    /// The login name a session was opened under, when the passwd
+    /// database had one for its uid.
+    pub fn username(&self, key: &SessionKey) -> Option<String> {
+        self.sessions.get(key)?.username.clone()
     }
 
     /// Get a snapshot of a session for inspection. Cloned to avoid holding
