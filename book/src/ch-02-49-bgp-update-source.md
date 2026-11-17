@@ -94,12 +94,33 @@ router bgp {
 }
 ```
 
+## In a VRF
+
+A per-VRF neighbor takes the same statement. The interface is then one
+of **that VRF**:
+
+```
+router bgp {
+  vrf vrf-cust {
+    rd 65000:1;
+    neighbor 10.1.0.2 {
+      remote-as 65001;
+      update-source ce-lo;
+    }
+  }
+}
+```
+
+An interface is looked for in the neighbor's own VRF only: the default
+VRF for a neighbor of `router bgp`, VRF `<name>` for a neighbor of
+`router bgp vrf <name>`. One that is in another VRF is not found, and
+the neighbor is not dialed, as when no interface of that name exists.
+When an interface moves into or out of the VRF, the choice is made
+again. A name a neighbor inherits from a neighbor-group is read the same
+way, by each member in its own VRF.
+
 ## Limits
 
-- The interface is one of the default VRF. A per-VRF neighbor
-  (`router bgp vrf <name> neighbor`) takes an address only, and an
-  interface name it would inherit from a neighbor-group is not applied
-  to it.
 - An interface name is not applied to a neighbor reached over an IPv6
   link-local address, an [`interface-neighbor`](ch-02-27-bgp-unnumbered.md)
   among them. Such a neighbor is sourced from the link it is on.

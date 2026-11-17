@@ -4484,15 +4484,13 @@ pub(super) fn apply_update_source(peer: &mut Peer, want: Option<&UpdateSource>) 
 ///
 /// A neighbor that was held for want of an address (`fsm_start` parks
 /// it in Active) is sent `Event::Start`, so it dials the moment the
-/// interface gives one. A session that is up is left alone when the
-/// address moves: it keeps the one it was opened with — as it does when
-/// an `update-source <address>` is changed — and the next connect binds
-/// the new one.
+/// interface gives one; a session that is up is left alone
+/// ([`super::update_source::adopt`]).
 ///
 /// Returns `true` when the source changed; the caller owes a
 /// `bfd_apply` reconcile then (the BFD session is keyed by it).
 pub(super) fn update_source_resolve(bgp: &mut Bgp, ident: usize) -> bool {
-    use super::peer::State;
+    use super::update_source::Adopted;
     let Some((ifname, address)) = bgp.peers.get_by_idx(ident).and_then(|peer| {
         let ifname = peer.config.transport.update_source_if.clone()?;
         Some((ifname, peer.address))
@@ -4508,29 +4506,15 @@ pub(super) fn update_source_resolve(bgp: &mut Bgp, ident: usize) -> bool {
     let Some(peer) = bgp.peers.get_mut_by_idx(ident) else {
         return false;
     };
-    let had = peer.config.transport.update_source;
-    if had == want {
-        return false;
+    match super::update_source::adopt(peer, want) {
+        Adopted::Unchanged => false,
+        Adopted::Changed { start } => {
+            if start {
+                let _ = bgp.tx.try_send(Message::Event(ident, Event::Start));
+            }
+            true
+        }
     }
-    match want {
-        Some(source) => tracing::info!(
-            peer = %peer.display_name(),
-            interface = %ifname,
-            source = %source,
-            "bgp: update-source interface gives this neighbor its source address",
-        ),
-        None => tracing::warn!(
-            peer = %peer.display_name(),
-            interface = %ifname,
-            "bgp: update-source interface has no usable address for this neighbor; it is not dialed",
-        ),
-    }
-    peer.config.transport.update_source = want;
-    let kick = had.is_none() && peer.active && !peer.is_passive() && peer.state == State::Active;
-    if kick {
-        let _ = bgp.tx.try_send(Message::Event(ident, Event::Start));
-    }
-    true
 }
 
 /// [`update_source_resolve`] for every neighbor, and a BFD reconcile
@@ -12630,10 +12614,11 @@ mod neighbor_group_wiring_tests {
     }
 
     /// An interface name is not applied to a neighbor reached over a
-    /// link-local address, nor to a per-VRF neighbor (which is not told
-    /// of its interfaces): each keeps the kernel's choice and is dialed.
+    /// link-local address: it keeps the kernel's choice and is dialed.
+    /// The per-VRF apply path takes a name as the default one does; the
+    /// per-VRF task then resolves it among its own interfaces.
     #[tokio::test]
-    async fn update_source_interface_is_not_applied_where_it_cannot_resolve() {
+    async fn update_source_interface_is_not_applied_to_a_link_local_neighbor() {
         use super::super::neighbor_group::{InheritableKnobs, apply_resolved_session_knobs};
         let by_name = UpdateSource::Interface("Loopback0".to_string());
         let mut bgp = fresh_bgp();
@@ -12652,23 +12637,23 @@ mod neighbor_group_wiring_tests {
         assert!(!apply_update_source(peer, Some(&by_name)));
         assert!(!peer.update_source_pending());
 
-        // The per-VRF apply path: an address is applied, a name is not.
+        // The per-VRF apply path: an address, and a name.
         peer.address = peer_addr();
         let knobs = |source| InheritableKnobs {
             update_source: Some(source),
             ..Default::default()
         };
-        apply_resolved_session_knobs(peer, &knobs(by_name.clone()));
-        assert_eq!(peer.config.transport.update_source_if, None);
-        assert!(!peer.update_source_pending());
         apply_resolved_session_knobs(peer, &knobs(UpdateSource::parse("192.0.2.1")));
         assert_eq!(
             peer.config.transport.update_source,
             Some("192.0.2.1".parse().unwrap())
         );
-        // ... and the default-VRF path does take the name.
-        assert!(apply_update_source(peer, Some(&by_name)));
-        assert!(peer.update_source_pending());
+        apply_resolved_session_knobs(peer, &knobs(by_name.clone()));
+        assert_eq!(
+            peer.config.transport.update_source_if.as_deref(),
+            Some("Loopback0")
+        );
+        assert!(peer.update_source_pending(), "a name, until it is resolved");
     }
 
     /// BFD is sourced from the interface's address too: no session

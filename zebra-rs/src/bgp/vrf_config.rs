@@ -982,10 +982,9 @@ pub fn config_vrf_neighbor_update_source(
     let addr = args.addr()?;
     let cfg = vrf_entry(bgp, vrf, op)?;
     let nbr = neighbor_entry(cfg, addr, op)?;
-    // An address only: the per-VRF leaf takes no interface name yet
-    // (see `neighbor_group::apply_resolved_session_knobs`).
+    // An address, or the name of an interface of this VRF.
     nbr.config.knobs_explicit.update_source = match op {
-        ConfigOp::Set => Some(super::update_source::UpdateSource::Addr(args.addr()?)),
+        ConfigOp::Set => Some(super::update_source::UpdateSource::parse(&args.string()?)),
         ConfigOp::Delete => None,
         _ => return Some(()),
     };

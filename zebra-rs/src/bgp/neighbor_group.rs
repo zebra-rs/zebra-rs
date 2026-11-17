@@ -1728,26 +1728,10 @@ pub(super) fn apply_resolved_session_knobs(peer: &mut Peer, want: &InheritableKn
         peer,
         want.route_reflector_client.unwrap_or(false),
     );
-    // A per-VRF task is not told of its VRF's interfaces and addresses
-    // yet (`BgpVrf::process_rib_msg` reads routes only), so it cannot
-    // find what an interface gives. Its own `update-source` leaf takes
-    // an address only; an interface name can still reach it from a
-    // neighbor-group shared with default-VRF neighbors, where it names
-    // an interface of the default VRF. Not applied to this member, as an
-    // address of the other family is not: the kernel picks its source.
-    let source = match want.update_source.as_ref() {
-        Some(UpdateSource::Interface(ifname)) => {
-            tracing::warn!(
-                peer = %peer.display_name(),
-                interface = %ifname,
-                "bgp: update-source by interface is not applied to a per-VRF neighbor",
-            );
-            None
-        }
-        source => source,
-    };
-    // The BFD re-arm this returns is only meaningful for a live session.
-    let _ = super::config::apply_update_source(peer, source);
+    // An interface name is only a name so far: the per-VRF task finds
+    // what it gives among its own VRF's interfaces right after this
+    // (`BgpVrf::update_source_resolve`), and reconciles BFD then.
+    let _ = super::config::apply_update_source(peer, want.update_source.as_ref());
     // TCP-MD5 password (active/connect side): apply the already-resolved
     // knob onto `config.transport.md5_password`. The shared FSM connect path
     // (`peer_start_connection`) reads it and keys this peer's VRF-bound

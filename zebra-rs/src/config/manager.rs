@@ -4372,12 +4372,10 @@ mod yang_load_tests {
     }
 
     /// `update-source` (and its IETF spelling `transport local-address`)
-    /// takes an interface name beside an address, on a neighbor and on a
-    /// neighbor-group. The name arm has a pattern, which is what keeps a
-    /// mistyped address an error instead of the name of an interface
-    /// that never appears. The per-VRF neighbor leaf still takes an
-    /// address only: the per-VRF task cannot find what an interface
-    /// gives, so a name there is refused rather than dropped.
+    /// takes an interface name beside an address, on a neighbor, on a
+    /// neighbor-group and on a per-VRF neighbor. The name arm has a
+    /// pattern, which is what keeps a mistyped address an error instead
+    /// of the name of an interface that never appears.
     #[test]
     fn bgp_update_source_takes_an_interface_name() {
         use crate::config::ExecCode;
@@ -4446,6 +4444,16 @@ mod yang_load_tests {
                 "/set/router/bgp/vrf/neighbor/update-source",
                 "10.0.0.2",
             ),
+            (
+                "set router bgp vrf blue neighbor 2001:db8::1 update-source 2001:db8::2",
+                "/set/router/bgp/vrf/neighbor/update-source",
+                "2001:db8::2",
+            ),
+            (
+                "set router bgp vrf blue neighbor 10.0.0.1 update-source Loopback0",
+                "/set/router/bgp/vrf/neighbor/update-source",
+                "Loopback0",
+            ),
         ];
         for (cmd, want_path, want_value) in accepted {
             let (code, _comps, state) = parse(cmd, entry.clone(), None, State::new());
@@ -4469,8 +4477,9 @@ mod yang_load_tests {
             "set router bgp neighbor 10.0.0.1 update-source 10.0.0.2/32",
             // One value.
             "set router bgp neighbor 10.0.0.1 update-source Loopback0 Loopback1",
-            // The per-VRF leaf: an address only, for now.
-            "set router bgp vrf blue neighbor 10.0.0.1 update-source Loopback0",
+            // The per-VRF leaf refuses the same mistakes.
+            "set router bgp vrf blue neighbor 10.0.0.1 update-source 10.0.0",
+            "set router bgp vrf blue neighbor 10.0.0.1 update-source 10.0.0.256",
         ];
         for cmd in refused {
             let (code, _comps, _state) = parse(cmd, entry.clone(), None, State::new());
@@ -4516,6 +4525,7 @@ mod yang_load_tests {
             "set router bgp neighbor 10.0.0.1 update-source",
             "set router bgp neighbor-group G update-source",
             "set router bgp neighbor 10.0.0.1 transport local-address",
+            "set router bgp vrf blue neighbor 10.0.0.1 update-source",
         ] {
             let (_code, names) = complete(&format!("{leaf} "));
             assert_eq!(

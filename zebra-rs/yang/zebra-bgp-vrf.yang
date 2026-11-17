@@ -294,11 +294,26 @@ module zebra-bgp-vrf {
         }
       }
       leaf update-source {
-        ext:help "Source address to bind for the outbound TCP connect";
-        type inet:ip-address;
+        ext:help "Source address or interface for the BGP TCP session";
+        ext:dynamic "rib:interface";
+        type union {
+          type inet:ipv4-address;
+          type inet:ipv6-address;
+          // An interface name; the pattern keeps a mistyped address a
+          // parse error. See `update-source` in
+          // zebra-bgp-transport.yang.
+          type string {
+            pattern '[A-Za-z][^ :/]*';
+          }
+        }
         description
-          "Local IP address to bind before the outbound connect to this
-           CE. Same as the global neighbor's update-source.";
+          "Where the session to this CE is sourced from: a local IP
+           address, bound before the outbound connect, or the name of
+           an interface of this VRF, which stands for that interface's
+           address of the CE's address family and follows it. While the
+           VRF has no such interface, or the interface has no usable
+           address of that family, the CE is not dialed. Same as the
+           global neighbor's update-source.";
       }
       leaf ebgp-multihop {
         ext:help "Allow an eBGP CE up to N hops away (TTL 1-255)";

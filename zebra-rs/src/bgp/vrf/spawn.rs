@@ -819,7 +819,9 @@ pub(super) fn insert_started_peer(
     // client-scoped (`ClientReq::UnsubscribeClient`), so a runtime-added
     // session is torn down at despawn without needing a spawn-time snapshot.
     // A no-op when `bfd enabled` is unset or no BFD client is wired
-    // (placeholder spawn / tests).
+    // (placeholder spawn / tests). An `update-source <interface>` is
+    // resolved first: its address is the BFD session's local address.
+    vrf.update_source_resolve(ident);
     vrf.bfd_reconcile(ident);
 }
 

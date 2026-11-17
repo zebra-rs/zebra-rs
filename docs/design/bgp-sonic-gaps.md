@@ -242,7 +242,8 @@ Where it differs from the address form, and from FRR:
   connect binds the new one. FRR resets on a change of the statement.
 - The name starts with a letter (`Loopback4096`, `Ethernet0`,
   `PortChannel101` all do).
-- Default VRF only: a per-VRF neighbor takes an address.
+- The interface is one of the neighbor's own VRF: the default VRF, or
+  the VRF of a per-VRF neighbor.
 
 Not yet done: the `monitors` template is not ported, and the feature has
 not run on a VS — only in the unit suite and BDD

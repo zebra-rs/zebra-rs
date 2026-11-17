@@ -157,6 +157,11 @@ pub struct BgpVrf {
     /// Threaded through `BgpTop` so the FSM driver compiles even
     /// though no path here populates it today.
     pub interface_addrs: InterfaceAddrs,
+    /// This VRF's interfaces and their addresses, from the RIB's link
+    /// and address events: what a neighbor's `update-source <interface>`
+    /// is resolved against ([`Self::update_source_resolve`]). Not
+    /// [`Self::interface_addrs`], which stays empty.
+    pub source_interfaces: super::super::update_source::SourceInterfaces,
     /// Resolved transport for the current best-path *winner* of each
     /// imported VPN prefix. Refreshed from [`Self::import_transport_v4`]
     /// (the per-origin-RD store) whenever an import or withdraw-import
@@ -927,6 +932,7 @@ impl BgpVrf {
             attr_store: BgpAttrStore::new(),
             update_groups: super::super::update_group::empty_map(),
             interface_addrs: InterfaceAddrs::new(),
+            source_interfaces: Default::default(),
             transport_v4: std::collections::BTreeMap::new(),
             transport_v6: std::collections::BTreeMap::new(),
             import_slots: std::collections::BTreeMap::new(),
@@ -1865,6 +1871,11 @@ impl BgpVrf {
             .config
             .bfd
             .resolve(&crate::bgp::peer::PeerBfdConfig::default());
+        // No session while an `update-source <interface>` has given no
+        // address: the wildcard local below would send the control
+        // packets from whatever the kernel picks. As for the default
+        // instance (`config::bfd_apply_ident`).
+        let enable = eff.enable && !peer.update_source_pending();
         let local = peer.config.transport.update_source.unwrap_or(match addr {
             std::net::IpAddr::V4(_) => std::net::Ipv4Addr::UNSPECIFIED.into(),
             std::net::IpAddr::V6(_) => std::net::Ipv6Addr::UNSPECIFIED.into(),
@@ -1902,8 +1913,8 @@ impl BgpVrf {
         };
 
         let current = self.peers.get_by_idx(ident).and_then(|p| p.bfd_session_key);
-        let want = eff.enable.then_some(key);
-        let want_params = eff.enable.then_some(params);
+        let want = enable.then_some(key);
+        let want_params = enable.then_some(params);
         let client = self.bfd_client();
         // A key/params change re-subscribes (BFD treats a repeat
         // Subscribe on the same key as an in-place param update); a
@@ -1916,7 +1927,7 @@ impl BgpVrf {
                 key: old,
             });
         }
-        if eff.enable {
+        if enable {
             let _ = bfd_client_tx.send(ClientReq::Subscribe {
                 client,
                 key,
@@ -3180,12 +3191,63 @@ impl BgpVrf {
         });
     }
 
-    /// Consume one RIB redistribute notification. Only the route
-    /// add/del stream is relevant to a per-VRF redistribute subscriber;
-    /// link / addr / router-id / EoR markers are ignored.
+    /// Find the address an `update-source <interface>` gives one
+    /// neighbor now, among this VRF's interfaces, and store it as the
+    /// neighbor's source. The per-VRF twin of the default instance's
+    /// `config::update_source_resolve`: nothing to do for a neighbor
+    /// with the address form or no statement, and a neighbor held for
+    /// want of an address is started the moment the interface gives one.
+    ///
+    /// Returns `true` when the source changed; the caller owes a
+    /// [`Self::bfd_reconcile`] then.
+    pub(in crate::bgp) fn update_source_resolve(&mut self, ident: usize) -> bool {
+        use super::super::update_source::{Adopted, adopt};
+        let Some((ifname, address)) = self.peers.get_by_idx(ident).and_then(|peer| {
+            let ifname = peer.config.transport.update_source_if.clone()?;
+            Some((ifname, peer.address))
+        }) else {
+            return false;
+        };
+        let want = self.source_interfaces.resolve(&ifname, address);
+        let Some(peer) = self.peers.get_mut_by_idx(ident) else {
+            return false;
+        };
+        match adopt(peer, want) {
+            Adopted::Unchanged => false,
+            Adopted::Changed { start } => {
+                if start {
+                    let _ = self
+                        .tx
+                        .try_send(Message::Event(ident, super::super::peer::Event::Start));
+                }
+                true
+            }
+        }
+    }
+
+    /// [`Self::update_source_resolve`] for every neighbor, with the BFD
+    /// reconcile of each one whose source moved: after a link or
+    /// address event changed what an interface gives.
+    fn update_source_resolve_all(&mut self) {
+        for ident in self.peers.idents() {
+            if self.update_source_resolve(ident) {
+                self.bfd_reconcile(ident);
+            }
+        }
+    }
+
+    /// Consume one RIB notification. The route add/del stream feeds a
+    /// per-VRF redistribute subscriber; the link and address events of
+    /// this VRF's interfaces are kept for `update-source <interface>`
+    /// ([`Self::source_interfaces`]). Router-id / EoR markers are
+    /// ignored.
     fn process_rib_msg(&mut self, msg: crate::rib::api::RibRx) {
         use crate::rib::RouteBatch;
         use crate::rib::api::RibRx;
+        if self.source_interfaces.rib_event(&msg) {
+            self.update_source_resolve_all();
+            return;
+        }
         match msg {
             RibRx::RouteAdd { rtype, routes, .. } => match routes {
                 RouteBatch::V4(entries) => {
@@ -3767,6 +3829,10 @@ impl BgpVrf {
             }
             self.resolve_ao_keys();
         }
+        // The config swap above put the statement back as written: an
+        // `update-source <interface>` is a name again, so find what it
+        // gives before BFD (keyed by it) is reconciled.
+        self.update_source_resolve(ident);
         // Reconcile BFD against the new config: `bfd_reconcile` subscribes /
         // unsubscribes / re-parametrizes the session to match `peer.config.bfd`
         // (a no-op when unchanged). Covers a runtime `bfd enabled` toggle or an
@@ -6879,6 +6945,296 @@ mod tests {
         assert_eq!(
             exports(&mut rx),
             vec![("export", p.clone(), Some(77), false)]
+        );
+    }
+
+    // ---- `update-source <interface>` on a per-VRF neighbor -----------------
+
+    /// A VRF task with one CE neighbor 192.0.2.1 (eBGP) whose resolved
+    /// knobs say `update-source ce-lo`, and a BFD client to observe.
+    fn vrf_with_source_ce_lo(
+        table_id: u32,
+        bfd: bool,
+    ) -> (
+        BgpVrf,
+        std::net::IpAddr,
+        mpsc::UnboundedReceiver<crate::bfd::inst::ClientReq>,
+    ) {
+        use crate::bgp::update_source::UpdateSource;
+        let (global_tx, _global_rx) = unbounded_channel::<BgpGlobalMsg>();
+        let ctx = test_ctx_for_vrf(table_id, "vrf-src");
+        let (_rib_tx, rib_rx) = mpsc::unbounded_channel();
+        let (mut vrf, _inbox) = BgpVrf::new(
+            "vrf-src".to_string(),
+            ctx,
+            Ipv4Addr::UNSPECIFIED,
+            65000,
+            /* label */ 16,
+            global_tx,
+            rib_rx,
+        );
+        let (bfd_tx, bfd_rx) = mpsc::unbounded_channel();
+        vrf.set_bfd_client(Some(bfd_tx));
+
+        let a: std::net::IpAddr = "192.0.2.1".parse().unwrap();
+        let mut n = crate::bgp::vrf_config::BgpVrfNeighborConfig {
+            remote_as: Some(65001),
+            ..Default::default()
+        };
+        n.config.knobs_explicit.update_source = Some(UpdateSource::Interface("ce-lo".to_string()));
+        n.config.bfd.enable = bfd.then_some(true);
+        let (ra, cfg, knobs) = super::super::spawn::resolve_vrf_peer_config(
+            &a,
+            &n,
+            &std::collections::BTreeMap::new(),
+        )
+        .unwrap();
+        vrf.process_global_msg(BgpVrfMsg::AddPeer {
+            addr: a,
+            remote_as: ra,
+            config: Box::new(cfg),
+            knobs: Box::new(knobs),
+            policy_refs: std::collections::BTreeMap::new(),
+        });
+        (vrf, a, bfd_rx)
+    }
+
+    fn vrf_link(index: u32, name: &str) -> crate::rib::api::RibRx {
+        crate::rib::api::RibRx::LinkAdd(crate::bgp::update_source::test_link(index, name))
+    }
+
+    fn vrf_addr(net: &str, ifindex: u32) -> crate::rib::link::LinkAddr {
+        crate::rib::link::LinkAddr {
+            addr: net.parse().unwrap(),
+            ifindex,
+            fib: true,
+            ..Default::default()
+        }
+    }
+
+    /// (effective address, interface) of the neighbor's source.
+    fn vrf_source_of(
+        vrf: &BgpVrf,
+        a: &std::net::IpAddr,
+    ) -> (Option<std::net::IpAddr>, Option<String>) {
+        let transport = &vrf.peers.get(a).unwrap().config.transport;
+        (transport.update_source, transport.update_source_if.clone())
+    }
+
+    /// A per-VRF neighbor's `update-source <interface>` follows the
+    /// interface as the RIB reports this VRF's links and addresses: no
+    /// source, and no dial, until the interface gives an address; the
+    /// address then; none again when it goes.
+    #[tokio::test]
+    async fn vrf_update_source_interface_follows_the_vrf_interface() {
+        use crate::rib::api::RibRx;
+        let (mut vrf, a, _bfd_rx) = vrf_with_source_ce_lo(21, false);
+        let named = |source: Option<&str>| {
+            (
+                source.map(|s| s.parse().unwrap()),
+                Some("ce-lo".to_string()),
+            )
+        };
+
+        // Added before the RIB said anything of the VRF's interfaces.
+        assert_eq!(vrf_source_of(&vrf, &a), named(None));
+        assert!(vrf.peers.get(&a).unwrap().update_source_pending());
+
+        vrf.process_rib_msg(vrf_link(7, "ce-lo"));
+        assert_eq!(vrf_source_of(&vrf, &a), named(None));
+        // Another interface's address, and one of the other family.
+        vrf.process_rib_msg(vrf_link(8, "ce1"));
+        vrf.process_rib_msg(RibRx::AddrAdd(vrf_addr("192.0.2.2/30", 8)));
+        vrf.process_rib_msg(RibRx::AddrAdd(vrf_addr("2001:db8::7/128", 7)));
+        assert_eq!(vrf_source_of(&vrf, &a), named(None));
+
+        vrf.process_rib_msg(RibRx::AddrAdd(vrf_addr("10.255.0.1/32", 7)));
+        assert_eq!(vrf_source_of(&vrf, &a), named(Some("10.255.0.1")));
+        assert!(!vrf.peers.get(&a).unwrap().update_source_pending());
+
+        vrf.process_rib_msg(RibRx::AddrDel(vrf_addr("10.255.0.1/32", 7)));
+        assert_eq!(vrf_source_of(&vrf, &a), named(None));
+        vrf.process_rib_msg(RibRx::AddrAdd(vrf_addr("10.255.0.3/32", 7)));
+        assert_eq!(vrf_source_of(&vrf, &a), named(Some("10.255.0.3")));
+
+        // The interface leaves the VRF (or is deleted).
+        vrf.process_rib_msg(RibRx::LinkDel(7));
+        assert_eq!(vrf_source_of(&vrf, &a), named(None));
+    }
+
+    /// A neighbor added when the interface is already known is resolved
+    /// as it is added, and a reconfigure — which swaps the whole config
+    /// and puts the statement back as a name — resolves it again.
+    #[tokio::test]
+    async fn vrf_update_source_interface_resolves_at_add_and_reconfigure() {
+        use crate::bgp::update_source::UpdateSource;
+        use crate::rib::api::RibRx;
+        let (mut vrf, _a, _bfd_rx) = vrf_with_source_ce_lo(22, false);
+        vrf.process_rib_msg(vrf_link(7, "ce-lo"));
+        vrf.process_rib_msg(RibRx::AddrAdd(vrf_addr("10.255.0.1/32", 7)));
+        vrf.process_rib_msg(vrf_link(9, "ce-lo2"));
+        vrf.process_rib_msg(RibRx::AddrAdd(vrf_addr("10.255.0.9/32", 9)));
+
+        // A second neighbor, added now.
+        let b: std::net::IpAddr = "192.0.2.5".parse().unwrap();
+        let neighbor = |ifname: &str, hold: u16| {
+            let mut n = crate::bgp::vrf_config::BgpVrfNeighborConfig {
+                remote_as: Some(65001),
+                ..Default::default()
+            };
+            n.config.knobs_explicit.update_source =
+                Some(UpdateSource::Interface(ifname.to_string()));
+            n.config.timer.hold_time = Some(hold);
+            super::super::spawn::resolve_vrf_peer_config(&b, &n, &std::collections::BTreeMap::new())
+                .unwrap()
+        };
+        let (ra, cfg, knobs) = neighbor("ce-lo", 90);
+        vrf.process_global_msg(BgpVrfMsg::AddPeer {
+            addr: b,
+            remote_as: ra,
+            config: Box::new(cfg),
+            knobs: Box::new(knobs),
+            policy_refs: std::collections::BTreeMap::new(),
+        });
+        assert_eq!(
+            vrf_source_of(&vrf, &b),
+            (
+                Some("10.255.0.1".parse().unwrap()),
+                Some("ce-lo".to_string())
+            )
+        );
+
+        // An unrelated knob changes: the source is the same again.
+        let (ra, cfg, knobs) = neighbor("ce-lo", 30);
+        vrf.process_global_msg(BgpVrfMsg::ReconfigurePeer {
+            addr: b,
+            remote_as: ra,
+            config: Box::new(cfg),
+            knobs: Box::new(knobs),
+            policy_refs: std::collections::BTreeMap::new(),
+        });
+        assert_eq!(
+            vrf_source_of(&vrf, &b),
+            (
+                Some("10.255.0.1".parse().unwrap()),
+                Some("ce-lo".to_string())
+            )
+        );
+
+        // The statement names another interface.
+        let (ra, cfg, knobs) = neighbor("ce-lo2", 30);
+        vrf.process_global_msg(BgpVrfMsg::ReconfigurePeer {
+            addr: b,
+            remote_as: ra,
+            config: Box::new(cfg),
+            knobs: Box::new(knobs),
+            policy_refs: std::collections::BTreeMap::new(),
+        });
+        assert_eq!(
+            vrf_source_of(&vrf, &b),
+            (
+                Some("10.255.0.9".parse().unwrap()),
+                Some("ce-lo2".to_string())
+            )
+        );
+    }
+
+    /// A name a per-VRF neighbor inherits from a neighbor-group is read
+    /// in the neighbor's own VRF, as its own statement is.
+    #[tokio::test]
+    async fn vrf_update_source_interface_inherited_from_a_group() {
+        use crate::bgp::neighbor_group::NeighborGroup;
+        use crate::bgp::update_source::UpdateSource;
+        use crate::rib::api::RibRx;
+        let (mut vrf, _a, _bfd_rx) = vrf_with_source_ce_lo(25, false);
+        vrf.process_rib_msg(vrf_link(7, "ce-lo"));
+        vrf.process_rib_msg(RibRx::AddrAdd(vrf_addr("10.255.0.1/32", 7)));
+
+        let mut group = NeighborGroup {
+            remote_as: Some(65001),
+            ..Default::default()
+        };
+        group.knobs.update_source = Some(UpdateSource::Interface("ce-lo".to_string()));
+        let groups = std::collections::BTreeMap::from([("CE".to_string(), group)]);
+
+        let b: std::net::IpAddr = "192.0.2.5".parse().unwrap();
+        let mut n = crate::bgp::vrf_config::BgpVrfNeighborConfig::default();
+        n.config.neighbor_group = Some("CE".to_string());
+        let (ra, cfg, knobs) = super::super::spawn::resolve_vrf_peer_config(&b, &n, &groups)
+            .expect("the group gives the remote-as");
+        vrf.process_global_msg(BgpVrfMsg::AddPeer {
+            addr: b,
+            remote_as: ra,
+            config: Box::new(cfg),
+            knobs: Box::new(knobs),
+            policy_refs: std::collections::BTreeMap::new(),
+        });
+        assert_eq!(
+            vrf_source_of(&vrf, &b),
+            (
+                Some("10.255.0.1".parse().unwrap()),
+                Some("ce-lo".to_string())
+            )
+        );
+    }
+
+    /// A held per-VRF neighbor is started the moment the interface gives
+    /// its address.
+    #[tokio::test]
+    async fn vrf_update_source_interface_address_starts_a_held_neighbor() {
+        use crate::bgp::peer::{Event, State};
+        use crate::rib::api::RibRx;
+        let (mut vrf, a, _bfd_rx) = vrf_with_source_ce_lo(23, false);
+        vrf.process_rib_msg(vrf_link(7, "ce-lo"));
+        let peer = vrf.peers.get_mut(&a).unwrap();
+        peer.state = State::Active;
+        let ident = peer.ident;
+        while vrf.rx.try_recv().is_ok() {}
+
+        vrf.process_rib_msg(RibRx::AddrAdd(vrf_addr("10.255.0.1/32", 7)));
+        let started: Vec<usize> = std::iter::from_fn(|| vrf.rx.try_recv().ok())
+            .filter_map(|msg| match msg {
+                Message::Event(i, Event::Start) => Some(i),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(started, vec![ident]);
+    }
+
+    /// The per-VRF BFD session is sourced from the interface's address:
+    /// none while the interface gives no address, one from the address
+    /// when it does, none again when it goes.
+    #[tokio::test]
+    async fn vrf_bfd_waits_for_the_update_source_interface() {
+        use crate::bfd::inst::ClientReq;
+        use crate::rib::api::RibRx;
+        let (mut vrf, a, mut bfd_rx) = vrf_with_source_ce_lo(24, true);
+        assert!(bfd_rx.try_recv().is_err(), "no session without the source");
+
+        vrf.process_rib_msg(vrf_link(7, "ce-lo"));
+        assert!(bfd_rx.try_recv().is_err());
+        vrf.process_rib_msg(RibRx::AddrAdd(vrf_addr("10.255.0.1/32", 7)));
+        let key = match bfd_rx
+            .try_recv()
+            .expect("subscribe from the interface address")
+        {
+            ClientReq::Subscribe { key, .. } => key,
+            other => panic!("expected Subscribe, got {other:?}"),
+        };
+        assert_eq!(key.local, "10.255.0.1".parse::<std::net::IpAddr>().unwrap());
+        assert_eq!(key.remote, a);
+
+        vrf.process_rib_msg(RibRx::AddrDel(vrf_addr("10.255.0.1/32", 7)));
+        match bfd_rx
+            .try_recv()
+            .expect("unsubscribe when the address goes")
+        {
+            ClientReq::Unsubscribe { key: gone, .. } => assert_eq!(gone, key),
+            other => panic!("expected Unsubscribe, got {other:?}"),
+        }
+        assert!(
+            bfd_rx.try_recv().is_err(),
+            "and no wildcard session in its place"
         );
     }
 }
