@@ -51,8 +51,10 @@ fn the_tables_under_sonic() {
         names,
         [
             "DEVICE_METADATA",
+            "DSCP_TO_TC_MAP",
             "INTERFACE",
             "INTERFACE_IPPREFIX",
+            "ODD",
             "PORT",
             "STATIC_ROUTE",
             "STATIC_ROUTE_IFACE",

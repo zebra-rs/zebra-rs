@@ -46,7 +46,7 @@ struct ExecService {
 ///
 /// Wraps [`SessionTable::require_admin`] with the tonic-side mapping so
 /// every gated handler does the same boilerplate.
-fn enforce_admin<T>(
+pub(super) fn enforce_admin<T>(
     sessions: &SessionTable,
     request: &tonic::Request<T>,
 ) -> Result<(), tonic::Status> {
@@ -895,15 +895,19 @@ pub fn serve(cli: Cli, addr: VtyAddr) -> anyhow::Result<()> {
         sessions: sessions.clone(),
     };
     // Machine-facing APIs: running-config subscription
-    // (zebra.config.v1), the external show provider (zebra.show.v1)
-    // and the writer of CONFIG_DB (zebra.configdb.v1). They use the
-    // session-less machine interceptor:
+    // (zebra.config.v1) and the external show provider
+    // (zebra.show.v1). Both use the session-less machine interceptor:
     // they carry no role-gated operations, so there is no session to
     // resolve.
     let config_service = ConfigSubscribeService { tx: cli.tx.clone() };
     let show_provider = ShowProviderBridge { tx: cli.tx.clone() };
+    // The writer of CONFIG_DB (zebra.configdb.v1) is a machine too, but
+    // what it says decides a commit: it is held to the admin role, and
+    // so is behind the interceptor that resolves a session, as `Apply`
+    // is.
     let config_db_writer = WriterBridge {
         hub: cli.writer.clone(),
+        sessions: sessions.clone(),
     };
     let machine_interceptor = MachinePeerInterceptor::from_env();
 
@@ -949,11 +953,11 @@ pub fn serve(cli: Cli, addr: VtyAddr) -> anyhow::Result<()> {
         ))
         .add_service(ShowProviderServiceServer::with_interceptor(
             show_provider,
-            machine_interceptor.clone(),
+            machine_interceptor,
         ))
         .add_service(WriterServiceServer::with_interceptor(
             config_db_writer,
-            machine_interceptor,
+            interceptor.clone(),
         ))
         .add_service(ClearServer::with_interceptor(clear_service, interceptor));
 

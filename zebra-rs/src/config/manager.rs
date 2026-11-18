@@ -67,6 +67,57 @@ const CONFIG_DB_WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_s
 const SONIC_IS_A_COPY: &str = "% `sonic` is a copy of CONFIG_DB and is changed there: \
      give `compare config-db` to SONiC's `config apply-patch`, or `discard`\n";
 
+/// What a change of `sonic` is answered with before CONFIG_DB has been
+/// copied here once. Until then the running subtree is empty because
+/// nothing is known, not because CONFIG_DB is: a patch made against it
+/// would add every table it names, and so replace the ones CONFIG_DB
+/// has.
+const CONFIG_DB_NOT_COPIED: &str = "% CONFIG_DB has not been copied here yet, so what a change \
+     of `sonic` changes in it cannot be told: try again when it has been\n";
+
+/// What a commit is answered with when CONFIG_DB has its change of
+/// `sonic` and the commit was then refused here. The check that refused
+/// it passed before the change was written, so the configuration was
+/// changed meanwhile by another writer.
+fn refused_after_config_db(why: &str) -> String {
+    let why = why.trim_end();
+    format!(
+        "% CONFIG_DB has the change of `sonic`, but the commit was then refused here:\n\
+         {why}\n\
+         % Nothing was committed here. `sonic` follows at the next copy of CONFIG_DB; \
+         the rest is still pending\n"
+    )
+}
+
+/// What a typed line needs of the writer of CONFIG_DB before it runs
+/// (`ConfigManager::config_db_write_for`).
+enum ConfigDbWrite {
+    /// Nothing: it is not a commit, or its commit changes nothing of
+    /// `sonic`.
+    No,
+    /// It is a commit that changes `sonic`, and is refused with this
+    /// before anything is written.
+    Refused(String),
+    /// This patch, written.
+    Patch(String),
+}
+
+/// The configure-mode commands that do not change the candidate, by
+/// their first word. They are the ones taken while a commit waits for
+/// the writer of CONFIG_DB (`ConfigManager::config_db_write_for`). A
+/// command that is not named here is not taken then: one added later is
+/// held until it is known to belong here.
+const CANDIDATE_READERS: [&str; 8] = [
+    "show", "compare", "exit", "help", "save", "clear", "cli", "run",
+];
+
+/// What a second commit is answered with while one waits for the writer.
+const COMMIT_IS_WAITING: &str = "% Another commit is waiting for CONFIG_DB to be changed\n";
+
+/// What an edit is answered with while a commit waits for the writer.
+const CANDIDATE_IS_HELD: &str = "% A commit is waiting for CONFIG_DB to be changed, and the \
+     configuration is not edited meanwhile: try again when it is made\n";
+
 pub struct ConfigStore {
     pub running: RefCell<Rc<Config>>,
     pub candidate: RefCell<Rc<Config>>,
@@ -299,8 +350,15 @@ pub struct ConfigManager {
     config_db_written: Cell<bool>,
     /// A commit is parked, waiting for the writer's answer. One at a
     /// time: a second would be a patch against a CONFIG_DB the first is
-    /// about to change.
+    /// about to change. The candidate is not edited meanwhile either:
+    /// the commit is made of it when the writer has answered, and has to
+    /// be of what was written.
     config_db_writing: Cell<bool>,
+    /// The rows the last copy of CONFIG_DB had that the running `sonic`
+    /// subtree does not stand for (`configdb::LeftOut`): what a patch
+    /// needs to know of CONFIG_DB besides the subtree. `None` until
+    /// CONFIG_DB has been copied once.
+    config_db_left_out: RefCell<Option<super::configdb::LeftOut>>,
     /// What the last commits produced, for `rollback`.
     pub history: CommitHistory,
     pub modes: HashMap<String, Mode>,
@@ -563,6 +621,7 @@ impl ConfigManager {
             config_db_writer: Default::default(),
             config_db_written: Cell::new(false),
             config_db_writing: Cell::new(false),
+            config_db_left_out: RefCell::new(None),
             history: CommitHistory::default(),
             tx,
             rx,
@@ -1026,6 +1085,24 @@ impl ConfigManager {
     }
 
     fn commit(&self, startup: bool, from_file: bool) -> anyhow::Result<()> {
+        self.commit_or_check(startup, from_file, false)
+    }
+
+    /// Whether [`Self::commit_config`] would commit the candidate: every
+    /// refusal of it, with nothing dispatched, reserved or logged. For a
+    /// commit that has something to do elsewhere first, and must not do
+    /// it for a candidate that is then refused here
+    /// ([`Self::config_db_write_for`]).
+    fn commit_check(&self) -> anyhow::Result<()> {
+        self.commit_or_check(false, false, true)
+    }
+
+    fn commit_or_check(
+        &self,
+        startup: bool,
+        from_file: bool,
+        check_only: bool,
+    ) -> anyhow::Result<()> {
         let mut errors = Vec::<String>::new();
         self.store.candidate.borrow().validate(&mut errors);
         if self.importing.get() || self.config_db_written.get() {
@@ -1036,7 +1113,7 @@ impl ConfigManager {
             // when it wrote them.
             errors.retain(|error| {
                 let of_sonic = error.starts_with("'sonic ");
-                if of_sonic {
+                if of_sonic && !check_only {
                     tracing::warn!("config-db: {error}");
                 }
                 !of_sonic
@@ -1145,7 +1222,7 @@ impl ConfigManager {
                 tracing::warn!("startup config: {error}");
             }
         }
-        if !pd.warnings.is_empty() {
+        if !pd.warnings.is_empty() && !check_only {
             let before = check::dhcpv6_pd_interfaces(&self.dhcpv6_pd_entries(&running));
             for warning in &pd.warnings {
                 if !before.warnings.contains(warning) {
@@ -1205,6 +1282,11 @@ impl ConfigManager {
             for violation in &violations {
                 tracing::warn!("startup config: {violation}");
             }
+        }
+        // Everything that refuses a commit is above this line, and
+        // nothing above it changes anything.
+        if check_only {
+            return Ok(());
         }
         space.add_reserved(label_check::sr_blocks(&candidate_leaves));
         let (first, last) = label_check::dynamic_range(&candidate_leaves);
@@ -2218,6 +2300,12 @@ impl ConfigManager {
     /// What the candidate's `sonic` subtree changes in CONFIG_DB: a JSON
     /// Patch on `config_db.json` from the tables the running subtree
     /// stands for to those the candidate's does (`config::configdb`).
+    ///
+    /// `Err` is why there is no such patch, for the operator: CONFIG_DB
+    /// has not been copied here yet, or the candidate changes something
+    /// under `sonic` that CONFIG_DB has no form for. Applied, a patch
+    /// made all the same would do something else than the candidate
+    /// says.
     pub fn config_db_patch(&self) -> Result<Vec<serde_json::Value>, String> {
         let mode = self.modes.get("configure").expect("configure mode");
         let Some(schema) = super::sonic::grafted(&mode.entry) else {
@@ -2225,12 +2313,60 @@ impl ConfigManager {
                 "% No SONiC models are loaded (start with `--feature sonic`)\n".to_string(),
             );
         };
+        let left_out = self.config_db_left_out.borrow();
+        let Some(left_out) = left_out.as_ref() else {
+            return Err(CONFIG_DB_NOT_COPIED.to_string());
+        };
         let name = "sonic".to_string();
-        let tables =
+        let export =
             |config: &Rc<Config>| super::configdb::export(&schema, config.lookup(&name).as_ref());
-        let running = tables(&self.store.running.borrow());
-        let candidate = tables(&self.store.candidate.borrow());
-        Ok(super::configdb::patch(&running, &candidate))
+        let running = export(&self.store.running.borrow());
+        let candidate = export(&self.store.candidate.borrow());
+
+        // What the tables do not say is not in a patch of them. The copy
+        // of CONFIG_DB has none of it, so any of it is a pending edit.
+        let unplaced = |lines: &[String], other: &[String], verb: &str| -> Vec<String> {
+            lines
+                .iter()
+                .filter(|line| !other.contains(line))
+                .map(|line| format!("%   {verb} {line}\n"))
+                .collect()
+        };
+        let mut changed = unplaced(&candidate.unplaced, &running.unplaced, "set");
+        changed.extend(unplaced(&running.unplaced, &candidate.unplaced, "delete"));
+        if !changed.is_empty() {
+            return Err(format!(
+                "% CONFIG_DB has no form for what these lines say, so it cannot be changed \
+                 to it:\n{}% Complete or `delete` them\n",
+                changed.concat()
+            ));
+        }
+        Ok(super::configdb::patch(
+            &running.tables,
+            &candidate.tables,
+            left_out,
+        ))
+    }
+
+    /// Note what the running `sonic` subtree does not have of
+    /// `config_db`, the tables just copied: a patch is made knowing it
+    /// ([`Self::config_db_patch`]). Asked of the running subtree and not
+    /// of the copy, which a refused import leaves beside it.
+    ///
+    /// A commit that writes CONFIG_DB does not change the note. It can
+    /// give the subtree a row that is noted here (a row with a fixed
+    /// key, of which the copy could read no field), and the note is then
+    /// one row too careful until the next copy: the table is not removed
+    /// with what the subtree takes for its last row.
+    fn config_db_copied(
+        &self,
+        schema: &Rc<Entry>,
+        config_db: &serde_json::Map<String, serde_json::Value>,
+    ) {
+        let sonic = self.store.running.borrow().lookup(&"sonic".to_string());
+        let mirrored = super::configdb::export(schema, sonic.as_ref());
+        self.config_db_left_out
+            .replace(Some(super::configdb::left_out(config_db, &mirrored.tables)));
     }
 
     /// Whether `sonic` may not be changed by what is running now: it is
@@ -2252,30 +2388,103 @@ impl ConfigManager {
                 .is_some_and(|mode| super::sonic::grafted(&mode.entry).is_some())
     }
 
-    /// The patch of CONFIG_DB this command needs written before it runs:
-    /// it is a `commit` typed in a session, and the candidate changes
-    /// `sonic`. `None` for every other command, and for a commit that
-    /// commit validation would refuse anyway: CONFIG_DB is not changed
-    /// for a commit that will not be made.
-    fn config_db_write_for(&self, mode_name: &str, input: &str) -> Option<String> {
+    /// What this command needs written to CONFIG_DB before it runs: the
+    /// patch, when it is a `commit` typed in a session and the candidate
+    /// changes `sonic`.
+    ///
+    /// CONFIG_DB is not changed for a commit that will not be made, so
+    /// everything that refuses the commit refuses it here, before the
+    /// writer is asked: that there is no patch of the change
+    /// ([`Self::config_db_patch`]), and every check of
+    /// [`Self::commit_config`] itself, on the candidate as it will be
+    /// committed.
+    ///
+    /// While a commit waits for the writer, a line that would change the
+    /// candidate is refused as well. The commit is made of the candidate
+    /// when the writer has answered, with `sonic` open to it because
+    /// CONFIG_DB has the change: an edit of `sonic` typed meanwhile
+    /// would be running here and never be in CONFIG_DB. A copy of
+    /// CONFIG_DB and an apply are not held. They set the candidate aside
+    /// and put it back as an edit of what they committed
+    /// ([`Self::put_back`]), and neither commits a change of `sonic`
+    /// that is not CONFIG_DB's.
+    fn config_db_write_for(&self, mode_name: &str, input: &str) -> ConfigDbWrite {
         if mode_name != "configure" || !self.sonic_mirrored() {
-            return None;
+            return ConfigDbWrite::No;
         }
-        let mode = self.modes.get(mode_name)?;
-        let (code, _comps, state) = parse(input, mode.entry.clone(), None, State::new());
-        if code != ExecCode::Success || paths_str(&state.paths) != "/commit" {
-            return None;
+        let Some(mode) = self.modes.get(mode_name) else {
+            return ConfigDbWrite::No;
+        };
+        // Read as `execute` reads it, against the candidate: a `delete`
+        // is matched with what is configured, and read against nothing
+        // it is no command at all.
+        let candidate = self.store.candidate.borrow().clone();
+        let (code, _comps, state) = parse(input, mode.entry.clone(), Some(candidate), State::new());
+        if code != ExecCode::Success {
+            return ConfigDbWrite::No;
         }
-        let patch = self.config_db_patch().ok()?;
-        if patch.is_empty() {
-            return None;
+        let first = state.paths.first().map(|path| path.name.as_str());
+        if self.config_db_writing.get() {
+            return match first {
+                Some("commit") => ConfigDbWrite::Refused(COMMIT_IS_WAITING.to_string()),
+                Some(word) if CANDIDATE_READERS.contains(&word) => ConfigDbWrite::No,
+                _ => ConfigDbWrite::Refused(CANDIDATE_IS_HELD.to_string()),
+            };
         }
-        let mut errors = Vec::new();
-        self.store.candidate.borrow().validate(&mut errors);
-        if errors.iter().any(|error| !error.starts_with("'sonic ")) {
-            return None;
+        if paths_str(&state.paths) != "/commit" {
+            return ConfigDbWrite::No;
         }
-        serde_json::to_string(&patch).ok()
+        // Nothing of `sonic` is pending, as nearly always: seen without
+        // rendering either subtree.
+        let name = "sonic".to_string();
+        let running = self.store.running.borrow().lookup(&name);
+        let candidate = self.store.candidate.borrow().lookup(&name);
+        let pending = match (&running, &candidate) {
+            (None, None) => false,
+            (Some(running), Some(candidate)) => !running.same_as(candidate),
+            _ => true,
+        };
+        if !pending {
+            return ConfigDbWrite::No;
+        }
+        let patch = match self.config_db_patch() {
+            Ok(patch) if patch.is_empty() => return ConfigDbWrite::No,
+            Ok(patch) => patch,
+            Err(why) => return ConfigDbWrite::Refused(why),
+        };
+        // The commit as it is made when the writer has answered.
+        self.config_db_written.set(true);
+        let refused = self.commit_check();
+        self.config_db_written.set(false);
+        if let Err(why) = refused {
+            return ConfigDbWrite::Refused(why.to_string());
+        }
+        match serde_json::to_string(&patch) {
+            Ok(patch) => ConfigDbWrite::Patch(patch),
+            Err(why) => ConfigDbWrite::Refused(format!("% {why}\n")),
+        }
+    }
+
+    /// Make the commit the writer of CONFIG_DB has answered for. It is
+    /// of whatever is pending now: the change of `sonic`, if the copy of
+    /// CONFIG_DB has not brought it already, and the rest. No session
+    /// has edited the candidate since the patch was made
+    /// ([`Self::config_db_write_for`]).
+    ///
+    /// The checks of the commit passed before the writer was asked. One
+    /// can still fail now, when another writer has committed meanwhile
+    /// what this commit cannot be beside. CONFIG_DB has the change by
+    /// then, and the refusal says so.
+    fn commit_written(&self, mode: &Mode, input: &str) -> (ExecCode, String, Vec<CommandPath>) {
+        self.config_db_written.set(true);
+        let (code, mut output, paths) = self.execute(mode, input);
+        self.config_db_written.set(false);
+        // `commit` says nothing when it is made, and why not when it is
+        // not.
+        if !output.is_empty() {
+            output = refused_after_config_db(&output);
+        }
+        (code, output, paths)
     }
 
     /// The interactive sessions' uncommitted edits, with the running
@@ -2375,6 +2584,7 @@ impl ConfigManager {
         };
         if same {
             report(false);
+            self.config_db_copied(&sonic, tables);
             return DeployResponse {
                 apply_code: ApplyCode::Applied,
                 exec_code: ExecCode::Success,
@@ -2393,6 +2603,7 @@ impl ConfigManager {
         let committed = self.commit_config();
         self.importing.set(false);
         report(true);
+        self.config_db_copied(&sonic, tables);
         match committed {
             Ok(()) => {
                 if edits.is_some() {
@@ -2426,27 +2637,30 @@ impl ConfigManager {
                 // asks zebra-rs for its running config before it writes
                 // anything, and would wait for a commit that waits for
                 // it.
-                if let Some(patch) = self.config_db_write_for(&req.mode, &req.input) {
-                    if self.config_db_writing.replace(true) {
+                match self.config_db_write_for(&req.mode, &req.input) {
+                    ConfigDbWrite::No => {}
+                    ConfigDbWrite::Refused(why) => {
                         resp.code = ExecCode::Show;
-                        resp.output =
-                            "% Another commit is waiting for CONFIG_DB to be changed\n".to_string();
+                        resp.output = why;
                         resp.hostname = self.running_hostname();
                         let _ = req.resp.send(resp);
                         return;
                     }
-                    let hub = self.config_db_writer.clone();
-                    let tx = self.tx.clone();
-                    tokio::spawn(async move {
-                        let outcome = hub.write(patch, CONFIG_DB_WRITE_TIMEOUT).await;
-                        let _ = tx
-                            .send(Message::ConfigDbWritten {
-                                request: req,
-                                outcome,
-                            })
-                            .await;
-                    });
-                    return;
+                    ConfigDbWrite::Patch(patch) => {
+                        self.config_db_writing.set(true);
+                        let hub = self.config_db_writer.clone();
+                        let tx = self.tx.clone();
+                        tokio::spawn(async move {
+                            let outcome = hub.write(patch, CONFIG_DB_WRITE_TIMEOUT).await;
+                            let _ = tx
+                                .send(Message::ConfigDbWritten {
+                                    request: req,
+                                    outcome,
+                                })
+                                .await;
+                        });
+                        return;
+                    }
                 }
                 match self.modes.get(&req.mode) {
                     Some(mode) => {
@@ -2472,14 +2686,11 @@ impl ConfigManager {
                         resp.code = ExecCode::Show;
                         resp.output = config_db_refusal(&why);
                     }
-                    // CONFIG_DB has the change. The commit is made of
-                    // whatever is pending now: the change of `sonic`, if
-                    // the copy of CONFIG_DB has not brought it already,
-                    // and the rest.
+                    // CONFIG_DB has the change, and the commit is made
+                    // here.
                     (Ok(()), Some(mode)) => {
-                        self.config_db_written.set(true);
-                        (resp.code, resp.output, resp.paths) = self.execute(mode, &req.input);
-                        self.config_db_written.set(false);
+                        (resp.code, resp.output, resp.paths) =
+                            self.commit_written(mode, &req.input);
                     }
                     (Ok(()), None) => resp.code = ExecCode::Nomatch,
                 }

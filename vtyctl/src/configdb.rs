@@ -5,6 +5,10 @@
 //! [...]}`, or nothing when none came in time; the script applies the
 //! patch with SONiC's `config apply-patch` and says what became of it
 //! with `done`.
+//!
+//! Both calls need the admin role, as `vtyctl apply` does: the writer
+//! runs as root. Exit status: 0 done, 3 the daemon is not reachable, 4
+//! the caller is not allowed to be the writer, 1 anything else.
 
 use anyhow::Result;
 use std::process::exit;
@@ -14,6 +18,16 @@ use pb::writer_service_client::WriterServiceClient;
 
 pub mod pb {
     tonic::include_proto!("zebra.configdb.v1");
+}
+
+/// Say why a call failed and leave: with 4 when the daemon will not have
+/// this caller as the writer, which calling again does not change.
+fn refused(status: tonic::Status) -> ! {
+    eprintln!("{}", status.message());
+    match status.code() {
+        tonic::Code::PermissionDenied | tonic::Code::Unauthenticated => exit(4),
+        _ => exit(1),
+    }
 }
 
 async fn client(host: &str) -> WriterServiceClient<tonic::transport::Channel> {
@@ -34,7 +48,10 @@ pub async fn wait(host: &str, timeout: u32) -> Result<()> {
     let request = pb::WaitRequest {
         timeout_seconds: timeout,
     };
-    let order = client.wait(Request::new(request)).await?.into_inner();
+    let order = match client.wait(Request::new(request)).await {
+        Ok(order) => order.into_inner(),
+        Err(status) => refused(status),
+    };
     if order.id != 0 {
         // The patch is JSON already: it goes in as it is.
         println!("{{\"id\": {}, \"patch\": {}}}", order.id, order.patch);
@@ -51,8 +68,7 @@ pub async fn done(host: &str, id: u64, error: Option<String>) -> Result<()> {
         message: error.unwrap_or_default(),
     };
     if let Err(status) = client.done(Request::new(result)).await {
-        eprintln!("{}", status.message());
-        exit(1);
+        refused(status);
     }
     Ok(())
 }

@@ -1,0 +1,32 @@
+module sonic-odd {
+  yang-version 1.1;
+  namespace "http://github.com/sonic-net/sonic-odd";
+  prefix odd;
+
+  // What SONiC's models do not have under a row, and a model may: a
+  // leaf with no value, and a container. CONFIG_DB has a row's fields
+  // and nothing else, so neither has a form there.
+  container sonic-odd {
+    container ODD {
+      list ODD_LIST {
+        key "name";
+        leaf name {
+          type string {
+            pattern '[a-z0-9]+';
+          }
+        }
+        leaf size {
+          type uint8;
+        }
+        leaf flag {
+          type empty;
+        }
+        container inside {
+          leaf depth {
+            type uint8;
+          }
+        }
+      }
+    }
+  }
+}

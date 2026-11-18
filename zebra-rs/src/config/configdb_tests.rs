@@ -444,7 +444,8 @@ fn the_subtree_exports_as_the_tables_it_was_copied_from() {
     let schema = super::super::sonic::grafted(configure).expect("sonic");
     let sonic = cm.store.running.borrow().lookup(&"sonic".to_string());
     let exported = super::super::configdb::export(&schema, sonic.as_ref());
-    assert_eq!(serde_json::Value::Object(exported), db);
+    assert_eq!(exported.unplaced, Vec::<String>::new());
+    assert_eq!(serde_json::Value::Object(exported.tables), db);
     // With nothing pending there is nothing to patch.
     assert_eq!(pending_patch(&cm), serde_json::json!([]));
 }
@@ -718,6 +719,553 @@ async fn the_manager_is_not_held_while_the_writer_works() {
     // And the next commit is taken again.
     edit(&cm, "set system hostname r1");
     assert_eq!(session(&mut cm, "commit").await, "");
+}
+
+// --- What a patch has to know of CONFIG_DB besides the subtree ---
+
+const NOT_COPIED: &str = "% CONFIG_DB has not been copied here yet, so what a change \
+     of `sonic` changes in it cannot be told: try again when it has been\n";
+
+/// What a configure-mode line is answered with, refused or not.
+fn answer(cm: &ConfigManager, line: &str) -> String {
+    let mode = cm.modes.get("configure").expect("configure mode");
+    cm.execute(mode, line).1
+}
+
+/// Before CONFIG_DB has been copied once, the subtree is empty because
+/// nothing is known of it. A row typed then would be patched in as the
+/// first of its table, and the table CONFIG_DB has would be replaced:
+/// there is no patch, and no commit.
+#[tokio::test]
+async fn before_the_first_copy_nothing_is_written() {
+    let mut cm = manager("not-copied");
+    let db = shared(tables());
+    let orders = writer(&cm, db.clone(), None);
+    tokio::task::yield_now().await;
+
+    // What is not of `sonic` is committed as ever.
+    edit(&cm, "set system hostname r1");
+    assert_eq!(session(&mut cm, "commit").await, "");
+    assert_eq!(running(&cm), "system hostname r1\n");
+
+    edit(&cm, "set sonic PORT Ethernet8 lanes 9,10,11,12");
+    assert_eq!(answer(&cm, "compare config-db"), NOT_COPIED);
+    assert_eq!(session(&mut cm, "commit").await, NOT_COPIED);
+    assert_eq!(orders.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert_eq!(*db.lock().unwrap(), tables());
+    assert_eq!(running(&cm), "system hostname r1\n");
+
+    // Copied, the edit is a row added to the table CONFIG_DB has.
+    import(&cm, tables());
+    assert_eq!(
+        pending_patch(&cm),
+        serde_json::json!([
+            {"op": "add", "path": "/PORT/Ethernet8", "value": {"lanes": "9,10,11,12"}},
+        ])
+    );
+    assert_eq!(session(&mut cm, "commit").await, "");
+    let written = db.lock().unwrap().clone();
+    assert_eq!(written["PORT"]["Ethernet0"]["lanes"], "1,2,3,4");
+    assert_eq!(written["PORT"]["Ethernet8"]["lanes"], "9,10,11,12");
+}
+
+/// An empty CONFIG_DB that was copied is known to be empty: the first
+/// row of a table is then added with its table.
+#[test]
+fn an_empty_config_db_that_was_copied_is_empty() {
+    let cm = manager("copied-empty");
+    import(&cm, serde_json::json!({}));
+    edit(&cm, "set sonic PORT Ethernet8 lanes 9,10,11,12");
+    assert_eq!(
+        pending_patch(&cm),
+        serde_json::json!([
+            {"op": "add", "path": "/PORT", "value": {"Ethernet8": {"lanes": "9,10,11,12"}}},
+        ])
+    );
+}
+
+/// CONFIG_DB as the copy takes only a part of it: rows no line can be
+/// made of, beside rows of the same tables that are copied or not.
+fn tables_left_out() -> serde_json::Value {
+    serde_json::json!({
+        // One row copied, and one whose key the model's pattern refuses.
+        "PORT": {
+            "Ethernet0": {"lanes": "1,2,3,4"},
+            "not-a-port": {"lanes": "1"},
+        },
+        // No row copied: no list of the table has three keys.
+        "INTERFACE": {"Ethernet0|10.0.0.0/31|extra": {}},
+        // A row with a fixed key, and no field that can be held.
+        "DEVICE_METADATA": {"localhost": {"hostname": "two\nlines"}},
+    })
+}
+
+/// A table is added with its first row and removed with its last, and
+/// which those are is CONFIG_DB's to say. Where the copy left a row out
+/// the table is neither: added, it would replace the rows CONFIG_DB
+/// has, and removed, take them with it. Nor is a row added that is
+/// there with fields the copy could not hold.
+#[tokio::test]
+async fn a_table_the_copy_left_rows_out_of_is_neither_added_nor_removed() {
+    let mut cm = manager("left-out");
+    let db = shared(tables_left_out());
+    import(&cm, tables_left_out());
+    assert_eq!(
+        running(&cm),
+        "sonic PORT Ethernet0\nsonic PORT Ethernet0 lanes 1,2,3,4\n"
+    );
+    let orders = writer(&cm, db.clone(), None);
+    tokio::task::yield_now().await;
+
+    edit(&cm, "delete sonic PORT Ethernet0");
+    edit(&cm, "set sonic INTERFACE Ethernet4");
+    edit(&cm, "set sonic DEVICE_METADATA localhost bgp_asn 65100");
+    assert_eq!(
+        pending_patch(&cm),
+        serde_json::json!([
+            {"op": "add", "path": "/DEVICE_METADATA/localhost/bgp_asn", "value": "65100"},
+            {"op": "add", "path": "/INTERFACE/Ethernet4", "value": {}},
+            {"op": "remove", "path": "/PORT/Ethernet0"},
+        ])
+    );
+    assert_eq!(session(&mut cm, "commit").await, "");
+    assert_eq!(orders.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+    // What the copy left out is all still there.
+    let mut wanted = tables_left_out();
+    wanted["PORT"].as_object_mut().unwrap().remove("Ethernet0");
+    wanted["INTERFACE"]["Ethernet4"] = serde_json::json!({});
+    wanted["DEVICE_METADATA"]["localhost"]["bgp_asn"] = "65100".into();
+    assert_eq!(*db.lock().unwrap(), wanted);
+
+    // The rows the copy left out are still CONFIG_DB's alone, before
+    // the next copy as after it.
+    for copied_again in [false, true] {
+        if copied_again {
+            import(&cm, wanted.clone());
+        }
+        edit(&cm, "delete sonic INTERFACE Ethernet4");
+        edit(&cm, "set sonic PORT Ethernet8 lanes 9");
+        assert_eq!(
+            pending_patch(&cm),
+            serde_json::json!([
+                {"op": "remove", "path": "/INTERFACE/Ethernet4"},
+                {"op": "add", "path": "/PORT/Ethernet8", "value": {"lanes": "9"}},
+            ]),
+            "copied again: {copied_again}"
+        );
+        run(&cm, "discard");
+    }
+}
+
+/// A copy that is refused leaves the subtree as it was, and what is
+/// noted of CONFIG_DB is what that subtree does not have of it.
+#[test]
+fn a_patch_knows_what_a_refused_copy_did_not_bring() {
+    let cm = manager("left-out-refused");
+    import(&cm, serde_json::json!({}));
+    // A candidate no commit takes (`vni` is mandatory), which is not an
+    // operator's edit to be set aside: a refused startup config.
+    edit(&cm, "set vxlan vx1 local-address 10.0.0.1");
+    cm.store.refused_load.set(true);
+    let reply = import(&cm, tables());
+    assert_ne!(reply.apply_code, ApplyCode::Applied);
+    assert_eq!(running(&cm), "");
+
+    edit(&cm, "set sonic PORT Ethernet8 lanes 9,10,11,12");
+    assert_eq!(
+        pending_patch(&cm),
+        serde_json::json!([
+            {"op": "add", "path": "/PORT/Ethernet8", "value": {"lanes": "9,10,11,12"}},
+        ])
+    );
+}
+
+// --- Maps, and what CONFIG_DB has no form for ---
+
+fn maps() -> serde_json::Value {
+    serde_json::json!({
+        "DSCP_TO_TC_MAP": {"AZURE": {"0": "1", "8": "0", "46": "5"}},
+        "PORT": {"Ethernet0": {"lanes": "1,2,3,4"}},
+    })
+}
+
+/// A map is a row whose fields are the entries of the list its model
+/// has inside it: the field's name is the entry's key and its value the
+/// entry's leaf. It is copied so, exported so, and patched field by
+/// field.
+#[test]
+fn a_map_is_a_row_whose_fields_are_entries() {
+    let cm = manager("map");
+    let t = translate(&cm, maps());
+    assert_eq!(t.problems, Vec::<String>::new());
+    let reply = import(&cm, maps());
+    assert_eq!(reply.apply_code, ApplyCode::Applied, "{}", reply.cmd);
+    assert_eq!(
+        running(&cm),
+        "\
+sonic DSCP_TO_TC_MAP AZURE
+sonic DSCP_TO_TC_MAP AZURE DSCP_TO_TC_MAP 0
+sonic DSCP_TO_TC_MAP AZURE DSCP_TO_TC_MAP 0 tc 1
+sonic DSCP_TO_TC_MAP AZURE DSCP_TO_TC_MAP 8
+sonic DSCP_TO_TC_MAP AZURE DSCP_TO_TC_MAP 8 tc 0
+sonic DSCP_TO_TC_MAP AZURE DSCP_TO_TC_MAP 46
+sonic DSCP_TO_TC_MAP AZURE DSCP_TO_TC_MAP 46 tc 5
+sonic PORT Ethernet0
+sonic PORT Ethernet0 lanes 1,2,3,4
+"
+    );
+    let configure = &cm.modes.get("configure").expect("configure mode").entry;
+    let schema = super::super::sonic::grafted(configure).expect("sonic");
+    let sonic = cm.store.running.borrow().lookup(&"sonic".to_string());
+    let exported = super::super::configdb::export(&schema, sonic.as_ref());
+    assert_eq!(exported.unplaced, Vec::<String>::new());
+    assert_eq!(serde_json::Value::Object(exported.tables), maps());
+
+    for line in [
+        "set sonic DSCP_TO_TC_MAP AZURE DSCP_TO_TC_MAP 8 tc 2",
+        "set sonic DSCP_TO_TC_MAP AZURE DSCP_TO_TC_MAP 3 tc 3",
+        "delete sonic DSCP_TO_TC_MAP AZURE DSCP_TO_TC_MAP 46",
+        "set sonic DSCP_TO_TC_MAP EDGE DSCP_TO_TC_MAP 0 tc 7",
+    ] {
+        edit(&cm, line);
+    }
+    let patch = pending_patch(&cm);
+    assert_eq!(
+        patch,
+        serde_json::json!([
+            {"op": "add", "path": "/DSCP_TO_TC_MAP/AZURE/3", "value": "3"},
+            {"op": "remove", "path": "/DSCP_TO_TC_MAP/AZURE/46"},
+            {"op": "replace", "path": "/DSCP_TO_TC_MAP/AZURE/8", "value": "2"},
+            {"op": "add", "path": "/DSCP_TO_TC_MAP/EDGE", "value": {"0": "7"}},
+        ])
+    );
+    // Applied and copied back, it is the candidate.
+    let wanted = candidate(&cm);
+    let mut db = maps();
+    apply_patch(&mut db, &patch);
+    import(&cm, db);
+    assert_eq!(running(&cm), wanted);
+    assert_eq!(pending_patch(&cm), serde_json::json!([]));
+}
+
+/// A field of a map that cannot be an entry of it is said and left out,
+/// as any field that cannot be copied is.
+#[test]
+fn a_field_of_a_map_that_is_no_entry_is_left_out() {
+    let cm = manager("map-problems");
+    let db = serde_json::json!({
+        "DSCP_TO_TC_MAP": {"AZURE": {"0": "1", "two words": "1", "9": "", "64": "1", "7": "9"}},
+    });
+    assert_eq!(
+        translate(&cm, db.clone()).problems,
+        [
+            "DSCP_TO_TC_MAP|AZURE: `two words` is not one word",
+            "DSCP_TO_TC_MAP|AZURE: the value of `9` is empty",
+        ]
+    );
+    // The key's pattern and the leaf's are the model's: refused when the
+    // line is read.
+    import(&cm, db);
+    assert_eq!(
+        running(&cm),
+        "sonic DSCP_TO_TC_MAP AZURE\n\
+         sonic DSCP_TO_TC_MAP AZURE DSCP_TO_TC_MAP 0\n\
+         sonic DSCP_TO_TC_MAP AZURE DSCP_TO_TC_MAP 0 tc 1\n"
+    );
+}
+
+/// What is typed under `sonic` and is no row and no field of one has no
+/// form in CONFIG_DB: an entry of a map with no value, a leaf with none,
+/// a container in a row. A patch does not say it, so there is none, and
+/// the commit that would make it running here is refused with nothing
+/// written: the lines are named, to be completed or deleted.
+#[tokio::test]
+async fn what_config_db_has_no_form_for_is_not_committed() {
+    let mut cm = manager("unplaced");
+    let db = shared(maps());
+    import(&cm, maps());
+    let before = running(&cm);
+    let orders = writer(&cm, db.clone(), None);
+    tokio::task::yield_now().await;
+
+    // Beside an edit there is a patch of.
+    edit(&cm, "set sonic PORT Ethernet0 mtu 1500");
+    for (line, named) in [
+        (
+            "set sonic DSCP_TO_TC_MAP AZURE DSCP_TO_TC_MAP 5",
+            "%   set sonic DSCP_TO_TC_MAP AZURE DSCP_TO_TC_MAP 5\n",
+        ),
+        ("set sonic ODD o1 flag", "%   set sonic ODD o1 flag\n"),
+        (
+            "set sonic ODD o1 inside depth 2",
+            "%   set sonic ODD o1 inside depth 2\n",
+        ),
+    ] {
+        edit(&cm, line);
+        let refused = format!(
+            "% CONFIG_DB has no form for what these lines say, so it cannot be changed to it:\n\
+             {named}% Complete or `delete` them\n"
+        );
+        assert_eq!(answer(&cm, "compare config-db"), refused, "`{line}`");
+        assert_eq!(session(&mut cm, "commit").await, refused, "`{line}`");
+        assert_eq!(orders.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(running(&cm), before, "`{line}`");
+        edit(&cm, &line.replacen("set", "delete", 1));
+    }
+    assert_eq!(*db.lock().unwrap(), maps());
+
+    // Completed, the entry is a field, and the commit is written.
+    edit(&cm, "set sonic DSCP_TO_TC_MAP AZURE DSCP_TO_TC_MAP 5 tc 2");
+    edit(&cm, "set sonic ODD o1 size 3");
+    assert_eq!(session(&mut cm, "commit").await, "");
+    let written = db.lock().unwrap().clone();
+    assert_eq!(written["DSCP_TO_TC_MAP"]["AZURE"]["5"], "2");
+    assert_eq!(written["PORT"]["Ethernet0"]["mtu"], "1500");
+    assert_eq!(written["ODD"], serde_json::json!({"o1": {"size": "3"}}));
+}
+
+// --- What a parked commit is a commit of ---
+
+/// A writer that takes one order, applies it to `db`, and holds its
+/// answer until `release` is sent to. `taken` is told when CONFIG_DB
+/// has the change.
+fn holding_writer(
+    cm: &ConfigManager,
+    db: std::sync::Arc<std::sync::Mutex<serde_json::Value>>,
+) -> (oneshot::Sender<()>, std::sync::Arc<tokio::sync::Notify>) {
+    let hub = cm.config_db_writer.clone();
+    let (release, held) = oneshot::channel::<()>();
+    let taken = std::sync::Arc::new(tokio::sync::Notify::new());
+    let took = taken.clone();
+    tokio::spawn(async move {
+        let (id, patch) = hub
+            .wait(std::time::Duration::from_secs(5))
+            .await
+            .expect("an order");
+        let patch: serde_json::Value = serde_json::from_str(&patch).unwrap();
+        apply_patch(&mut db.lock().unwrap(), &patch);
+        took.notify_one();
+        let _ = held.await;
+        hub.done(id, Ok(()));
+    });
+    (release, taken)
+}
+
+/// Type `commit` and return where its answer comes, without waiting for
+/// it: the commit is parked for the writer.
+async fn parked_commit(cm: &mut ConfigManager) -> oneshot::Receiver<ExecuteResponse> {
+    let (tx, reply) = oneshot::channel();
+    let request = super::super::api::ExecuteRequest::new("configure", "commit", tx);
+    cm.process_message(Message::Execute(request)).await;
+    reply
+}
+
+/// The writer's answer, taken off the manager's queue as the daemon's
+/// loop takes it.
+async fn writer_answers(cm: &mut ConfigManager) {
+    let message = cm.rx.recv().await.expect("the writer's answer");
+    cm.process_message(message).await;
+}
+
+/// A line typed in a session while a commit is parked: off the
+/// manager's queue, and answered at once.
+async fn typed(cm: &mut ConfigManager, line: &str) -> String {
+    let (tx, rx) = oneshot::channel();
+    let request = super::super::api::ExecuteRequest::new("configure", line, tx);
+    cm.process_message(Message::Execute(request)).await;
+    rx.await.expect("a reply").output
+}
+
+const HELD: &str = "% A commit is waiting for CONFIG_DB to be changed, and the \
+     configuration is not edited meanwhile: try again when it is made\n";
+
+/// The commit is made of the candidate when the writer has answered,
+/// with `sonic` open to it because CONFIG_DB has the change. So the
+/// candidate is not edited while the writer works: an edit of `sonic`
+/// typed then would be running here and never have been in CONFIG_DB.
+/// What only reads is answered as ever. So it is whether the copy of
+/// CONFIG_DB lands before the writer's answer, as it usually does, or
+/// after.
+#[tokio::test]
+async fn the_candidate_is_not_edited_while_the_writer_works() {
+    for copy_lands_first in [false, true] {
+        let mut cm = manager(&format!("writer-held-{copy_lands_first}"));
+        let db = shared(tables());
+        import(&cm, tables());
+        commit(&cm, &["set system hostname r0"]);
+        let (release, taken) = holding_writer(&cm, db.clone());
+        tokio::task::yield_now().await;
+
+        edit(&cm, "set sonic PORT Ethernet0 mtu 1500");
+        edit(&cm, "set system hostname r1");
+        let wanted = candidate(&cm);
+        let mut reply = parked_commit(&mut cm).await;
+        taken.notified().await;
+        assert!(reply.try_recv().is_err(), "answered before the writer was");
+
+        for line in [
+            "set sonic PORT Ethernet4 mtu 1500",
+            "set system hostname r2",
+            "delete sonic PORT Ethernet4",
+            "delete system hostname",
+            "discard",
+            "rollback 1",
+            "load",
+        ] {
+            assert_eq!(typed(&mut cm, line).await, HELD, "`{line}`");
+            assert_eq!(candidate(&cm), wanted, "`{line}`");
+        }
+        assert_eq!(
+            typed(&mut cm, "commit").await,
+            "% Another commit is waiting for CONFIG_DB to be changed\n"
+        );
+        assert_eq!(
+            typed(&mut cm, "compare formal").await,
+            "-sonic PORT Ethernet0 mtu 9100\n+sonic PORT Ethernet0 mtu 1500\n\
+             -system hostname r0\n+system hostname r1\n"
+        );
+        assert!(
+            typed(&mut cm, "show running-config formal")
+                .await
+                .contains("set system hostname r0\n")
+        );
+        assert!(
+            typed(&mut cm, "save")
+                .await
+                .starts_with("Configuration saved")
+        );
+        let _ = std::fs::remove_file(&cm.config_path);
+
+        if copy_lands_first {
+            let copy = db.lock().unwrap().clone();
+            import(&cm, copy);
+            assert!(running(&cm).contains("sonic PORT Ethernet0 mtu 1500\n"));
+            assert!(running(&cm).contains("system hostname r0\n"));
+        }
+        release.send(()).unwrap();
+        writer_answers(&mut cm).await;
+        assert_eq!(reply.await.unwrap().output, "", "{copy_lands_first}");
+        assert_eq!(running(&cm), wanted, "{copy_lands_first}");
+        assert_eq!(candidate(&cm), wanted, "{copy_lands_first}");
+
+        // Made, the candidate is edited again, and the next commit
+        // writes what is typed now.
+        let orders = writer(&cm, db.clone(), None);
+        tokio::task::yield_now().await;
+        assert_eq!(
+            typed(&mut cm, "set sonic PORT Ethernet4 mtu 1500").await,
+            ""
+        );
+        assert_eq!(session(&mut cm, "commit").await, "");
+        assert_eq!(orders.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(db.lock().unwrap()["PORT"]["Ethernet4"]["mtu"], "1500");
+        assert!(running(&cm).contains("sonic PORT Ethernet4 mtu 1500\n"));
+    }
+}
+
+/// A commit the writer refuses, or does not answer, lets go of the
+/// candidate as one that is made does.
+#[tokio::test]
+async fn a_refused_write_lets_go_of_the_candidate() {
+    let mut cm = manager("writer-held-refused");
+    let db = shared(tables());
+    import(&cm, tables());
+    writer(&cm, db.clone(), Some("no"));
+    tokio::task::yield_now().await;
+    edit(&cm, "set sonic PORT Ethernet0 mtu 1500");
+    assert!(session(&mut cm, "commit").await.contains(": no\n"));
+    assert_eq!(typed(&mut cm, "set system hostname r1").await, "");
+    assert_eq!(typed(&mut cm, "discard").await, "");
+    assert_eq!(candidate(&cm), IMPORTED);
+}
+
+const BOTH_DISCARDS: &str = "router static ipv4 route 10.9.9.0/24: nexthop blackhole cannot be \
+     combined with nexthop unreachable; delete one or the other";
+
+/// Everything that refuses a commit refuses it before CONFIG_DB is
+/// changed for it, not only what `validate` finds: here a check commit
+/// makes on the whole candidate.
+#[tokio::test]
+async fn a_commit_that_is_refused_is_refused_before_the_write() {
+    let mut cm = manager("writer-checked");
+    let db = shared(tables());
+    import(&cm, tables());
+    let orders = writer(&cm, db.clone(), None);
+    tokio::task::yield_now().await;
+
+    edit(&cm, "set sonic PORT Ethernet0 mtu 1500");
+    edit(
+        &cm,
+        "set router static ipv4 route 10.9.9.0/24 nexthop blackhole",
+    );
+    edit(
+        &cm,
+        "set router static ipv4 route 10.9.9.0/24 nexthop unreachable",
+    );
+    let pending = candidate(&cm);
+    assert_eq!(session(&mut cm, "commit").await, BOTH_DISCARDS);
+    assert_eq!(orders.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert_eq!(*db.lock().unwrap(), tables());
+    assert_eq!(running(&cm), IMPORTED);
+    assert_eq!(candidate(&cm), pending);
+
+    // Corrected, it is written and committed.
+    edit(
+        &cm,
+        "delete router static ipv4 route 10.9.9.0/24 nexthop blackhole",
+    );
+    assert_eq!(session(&mut cm, "commit").await, "");
+    assert_eq!(orders.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(db.lock().unwrap()["PORT"]["Ethernet0"]["mtu"], "1500");
+}
+
+/// A commit that passed every check can still be refused when the
+/// writer has answered: another writer committed meanwhile what it
+/// cannot be beside. CONFIG_DB has its change of `sonic` by then, and
+/// the refusal says so. Nothing is committed here, the copy of
+/// CONFIG_DB brings `sonic`, and the rest stays pending.
+#[tokio::test]
+async fn a_commit_refused_after_the_write_says_config_db_has_the_change() {
+    let mut cm = manager("writer-refused-after");
+    let db = shared(tables());
+    import(&cm, tables());
+    let (release, taken) = holding_writer(&cm, db.clone());
+    tokio::task::yield_now().await;
+
+    edit(&cm, "set sonic PORT Ethernet0 mtu 1500");
+    edit(
+        &cm,
+        "set router static ipv4 route 10.9.9.0/24 nexthop unreachable",
+    );
+    let reply = parked_commit(&mut cm).await;
+    taken.notified().await;
+    let applied = cm.deploy("set router static ipv4 route 10.9.9.0/24 nexthop blackhole\n");
+    assert_eq!(applied.apply_code, ApplyCode::Applied, "{}", applied.cmd);
+    let applied = running(&cm);
+
+    release.send(()).unwrap();
+    writer_answers(&mut cm).await;
+    assert_eq!(
+        reply.await.unwrap().output,
+        format!(
+            "% CONFIG_DB has the change of `sonic`, but the commit was then refused here:\n\
+             {BOTH_DISCARDS}\n\
+             % Nothing was committed here. `sonic` follows at the next copy of CONFIG_DB; \
+             the rest is still pending\n"
+        )
+    );
+    assert_eq!(running(&cm), applied);
+    assert_eq!(db.lock().unwrap()["PORT"]["Ethernet0"]["mtu"], "1500");
+
+    let copy = db.lock().unwrap().clone();
+    import(&cm, copy);
+    assert!(running(&cm).contains("sonic PORT Ethernet0 mtu 1500\n"));
+    assert_eq!(pending_patch(&cm), serde_json::json!([]));
+    assert_eq!(
+        run(&cm, "compare formal"),
+        "+router static ipv4 route 10.9.9.0/24 nexthop unreachable\n"
+    );
 }
 
 /// Not a test of what is copied: how long a copy of a large CONFIG_DB

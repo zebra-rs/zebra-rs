@@ -19,6 +19,12 @@ syntax = "proto3";
 //
 // Two unary calls, not a stream, so that a writer can be a shell script
 // around `vtyctl config-db wait` and `vtyctl config-db done`.
+//
+// Both need the admin role of the vty socket, as `Apply` does: a commit
+// is made on the writer's word, so the writer is whoever may commit. In
+// practice it runs as root, which SONiC's updater needs anyway. A caller
+// without the role is refused with PERMISSION_DENIED or UNAUTHENTICATED
+// and is not counted as a writer that is waiting.
 package zebra.configdb.v1;
 
 service WriterService {
@@ -26,7 +32,8 @@ service WriterService {
   // `timeout_seconds` pass with none. A writer calls it again at once:
   // that it is waiting is how zebra-rs knows there is a writer.
   rpc Wait(WaitRequest) returns (Order);
-  // What became of the order `id`.
+  // What became of the order `id`. NOT_FOUND when no commit waits for
+  // it, or when no `Wait` has handed it out yet.
   rpc Done(Result) returns (DoneReply);
 }
 

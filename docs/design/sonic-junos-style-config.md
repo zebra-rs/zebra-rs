@@ -255,7 +255,10 @@ write behind a successful `commit` would be the worst outcome of this design.
 given to `vtyctl apply` replaces the `sonic` subtree with the translation of
 those tables (`zebra-rs/src/config/configdb.rs`): a row goes to the list of
 its table that has as many keys as its key has `|`-separated parts, or to the
-container of its fixed key. An import is not a commit of the history, is not
+container of its fixed key. A map (`DSCP_TO_TC_MAP|AZURE` is `{"0": "1", …}`)
+is a row whose fields are the entries of the one list its model has inside it,
+the field's name being the entry's key: the eleven QoS and cable-length tables
+of the tree we build. An import is not a commit of the history, is not
 held to the models' mandatory leaves, and leaves out and logs what it cannot
 copy. *Measured* on a SONiC VS: all 21 tables of its CONFIG_DB are modelled,
 306 rows became 1,282 lines, two values were left out (an empty string and one
@@ -464,6 +467,46 @@ Each phase is useful on its own and none commits us to the next.
    was in CONFIG_DB and the kernel; a member of a VLAN that does not exist
    was refused with the updater's leafref error; the changes were undone
    by a second commit.
+
+   What such a commit is held to:
+
+   - **The writer is whoever may commit.** `Wait` and `Done` need the admin
+     role of the vty socket, as `vtyctl apply` does: the writer runs as root.
+     A commit is made on the writer's word, so a caller without the role
+     neither takes an order nor answers for one.
+   - **No patch before the first copy.** Until CONFIG_DB has been copied once
+     the running subtree is empty because nothing is known, and a row typed
+     then would be added as the first of its table, replacing the table.
+     `compare config-db` and `commit` say so and do nothing.
+   - **A patch knows what the copy left out.** A table is added with its first
+     row and removed with its last, and which those are is CONFIG_DB's to say.
+     zebra-rs keeps the keys of the rows the last copy had and the subtree
+     does not (a key no list takes, a row the model refuses, a table with no
+     model). A table that has such a row is neither added nor removed, and a
+     row that is there is not added: its fields are.
+   - **Nothing is written that the patch does not say.** What is typed under
+     `sonic` and is no row and no field of one (an entry of a map with no
+     value; in a model that has them, a leaf of `type empty` or a container
+     in a row) has no form in CONFIG_DB. The commit is refused and names the
+     lines.
+   - **Refused before the write, or said after it.** Every check of a commit
+     runs before the writer is asked, on the candidate as it will be
+     committed. A commit can still be refused when the writer has answered,
+     if another writer committed meanwhile what it cannot be beside; the
+     refusal then says that CONFIG_DB has the change.
+   - **The candidate is held while the writer works.** The commit is made of
+     the candidate when the writer has answered, with `sonic` open to it. An
+     edit typed meanwhile would be committed here without having been
+     written, so `set`, `delete`, `discard`, `rollback`, `load` and a second
+     `commit` are refused until the commit is made; `show` and `compare` are
+     answered. This is per daemon while there is one candidate (§8.1).
+
+   Not closed: the patch is made against CONFIG_DB as of the last copy. A
+   change another writer makes after that copy and before the commit is not
+   seen, and where it created a table the commit also creates, the commit's
+   `add` of the table replaces it. JSON Patch has no test for "not there";
+   closing this needs the writer to make the comparison, or a copy taken as
+   part of the commit.
 
    Not done: the writer as a service of the image; `commit confirmed` and
    `rollback` of a change of CONFIG_DB (an earlier commit is still taken

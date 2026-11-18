@@ -12,6 +12,12 @@
 //! The hub does not know what a patch is, nor who the writer is. It
 //! knows whether one is there: a writer that is waiting, or was a
 //! moment ago and is between two waits.
+//!
+//! Who may be the writer is the service's to say, and it is whoever may
+//! commit: both calls need the admin role, as `vtyctl apply` does. A
+//! caller without it could take a commit's order and leave it to time
+//! out, or answer for one that CONFIG_DB never saw, and the commit
+//! would be made on its word.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -20,6 +26,9 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::{Notify, oneshot};
 use tonic::Response;
+
+use super::serve::enforce_admin;
+use super::session::SessionTable;
 
 pub mod pb {
     tonic::include_proto!("zebra.configdb.v1");
@@ -124,8 +133,20 @@ impl WriterHub {
     }
 
     /// The writer's answer to order `id`. `false` when nobody waits for
-    /// it: the commit gave up, or there was no such order.
+    /// it: the commit gave up, or there was no such order. Nor is an
+    /// order answered that no writer has taken: nothing can have become
+    /// of it, and it would still be handed out after its commit was
+    /// answered.
     pub fn done(&self, id: u64, answer: Result<(), String>) -> bool {
+        if self
+            .queue
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(queued, _)| *queued == id)
+        {
+            return false;
+        }
         match self.pending.lock().unwrap().remove(&id) {
             Some(tx) => tx.send(answer).is_ok(),
             None => false,
@@ -136,6 +157,9 @@ impl WriterHub {
 /// `zebra.configdb.v1.WriterService`.
 pub struct WriterBridge {
     pub hub: std::sync::Arc<WriterHub>,
+    /// The sessions of the vty socket: a caller is held to the admin
+    /// role of its own.
+    pub sessions: std::sync::Arc<SessionTable>,
 }
 
 #[tonic::async_trait]
@@ -144,6 +168,9 @@ impl pb::writer_service_server::WriterService for WriterBridge {
         &self,
         request: tonic::Request<pb::WaitRequest>,
     ) -> Result<Response<pb::Order>, tonic::Status> {
+        // Before the hub hears of the call: one that is refused is not a
+        // writer that is there.
+        enforce_admin(&self.sessions, &request)?;
         let timeout = match request.get_ref().timeout_seconds {
             0 => DEFAULT_WAIT,
             seconds => Duration::from_secs(seconds.into()),
@@ -159,6 +186,7 @@ impl pb::writer_service_server::WriterService for WriterBridge {
         &self,
         request: tonic::Request<pb::Result>,
     ) -> Result<Response<pb::DoneReply>, tonic::Status> {
+        enforce_admin(&self.sessions, &request)?;
         let result = request.into_inner();
         let answer = if result.ok {
             Ok(())
@@ -269,6 +297,124 @@ mod tests {
         let (id, _) = taker.await.unwrap().expect("taken");
         assert!(!hub.done(id, Ok(())));
         assert!(!hub.done(99, Ok(())));
+    }
+
+    /// An order no writer has taken cannot be answered: nothing has
+    /// become of it yet. It is still handed out, and its commit still
+    /// waits for the writer that takes it.
+    #[tokio::test]
+    async fn an_order_not_taken_is_not_answered() {
+        let hub = Arc::new(WriterHub::default());
+        assert_eq!(hub.wait(Duration::from_millis(1)).await, None);
+        let commit = {
+            let hub = hub.clone();
+            tokio::spawn(async move { hub.write("[]".into(), SOON).await })
+        };
+        tokio::task::yield_now().await;
+        assert!(!hub.done(1, Ok(())), "queued, and taken by nobody");
+        let (id, _) = hub.wait(SOON).await.expect("still queued");
+        assert_eq!(id, 1);
+        assert!(hub.done(id, Err("refused".to_string())));
+        assert_eq!(commit.await.unwrap(), Err("refused".to_string()));
+    }
+
+    use super::super::session::{SessionContext, SessionKey};
+    use pb::writer_service_server::WriterService;
+
+    /// A call as the vty socket's interceptor hands it on: with the
+    /// caller's session, when it has one.
+    fn call<T>(message: T, session: Option<SessionKey>) -> tonic::Request<T> {
+        let mut request = tonic::Request::new(message);
+        if let Some(key) = session {
+            request.extensions_mut().insert(SessionContext { key });
+        }
+        request
+    }
+
+    /// The writer is whoever may commit: both calls need the admin role.
+    /// A caller without it does not take an order, is not a writer that
+    /// is there, and does not answer for an order a writer took.
+    #[tokio::test(start_paused = true)]
+    async fn the_writer_needs_the_admin_role() {
+        let sessions = SessionTable::new();
+        let hub = Arc::new(WriterHub::default());
+        let bridge = WriterBridge {
+            hub: hub.clone(),
+            sessions: sessions.clone(),
+        };
+        let (viewer, admin): (SessionKey, SessionKey) = ((1000, 4242), (1001, 4343));
+        sessions.insert_for_test(viewer, Instant::now());
+        sessions.insert_for_test(admin, Instant::now());
+        let hour = Duration::from_secs(3600);
+        assert!(sessions.promote_to_admin(&admin, hour, hour));
+        let wait = || pb::WaitRequest { timeout_seconds: 1 };
+        let done = |id: u64, ok: bool| pb::Result {
+            id,
+            ok,
+            message: String::new(),
+        };
+        let denied = |status: tonic::Status| {
+            matches!(
+                status.code(),
+                tonic::Code::Unauthenticated | tonic::Code::PermissionDenied
+            )
+        };
+
+        // No session (a peer the interceptor resolved none for), and a
+        // session without the role.
+        for caller in [None, Some(viewer)] {
+            let refused = bridge.wait(call(wait(), caller)).await.unwrap_err();
+            assert!(denied(refused), "{caller:?}");
+            assert!(!hub.present(), "{caller:?} is no writer");
+        }
+
+        // The admin is the writer, and takes the commit's order.
+        assert_eq!(
+            bridge
+                .wait(call(wait(), Some(admin)))
+                .await
+                .unwrap()
+                .into_inner(),
+            pb::Order::default()
+        );
+        assert!(hub.present());
+        let commit = {
+            let hub = hub.clone();
+            tokio::spawn(async move { hub.write("[]".into(), Duration::from_secs(60)).await })
+        };
+        tokio::task::yield_now().await;
+        // Not the viewer, who is not handed it.
+        let refused = bridge.wait(call(wait(), Some(viewer))).await.unwrap_err();
+        assert!(denied(refused));
+        let order = bridge
+            .wait(call(wait(), Some(admin)))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!((order.id, order.patch.as_str()), (1, "[]"));
+
+        // Nor does the viewer answer for it, either way.
+        for ok in [true, false] {
+            let refused = bridge
+                .done(call(done(order.id, ok), Some(viewer)))
+                .await
+                .unwrap_err();
+            assert!(denied(refused));
+            let refused = bridge
+                .done(call(done(order.id, ok), None))
+                .await
+                .unwrap_err();
+            assert!(denied(refused));
+        }
+        assert!(
+            !commit.is_finished(),
+            "answered by a caller without the role"
+        );
+        bridge
+            .done(call(done(order.id, true), Some(admin)))
+            .await
+            .expect("the writer's answer");
+        assert_eq!(commit.await.unwrap(), Ok(()));
     }
 
     /// A writer that has not called for a while is gone.
