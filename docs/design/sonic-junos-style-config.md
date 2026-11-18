@@ -435,10 +435,12 @@ Each phase is useful on its own and none commits us to the next.
 2. **Read-only mirror.** The `sonic` subtree generated from SONiC's YANG, the
    bridge importing CONFIG_DB. `show configuration sonic …` in `vty` with
    completion and help; no writes. Proves the schema generation and the import
-   path, and is safe. *The schema and the import are built (§5.1, §7). Still
-   to do: a process that follows CONFIG_DB by its keyspace notifications, the
-   models in the `bgp` container's image, and refusing an operator's own edits
-   of `sonic` while it is only a mirror.*
+   path, and is safe. *The schema and the import are built (§5.1, §7), and
+   the subtree is read-only: a session's `set sonic …` is refused and pointed
+   at SONiC's `config` command, `save` leaves the subtree out, and `rollback`
+   keeps it as CONFIG_DB has it now. Still to do, outside zebra-rs: the
+   process that follows CONFIG_DB by its keyspace notifications, and the
+   models in the `bgp` container's image.*
 3. **Commit for a few tables**: `PORT`, `VLAN`, `VLAN_MEMBER`, `INTERFACE`,
    `STATIC_ROUTE`, `BGP_NEIGHBOR`. Pre-commit check, ordered write through the
    config updater, partial-write handling. Measure commit latency.

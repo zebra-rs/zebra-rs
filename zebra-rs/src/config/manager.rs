@@ -38,6 +38,10 @@ use std::rc::Rc;
 use tokio::sync::mpsc::{self, Receiver, Sender, UnboundedReceiver, UnboundedSender};
 use tokio::sync::oneshot;
 
+/// What an edit of `sonic` is answered with while it is a mirror.
+const SONIC_IS_A_COPY: &str =
+    "% `sonic` is a copy of CONFIG_DB and is not changed here: use SONiC's `config` command\n";
+
 pub struct ConfigStore {
     pub running: RefCell<Rc<Config>>,
     pub candidate: RefCell<Rc<Config>>,
@@ -252,6 +256,14 @@ pub struct ConfigManager {
     /// elsewhere, not a change someone made here. It is not held to the
     /// models' mandatory leaves and is not a commit of the history.
     importing: Cell<bool>,
+    /// The `sonic` subtree is a copy of CONFIG_DB and nothing else:
+    /// only an import changes it. An operator's `set sonic …` is
+    /// refused, `save` leaves the subtree out, and an earlier commit is
+    /// loaded with the subtree as it is now. This is the read-only
+    /// mirror of docs/design/sonic-junos-style-config.md, phase 2; a
+    /// commit that writes to CONFIG_DB (phase 3) is what will turn it
+    /// off.
+    pub sonic_read_only: Cell<bool>,
     /// What the last commits produced, for `rollback`.
     pub history: CommitHistory,
     pub modes: HashMap<String, Mode>,
@@ -510,6 +522,7 @@ impl ConfigManager {
             modes: HashMap::new(),
             store: ConfigStore::new(),
             importing: Cell::new(false),
+            sonic_read_only: Cell::new(true),
             history: CommitHistory::default(),
             tx,
             rx,
@@ -1004,6 +1017,16 @@ impl ConfigManager {
         let diff = super::ordered::resend_ordered_leaf_lists(&diff, |line| {
             self.ordered_leaf_list_value(line)
         });
+
+        // The same, for a change of `sonic` that did not come by a typed
+        // line: nothing but an import commits one.
+        if self.sonic_is_a_copy()
+            && diff
+                .lines()
+                .any(|l| l.starts_with("+sonic ") || l.starts_with("-sonic "))
+        {
+            return Err(anyhow::anyhow!(SONIC_IS_A_COPY.trim_end().to_string()));
+        }
 
         let remove_first_char = |s: &str| -> String { s.chars().skip(1).collect() };
 
@@ -1760,7 +1783,17 @@ impl ConfigManager {
     /// trailing `;`, no `set` — and would be unreadable on the next
     /// boot.
     fn serialize_running(&self, format: ConfigFormat) -> String {
-        let running = self.store.running.borrow();
+        let running = self.store.running.borrow().clone();
+        // A copy of CONFIG_DB is not this daemon's to save: SONiC keeps
+        // it (`config save`), and it is copied in again at start.
+        let running =
+            if self.sonic_read_only.get() && running.lookup(&"sonic".to_string()).is_some() {
+                let without = carbon_copy(&running, None);
+                without.configs.borrow_mut().retain(|c| c.name != "sonic");
+                without
+            } else {
+                running
+            };
         let mut output = String::new();
         match format {
             ConfigFormat::Cli => running.format(&mut output),
@@ -1796,8 +1829,19 @@ impl ConfigManager {
             return Ok(carbon_copy(&self.store.running.borrow(), None));
         }
         let root = Rc::new(Config::new("".to_string(), None));
+        // The copy of CONFIG_DB is no part of a commit to go back to:
+        // an earlier commit is the configuration made here as it was
+        // then, with `sonic` as CONFIG_DB has it now.
+        let mirror = self.sonic_read_only.get();
+        let mut sonic_now = String::new();
+        if mirror && let Some(sonic) = self.store.running.borrow().lookup(&"sonic".to_string()) {
+            sonic.list(&mut sonic_now);
+        }
         let built = self.history.with_config(n, |config| {
-            for line in config.lines() {
+            let then = config
+                .lines()
+                .filter(|line| !(mirror && (*line == "sonic" || line.starts_with("sonic "))));
+            for line in then.chain(sonic_now.lines()) {
                 match self.paths(line.to_string()) {
                     Some(paths) => set(paths, root.clone()),
                     // The line was committed by this process, under this
@@ -1834,6 +1878,14 @@ impl ConfigManager {
 
         if code != ExecCode::Success {
             return (code, String::new(), state.paths);
+        }
+
+        // `sonic` is a copy of CONFIG_DB: only an import edits it.
+        if (state.set || state.delete)
+            && state.paths.get(1).is_some_and(|path| path.name == "sonic")
+            && self.sonic_is_a_copy()
+        {
+            return (ExecCode::Nomatch, SONIC_IS_A_COPY.to_string(), state.paths);
         }
 
         // Handle "set"
@@ -2125,6 +2177,12 @@ impl ConfigManager {
         }
     }
 
+    /// Whether `sonic` may not be changed by what is running now: it is
+    /// a copy, and this is not the import that makes it one.
+    fn sonic_is_a_copy(&self) -> bool {
+        self.sonic_read_only.get() && !self.importing.get()
+    }
+
     /// The interactive sessions' uncommitted edits, with the running
     /// config they are an edit of, for a commit that is not theirs to
     /// be made without them. `None` when there are none.
@@ -2185,6 +2243,7 @@ impl ConfigManager {
         if edits.is_some() {
             self.store.discard();
         }
+        self.importing.set(true);
         // Nomatch when there is no `sonic` yet, which is as good.
         let _ = self.execute(mode, "delete sonic");
         for line in translation.lines.iter() {
@@ -2193,7 +2252,6 @@ impl ConfigManager {
                 problems.push(format!("not taken by the model: {line}"));
             }
         }
-        self.importing.set(true);
         let committed = self.commit_config();
         self.importing.set(false);
 

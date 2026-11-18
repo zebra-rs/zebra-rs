@@ -2,7 +2,7 @@
 //! models of `testdata/sonic`.
 
 use super::super::sonic::graft;
-use super::test_support::{candidate, commit, edit, running};
+use super::test_support::{candidate, commit, edit, run, running};
 use super::*;
 
 const MODELS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src/config/testdata/sonic");
@@ -262,4 +262,128 @@ fn without_the_models_config_db_is_refused() {
     let reply = import(&cm, tables());
     assert_eq!(reply.apply_code, ApplyCode::ParseError);
     assert!(reply.cmd.contains("no SONiC models"), "{}", reply.cmd);
+}
+
+const READ_ONLY: &str =
+    "% `sonic` is a copy of CONFIG_DB and is not changed here: use SONiC's `config` command\n";
+
+/// The answer to a line a session types, whatever its code.
+fn answer(cm: &ConfigManager, line: &str) -> (ExecCode, String) {
+    let mode = cm.modes.get("configure").expect("configure mode");
+    let (code, output, _) = cm.execute(mode, line);
+    (code, output)
+}
+
+/// The copy is the import's alone to change. A session's `set` or
+/// `delete` of it is refused and says where it is changed, and the
+/// candidate is as it was.
+#[test]
+fn an_operator_does_not_edit_the_copy() {
+    let cm = manager("read-only");
+    import(&cm, tables());
+    for line in [
+        "set sonic PORT Ethernet0 mtu 1500",
+        "set sonic PORT Ethernet8 lanes 9,10,11,12",
+        "delete sonic PORT Ethernet0",
+        "delete sonic",
+    ] {
+        assert_eq!(
+            answer(&cm, line),
+            (ExecCode::Nomatch, READ_ONLY.to_string()),
+            "`{line}`"
+        );
+    }
+    assert_eq!(candidate(&cm), IMPORTED);
+    assert_eq!(run(&cm, "compare"), "");
+    // A line the schema does not know is refused as any other.
+    assert_eq!(
+        answer(&cm, "set sonic PORT Ethernet0 mtu 99999"),
+        (ExecCode::Nomatch, String::new())
+    );
+    // Everything else is edited as ever, and the import still copies.
+    commit(&cm, &["set system hostname r1"]);
+    let mut more = tables();
+    more["PORT"]["Ethernet0"]["mtu"] = "1500".into();
+    import(&cm, more);
+    assert!(running(&cm).contains("sonic PORT Ethernet0 mtu 1500\n"));
+}
+
+/// Nor does a document given to `vtyctl apply`, in any format: only the
+/// one that says it is CONFIG_DB.
+#[test]
+fn a_document_does_not_edit_the_copy() {
+    let cm = manager("read-only-apply");
+    import(&cm, tables());
+    for document in [
+        "set sonic PORT Ethernet0 mtu 1500\n",
+        "set system hostname r1\nset sonic PORT Ethernet0 mtu 1500\n",
+        "delete sonic PORT Ethernet4\n",
+        r#"{"system": {"hostname": "r1"}, "sonic": {"PORT": [{"name": "Ethernet0", "mtu": 1500}]}}"#,
+    ] {
+        let reply = cm.deploy(document);
+        assert_eq!(reply.apply_code, ApplyCode::ParseError, "{document}");
+    }
+    assert_eq!(running(&cm), IMPORTED);
+}
+
+/// A change of the copy that reaches a commit some other way is refused
+/// there.
+#[test]
+fn a_commit_does_not_change_the_copy() {
+    let cm = manager("read-only-commit");
+    import(&cm, tables());
+    cm.sonic_read_only.set(false);
+    edit(&cm, "set sonic PORT Ethernet0 mtu 1500");
+    cm.sonic_read_only.set(true);
+    assert_eq!(run(&cm, "commit"), READ_ONLY.trim_end());
+    assert_eq!(running(&cm), IMPORTED);
+}
+
+/// An earlier commit is the configuration made here as it was then. The
+/// copy is not part of it: going back leaves `sonic` as CONFIG_DB has
+/// it now, and `compare rollback` shows no change of it.
+#[test]
+fn rollback_leaves_the_copy_as_it_is_now() {
+    let cm = manager("read-only-rollback");
+    import(&cm, tables());
+    commit(&cm, &["set system hostname r1"]);
+    commit(&cm, &["set system hostname r2"]);
+    // CONFIG_DB changes after the commit to go back to.
+    let mut later = tables();
+    later["PORT"]["Ethernet0"]["mtu"] = "1500".into();
+    later["PORT"].as_object_mut().unwrap().remove("Ethernet4");
+    import(&cm, later);
+    let copy_now: String = running(&cm)
+        .lines()
+        .filter(|l| l.starts_with("sonic"))
+        .map(|l| format!("{l}\n"))
+        .collect();
+
+    assert_eq!(
+        run(&cm, "compare rollback 1"),
+        " system {\n-  hostname r1;\n+  hostname r2;\n }\n"
+    );
+    assert_eq!(run(&cm, "rollback 1"), "");
+    assert_eq!(candidate(&cm), format!("{copy_now}system hostname r1\n"));
+    assert_eq!(run(&cm, "commit"), "");
+    assert_eq!(running(&cm), format!("{copy_now}system hostname r1\n"));
+}
+
+/// `save` writes the configuration made here. The copy is SONiC's to
+/// save and is copied in again at start.
+#[test]
+fn save_leaves_the_copy_out() {
+    let cm = manager("read-only-save");
+    import(&cm, tables());
+    commit(&cm, &["set system hostname r1"]);
+    for format in ["formal", "cli", "json", "yaml"] {
+        assert!(run(&cm, &format!("save {format}")).starts_with("Configuration saved"));
+        let saved = std::fs::read_to_string(&cm.config_path).unwrap();
+        assert!(saved.contains("hostname"), "{format}: {saved}");
+        assert!(!saved.contains("sonic"), "{format}: {saved}");
+        assert!(!saved.contains("Ethernet0"), "{format}: {saved}");
+    }
+    let _ = std::fs::remove_file(&cm.config_path);
+    // What is running still has it.
+    assert!(running(&cm).contains("sonic PORT Ethernet0\n"));
 }

@@ -73,7 +73,9 @@ module zebra-features {
        The subtree is a copy of CONFIG_DB kept by a process that reads
        it (the read-only mirror of docs/design/sonic-junos-style-
        config.md). A copy is not a commit of the commit history, and is
-       not held to the models' mandatory leaves.
+       not held to the models' mandatory leaves. Nothing else changes
+       the subtree: `set sonic …` is refused, `save` leaves it out, and
+       `rollback` keeps it as it is.
 
        Not a schema gate: nothing in the daemon's own models is guarded
        by it.";
