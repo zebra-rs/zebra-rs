@@ -305,9 +305,11 @@ host(config)# rollback revision 1794906748-9
 
 Tab after `revision` lists the revisions kept. A revision is the time
 the daemon started, in seconds since the epoch, and the count of commits
-since. The count is never used twice, and the start time keeps a
-revision noted before a restart from naming another commit after it. Use
-the revision where another writer may commit meanwhile, and in anything
+the history has recorded. The count goes on across a restart, so it is
+never used twice: a revision noted before a restart names the same
+commit after it, also when the daemon comes back within the second or on
+a box whose clock starts at the same time at every boot. Use the
+revision where another writer may commit meanwhile, and in anything
 scripted.
 
 `compare rollback <n>` shows what turns commit `n` into the candidate
@@ -348,7 +350,9 @@ host(config)# commit
 
 - **Minutes:** 1 to 65535, and 10 when left out.
 - **Confirming:** only a `commit` typed in configure mode confirms, in
-  any session. A `vtyctl apply` by another writer does not.
+  any session. A `vtyctl apply` by another writer does not, and neither
+  does a `commit` line in its document: that commit is the apply's, and
+  is listed as one.
 - **Typed again while pending:** `commit confirmed` commits what has
   been edited since, if anything, and restarts the timer. The rollback
   still goes to the configuration before the first one.
@@ -357,6 +361,16 @@ host(config)# commit
   uncommitted edits afterwards.
 - **Saving:** `save` is refused while a commit is pending, so the config
   file never holds a change the daemon may take back.
+- **The rollback itself:** it goes back to a configuration that was
+  running, and is held to what the startup config is held to. A check
+  that only warns about the startup config (a rule added since that
+  config was first taken) does not stop the rollback either; the log has
+  the warning.
+- **A rollback that is refused:** what other writers committed meanwhile
+  can leave the configuration to go back to invalid. The commit then
+  stays pending. `show commit history` says that the rollback was
+  refused and why, `save` is still refused, and the daemon tries again
+  every minute. A `commit` keeps the change and ends the tries.
 
 `show commit history` says when a commit is pending, and lists the
 rollback as a commit of its own:
@@ -379,6 +393,12 @@ operators in configure mode do not see each other's uncommitted edits,
 and `commit` commits the edits of the session that typed it and nobody
 else's. `discard`, `load` and `rollback` likewise change only the
 candidate of their own session.
+
+`vtyctl show 'show candidate-config'` run from a vty shell, or from a
+script started there, shows that shell's candidate, as `show
+candidate-config` typed in it does. Run from anywhere else it has no
+session with a candidate, and shows the configuration with nobody's
+edits.
 
 When someone else commits (another session, or a `vtyctl apply`), the
 running config changes under your candidate. Your edits stay, as edits
@@ -410,7 +430,9 @@ theirs. One case is not yours to decide: a leaf you edited inside a list
 entry the other commit deleted goes with the entry.
 
 A candidate lasts as long as its shell. It is still there after any idle
-time, and it is gone when the shell exits.
+time, for piped commands too (`show | compare`), and it is gone when the
+shell exits. A session is given its candidate by its first
+configure-mode command; a shell that only looks has none.
 
 ### Leaving the shell with uncommitted changes
 
@@ -425,25 +447,43 @@ host# exit
 You have uncommitted changes. Commit? [y=commit other=discard]
 ```
 
-`y` commits; a commit refused for the reason above is not repeated, and
-the edits are then lost with the session. Anything else — `n`, just pressing Enter, or waiting out
+`y` commits. Anything else — `n`, just pressing Enter, or waiting out
 the 30-second timeout — loses the edits with the session. The shell
 exits in every case; the answer never cancels the exit.
 
+A commit that does not go through cannot be put right later, so the
+shell does what it can before it leaves:
+
+- **The commit is refused** (a validation error, or another commit
+  changed a leaf you edited): the reason is shown and the question is
+  asked again. A second `y` commits over the other commit, as a second
+  `commit` does in configure mode. A validation error can only be given
+  up: answer `n`.
+- **The admin role has lapsed** (it is held for 15 minutes past the last
+  admin command): the shell takes it again, asking for the root password
+  when your account needs one, and commits. The password prompt gives up
+  after the same 30 seconds.
+- **The daemon cannot be reached, or the role cannot be taken:** there
+  is no committing.
+
+Whenever you answered `y` and the edits were not committed, the last
+line says so:
+
+```
+% Not committed: the uncommitted changes are lost with this session.
+```
+
 Three cases stay silent: a session that never entered configure mode, a
 session with no terminal to ask on (a script piping commands in), and a
-daemon that cannot answer the question. If the commit is refused because
-the session is no longer Admin, the reason is printed and the edits are
-left untouched:
+daemon that cannot answer the question.
 
-```
-% commit failed (admin role required — run 'enable'); changes left uncommitted.
-```
+The prompt is about your own edits only. What another operator has
+typed is in that operator's candidate, and what a `vtyctl apply` brings
+is committed by the apply itself (see the next section).
 
-Note that the candidate is shared by every configure-mode session:
-pending edits from another operator are part of what this prompt offers
-to commit or discard. What a `vtyctl apply` brings is not: it is
-committed by the apply itself (see the next section).
+A vty started inside the vty shares the session of the shell it was
+started from, its candidate included. Leaving the inner one does not end
+the session; the edits are still there in the outer shell.
 
 ### An apply and uncommitted edits
 

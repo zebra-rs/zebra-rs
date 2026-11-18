@@ -16,9 +16,15 @@
 //! Its revision does not change. That is the second way to name it
 //! (`rollback revision <id>`), for a writer that must have this commit
 //! and no other. A revision is the time the daemon started, in seconds
-//! since the epoch, and the count of commits recorded since: the count
-//! is never used twice, and the start time keeps a revision noted
-//! before a restart from naming a different commit after it.
+//! since the epoch, and the count of commits the history has recorded:
+//! all of them, those no longer kept and those of the daemon's earlier
+//! lives included. The count is what keeps two revisions apart: it is
+//! the number the commit's file is named by, which only grows, so it is
+//! not used twice by two lives of a daemon that start in the same
+//! second (a box with no clock boots at the same time every time, and a
+//! daemon that crashes is restarted within the second). The start time
+//! is there for a history whose directory was lost, where the count
+//! starts over.
 //!
 //! The daemon keeps the history in a directory, one file a commit, and
 //! reads it back when it starts ([`CommitHistory::keep_in`]). The commit
@@ -107,7 +113,8 @@ impl Origin {
 
 pub struct CommitRecord {
     /// What names this commit for as long as it is kept, wherever later
-    /// commits move it: `<daemon start>-<count>`.
+    /// commits move it: `<daemon start>-<count>`, the count being one
+    /// more than `seq`.
     pub revision: String,
     pub time: DateTime<Utc>,
     pub origin: Origin,
@@ -184,16 +191,16 @@ fn file_name(seq: u64) -> String {
 
 pub struct CommitHistory {
     /// When the history began, in seconds since the epoch: the first
-    /// half of every revision.
+    /// half of every revision this life of the daemon gives.
     start: i64,
-    /// The commits recorded since, those no longer kept included: the
-    /// second half of the latest revision.
-    count: Cell<u64>,
     /// Newest first.
     records: RefCell<VecDeque<CommitRecord>>,
     /// Where the commits are kept, when they are.
     dir: RefCell<Option<PathBuf>>,
-    /// The number of the next commit's file.
+    /// The number of the next commit's file: how many commits the
+    /// history has recorded, those no longer kept and those of earlier
+    /// lives of the daemon included. One more is the second half of
+    /// that commit's revision.
     next_seq: Cell<u64>,
 }
 
@@ -208,7 +215,6 @@ impl CommitHistory {
     pub fn starting_at(start: i64) -> Self {
         Self {
             start,
-            count: Cell::new(0),
             records: RefCell::default(),
             dir: RefCell::default(),
             next_seq: Cell::new(0),
@@ -235,12 +241,10 @@ impl CommitHistory {
         if origin == Origin::ConfigFile && records.front().is_some_and(|r| r.config == config) {
             return;
         }
-        let count = self.count.get() + 1;
-        self.count.set(count);
         let seq = self.next_seq.get();
         self.next_seq.set(seq + 1);
         let record = CommitRecord {
-            revision: format!("{}-{count}", self.start),
+            revision: format!("{}-{}", self.start, seq + 1),
             time: Utc::now(),
             origin,
             user,

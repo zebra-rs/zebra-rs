@@ -101,6 +101,11 @@ The default is a directory beside the config file, named after it:
 `/etc/zebra-rs/zebra-rs.conf.commits` for the default config file. The
 daemon creates it, mode 0700.
 
+There is no default when the config file is not a regular file, as with
+`-c /dev/null` to start with no configuration: every daemon started that
+way would otherwise share `/dev/null.commits`. The history is then kept
+in memory only, unless this option names a directory.
+
 Give a directory on storage that outlives the daemon's own filesystem
 when that one does not, as in a container. A directory that cannot be
 created or read is reported in the log, and the history is then kept in

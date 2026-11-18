@@ -1,3 +1,5 @@
+use super::history::Origin;
+use super::session::SessionKey;
 use super::subscribe::ConfigSubscribeRequest;
 use super::vty::CommandPath;
 use super::{ApplyCode, Completion, ExecCode};
@@ -50,14 +52,80 @@ impl ConfigChannel {
     }
 }
 
+/// What a line is run for: whose line it is, and what a commit it makes
+/// is recorded with.
+///
+/// It goes with the line, from the request that brought it to the
+/// handler of the command it turns out to be. Nothing about the caller
+/// is left in the config manager for the handler to find there: what a
+/// handler is not handed, it cannot mistake for the caller's (a `commit`
+/// line of an apply for an operator's), and what runs next cannot
+/// inherit.
+#[derive(Debug, Clone, Default)]
+pub struct Context {
+    /// The session whose line it is. The line runs on that session's
+    /// candidate (`config::private`). `None` for a line that is no
+    /// session's: the config file's at startup, an apply's, a test's.
+    pub session: Option<SessionKey>,
+    /// The login name of who runs it, recorded with a commit it makes.
+    pub user: Option<String>,
+    /// Whose line it is when it is not one an operator typed: a line of
+    /// a `vtyctl apply` document ([`Origin::Apply`]) or of the config
+    /// file ([`Origin::ConfigFile`]).
+    pub writer: Option<Origin>,
+    /// The text of `commit comment <text>`, for the commit the line
+    /// makes.
+    pub comment: Option<String>,
+}
+
+impl Context {
+    /// A line of session `session`, typed by `user`.
+    pub fn session(session: Option<SessionKey>, user: Option<String>) -> Self {
+        Self {
+            session,
+            user,
+            ..Default::default()
+        }
+    }
+
+    /// The same caller, running a line of `writer`'s: a document it
+    /// applies, the config file it loads.
+    pub fn line_of(&self, writer: Origin) -> Self {
+        Self {
+            writer: Some(writer),
+            comment: None,
+            ..self.clone()
+        }
+    }
+
+    /// The same line, with the comment taken off it.
+    pub fn commented(&self, comment: String) -> Self {
+        Self {
+            comment: Some(comment),
+            ..self.clone()
+        }
+    }
+
+    /// What a commit made by the line is: an operator's `commit`,
+    /// unless the line is another writer's.
+    pub fn origin(&self) -> Origin {
+        self.writer.unwrap_or(Origin::Commit)
+    }
+
+    /// Whether an operator typed the line: what a `commit` must be to
+    /// confirm a `commit confirmed`.
+    pub fn typed(&self) -> bool {
+        self.writer.is_none()
+    }
+}
+
 #[derive(Debug)]
 pub struct ExecuteRequest {
     pub mode: String,
     pub input: String,
-    /// The login name of the session, for the commit history.
-    pub user: Option<String>,
-    /// The session, whose candidate the command runs on.
-    pub session: Option<super::session::SessionKey>,
+    /// Whose line it is: the session, whose candidate it runs on, and
+    /// its login name.
+    pub ctx: Context,
     pub resp: Sender<ExecuteResponse>,
 }
 
@@ -82,7 +150,7 @@ pub struct CompletionRequest {
     pub input: String,
     pub interactive: bool,
     /// The session, whose candidate says what is there to complete.
-    pub session: Option<super::session::SessionKey>,
+    pub session: Option<SessionKey>,
     pub resp: Sender<CompletionResponse>,
 }
 
@@ -97,8 +165,7 @@ impl ExecuteRequest {
         Self {
             mode: mode.to_string(),
             input: input.to_string(),
-            user: None,
-            session: None,
+            ctx: Context::default(),
             resp,
         }
     }
@@ -155,6 +222,9 @@ pub struct DeployResponse {
 #[derive(Debug)]
 pub struct DisplayTxRequest {
     pub paths: Vec<CommandPath>,
+    /// The session that asks, for what is shown of its own: its
+    /// candidate.
+    pub session: Option<SessionKey>,
     pub resp: Sender<DisplayTxResponse>,
 }
 
@@ -175,7 +245,7 @@ pub enum Message {
     /// The shell of a session is gone: its candidate goes with it
     /// (`config::private`).
     SessionEnd {
-        key: super::session::SessionKey,
+        key: SessionKey,
     },
     /// The timer of a `commit confirmed` ran out (`config::confirm`).
     ConfirmTimeout {

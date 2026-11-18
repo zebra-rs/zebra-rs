@@ -2,35 +2,28 @@
 
 use super::super::ApplyCode;
 use super::super::manager::ConfigManager;
+use super::super::manager::test_support;
 use super::super::session::SessionKey;
 use super::*;
-use tokio::sync::mpsc;
 
 fn manager(name: &str) -> ConfigManager {
     let path = std::env::temp_dir().join(format!("zebra-rs-private-{name}-{}", std::process::id()));
     let _ = std::fs::remove_file(&path);
-    let (rib_tx, _rib_rx) = mpsc::unbounded_channel();
-    let (rib_inbound_tx, _rib_inbound_rx) = mpsc::unbounded_channel();
-    let (policy_tx, _policy_rx) = mpsc::unbounded_channel();
-    ConfigManager::new(
-        concat!(env!("CARGO_MANIFEST_DIR"), "/yang").to_string(),
-        Vec::new(),
-        Some(path.to_string_lossy().into_owned()),
-        rib_tx,
-        rib_inbound_tx,
-        policy_tx,
-        Default::default(),
-    )
-    .expect("manager builds")
+    test_support::manager(&path, Vec::new(), Default::default())
 }
 
 const ALICE: SessionKey = (1000, 100);
 const BOB: SessionKey = (1001, 200);
 
+/// The context of a line typed in session `who`.
+fn of(who: SessionKey) -> Context {
+    Context::session(Some(who), None)
+}
+
 /// A line typed by a session in configure mode, and what it prints.
 fn run(cm: &ConfigManager, who: SessionKey, line: &str) -> String {
     let (code, output, _) = cm
-        .execute_for(Some(who), None, "configure", line)
+        .execute_for(&of(who), "configure", line)
         .expect("configure mode");
     assert_eq!(code, ExecCode::Show, "`{line}`: {output:?}");
     output
@@ -38,9 +31,7 @@ fn run(cm: &ConfigManager, who: SessionKey, line: &str) -> String {
 
 /// A line typed by a session at the exec prompt.
 fn exec(cm: &ConfigManager, who: SessionKey, line: &str) -> String {
-    let (code, output, _) = cm
-        .execute_for(Some(who), None, "exec", line)
-        .expect("exec mode");
+    let (code, output, _) = cm.execute_for(&of(who), "exec", line).expect("exec mode");
     assert_eq!(code, ExecCode::Show, "`{line}`: {output:?}");
     output
 }
@@ -208,15 +199,68 @@ async fn told_once_and_again_for_a_new_conflict() {
     assert_eq!(run(&cm, BOB, "commit"), "");
     assert!(run(&cm, ALICE, "commit").starts_with("% Another commit"));
 
-    // Before she commits again, Bob changes it once more.
+    // Before she commits again, Bob changes it once more. She is shown
+    // the leaf again, once, with the value it has now: not also the
+    // one she was shown before, which is no longer there.
     run(&cm, BOB, "set system hostname bob2");
     assert_eq!(run(&cm, BOB, "commit"), "");
-    let refusal = run(&cm, ALICE, "commit");
-    assert!(refusal.contains("committed bob2, yours alice"), "{refusal}");
+    assert_eq!(
+        run(&cm, ALICE, "commit"),
+        "% Another commit changed what this session has edited. Your edits are kept:\n\
+         \x20 system hostname: committed bob2, yours alice\n\
+         % `compare` shows what `commit` would now change; `commit` again to proceed\n"
+    );
 
     assert_eq!(run(&cm, ALICE, "discard"), "");
     run(&cm, ALICE, ETH0.trim_end());
     assert_eq!(run(&cm, ALICE, "commit"), "");
+}
+
+/// A leaf the session has given the committed value since is no
+/// conflict any more: its `commit` is not refused over it, and a leaf
+/// still in conflict is shown with the value the session has now.
+#[tokio::test]
+async fn an_edit_set_back_to_the_committed_value_is_no_conflict() {
+    let cm = manager("set-back");
+    run(&cm, ALICE, "set system hostname alice");
+    run(&cm, ALICE, "set system router-id 10.0.0.1");
+    run(&cm, ALICE, ETH0.trim_end());
+    run(&cm, BOB, "set system hostname bob");
+    run(&cm, BOB, "set system router-id 10.0.0.2");
+    assert_eq!(run(&cm, BOB, "commit"), "");
+
+    // She takes his host name, and changes her mind about the other.
+    run(&cm, ALICE, "set system hostname bob");
+    run(&cm, ALICE, "set system router-id 10.0.0.3");
+    assert_eq!(
+        run(&cm, ALICE, "commit"),
+        "% Another commit changed what this session has edited. Your edits are kept:\n\
+         \x20 system router-id: committed 10.0.0.2, yours 10.0.0.3\n\
+         % `compare` shows what `commit` would now change; `commit` again to proceed\n"
+    );
+    // And takes that one too: nothing is left to decide, and the edit
+    // that met nothing is committed without a refusal.
+    run(&cm, ALICE, "set system router-id 10.0.0.2");
+    assert_eq!(run(&cm, ALICE, "commit"), OTHERS_COMMITTED);
+    let committed = running(&cm);
+    assert!(
+        committed.contains(ETH0) && committed.contains("hostname bob\n"),
+        "{committed}"
+    );
+}
+
+/// With the conflict undone before the first `commit`, that commit is
+/// not refused at all.
+#[tokio::test]
+async fn a_conflict_undone_before_the_commit_refuses_nothing() {
+    let cm = manager("undone");
+    run(&cm, ALICE, "set system hostname alice");
+    run(&cm, ALICE, ETH0.trim_end());
+    run(&cm, BOB, "set system hostname bob");
+    assert_eq!(run(&cm, BOB, "commit"), "");
+    run(&cm, ALICE, "set system hostname bob");
+    assert_eq!(run(&cm, ALICE, "commit"), OTHERS_COMMITTED);
+    assert!(running(&cm).contains(ETH0));
 }
 
 /// `commit confirmed` is refused the same way, and says the same.
@@ -326,6 +370,89 @@ async fn a_session_that_only_looks_has_no_candidate() {
     assert_eq!(cm.candidates.borrow().len(), 1);
 }
 
+/// A completion gives no session a candidate. Every vty shell asks for
+/// configure mode's commands as it starts, whoever runs it and whether
+/// or not it ever configures.
+#[tokio::test]
+async fn a_completion_gives_no_session_a_candidate() {
+    let cm = manager("completion");
+    for input in ["", "s", "set system "] {
+        let (code, _) = cm
+            .completion_for(Some(ALICE), "configure", input, true)
+            .await
+            .expect("configure mode");
+        assert_ne!(code, ExecCode::Nomatch, "`{input}`");
+    }
+    assert!(cm.candidates.borrow().is_empty());
+    assert!(
+        cm.completion_for(Some(ALICE), "nosuch", "", true)
+            .await
+            .is_none()
+    );
+}
+
+/// Neither do `exit` and `help`, the two configure-mode lines that run
+/// without the admin role.
+#[tokio::test]
+async fn exit_and_help_give_no_session_a_candidate() {
+    let cm = manager("ungated");
+    for line in ["exit", "ex", "help", "he"] {
+        cm.execute_for(&of(ALICE), "configure", line)
+            .expect("configure mode");
+    }
+    assert!(cm.candidates.borrow().is_empty());
+}
+
+/// A session that has a candidate completes against it: what it has
+/// typed is there to complete, and what another has typed is not.
+#[tokio::test]
+async fn a_completion_is_of_the_session_s_candidate() {
+    let cm = manager("completion-own");
+    run(&cm, ALICE, ETH0.trim_end());
+    run(&cm, BOB, ETH1.trim_end());
+    async fn names(cm: &ConfigManager, who: SessionKey) -> Vec<String> {
+        let (_, comps) = cm
+            .completion_for(Some(who), "configure", "delete interface ", true)
+            .await
+            .expect("configure mode");
+        comps.into_iter().map(|comp| comp.name).collect()
+    }
+    let alice = names(&cm, ALICE).await;
+    assert!(alice.contains(&"eth0".to_string()), "{alice:?}");
+    assert!(!alice.contains(&"eth1".to_string()), "{alice:?}");
+    let bob = names(&cm, BOB).await;
+    assert!(bob.contains(&"eth1".to_string()), "{bob:?}");
+    assert!(!bob.contains(&"eth0".to_string()), "{bob:?}");
+    // Asking changed nothing of either.
+    assert!(candidate(&cm, ALICE).contains(ETH0));
+    assert!(candidate(&cm, BOB).contains(ETH1));
+}
+
+/// `vtyctl show 'show candidate-config'` is answered with the candidate
+/// of the session that asks, as that session's own `show` is: run from
+/// a vty shell, it is that shell's. It gives no session a candidate.
+#[tokio::test]
+async fn a_show_from_outside_the_session_is_of_its_candidate() {
+    let mut cm = manager("shown");
+    run(&cm, ALICE, "set system hostname alice");
+    let line = "show candidate-config formal";
+    assert_eq!(
+        test_support::shown(&mut cm, Some(ALICE), line, false).await,
+        "set system hostname alice\n"
+    );
+    // Whoever has no candidate is shown the one that is everybody's.
+    assert_eq!(
+        test_support::shown(&mut cm, Some(BOB), line, false).await,
+        ""
+    );
+    assert_eq!(test_support::shown(&mut cm, None, line, false).await, "");
+    assert_eq!(cm.candidates.borrow().len(), 1);
+    // And the session's is as it was.
+    assert_eq!(candidate(&cm, ALICE), "set system hostname alice\n");
+    let json = test_support::shown(&mut cm, Some(ALICE), "show candidate-config", true).await;
+    assert!(json.contains("\"hostname\": \"alice\""), "{json}");
+}
+
 /// The candidate goes with the session's shell.
 #[tokio::test]
 async fn the_candidate_ends_with_the_shell() {
@@ -395,6 +522,18 @@ async fn a_refused_config_file_goes_to_the_first_session() {
     let _ = std::fs::remove_file(&cm.config_path);
     assert_eq!(running(&cm), "", "the file was committed");
     assert!(cm.store.refused_load.get());
+
+    // What only looks does not take it: the completion every shell
+    // asks for as it starts, a line that needs no admin role, the exec
+    // prompt. It is still there for an operator, and for an apply.
+    cm.completion_for(Some(BOB), "configure", "", true)
+        .await
+        .expect("configure mode");
+    cm.execute_for(&of(BOB), "configure", "help")
+        .expect("configure mode");
+    assert!(exec(&cm, BOB, "show candidate-config formal").contains("hostname fromfile"));
+    assert!(cm.store.refused_load.get(), "a shell that looks took it");
+    assert!(cm.candidates.borrow().is_empty());
 
     let alice = candidate(&cm, ALICE);
     assert!(alice.contains("hostname fromfile"), "{alice}");

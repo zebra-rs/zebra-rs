@@ -1,3 +1,4 @@
+use super::api::Context;
 use super::manager::{ConfigFormat, ConfigManager};
 use super::util::trim_first_line;
 use super::{Args, ExecCode};
@@ -7,12 +8,17 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::rc::Rc;
 
-type FuncMap = HashMap<String, fn(&ConfigManager) -> (ExecCode, String)>;
+/// The handler of a command: given the manager, and whose line the
+/// command is ([`Context`]). Most do the same for anyone; `commit` does
+/// not.
+type Func = fn(&ConfigManager, &Context) -> (ExecCode, String);
+
+type FuncMap = HashMap<String, Func>;
 
 /// The handler of a command that carries values: `rollback 2`,
 /// `rollback revision <id>`. It is given them as a protocol's callback
 /// is given the values of a `set` line.
-type ArgFunc = fn(&ConfigManager, Args) -> (ExecCode, String);
+type ArgFunc = fn(&ConfigManager, &Context, Args) -> (ExecCode, String);
 
 #[derive(Debug)]
 pub struct Mode {
@@ -33,12 +39,29 @@ impl Mode {
         }
     }
 
-    pub fn install_func(&mut self, path: String, f: fn(&ConfigManager) -> (ExecCode, String)) {
+    pub fn install_func(&mut self, path: String, f: Func) {
         self.fmap.insert(path, f);
     }
 
     pub fn install_func_args(&mut self, path: String, f: ArgFunc) {
         self.amap.insert(path, f);
+    }
+}
+
+/// Configure-mode lines that need no admin role: `exit` and `help`, or a
+/// prefix of either, alone on the line. Decided on the words, before
+/// anything runs, since other configure-mode commands change the
+/// candidate when they run. A prefix that the parser finds ambiguous runs
+/// nothing either.
+///
+/// They are also the lines that give a session no candidate of its own
+/// (`ConfigManager::session_enter`): whoever may run them without the
+/// role may not take what a candidate is made from.
+pub(super) fn ungated_in_configure(line: &str) -> bool {
+    let mut words = line.split_whitespace();
+    match (words.next(), words.next()) {
+        (Some(word), None) => "exit".starts_with(word) || "help".starts_with(word),
+        _ => false,
     }
 }
 
@@ -61,6 +84,7 @@ pub fn configure_mode_create(entry: Rc<Entry>) -> Mode {
     mode.install_func(String::from("/show"), show);
     install_show_config_handlers(&mut mode);
     mode.install_func(String::from("/commit"), commit);
+    mode.install_func_args(String::from("/commit/comment"), commit_comment_word);
     // `commit confirmed <minutes>` carries a number: see `rollback`.
     mode.install_func(String::from("/commit/confirmed"), commit_confirmed);
     mode.install_func_args(String::from("/commit/confirmed"), commit_confirmed_minutes);
@@ -127,7 +151,7 @@ fn install_show_config_handlers(mode: &mut Mode) {
     mode.install_func(String::from("/show/running-config/yaml"), show_running_yaml);
 }
 
-fn help(_config: &ConfigManager) -> (ExecCode, String) {
+fn help(_config: &ConfigManager, _: &Context) -> (ExecCode, String) {
     let output = r#"This is help for zebra-rs's `vty' shell.
 vty is based on GNU bash 5.2 so you can use any shell command in it,
 including redirection (>, >>, <) and pipes (|) to chain commands or
@@ -140,7 +164,7 @@ save output to files (e.g. `show running-config | grep bgp',
 // const CLI_CONFIGURE_MODE_PROMPT: &str = "(config)";
 const CLI_CONFIGURE_MODE_PROMPT: &str = ""; // Keep backward compatibility for now.
 
-fn configure(_config: &ConfigManager) -> (ExecCode, String) {
+fn configure(_config: &ConfigManager, _: &Context) -> (ExecCode, String) {
     let cli_command = format!(
         "SuccessExec\n\
          CLI_MODE=configure;CLI_MODE_STR=Configure;\
@@ -157,7 +181,7 @@ fn configure(_config: &ConfigManager) -> (ExecCode, String) {
 /// carries the password — DoExec is never used for the interactive path. This
 /// handler exists for the rare manual case of `vtyhelper -m exec enable` and
 /// returns a usage hint instead of silently doing nothing.
-fn enable(_config: &ConfigManager) -> (ExecCode, String) {
+fn enable(_config: &ConfigManager, _: &Context) -> (ExecCode, String) {
     let msg = "% 'enable' must be typed inside the 'vty' shell so the password \
                can be read without echo.\n\
                % From outside the vty shell, use 'vtyhelper -e' with the \
@@ -168,32 +192,32 @@ fn enable(_config: &ConfigManager) -> (ExecCode, String) {
 /// Fallback handler for `disable`. See `enable` above; for `disable` the vty
 /// shell wraps `vtyhelper -d` so it can also flip the local CLI_PRIVILEGE for
 /// the prompt change. From scripts, run `vtyhelper -d` directly.
-fn disable(_config: &ConfigManager) -> (ExecCode, String) {
+fn disable(_config: &ConfigManager, _: &Context) -> (ExecCode, String) {
     let msg = "% 'disable' is handled by the vty shell wrapper so the local \
                CLI_PRIVILEGE can be reset for the prompt.\n\
                % From scripts, use 'vtyhelper -d' directly.\n";
     (ExecCode::Show, msg.to_string())
 }
 
-fn cli_format_json(_config: &ConfigManager) -> (ExecCode, String) {
+fn cli_format_json(_config: &ConfigManager, _: &Context) -> (ExecCode, String) {
     let cli_command = r#"SuccessExec
 CLI_FORMAT=json;_cli_refresh"#;
     (ExecCode::Success, cli_command.to_string())
 }
 
-fn cli_format_terminal(_config: &ConfigManager) -> (ExecCode, String) {
+fn cli_format_terminal(_config: &ConfigManager, _: &Context) -> (ExecCode, String) {
     let cli_command = r#"SuccessExec
 CLI_FORMAT=terminal;_cli_refresh"#;
     (ExecCode::Success, cli_command.to_string())
 }
 
-fn exit(_config: &ConfigManager) -> (ExecCode, String) {
+fn exit(_config: &ConfigManager, _: &Context) -> (ExecCode, String) {
     let cli_command = r#"SuccessExec
 CLI_MODE=exec;CLI_MODE_PROMPT='';CLI_PRIVILEGE=1;_cli_refresh"#;
     (ExecCode::Success, cli_command.to_string())
 }
 
-fn show(config: &ConfigManager) -> (ExecCode, String) {
+fn show(config: &ConfigManager, _: &Context) -> (ExecCode, String) {
     let mut running = String::new();
     let mut candidate = String::new();
     config.store.running.borrow().format(&mut running);
@@ -218,7 +242,7 @@ fn show(config: &ConfigManager) -> (ExecCode, String) {
 
 /// The changed lines of the indented block view, each inside the
 /// unchanged blocks that hold it.
-fn compare(config: &ConfigManager) -> (ExecCode, String) {
+fn compare(config: &ConfigManager, _: &Context) -> (ExecCode, String) {
     let mut running = String::new();
     let mut candidate = String::new();
     config.store.running.borrow().format(&mut running);
@@ -228,7 +252,7 @@ fn compare(config: &ConfigManager) -> (ExecCode, String) {
 
 /// The changed `set` lines. This is the rendering `commit` itself
 /// diffs, so a line is here exactly when a commit would act on it.
-fn compare_formal(config: &ConfigManager) -> (ExecCode, String) {
+fn compare_formal(config: &ConfigManager, _: &Context) -> (ExecCode, String) {
     let mut running = String::new();
     let mut candidate = String::new();
     config.store.running.borrow().list(&mut running);
@@ -247,27 +271,31 @@ fn compare_formal(config: &ConfigManager) -> (ExecCode, String) {
 }
 
 /// Bare `rollback`: commit 0.
-fn rollback_latest(config: &ConfigManager) -> (ExecCode, String) {
+fn rollback_latest(config: &ConfigManager, _: &Context) -> (ExecCode, String) {
     rollback(config, Ok(0))
 }
 
 /// `rollback <n>`.
-fn rollback_number(config: &ConfigManager, args: Args) -> (ExecCode, String) {
+fn rollback_number(config: &ConfigManager, _: &Context, args: Args) -> (ExecCode, String) {
     rollback(config, commit_number(args))
 }
 
 /// `rollback revision <id>`.
-fn rollback_revision(config: &ConfigManager, args: Args) -> (ExecCode, String) {
+fn rollback_revision(config: &ConfigManager, _: &Context, args: Args) -> (ExecCode, String) {
     rollback(config, revision_number(config, args))
 }
 
 /// `compare rollback <n>`.
-fn compare_rollback_number(config: &ConfigManager, args: Args) -> (ExecCode, String) {
+fn compare_rollback_number(config: &ConfigManager, _: &Context, args: Args) -> (ExecCode, String) {
     compare_rollback(config, commit_number(args))
 }
 
 /// `compare rollback revision <id>`.
-fn compare_rollback_revision(config: &ConfigManager, args: Args) -> (ExecCode, String) {
+fn compare_rollback_revision(
+    config: &ConfigManager,
+    _: &Context,
+    args: Args,
+) -> (ExecCode, String) {
     compare_rollback(config, revision_number(config, args))
 }
 
@@ -371,60 +399,53 @@ fn compare_block(running: &str, candidate: &str) -> String {
 // `Config::formal()` renders the flat `set`-statement form ("formal");
 // `Config::json()` / `Config::yaml()` are the serialized equivalents.
 
-fn show_commit_history(config: &ConfigManager) -> (ExecCode, String) {
-    let mut output = config.history.render();
-    if let Some(deadline) = config.confirm_deadline() {
-        output.push_str(&format!(
-            "A confirmed commit is pending: rolled back at {} unless `commit` confirms it\n",
-            deadline.format("%Y-%m-%d %H:%M:%S UTC")
-        ));
-    }
-    (ExecCode::Show, output)
+fn show_commit_history(config: &ConfigManager, _: &Context) -> (ExecCode, String) {
+    (ExecCode::Show, config.commit_history())
 }
 
-fn show_candidate_cli(config: &ConfigManager) -> (ExecCode, String) {
+fn show_candidate_cli(config: &ConfigManager, _: &Context) -> (ExecCode, String) {
     let mut output = String::new();
     config.store.candidate.borrow().format(&mut output);
     (ExecCode::Show, output)
 }
 
-fn show_running_cli(config: &ConfigManager) -> (ExecCode, String) {
+fn show_running_cli(config: &ConfigManager, _: &Context) -> (ExecCode, String) {
     let mut output = String::new();
     config.store.running.borrow().format(&mut output);
     (ExecCode::Show, output)
 }
 
-fn show_candidate_formal(config: &ConfigManager) -> (ExecCode, String) {
+fn show_candidate_formal(config: &ConfigManager, _: &Context) -> (ExecCode, String) {
     let mut output = String::new();
     config.store.candidate.borrow().formal(&mut output);
     (ExecCode::Show, output)
 }
 
-fn show_candidate_json(config: &ConfigManager) -> (ExecCode, String) {
+fn show_candidate_json(config: &ConfigManager, _: &Context) -> (ExecCode, String) {
     let mut compact = String::new();
     config.store.candidate.borrow().json(&mut compact);
     (ExecCode::Show, prettify_json(compact))
 }
 
-fn show_candidate_yaml(config: &ConfigManager) -> (ExecCode, String) {
+fn show_candidate_yaml(config: &ConfigManager, _: &Context) -> (ExecCode, String) {
     let mut output = String::new();
     config.store.candidate.borrow().yaml(&mut output);
     (ExecCode::Show, output)
 }
 
-fn show_running_formal(config: &ConfigManager) -> (ExecCode, String) {
+fn show_running_formal(config: &ConfigManager, _: &Context) -> (ExecCode, String) {
     let mut output = String::new();
     config.store.running.borrow().formal(&mut output);
     (ExecCode::Show, output)
 }
 
-fn show_running_json(config: &ConfigManager) -> (ExecCode, String) {
+fn show_running_json(config: &ConfigManager, _: &Context) -> (ExecCode, String) {
     let mut compact = String::new();
     config.store.running.borrow().json(&mut compact);
     (ExecCode::Show, prettify_json(compact))
 }
 
-fn show_running_yaml(config: &ConfigManager) -> (ExecCode, String) {
+fn show_running_yaml(config: &ConfigManager, _: &Context) -> (ExecCode, String) {
     let mut output = String::new();
     config.store.running.borrow().yaml(&mut output);
     (ExecCode::Show, output)
@@ -444,25 +465,51 @@ pub(super) fn prettify_json(compact: String) -> String {
         .unwrap_or(compact)
 }
 
-fn commit(config: &ConfigManager) -> (ExecCode, String) {
-    if let Some(refusal) = config.commit_refusal() {
+fn commit(config: &ConfigManager, ctx: &Context) -> (ExecCode, String) {
+    if let Some(refusal) = config.commit_refusal(ctx) {
         return (ExecCode::Show, refusal);
     }
-    let result = config.commit_config();
-    match result {
+    // A `commit` line of an apply's document, or of the config file,
+    // is that writer's commit and is recorded as one.
+    match config.commit_as(ctx.origin(), ctx) {
         Ok(_) => {
             // Typed by an operator: it confirms a `commit confirmed`.
-            config.confirm_commit();
-            (ExecCode::Show, config.commit_note())
+            // No other writer's `commit` line does; the confirmation is
+            // the operator's to give.
+            if ctx.typed() {
+                config.confirm_commit();
+            }
+            (ExecCode::Show, config.commit_note(ctx))
         }
         Err(err) => (ExecCode::Show, err.to_string()),
     }
 }
 
+/// `commit comment <word>`, as the parser reads the line. A line with a
+/// comment is taken apart before it is parsed ([`split_commit_comment`])
+/// and does not get here. Should one, by a spelling of the keyword that
+/// function does not know, the commit is made with the word the parser
+/// took as the text: a `commit` line that commits nothing and says
+/// nothing reads as a commit that was made.
+fn commit_comment_word(
+    config: &ConfigManager,
+    ctx: &Context,
+    mut args: Args,
+) -> (ExecCode, String) {
+    match args.string() {
+        Some(text) => commit(config, &ctx.commented(text)),
+        None => (ExecCode::Incomplete, String::new()),
+    }
+}
+
 /// `commit confirmed <minutes>`.
-fn commit_confirmed_minutes(config: &ConfigManager, mut args: Args) -> (ExecCode, String) {
+fn commit_confirmed_minutes(
+    config: &ConfigManager,
+    ctx: &Context,
+    mut args: Args,
+) -> (ExecCode, String) {
     match args.u16() {
-        Some(minutes) => (ExecCode::Show, config.commit_confirmed(minutes.into())),
+        Some(minutes) => (ExecCode::Show, config.commit_confirmed(ctx, minutes.into())),
         // The schema took it as a number of minutes.
         None => (ExecCode::Nomatch, String::new()),
     }
@@ -476,7 +523,13 @@ fn commit_confirmed_minutes(config: &ConfigManager, mut args: Args) -> (ExecCode
 /// Only a line whose first word is `commit`, or an abbreviation of it
 /// that is not also one of `compare`, is looked at: `comment` anywhere
 /// else is a value (`set … description comment`).
+///
+/// The keyword is read as the parser reads any other: `comment`, or an
+/// abbreviation of it that is not also one of `confirmed` (`comm`,
+/// `com`). Left to the parser, such a line would be `commit comment`
+/// with one word of text, which is not this command.
 pub(super) fn split_commit_comment(input: &str) -> Option<(String, Option<String>)> {
+    let is_comment = |word: &str| "comment".starts_with(word) && !"confirmed".starts_with(word);
     let line = input.trim();
     let first = line.split_whitespace().next()?;
     if first.len() < 4 || !"commit".starts_with(first) {
@@ -488,7 +541,9 @@ pub(super) fn split_commit_comment(input: &str) -> Option<(String, Option<String
     loop {
         rest = rest.trim_start();
         let word = rest.split_whitespace().next()?;
-        if word == "comment" {
+        // Not the first word: that is `commit`, which `comm` abbreviates
+        // too.
+        if !command.is_empty() && is_comment(word) {
             rest = rest[word.len()..].trim();
             break;
         }
@@ -512,20 +567,20 @@ pub(super) fn split_commit_comment(input: &str) -> Option<(String, Option<String
 }
 
 /// Bare `commit confirmed`.
-fn commit_confirmed(config: &ConfigManager) -> (ExecCode, String) {
+fn commit_confirmed(config: &ConfigManager, ctx: &Context) -> (ExecCode, String) {
     (
         ExecCode::Show,
-        config.commit_confirmed(super::confirm::CONFIRM_MINUTES),
+        config.commit_confirmed(ctx, super::confirm::CONFIRM_MINUTES),
     )
 }
 
-fn discard(config: &ConfigManager) -> (ExecCode, String) {
+fn discard(config: &ConfigManager, _: &Context) -> (ExecCode, String) {
     config.store.discard();
     (ExecCode::Show, String::from(""))
 }
 
-fn load(config: &ConfigManager) -> (ExecCode, String) {
-    config.load_config();
+fn load(config: &ConfigManager, ctx: &Context) -> (ExecCode, String) {
+    config.load_config_for(ctx);
     (ExecCode::Show, String::from(""))
 }
 
@@ -558,52 +613,46 @@ fn save_reply(config: &ConfigManager, saved: std::io::Result<&Path>) -> (ExecCod
     (ExecCode::Show, output)
 }
 
+/// `save`: write the running config to the config file, in the format
+/// the file has, or converted to `format`.
+///
 /// A commit awaiting confirmation is not saved: the file would keep it
 /// when the daemon takes it back, and a restart would bring it back.
-fn save_unconfirmed(config: &ConfigManager) -> Option<(ExecCode, String)> {
-    config.confirm_deadline()?;
-    Some((
-        ExecCode::Show,
-        "% A confirmed commit is pending: `commit` to confirm it, then save\n".to_string(),
-    ))
-}
-
-fn save(config: &ConfigManager) -> (ExecCode, String) {
-    if let Some(refused) = save_unconfirmed(config) {
-        return refused;
+fn save_as(config: &ConfigManager, format: Option<ConfigFormat>) -> (ExecCode, String) {
+    if config.confirm_deadline().is_some() {
+        return (
+            ExecCode::Show,
+            "% A confirmed commit is pending: `commit` to confirm it, then save\n".to_string(),
+        );
     }
-    save_reply(config, config.save_config())
+    let saved = match format {
+        Some(format) => config.save_config_as(format),
+        None => config.save_config(),
+    };
+    save_reply(config, saved)
 }
 
-fn save_cli(config: &ConfigManager) -> (ExecCode, String) {
-    if let Some(refused) = save_unconfirmed(config) {
-        return refused;
-    }
-    save_reply(config, config.save_config_as(ConfigFormat::Cli))
+fn save(config: &ConfigManager, _: &Context) -> (ExecCode, String) {
+    save_as(config, None)
 }
 
-fn save_formal(config: &ConfigManager) -> (ExecCode, String) {
-    if let Some(refused) = save_unconfirmed(config) {
-        return refused;
-    }
-    save_reply(config, config.save_config_as(ConfigFormat::SetDelete))
+fn save_cli(config: &ConfigManager, _: &Context) -> (ExecCode, String) {
+    save_as(config, Some(ConfigFormat::Cli))
 }
 
-fn save_json(config: &ConfigManager) -> (ExecCode, String) {
-    if let Some(refused) = save_unconfirmed(config) {
-        return refused;
-    }
-    save_reply(config, config.save_config_as(ConfigFormat::Json))
+fn save_formal(config: &ConfigManager, _: &Context) -> (ExecCode, String) {
+    save_as(config, Some(ConfigFormat::SetDelete))
 }
 
-fn save_yaml(config: &ConfigManager) -> (ExecCode, String) {
-    if let Some(refused) = save_unconfirmed(config) {
-        return refused;
-    }
-    save_reply(config, config.save_config_as(ConfigFormat::Yaml))
+fn save_json(config: &ConfigManager, _: &Context) -> (ExecCode, String) {
+    save_as(config, Some(ConfigFormat::Json))
 }
 
-fn clear_isis_spf(_config: &ConfigManager) -> (ExecCode, String) {
+fn save_yaml(config: &ConfigManager, _: &Context) -> (ExecCode, String) {
+    save_as(config, Some(ConfigFormat::Yaml))
+}
+
+fn clear_isis_spf(_config: &ConfigManager, _: &Context) -> (ExecCode, String) {
     let output = String::from("clear isis spf");
     (ExecCode::Show, output)
 }

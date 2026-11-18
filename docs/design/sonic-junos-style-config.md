@@ -332,6 +332,11 @@ What that does not give:
   belongs to the daemon, not the shell, so the rollback survives the loss of
   the session that asked for it, which is the case it exists for. Only the
   unconfirmed commit is rolled back: what bgpcfgd applied meanwhile is kept.
+  Where those applies have left the configuration to go back to invalid, the
+  rollback is refused. The commit then stays pending and is shown as that in
+  `show commit history`, and the daemon tries again every minute: bgpcfgd's
+  next apply may cure it. A `commit` line in a document bgpcfgd applies is
+  bgpcfgd's commit and confirms nothing.
 
 These are useful to zebra-rs off SONiC as well and can ship first.
 

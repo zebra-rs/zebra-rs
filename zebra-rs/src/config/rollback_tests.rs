@@ -2,14 +2,10 @@
 
 use super::super::ApplyCode;
 use super::super::Completion;
-use super::super::api::{DisplayRequest, DisplayTxRequest, Message};
 use super::super::history::{HISTORY_MAX, Origin};
 use super::super::manager::ConfigManager;
 use super::super::manager::test_support::{self, candidate, commit, run, running};
 use super::*;
-use std::time::Duration;
-use tokio::sync::{mpsc, oneshot};
-use tokio::time::timeout;
 
 fn manager(name: &str) -> ConfigManager {
     manager_at(&config_path(name))
@@ -37,30 +33,7 @@ fn refused(cm: &ConfigManager, line: &str) -> String {
 /// second phase of a show, which a session's own reply does not go
 /// through. The text, or the JSON of `-j`.
 async fn shown(cm: &mut ConfigManager, line: &str, json: bool) -> String {
-    let paths = {
-        let mode = cm.modes.get("exec").expect("exec mode");
-        cm.execute(mode, line).2
-    };
-    let (resp, answered) = oneshot::channel();
-    cm.process_message(Message::DisplayTx(DisplayTxRequest {
-        paths: paths.clone(),
-        resp,
-    }))
-    .await;
-    let wait = Duration::from_secs(5);
-    let answer = timeout(wait, answered)
-        .await
-        .expect("no answer to the show")
-        .expect("the manager answers");
-    let (resp, mut output) = mpsc::channel(4);
-    answer
-        .tx
-        .send(DisplayRequest { paths, json, resp })
-        .expect("the answer takes the request");
-    timeout(wait, output.recv())
-        .await
-        .expect("no output")
-        .expect("output")
+    test_support::shown(cm, None, line, json).await
 }
 
 /// A manager as the daemon is at startup with `file` as its config
@@ -961,10 +934,109 @@ fn the_config_file_at_a_restart_joins_the_history() {
 }
 
 /// Serve a command as the session of `user` does.
+/// Two lives of the daemon that start in the same second (no clock at
+/// boot, or a restart within the second) do not give two commits the
+/// same revision: one names one commit, after the restart as before.
+#[test]
+fn a_restart_in_the_same_second_shares_no_revision() {
+    let dir = history_dir("same-second");
+    let config = |n: usize| format!("system hostname r{n}\n");
+    let life = || {
+        let history = super::super::history::CommitHistory::starting_at(1794906748);
+        history.keep_in(&dir);
+        history
+    };
+    let first = life();
+    first.record(config(1), Origin::Commit, None, None);
+    first.record(config(2), Origin::Commit, None, None);
+    let noted = first.revisions()[1].clone();
+    assert_eq!(noted, "1794906748-1");
+
+    let second = life();
+    second.record(config(3), Origin::Commit, None, None);
+    second.record(config(4), Origin::Commit, None, None);
+    let revisions = second.revisions();
+    assert_eq!(
+        revisions,
+        [
+            "1794906748-4",
+            "1794906748-3",
+            "1794906748-2",
+            "1794906748-1"
+        ]
+    );
+    // The revision noted in the first life still names that commit.
+    let number = second.number_of(&noted).expect("still kept");
+    assert_eq!(second.config(number).unwrap(), config(1));
+
+    // And a third: the count goes on from what is kept, not from the
+    // commits of the life before alone.
+    let third = life();
+    third.record(config(5), Origin::Commit, None, None);
+    assert_eq!(third.revisions()[0], "1794906748-5");
+    let mut unique = third.revisions();
+    unique.sort();
+    unique.dedup();
+    assert_eq!(unique.len(), third.len());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Without `--commit-history-dir` the history is kept beside the config
+/// file, in the directory named after it.
+#[test]
+fn the_history_is_kept_beside_the_config_file() {
+    let path = config_path("beside");
+    let beside = history_dir("beside");
+    let cm = manager_at(&path);
+    cm.keep_history(None);
+    commit(&cm, &["set system hostname r1"]);
+    assert_eq!(files(&beside), ["0000000000.conf"]);
+    let _ = std::fs::remove_dir_all(&beside);
+}
+
+/// A config file that is not a file has no directory beside it: every
+/// daemon started with `-c /dev/null` would share `/dev/null.commits`.
+/// The history is then in memory, unless a directory is named.
+#[test]
+fn a_config_file_that_is_no_file_keeps_the_history_in_memory() {
+    // A directory stands in for the device: neither is a regular file.
+    let special =
+        std::env::temp_dir().join(format!("zebra-rs-rollback-special-{}", std::process::id()));
+    let beside = std::path::PathBuf::from(format!("{}.commits", special.display()));
+    let _ = std::fs::remove_dir_all(&beside);
+    std::fs::create_dir_all(&special).unwrap();
+    let cm = manager_at(&special);
+    cm.keep_history(None);
+    commit(&cm, &["set system hostname r1"]);
+    assert_eq!(cm.history.len(), 1, "the commit is still recorded");
+    assert!(!beside.exists(), "{} was made", beside.display());
+
+    // The real thing, where the test can tell: the directory must not
+    // be there afterwards unless it was before.
+    let was_there = std::path::Path::new("/dev/null.commits").exists();
+    let cm = manager_at(std::path::Path::new("/dev/null"));
+    cm.keep_history(None);
+    commit(&cm, &["set system hostname r1"]);
+    assert_eq!(
+        std::path::Path::new("/dev/null.commits").exists(),
+        was_there
+    );
+
+    // A directory that is named is used all the same.
+    let named = history_dir("special-named");
+    let cm = manager_at(&special);
+    cm.keep_history(Some(&named));
+    commit(&cm, &["set system hostname r1"]);
+    assert_eq!(files(&named), ["0000000000.conf"]);
+    let _ = std::fs::remove_dir_all(&named);
+    let _ = std::fs::remove_dir_all(&special);
+}
+
 fn run_as(cm: &ConfigManager, user: &str, line: &str) -> String {
-    cm.commit_user.replace(Some(user.to_string()));
-    let output = run(cm, line);
-    cm.commit_user.replace(None);
+    let mode = cm.modes.get("configure").expect("configure mode");
+    let ctx = Context::session(None, Some(user.to_string()));
+    let (code, output, _) = cm.execute_as(&ctx, mode, line);
+    assert_eq!(code, ExecCode::Show, "`{line}`: {output:?}");
     output
 }
 
@@ -1040,6 +1112,58 @@ async fn a_comment_does_not_outlive_its_line() {
     assert!(candidate(&cm).contains("description comment\n"));
 }
 
+/// The keyword may be abbreviated like any other. Such a line is the
+/// commit with its comment, not a line that is taken and does nothing.
+#[tokio::test]
+async fn an_abbreviated_comment_still_commits() {
+    let cm = manager("comment-abbreviated");
+    run(&cm, "set system hostname r1");
+    assert_eq!(run(&cm, "commit comm one word"), "");
+    assert_eq!(running(&cm), "system hostname r1\n");
+    run(&cm, "set system hostname r2");
+    assert_eq!(run(&cm, "commit com fix"), "");
+    assert_eq!(running(&cm), "system hostname r2\n");
+    run(&cm, "set system hostname r3");
+    assert!(
+        run(&cm, "commit confirmed 5 comm trying r3")
+            .starts_with("Commit will be rolled back in 5 minutes")
+    );
+    let listing = run(&cm, "show commit history");
+    let lines: Vec<&str> = listing.lines().collect();
+    assert_eq!(lines[1], "    trying r3", "{listing}");
+    assert_eq!(lines[3], "    fix", "{listing}");
+    assert_eq!(lines[5], "    one word", "{listing}");
+
+    // Short of telling it from `confirmed`, the line is refused aloud.
+    run(&cm, "set system hostname r4");
+    let mode = cm.modes.get("configure").expect("configure mode");
+    let (code, _, _) = cm.execute(mode, "commit co fix");
+    assert_eq!(code, ExecCode::Ambiguous);
+    assert_eq!(running(&cm), "system hostname r3\n");
+}
+
+/// `commit comment <word>` as the parser reads it is not reached while
+/// the line is taken apart first. Were it, it commits with the word.
+#[tokio::test]
+async fn the_parsed_comment_commits_too() {
+    let cm = manager("comment-parsed");
+    run(&cm, "set system hostname r1");
+    let word = Args(std::collections::VecDeque::from(["fix".to_string()]));
+    assert_eq!(
+        commit_comment_word(&cm, &Context::default(), word),
+        (ExecCode::Show, String::new())
+    );
+    assert_eq!(running(&cm), "system hostname r1\n");
+    assert!(run(&cm, "show commit history").contains("\n    fix\n"));
+    // The text is that commit's alone.
+    run(&cm, "set system hostname r2");
+    assert_eq!(run(&cm, "commit"), "");
+    assert_eq!(
+        run(&cm, "show commit history").matches("    fix\n").count(),
+        1
+    );
+}
+
 /// `commit confirmed` takes a comment too, with or without its minutes.
 #[tokio::test]
 async fn commit_confirmed_takes_a_comment() {
@@ -1082,6 +1206,19 @@ fn the_comment_is_split_off_the_line() {
         split("commit comment \"\""),
         Some(("commit".to_string(), None))
     );
+    // The keyword abbreviated, as the parser takes any other: down to
+    // where it is `confirmed` as well.
+    assert_eq!(split("commit comm a b"), some("commit", "a b"));
+    assert_eq!(split("commit com fix"), some("commit", "fix"));
+    assert_eq!(split("comm comm a"), some("comm", "a"));
+    assert_eq!(
+        split("commit confirmed 5 comm a b"),
+        some("commit confirmed 5", "a b")
+    );
+    assert_eq!(split("commit conf com a"), some("commit conf", "a"));
+    assert_eq!(split("commit com"), Some(("commit".to_string(), None)));
+    assert_eq!(split("commit co fix"), None, "`co` is `confirmed` too");
+    assert_eq!(split("commit c fix"), None);
     assert_eq!(split("commit"), None);
     assert_eq!(split("commit confirmed 5"), None);
     assert_eq!(split("com comment a"), None, "`com` is `compare` too");
@@ -1095,15 +1232,55 @@ fn the_comment_is_split_off_the_line() {
 #[tokio::test]
 async fn an_apply_is_listed_as_an_apply() {
     let cm = manager("apply-listed");
-    cm.commit_user.replace(Some("root".to_string()));
-    let resp = cm.deploy("set system hostname applied\n");
-    cm.commit_user.replace(None);
+    let resp = cm.deploy_as("set system hostname applied\n", Some("root".to_string()));
     assert_eq!(resp.apply_code, ApplyCode::Applied);
     let listing = run(&cm, "show commit history");
     assert!(
         listing.trim_end().ends_with("  by root  apply"),
         "{listing}"
     );
+}
+
+/// So is the commit of a `commit` line in its document: it is the
+/// apply's, not a commit an operator typed.
+#[tokio::test]
+async fn an_apply_s_own_commit_line_is_listed_as_an_apply() {
+    let cm = manager("apply-commit-line");
+    let resp = cm.deploy_as(
+        "set system hostname one\ncommit\nset system hostname two\n",
+        Some("root".to_string()),
+    );
+    assert_eq!(resp.apply_code, ApplyCode::Applied);
+    assert_eq!(running(&cm), "system hostname two\n");
+    let listing = run(&cm, "show commit history");
+    let lines: Vec<&str> = listing.lines().collect();
+    assert_eq!(lines.len(), 2, "{listing}");
+    for line in lines {
+        assert!(line.ends_with("  by root  apply"), "{listing}");
+    }
+    // A line an operator types afterwards is an operator's again.
+    commit(&cm, &["set system hostname three"]);
+    let listing = run(&cm, "show commit history");
+    assert!(
+        !listing.lines().next().unwrap().contains("apply"),
+        "{listing}"
+    );
+}
+
+/// And the commit of a `commit` line in the config file is the file's.
+#[test]
+fn a_config_file_s_own_commit_line_is_the_file_s() {
+    let cm = started(
+        "file-commit-line",
+        Some("set system hostname one\ncommit\nset system hostname two\n"),
+    );
+    assert_eq!(running(&cm), "system hostname two\n");
+    let listing = run(&cm, "show commit history");
+    let lines: Vec<&str> = listing.lines().collect();
+    assert_eq!(lines.len(), 2, "{listing}");
+    for line in lines {
+        assert!(line.ends_with("  config file"), "{listing}");
+    }
 }
 
 /// A writer that applies often does not push an operator's commits out

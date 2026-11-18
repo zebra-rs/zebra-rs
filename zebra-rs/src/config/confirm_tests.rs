@@ -1,33 +1,12 @@
 //! `commit confirmed`: taken back unless a `commit` confirms it.
 
 use super::super::manager::ConfigManager;
-use super::*;
-use tokio::sync::mpsc;
+use super::super::manager::test_support::{self, run};
 
 fn manager(name: &str) -> ConfigManager {
     let path = std::env::temp_dir().join(format!("zebra-rs-confirm-{name}-{}", std::process::id()));
     let _ = std::fs::remove_file(&path);
-    let (rib_tx, _rib_rx) = mpsc::unbounded_channel();
-    let (rib_inbound_tx, _rib_inbound_rx) = mpsc::unbounded_channel();
-    let (policy_tx, _policy_rx) = mpsc::unbounded_channel();
-    ConfigManager::new(
-        concat!(env!("CARGO_MANIFEST_DIR"), "/yang").to_string(),
-        Vec::new(),
-        Some(path.to_string_lossy().into_owned()),
-        rib_tx,
-        rib_inbound_tx,
-        policy_tx,
-        Default::default(),
-    )
-    .expect("manager builds")
-}
-
-/// Type a line in a configure-mode session and return what it prints.
-fn run(cm: &ConfigManager, line: &str) -> String {
-    let mode = cm.modes.get("configure").expect("configure mode");
-    let (code, output, _) = cm.execute(mode, line);
-    assert_eq!(code, ExecCode::Show, "`{line}`: {output:?}");
-    output
+    test_support::manager(&path, Vec::new(), Default::default())
 }
 
 /// What another writer commits: `vtyctl apply`'s commit, which is not
@@ -131,6 +110,31 @@ async fn the_listing_says_a_commit_is_pending() {
     assert!(!run(&cm, "show commit history").contains("pending"));
 }
 
+/// `vtyctl show 'show commit history'` says it too: the listing is the
+/// one a session's `show` has.
+#[tokio::test]
+async fn the_listing_from_outside_a_session_says_so_too() {
+    let mut cm = r1("listing-shown");
+    let line = "show commit history";
+    assert!(
+        !test_support::shown(&mut cm, None, line, false)
+            .await
+            .contains("pending")
+    );
+    run(&cm, "set system hostname r2");
+    assert_eq!(run(&cm, "commit confirmed"), ROLLED_BACK_IN_10);
+    let listing = test_support::shown(&mut cm, None, line, false).await;
+    assert_eq!(listing, run(&cm, line));
+    assert!(
+        listing
+            .lines()
+            .last()
+            .unwrap()
+            .starts_with("A confirmed commit is pending: rolled back at "),
+        "{listing}"
+    );
+}
+
 /// With nothing edited and nothing pending there is nothing to take
 /// back, so no timer is started.
 #[tokio::test]
@@ -220,6 +224,148 @@ async fn another_writer_s_commit_is_kept() {
         after.contains("set interface eth0 ipv4 address 10.0.0.1/24\n"),
         "{after}"
     );
+}
+
+/// Nor does a `commit` line in the document of an apply: the
+/// confirmation is an operator's to give, and that line is the apply's.
+#[tokio::test]
+async fn an_apply_s_own_commit_line_does_not_confirm() {
+    let cm = r1("apply-commit-line");
+    run(&cm, "set system hostname r2");
+    assert_eq!(run(&cm, "commit confirmed"), ROLLED_BACK_IN_10);
+
+    let resp = cm.deploy("set interface eth0 ipv4 address 10.0.0.1/24\ncommit\n");
+    assert_eq!(resp.apply_code, super::super::ApplyCode::Applied);
+    assert!(
+        running(&cm).contains("set interface eth0 ipv4 address 10.0.0.1/24\n"),
+        "the apply's line was not committed"
+    );
+    assert!(
+        cm.confirm_deadline().is_some(),
+        "an apply's `commit` line confirmed"
+    );
+
+    time_out(&cm);
+    let after = running(&cm);
+    assert!(after.contains("set system hostname r1\n"), "{after}");
+    assert!(
+        after.contains("set interface eth0 ipv4 address 10.0.0.1/24\n"),
+        "{after}"
+    );
+}
+
+/// The rollback goes back to a configuration that was running, and is
+/// held to no more than that one was: what the startup config is only
+/// warned about does not refuse it. Refused, the change that may have
+/// cut the operator off would stay.
+#[tokio::test]
+async fn the_rollback_is_held_to_what_the_startup_config_was() {
+    let cm = manager("tolerated");
+    // A host name no commit takes, and the startup config is warned of.
+    std::fs::write(&cm.config_path, "set system hostname r1-\n").unwrap();
+    cm.load_config();
+    let _ = std::fs::remove_file(&cm.config_path);
+    assert_eq!(running(&cm), "set system hostname r1-\n");
+
+    run(&cm, "set system hostname r2");
+    assert_eq!(run(&cm, "commit confirmed"), ROLLED_BACK_IN_10);
+    // What the rollback is about to commit, an operator's commit is
+    // refused.
+    run(&cm, "set system hostname r1-");
+    assert_ne!(run(&cm, "commit confirmed"), ROLLED_BACK_IN_10);
+    assert_eq!(running(&cm), "set system hostname r2\n");
+    run(&cm, "discard");
+
+    time_out(&cm);
+    assert_eq!(running(&cm), "set system hostname r1-\n");
+    assert!(cm.confirm_deadline().is_none());
+    let listing = run(&cm, "show commit history");
+    let first = listing.lines().next().unwrap();
+    assert!(first.ends_with("rollback, not confirmed"), "{listing}");
+}
+
+/// A rollback that is refused all the same (what others committed since
+/// made the configuration to go back to invalid) is not forgotten: the
+/// commit is still pending, the listing says why, `save` is still
+/// refused, and the daemon tries again.
+#[tokio::test(start_paused = true)]
+async fn a_refused_rollback_stays_pending_and_is_tried_again() {
+    let mut cm = r1("rollback-refused");
+    run(&cm, "set system hostname r2");
+    assert_eq!(
+        run(&cm, "commit confirmed 1"),
+        "Commit will be rolled back in 1 minute unless confirmed by `commit`\n"
+    );
+    // The configuration to go back to, made one no commit takes.
+    let broken = cm
+        .paths("router isis interface eth0 te-metric measurement loss interval 45".to_string())
+        .expect("the line reads");
+    let before = cm.confirm.borrow().as_ref().unwrap().before.clone();
+    super::super::configs::set(broken.clone(), before.clone());
+
+    tokio::time::sleep(std::time::Duration::from_secs(61)).await;
+    let msg = cm.rx.recv().await.expect("the timer's message");
+    cm.process_message(msg).await;
+    assert_eq!(running(&cm), "set system hostname r2\n", "rolled back");
+    assert_eq!(candidate(&cm), "set system hostname r2\n");
+    assert!(
+        cm.confirm_deadline().is_some(),
+        "the pending commit was dropped"
+    );
+    let listing = run(&cm, "show commit history");
+    assert!(
+        listing.contains("A confirmed commit was not confirmed, and its rollback was refused:\n  ")
+            && listing.contains("The rollback is tried again at ")
+            && listing.ends_with("; `commit` keeps the change instead\n"),
+        "{listing}"
+    );
+    assert_eq!(
+        run(&cm, "save"),
+        "% A confirmed commit is pending: `commit` to confirm it, then save\n"
+    );
+
+    // Tried again a minute later, and refused again: still pending.
+    tokio::time::sleep(std::time::Duration::from_secs(61)).await;
+    let msg = cm.rx.recv().await.expect("the retry's message");
+    cm.process_message(msg).await;
+    assert_eq!(running(&cm), "set system hostname r2\n");
+    assert!(cm.confirm_deadline().is_some());
+
+    // Cured: the next try takes the commit back.
+    let mut isis = broken;
+    isis.truncate(2);
+    assert!(super::super::configs::delete(isis, before));
+    tokio::time::sleep(std::time::Duration::from_secs(61)).await;
+    let msg = cm.rx.recv().await.expect("the second retry's message");
+    cm.process_message(msg).await;
+    assert_eq!(running(&cm), "set system hostname r1\n");
+    assert!(cm.confirm_deadline().is_none());
+    assert!(!run(&cm, "show commit history").contains("refused"));
+}
+
+/// An operator's `commit` keeps the change a refused rollback could not
+/// take back, and ends the tries.
+#[tokio::test]
+async fn a_commit_keeps_what_a_refused_rollback_left() {
+    let cm = r1("rollback-refused-confirm");
+    run(&cm, "set system hostname r2");
+    assert_eq!(run(&cm, "commit confirmed"), ROLLED_BACK_IN_10);
+    let broken = cm
+        .paths("router isis interface eth0 te-metric measurement loss interval 45".to_string())
+        .expect("the line reads");
+    let before = cm.confirm.borrow().as_ref().unwrap().before.clone();
+    super::super::configs::set(broken, before);
+    time_out(&cm);
+    assert!(cm.confirm_deadline().is_some());
+    let retry = cm.confirm_generation.get();
+
+    run(&cm, "set system router-id 10.0.0.1");
+    assert_eq!(run(&cm, "commit"), "");
+    assert!(cm.confirm_deadline().is_none());
+    cm.confirm_timeout(retry);
+    assert!(running(&cm).contains("set system hostname r2\n"));
+    assert!(run(&cm, "save").starts_with("Configuration saved to "));
+    let _ = std::fs::remove_file(&cm.config_path);
 }
 
 /// Uncommitted edits at the time of the rollback are not committed by

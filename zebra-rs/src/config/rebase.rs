@@ -41,13 +41,47 @@ use similar::{ChangeTag, TextDiff};
 use super::configs::{Config, delete, set, ymatch_enum};
 use super::vty::{CommandPath, YangMatch};
 
+/// What makes one configuration of another, as the lines a commit of it
+/// is dispatched from: the paths of the lines that go and of those that
+/// come, each in the order of its rendering.
+pub struct Changes {
+    pub removed: Vec<Vec<CommandPath>>,
+    pub added: Vec<Vec<CommandPath>>,
+}
+
+impl Changes {
+    /// What makes the configuration rendered as `before` the one
+    /// rendered as `after` ([`Config::list`]).
+    ///
+    /// `paths` reads one config line into its path, `None` for a line
+    /// the schema does not read back: a commit does not dispatch such a
+    /// line either.
+    pub fn between(
+        before: &str,
+        after: &str,
+        paths: impl Fn(&str) -> Option<Vec<CommandPath>>,
+    ) -> Self {
+        let (mut removed, mut added) = (Vec::new(), Vec::new());
+        for change in TextDiff::from_lines(before, after).iter_all_changes() {
+            let side = match change.tag() {
+                ChangeTag::Delete => &mut removed,
+                ChangeTag::Insert => &mut added,
+                ChangeTag::Equal => continue,
+            };
+            if let Some(path) = paths(change.value().trim_end()) {
+                side.push(path);
+            }
+        }
+        Self { removed, added }
+    }
+}
+
 /// Make `ours`, edits of the config `base`, the same edits of the config
 /// `theirs`, which a commit has made of `base` since. `ours` is changed
 /// in place.
 ///
 /// `paths` reads one config line (as [`Config::list`] renders it) into
-/// its path, `None` for a line the schema does not read back: a commit
-/// does not dispatch such a line either.
+/// its path: see [`Changes::between`].
 pub fn rebase(
     base: &Rc<Config>,
     theirs: &Rc<Config>,
@@ -58,17 +92,19 @@ pub fn rebase(
     let (mut before, mut after) = (String::new(), String::new());
     base.list(&mut before);
     theirs.list(&mut after);
-    let (mut removed, mut added) = (Vec::new(), Vec::new());
-    for change in TextDiff::from_lines(&before, &after).iter_all_changes() {
-        let side = match change.tag() {
-            ChangeTag::Delete => &mut removed,
-            ChangeTag::Insert => &mut added,
-            ChangeTag::Equal => continue,
-        };
-        if let Some(path) = paths(change.value().trim_end()) {
-            side.push(path);
-        }
-    }
+    apply(
+        &Changes::between(&before, &after, paths),
+        base,
+        theirs,
+        ours,
+    );
+}
+
+/// [`rebase`], for a caller that has read what the commit changed
+/// (`committed`: what makes `base` into `theirs`) and has its own use
+/// for it.
+pub fn apply(committed: &Changes, base: &Rc<Config>, theirs: &Rc<Config>, ours: &Rc<Config>) {
+    let Changes { removed, added } = committed;
 
     // `ordered-by user` leaf-lists among them, each as the path of its
     // node with one of its values to copy the others from.
@@ -181,7 +217,7 @@ fn ordered_value(path: &[CommandPath]) -> Option<(&CommandPath, &[CommandPath])>
 
 /// The node `path` leads to under `root`. A leaf's value and a
 /// leaf-list's member are on the node of the leaf, not nodes themselves.
-fn find(root: &Rc<Config>, path: &[CommandPath]) -> Option<Rc<Config>> {
+pub(super) fn find(root: &Rc<Config>, path: &[CommandPath]) -> Option<Rc<Config>> {
     let mut node = root.clone();
     for step in path {
         node = match kind(step) {

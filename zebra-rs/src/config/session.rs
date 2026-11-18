@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 #[cfg(target_os = "linux")]
-use dashmap::DashMap;
+use dashmap::{DashMap, DashSet};
 
 /// Default idle TTL for VTY sessions. Mirrors the typical Cisco IOS
 /// `exec-timeout 10 0` default.
@@ -71,6 +71,10 @@ pub enum Role {
 #[derive(Debug, Clone, Copy)]
 pub struct SessionContext {
     pub key: SessionKey,
+    /// The client that sent the request, from `SO_PEERCRED`. It is the
+    /// session's own shell's when [`SessionTable::is_shell_of`] says so,
+    /// and otherwise a process further down that shares the session.
+    pub peer_pid: i32,
 }
 
 /// Session record.
@@ -193,6 +197,21 @@ pub struct SessionTable {
     /// Gid of the configure-authorization group (`zebra-rs` by default).
     /// `None` when the group does not exist at daemon startup.
     config_group_gid: Option<u32>,
+    /// The sessions whose entry lapsed for being idle while their shell
+    /// lives. The shell has not ended, and what is kept for the session
+    /// beyond its entry (its candidate) is still there under this key,
+    /// so the key is remembered:
+    ///
+    /// - [`Self::resolve`] gives the session its entry back under the
+    ///   same key, whichever process of the shell asks first. Without
+    ///   that, a piped command (which reaches the daemon from a subshell
+    ///   of the shell) found no session above it and was given a new one
+    ///   keyed on the subshell: a session with no candidate, in which
+    ///   `compare` showed nothing and `commit` committed nothing.
+    /// - The watcher of the shell goes on watching it, and the sweep
+    ///   looks for it too, so that the end of the shell is still
+    ///   reported.
+    dormant: DashSet<SessionKey>,
     /// Told the key of a session whose shell is gone: see
     /// [`Self::on_shell_gone`].
     shell_gone: std::sync::OnceLock<ShellGone>,
@@ -210,6 +229,7 @@ impl SessionTable {
         std::sync::Arc::new(Self {
             sessions: DashMap::new(),
             config_group_gid,
+            dormant: DashSet::new(),
             shell_gone: std::sync::OnceLock::new(),
         })
     }
@@ -257,7 +277,13 @@ impl SessionTable {
     /// `ParentVanished` guard still runs when a parent pid was reported but
     /// has since disappeared.
     ///
-    /// Returns `(key, is_new)` so callers can choose log verbosity.
+    /// An entry that lapsed for being idle while its shell lives (see
+    /// `dormant`) is made again under the key it had, for the shell and
+    /// for any process below it alike. That is not a new session: its
+    /// shell is the one that was being watched all along.
+    ///
+    /// Returns `(key, is_new)`. A new session's shell is not watched yet:
+    /// the caller starts [`watch_bash_death`] for it.
     pub fn resolve<P: ProcStatusReader>(
         &self,
         reader: &P,
@@ -288,9 +314,10 @@ impl SessionTable {
                 entry.last_active = Instant::now();
                 return Ok((key, false));
             }
+            let lapsed = self.dormant.remove(&key).is_some();
             let session = Self::new_session(reader, peer_uid, key.1);
             self.sessions.insert(key, session);
-            return Ok((key, true));
+            return Ok((key, !lapsed));
         }
         let ppid_u32 = ppid as u32;
         let key = (peer_uid, ppid_u32);
@@ -298,6 +325,11 @@ impl SessionTable {
         // Fast path: existing session, just refresh activity.
         if let Some(mut entry) = self.sessions.get_mut(&key) {
             entry.last_active = Instant::now();
+            return Ok((key, false));
+        }
+        // The shell's own session, whose entry lapsed: the same session
+        // again. Its parent was checked when the session was first made.
+        if self.revive(reader, &key) {
             return Ok((key, false));
         }
 
@@ -330,6 +362,11 @@ impl SessionTable {
                 entry.last_active = Instant::now();
                 return Ok((akey, false));
             }
+            // The owning shell's session, whose entry lapsed: it is
+            // still the session of everything below that shell.
+            if self.revive(reader, &akey) {
+                return Ok((akey, false));
+            }
             ancestor = next;
         }
 
@@ -347,6 +384,33 @@ impl SessionTable {
         let session = Self::new_session(reader, peer_uid, ppid_u32);
         self.sessions.insert(key, session);
         Ok((key, true))
+    }
+
+    /// Give session `key` its entry back if it lapsed for being idle
+    /// while its shell lives. The entry is as a new one is: the role is
+    /// what the uid starts with, and any role taken with `enable` had
+    /// lapsed before the entry could.
+    fn revive<P: ProcStatusReader>(&self, reader: &P, key: &SessionKey) -> bool {
+        if self.dormant.remove(key).is_none() {
+            return false;
+        }
+        self.sessions
+            .insert(*key, Self::new_session(reader, key.0, key.1));
+        true
+    }
+
+    /// Whether the client `peer_pid` speaks for the shell of session
+    /// `key` itself: it is the process the session is bound to, or that
+    /// process ran it. A process further down (a vty started inside the
+    /// vty, a script) shares the session through the walk up the parents
+    /// in [`Self::resolve`]. What it does is done in the session; its
+    /// leaving is not the shell's.
+    pub fn is_shell_of<P: ProcStatusReader>(reader: &P, key: &SessionKey, peer_pid: i32) -> bool {
+        peer_pid > 0
+            && (peer_pid as u32 == key.1
+                || reader
+                    .read_ppid(peer_pid)
+                    .is_ok_and(|ppid| ppid > 1 && ppid as u32 == key.1))
     }
 
     /// Build a fresh session whose lifetime is bound to `lifetime_pid`.
@@ -475,18 +539,38 @@ impl SessionTable {
     /// lapses, the idle rule applies again. A dead shell's session goes
     /// either way.
     ///
+    /// An idle session whose shell lives loses its entry and is not
+    /// over: its key is kept (`dormant`) until the shell is gone. The
+    /// shells of those are looked at here as well. Each has a watcher
+    /// that reports its death, and this is what reports it when the
+    /// watcher could not be kept (it failed to register, or its wait
+    /// failed).
+    ///
     /// Returns counts useful for logging/metrics.
     pub fn gc_once<P: ProcStatusReader>(&self, reader: &P, idle_ttl: Duration) -> GcStats {
         let now = Instant::now();
         let mut removed_idle = 0usize;
         let mut removed_gone = 0usize;
         let mut gone = Vec::new();
+        // The sessions that lapsed earlier: is the shell still there?
+        self.dormant.retain(|key| {
+            let alive = reader.process_exists(key.1 as i32);
+            if !alive {
+                gone.push(*key);
+            }
+            alive
+        });
         self.sessions.retain(|key, session| {
             let leased = matches!(Self::lease_of(session, now), AdminLease::Remaining(_));
             if !leased && now.saturating_duration_since(session.last_active) > idle_ttl {
                 removed_idle += 1;
                 // Counted as idle, and its shell may be dead as well.
-                if !reader.process_exists(session.bash_pid as i32) {
+                if reader.process_exists(session.bash_pid as i32) {
+                    // Remembered before the entry goes, which is when
+                    // this returns: a request of the shell that comes
+                    // in now finds one or the other.
+                    self.dormant.insert(*key);
+                } else {
                     gone.push(*key);
                 }
                 return false;
@@ -511,13 +595,22 @@ impl SessionTable {
 
     /// Remove a session by key. Returns true if an entry was present.
     ///
-    /// Every caller removes a session because its shell is gone (it
-    /// logged out, or died), so the shell is reported gone: also when
-    /// the entry had already lapsed for being idle, which is not the
-    /// end of the shell and is not reported.
+    /// Every caller removes a session because its shell is gone: it
+    /// logged out (the `Logout` RPC, which is taken from the shell
+    /// itself only: [`Self::is_shell_of`]), or died. So the shell is
+    /// reported gone: also when the entry had already lapsed for being
+    /// idle, which is not the end of the shell and is not reported.
     pub fn remove(&self, key: &SessionKey) -> bool {
+        self.dormant.remove(key);
         self.shell_is_gone(*key);
         self.sessions.remove(key).is_some()
+    }
+
+    /// Whether the shell of session `key` is still to be watched: the
+    /// session has its entry, or lost it for being idle and is not
+    /// over. False once the shell is known gone ([`Self::remove`]).
+    pub fn watched(&self, key: &SessionKey) -> bool {
+        self.sessions.contains_key(key) || self.dormant.contains(key)
     }
 
     /// Call `told` with the key of each session whose shell is gone,
@@ -536,6 +629,7 @@ impl SessionTable {
     }
 
     /// Whether a session with `key` is currently present.
+    #[cfg(test)]
     pub fn contains(&self, key: &SessionKey) -> bool {
         self.sessions.contains_key(key)
     }
@@ -627,9 +721,13 @@ static PIDFD_UNSUPPORTED_LOGGED: std::sync::atomic::AtomicBool =
 /// Intended to be `tokio::spawn`'d once per new session created by
 /// [`SessionTable::resolve`]. If the kernel has no `pidfd_open` (`ENOSYS`,
 /// Linux < 5.3) the session is kept and its lifetime is tracked by
-/// [`watch_bash_death_by_polling`] instead (D31). Any other open failure
-/// means the process is already gone, and the session is removed
-/// immediately.
+/// [`watch_bash_death_by_polling`] instead (D31). So it is when the
+/// shell cannot be watched through a pidfd for any other reason while
+/// it is there (the daemon is out of file descriptors, the descriptor
+/// cannot be registered, the wait on it fails): that is no news of the
+/// shell, and ending its session for it would drop the edits of an
+/// operator who is still typing. Only a shell that is already gone has
+/// its session removed at once.
 #[cfg(target_os = "linux")]
 pub async fn watch_bash_death(table: Arc<SessionTable>, key: SessionKey, bash_pid: u32) {
     watch_bash_death_with(table, key, bash_pid, pidfd::open, PROC_POLL_INTERVAL).await;
@@ -666,13 +764,27 @@ async fn watch_bash_death_with<F>(
             return;
         }
         Err(e) => {
+            // ESRCH is the kernel saying the shell is gone. Any other
+            // failure (EMFILE, ENFILE, ENOMEM) says nothing of it.
+            let gone = e.raw_os_error() == Some(libc::ESRCH)
+                || !ProcfsReader.process_exists(bash_pid as i32);
+            if gone {
+                tracing::debug!(
+                    uid = key.0,
+                    bash_pid,
+                    error = %e,
+                    "pidfd_open failed and the shell is gone; dropping session",
+                );
+                table.remove(&key);
+                return;
+            }
             tracing::warn!(
                 uid = key.0,
                 bash_pid,
                 error = %e,
-                "pidfd_open failed; dropping session immediately",
+                "pidfd_open failed; vty session lifetime tracked by polling /proc",
             );
-            table.remove(&key);
+            watch_bash_death_by_polling(table, key, bash_pid, poll_interval).await;
             return;
         }
     };
@@ -684,14 +796,18 @@ async fn watch_bash_death_with<F>(
                 uid = key.0,
                 bash_pid,
                 error = %e,
-                "AsyncFd registration failed; relying on GC for cleanup",
+                "AsyncFd registration failed; vty session lifetime tracked by polling /proc",
             );
+            watch_bash_death_by_polling(table, key, bash_pid, poll_interval).await;
             return;
         }
     };
 
-    match async_fd.readable().await {
-        Ok(_guard) => {
+    // The readiness guard is not kept: the process has exited, and that
+    // does not change back.
+    let exited = async_fd.readable().await.map(drop);
+    match exited {
+        Ok(()) => {
             if table.remove(&key) {
                 if super::tracing::vty() {
                     tracing::info!(uid = key.0, bash_pid, "vty session removed (bash exited)");
@@ -705,15 +821,27 @@ async fn watch_bash_death_with<F>(
             }
         }
         Err(e) => {
-            tracing::warn!(uid = key.0, bash_pid, error = %e, "pidfd readable() failed");
+            tracing::warn!(
+                uid = key.0,
+                bash_pid,
+                error = %e,
+                "pidfd readable() failed; vty session lifetime tracked by polling /proc",
+            );
+            drop(async_fd);
+            watch_bash_death_by_polling(table, key, bash_pid, poll_interval).await;
         }
     }
 }
 
-/// Fallback watcher for kernels without `pidfd_open` (D31): checks
-/// `/proc/{bash_pid}` every `interval` and removes the session once it is
-/// gone. Also exits once the session has been removed by someone else
-/// (GC, `Logout`), so watchers don't pile up behind long-lived shells.
+/// Fallback watcher for kernels without `pidfd_open` (D31), and for a
+/// shell no pidfd could be had or kept for: checks `/proc/{bash_pid}`
+/// every `interval` and removes the session once it is gone. Also exits
+/// once the session has been removed by someone else (`Logout`), so
+/// watchers don't pile up behind long-lived shells.
+///
+/// A session whose entry lapsed for being idle is not removed: its
+/// shell lives, and its end is still this watcher's to report
+/// ([`SessionTable::watched`]).
 #[cfg(target_os = "linux")]
 pub async fn watch_bash_death_by_polling(
     table: Arc<SessionTable>,
@@ -728,7 +856,7 @@ pub async fn watch_bash_death_by_polling(
     ticker.tick().await;
     loop {
         ticker.tick().await;
-        if !table.contains(&key) {
+        if !table.watched(&key) {
             tracing::debug!(
                 uid = key.0,
                 bash_pid,
@@ -1712,6 +1840,131 @@ mod tests {
         assert_eq!(gone, [(2000, 2000), (3000, 3000)]);
     }
 
+    /// A session whose entry lapsed for being idle is the same session
+    /// when its shell next asks: under the key it had, and not a new
+    /// one, whose shell would be watched a second time.
+    #[test]
+    fn a_lapsed_session_comes_back_under_its_key() {
+        let table = SessionTable::new();
+        let gone = gone_shells(&table);
+        let reader = StubReader::default();
+        // helper 300 -> shell 200 -> login 100.
+        reader.set_ppid(300, 200);
+        reader.set_ppid(200, 100);
+        reader.set_ruid(200, 1000);
+        let (key, is_new) = table.resolve(&reader, 1000, 300).unwrap();
+        assert_eq!((key, is_new), ((1000, 200), true));
+
+        table.insert_for_test(key, Instant::now() - Duration::from_secs(900));
+        let stats = table.gc_once(&reader, Duration::from_secs(600));
+        assert_eq!((stats.removed_idle, stats.remaining), (1, 0));
+        assert!(!table.contains(&key));
+        assert!(table.watched(&key), "the shell is still there to watch");
+
+        let (again, is_new) = table.resolve(&reader, 1000, 300).unwrap();
+        assert_eq!(again, key);
+        assert!(!is_new, "its shell is watched already");
+        assert!(table.contains(&key));
+        assert!(gone.lock().unwrap().is_empty());
+    }
+
+    /// A piped command reaches the daemon from a subshell of the shell.
+    /// With the shell's entry lapsed it is still that shell's session,
+    /// not a new one keyed on the subshell, which would have no
+    /// candidate: `show | compare` showed no edits, `commit | tee`
+    /// committed none.
+    #[test]
+    fn a_piped_command_finds_its_shell_s_lapsed_session() {
+        let table = SessionTable::new();
+        let reader = StubReader::default();
+        // helper 400 -> subshell 300 -> shell 200 -> login 100.
+        reader.set_ppid(400, 300);
+        reader.set_ppid(300, 200);
+        reader.set_ppid(200, 100);
+        reader.set_ruid(300, 0);
+        reader.set_ruid(200, 0);
+        let shell = (0, 200);
+        table.insert_for_test(shell, Instant::now() - Duration::from_secs(900));
+        table.gc_once(&reader, Duration::from_secs(600));
+        assert!(!table.contains(&shell));
+
+        let (key, is_new) = table.resolve(&reader, 0, 400).unwrap();
+        assert_eq!(key, shell, "keyed on the transient subshell");
+        assert!(!is_new);
+        assert!(!table.contains(&(0, 300)));
+        // Root's session is as it started.
+        assert_eq!(table.get(&shell).unwrap().role, Role::Admin);
+    }
+
+    /// The sweep reports the death of a shell whose session had lapsed
+    /// before: its watcher may not have been there to.
+    #[test]
+    fn gc_reports_the_death_of_a_lapsed_session_s_shell() {
+        let table = SessionTable::new();
+        let gone = gone_shells(&table);
+        let reader = StubReader::default();
+        let key = (1000, 200);
+        table.insert_for_test(key, Instant::now() - Duration::from_secs(900));
+        table.gc_once(&reader, Duration::from_secs(600));
+        assert!(gone.lock().unwrap().is_empty(), "idle is not gone");
+        // Alive at the next sweep: nothing to report.
+        table.gc_once(&reader, Duration::from_secs(600));
+        assert!(gone.lock().unwrap().is_empty());
+        assert!(table.watched(&key));
+
+        reader.set_missing(200);
+        table.gc_once(&reader, Duration::from_secs(600));
+        assert_eq!(*gone.lock().unwrap(), [key]);
+        assert!(!table.watched(&key));
+        // Told once.
+        table.gc_once(&reader, Duration::from_secs(600));
+        assert_eq!(gone.lock().unwrap().len(), 1);
+        // A shell that takes the pid later starts a session of its own.
+        let later = StubReader::default();
+        later.set_ppid(300, 200);
+        later.set_ppid(200, 100);
+        later.set_ruid(200, 1000);
+        let (_, is_new) = table.resolve(&later, 1000, 300).unwrap();
+        assert!(is_new);
+    }
+
+    /// `remove` ends a lapsed session too: nothing of it comes back.
+    #[test]
+    fn remove_ends_a_lapsed_session() {
+        let table = SessionTable::new();
+        let reader = StubReader::default();
+        let key = (1000, 200);
+        table.insert_for_test(key, Instant::now() - Duration::from_secs(900));
+        table.gc_once(&reader, Duration::from_secs(600));
+        assert!(table.watched(&key));
+        assert!(!table.remove(&key));
+        assert!(!table.watched(&key));
+    }
+
+    /// Only the session's own shell speaks for it: the process the
+    /// session is bound to, and what that process ran itself.
+    #[test]
+    fn only_the_shell_itself_speaks_for_its_session() {
+        let reader = StubReader::default();
+        // vtyhelper 300 run by the shell 200.
+        reader.set_ppid(300, 200);
+        // vtyhelper 500 run by a vty 400 started inside the shell 200.
+        reader.set_ppid(500, 400);
+        reader.set_ppid(400, 200);
+        // A client with no shell above it is its own session.
+        reader.set_ppid(600, 1);
+        let key = (1000, 200);
+        assert!(SessionTable::is_shell_of(&reader, &key, 300));
+        assert!(SessionTable::is_shell_of(&reader, &key, 200));
+        assert!(!SessionTable::is_shell_of(&reader, &key, 500));
+        assert!(SessionTable::is_shell_of(&reader, &(1000, 600), 600));
+        assert!(!SessionTable::is_shell_of(&reader, &(1000, 1), 600));
+        // A peer that is gone, or not visible, speaks for nobody.
+        assert!(!SessionTable::is_shell_of(&reader, &key, 999));
+        assert!(!SessionTable::is_shell_of(&reader, &key, 0));
+        assert!(!SessionTable::is_shell_of(&reader, &key, -1));
+    }
+
     /// `remove` is the shell logging out or dying, and says so: also
     /// for a session whose entry had lapsed before.
     #[test]
@@ -1887,10 +2140,81 @@ mod tests {
         assert!(table.get(&key).is_none(), "session was not removed");
     }
 
+    /// The polling watcher goes on watching a shell whose session
+    /// lapsed for being idle, and reports its death: it is the only
+    /// thing that would on a kernel without `pidfd_open`.
+    #[tokio::test]
+    async fn polling_watcher_outlasts_an_idle_lapse() {
+        let child = spawn_fake_bash();
+        let bash_pid = child.id();
+        let key = (1000u32, bash_pid);
+        let table = SessionTable::new();
+        let gone = gone_shells(&table);
+        table.insert_for_test(key, Instant::now() - Duration::from_secs(900));
+
+        let watcher = tokio::spawn(super::watch_bash_death_by_polling(
+            table.clone(),
+            key,
+            bash_pid,
+            Duration::from_millis(20),
+        ));
+        let stats = table.gc_once(&ProcfsReader, Duration::from_secs(600));
+        assert_eq!(stats.removed_idle, 1);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!watcher.is_finished(), "the watcher left with the entry");
+        assert!(gone.lock().unwrap().is_empty());
+
+        reap(child);
+        tokio::time::timeout(Duration::from_secs(5), watcher)
+            .await
+            .expect("watcher timed out")
+            .expect("watcher panicked");
+        assert_eq!(*gone.lock().unwrap(), [key]);
+        assert!(!table.watched(&key));
+    }
+
+    /// A pidfd that cannot be had for a shell that is there (the daemon
+    /// is out of descriptors) is no news of the shell: its session is
+    /// kept and the shell is watched by polling.
+    #[tokio::test]
+    async fn an_open_failure_of_a_live_shell_falls_back_to_polling() {
+        let child = spawn_fake_bash();
+        let bash_pid = child.id();
+        let key = (1000u32, bash_pid);
+        let table = SessionTable::new();
+        let gone = gone_shells(&table);
+        table.insert_for_test(key, Instant::now());
+
+        let emfile = |_pid: i32| -> std::io::Result<std::os::fd::OwnedFd> {
+            Err(std::io::Error::from_raw_os_error(libc::EMFILE))
+        };
+        let watcher = tokio::spawn(super::watch_bash_death_with(
+            table.clone(),
+            key,
+            bash_pid,
+            emfile,
+            Duration::from_millis(20),
+        ));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            table.get(&key).is_some(),
+            "EMFILE dropped the session of a live shell"
+        );
+        assert!(gone.lock().unwrap().is_empty());
+
+        reap(child);
+        tokio::time::timeout(Duration::from_secs(5), watcher)
+            .await
+            .expect("watcher timed out")
+            .expect("watcher panicked");
+        assert!(table.get(&key).is_none(), "session was not removed");
+        assert_eq!(*gone.lock().unwrap(), [key]);
+    }
+
     #[tokio::test]
     async fn non_enosys_open_failure_still_drops_session() {
-        // Every other pidfd_open failure (ESRCH: parent already dead) keeps
-        // the immediate-drop behaviour.
+        // ESRCH is the kernel saying the parent is already dead: the
+        // immediate drop.
         let key = (1000u32, 4242u32);
         let table = SessionTable::new();
         table.insert_for_test(key, Instant::now());
