@@ -1,0 +1,46 @@
+module sonic-port {
+  yang-version 1.1;
+  namespace "http://github.com/sonic-net/sonic-port";
+  prefix port;
+
+  import sonic-types {
+    prefix stypes;
+  }
+
+  container sonic-port {
+    container PORT {
+      description "PORT part of config_db.json";
+      list PORT_LIST {
+        key "name";
+        leaf name {
+          description "Port name.  It is what the port is called everywhere else.";
+          type string {
+            pattern 'Ethernet[0-9]+';
+          }
+        }
+        leaf lanes {
+          mandatory true;
+          type string {
+            length 1..128;
+          }
+        }
+        leaf admin_status {
+          description "Administrative state of the port";
+          type stypes:admin_status;
+        }
+        leaf description {
+          type string {
+            length 0..255;
+          }
+        }
+        leaf mtu {
+          type uint16 {
+            range 68..9216 {
+              error-message "Invalid MTU value";
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,44 @@
+module sonic-interface {
+  yang-version 1.1;
+  namespace "http://github.com/sonic-net/sonic-interface";
+  prefix intf;
+
+  import sonic-port {
+    prefix port;
+  }
+
+  container sonic-interface {
+    container INTERFACE {
+      description "INTERFACE part of config_db.json";
+      list INTERFACE_LIST {
+        description "Layer 3 interfaces";
+        key "name";
+        leaf name {
+          type leafref {
+            path /port:sonic-port/port:PORT/port:PORT_LIST/port:name;
+          }
+        }
+        leaf vrf_name {
+          type string;
+        }
+      }
+      list INTERFACE_IPPREFIX_LIST {
+        key "name ip-prefix";
+        leaf name {
+          type string;
+        }
+        leaf ip-prefix {
+          type string {
+            pattern '[0-9a-fA-F:.]+/[0-9]+';
+          }
+        }
+        leaf scope {
+          type enumeration {
+            enum global;
+            enum local;
+          }
+        }
+      }
+    }
+  }
+}

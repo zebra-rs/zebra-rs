@@ -247,6 +247,11 @@ pub struct ConfigManager {
     /// writes to that file.
     pub config_format: RefCell<ConfigFormat>,
     pub store: ConfigStore,
+    /// The commit being made is an import of CONFIG_DB into the `sonic`
+    /// subtree (`Self::import_config_db`): a copy of what is configured
+    /// elsewhere, not a change someone made here. It is not held to the
+    /// models' mandatory leaves and is not a commit of the history.
+    importing: Cell<bool>,
     /// What the last commits produced, for `rollback`.
     pub history: CommitHistory,
     pub modes: HashMap<String, Mode>,
@@ -504,6 +509,7 @@ impl ConfigManager {
             config_format: RefCell::new(ConfigFormat::Cli),
             modes: HashMap::new(),
             store: ConfigStore::new(),
+            importing: Cell::new(false),
             history: CommitHistory::default(),
             tx,
             rx,
@@ -655,6 +661,23 @@ impl ConfigManager {
         }
         if let Some(exec_cli) = top_from_exec(&exec, "cli") {
             entry.dir.borrow_mut().push(exec_cli);
+        }
+        // `--feature sonic`: SONiC's tables under `set sonic` and
+        // `delete sonic`, from SONiC's own models (`config::sonic`).
+        if feature_enabled(&self.features, "zebra-features", "sonic") {
+            match super::sonic::models_dir(&self.yang_path) {
+                Some(dir) => {
+                    let (sonic, problems) = super::sonic::sonic_entry(&self.yang_path, &dir);
+                    for problem in problems {
+                        tracing::warn!("sonic yang: {problem}");
+                    }
+                    super::sonic::graft(&entry, &sonic);
+                }
+                None => tracing::error!(
+                    "--feature sonic: no `sonic` directory with SONiC's YANG models under the YANG path {}; there is no `sonic` configuration",
+                    self.yang_path
+                ),
+            }
         }
         let configure_mode = configure_mode_create(entry);
         self.modes.insert("configure".to_string(), configure_mode);
@@ -832,7 +855,7 @@ impl ConfigManager {
             })
     }
 
-    fn paths(&self, input: String) -> Option<Vec<CommandPath>> {
+    pub(super) fn paths(&self, input: String) -> Option<Vec<CommandPath>> {
         let mode = self.modes.get("configure")?;
         let state = State::new();
 
@@ -952,6 +975,18 @@ impl ConfigManager {
     fn commit(&self, startup: bool, from_file: bool) -> anyhow::Result<()> {
         let mut errors = Vec::<String>::new();
         self.store.candidate.borrow().validate(&mut errors);
+        if self.importing.get() {
+            // CONFIG_DB is what it is. A row the model calls incomplete
+            // is still a row of the device's configuration, and the copy
+            // of it here says so: it is logged, not refused.
+            errors.retain(|error| {
+                let of_sonic = error.starts_with("'sonic ");
+                if of_sonic {
+                    tracing::warn!("config-db: {error}");
+                }
+                !of_sonic
+            });
+        }
         if !errors.is_empty() {
             let errors = errors.join("\n");
             return Err(anyhow::anyhow!(errors));
@@ -1458,7 +1493,7 @@ impl ConfigManager {
         // that changed none is not one to roll back to, and that is what
         // keeps the configuration a daemon starts with nothing in out of
         // the history.
-        if running != candidate {
+        if running != candidate && !self.importing.get() {
             self.history.record(candidate, from_file);
         }
 
@@ -2007,6 +2042,11 @@ impl ConfigManager {
             };
         }
 
+        // CONFIG_DB, to be copied into the `sonic` subtree.
+        if let Some(tables) = super::configdb::document(config) {
+            return self.import_config_db(&tables);
+        }
+
         let (format_type, cmds) = match self.config_to_commands(config) {
             Ok(parsed) => parsed,
             Err(doc_errors) => {
@@ -2030,12 +2070,7 @@ impl ConfigManager {
         // are none, which is every apply on a box nobody is configuring
         // by hand: it then runs on the candidate as it always did, with
         // no copy and nothing to put back.
-        let edits = (!self.store.refused_load.get() && self.has_uncommitted()).then(|| {
-            (
-                self.store.candidate.borrow().clone(),
-                self.store.running.borrow().clone(),
-            )
-        });
+        let edits = self.set_aside_edits();
         // The apply's own candidate. For `set`/`delete` lines it is the
         // running config, which they change: a copy of it when the
         // candidate holds the edits, and with no edits the candidate as
@@ -2048,19 +2083,7 @@ impl ConfigManager {
         // Leave the candidate with what the apply found in it: the
         // edits, on the running config as it is now, or with no edits
         // the running config.
-        let put_back = |edits: Option<(Rc<Config>, Rc<Config>)>| match edits {
-            Some((edits, base)) => {
-                let running = self.store.running.borrow().clone();
-                // The same tree: nothing was committed.
-                if !Rc::ptr_eq(&base, &running) {
-                    super::rebase::rebase(&base, &running, &edits, |line| {
-                        self.paths(line.to_string())
-                    });
-                }
-                self.store.candidate.replace(edits);
-            }
-            None => self.store.discard(),
-        };
+        let put_back = |edits| self.put_back(edits);
 
         for cmd in cmds.iter() {
             let (code, _output, _paths) = self.execute(mode, cmd);
@@ -2099,6 +2122,111 @@ impl ConfigManager {
             apply_code: ApplyCode::Applied,
             exec_code: ExecCode::Success,
             cmd: String::new(),
+        }
+    }
+
+    /// The interactive sessions' uncommitted edits, with the running
+    /// config they are an edit of, for a commit that is not theirs to
+    /// be made without them. `None` when there are none.
+    pub(super) fn set_aside_edits(&self) -> Option<(Rc<Config>, Rc<Config>)> {
+        (!self.store.refused_load.get() && self.has_uncommitted()).then(|| {
+            (
+                self.store.candidate.borrow().clone(),
+                self.store.running.borrow().clone(),
+            )
+        })
+    }
+
+    /// Leave the candidate with what [`Self::set_aside_edits`] found in
+    /// it: the edits, on the running config as it is now, or with no
+    /// edits the running config.
+    pub(super) fn put_back(&self, edits: Option<(Rc<Config>, Rc<Config>)>) {
+        match edits {
+            Some((edits, base)) => {
+                let running = self.store.running.borrow().clone();
+                // The same tree: nothing was committed.
+                if !Rc::ptr_eq(&base, &running) {
+                    super::rebase::rebase(&base, &running, &edits, |line| {
+                        self.paths(line.to_string())
+                    });
+                }
+                self.store.candidate.replace(edits);
+            }
+            None => self.store.discard(),
+        }
+    }
+
+    /// Make the `sonic` subtree a copy of CONFIG_DB (`config::configdb`).
+    ///
+    /// The subtree is replaced whole: what CONFIG_DB no longer has is
+    /// gone from it. Nothing else of the configuration is touched, and
+    /// uncommitted edits are set aside and put back as over an apply.
+    /// What of CONFIG_DB cannot be copied is logged and left out; the
+    /// import is refused only on a device with no SONiC models.
+    pub(super) fn import_config_db(
+        &self,
+        tables: &serde_json::Map<String, serde_json::Value>,
+    ) -> DeployResponse {
+        let mode = self.modes.get("configure").unwrap();
+        let Some(sonic) = super::sonic::grafted(&mode.entry) else {
+            return DeployResponse {
+                apply_code: ApplyCode::ParseError,
+                exec_code: ExecCode::Nomatch,
+                cmd: "CONFIG_DB: no SONiC models are loaded (start with `--feature sonic`)"
+                    .to_string(),
+            };
+        };
+        let translation = super::configdb::translate(&sonic, tables, |line| {
+            self.paths(line.to_string()).is_some()
+        });
+        let mut problems = translation.problems;
+
+        let edits = self.set_aside_edits();
+        if edits.is_some() {
+            self.store.discard();
+        }
+        // Nomatch when there is no `sonic` yet, which is as good.
+        let _ = self.execute(mode, "delete sonic");
+        for line in translation.lines.iter() {
+            let (code, _, _) = self.execute(mode, line);
+            if code != ExecCode::Show {
+                problems.push(format!("not taken by the model: {line}"));
+            }
+        }
+        self.importing.set(true);
+        let committed = self.commit_config();
+        self.importing.set(false);
+
+        for problem in problems.iter() {
+            tracing::warn!("config-db: {problem}");
+        }
+        tracing::info!(
+            tables = translation.tables,
+            rows = translation.rows,
+            lines = translation.lines.len(),
+            left_out = problems.len(),
+            unmodelled_tables = translation.unmodelled.len(),
+            "config-db: imported"
+        );
+        match committed {
+            Ok(()) => {
+                if edits.is_some() {
+                    self.put_back(edits);
+                }
+                DeployResponse {
+                    apply_code: ApplyCode::Applied,
+                    exec_code: ExecCode::Success,
+                    cmd: String::new(),
+                }
+            }
+            Err(e) => {
+                self.put_back(edits);
+                DeployResponse {
+                    apply_code: ApplyCode::MissingMandatory,
+                    exec_code: ExecCode::Success,
+                    cmd: e.to_string(),
+                }
+            }
         }
     }
 
@@ -10576,3 +10704,11 @@ mod apply_isolation_tests;
 #[cfg(test)]
 #[path = "multikey_tests.rs"]
 mod multikey_tests;
+
+#[cfg(test)]
+#[path = "sonic_tests.rs"]
+mod sonic_tests;
+
+#[cfg(test)]
+#[path = "configdb_tests.rs"]
+mod configdb_tests;

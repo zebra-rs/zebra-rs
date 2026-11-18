@@ -1,0 +1,14 @@
+module sonic-events-host {
+  yang-version 1.1;
+  namespace "http://github.com/sonic-net/sonic-events-host";
+  prefix events-host;
+
+  // Events, not configuration: not under `sonic`.
+  container sonic-events-host {
+    container disk-usage {
+      leaf usage {
+        type uint8;
+      }
+    }
+  }
+}

@@ -20,6 +20,7 @@ pub use serve::serve;
 mod enable_rate;
 mod session;
 
+mod configdb;
 mod configs;
 pub use configs::Args;
 pub use configs::Config;
@@ -60,6 +61,7 @@ mod pim;
 mod rebase;
 mod resolver;
 mod show_provider;
+mod sonic;
 mod stamp;
 mod subscribe;
 mod token;

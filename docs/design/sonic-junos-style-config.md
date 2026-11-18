@@ -149,17 +149,42 @@ models, not written by hand:
 | table container `PORT` with list `PORT_LIST` keyed `name` | `set sonic PORT Ethernet0 …` |
 | leaf `admin_status` | `set sonic PORT Ethernet0 admin_status up` |
 | list with two keys (`VLAN_MEMBER`: vlan, port) | `set sonic VLAN_MEMBER Vlan100 Ethernet0 …` |
+| a table with two lists (`INTERFACE_LIST`, `INTERFACE_IPPREFIX_LIST`) | one keyword for each: `set sonic INTERFACE Ethernet0`, `set sonic INTERFACE_IPPREFIX Ethernet0 10.0.0.0/31` |
 | leaf-list (`BGP_PEER_RANGE` `ip_range`) | one `set` line per member |
 | a single fixed-key entry (`DEVICE_METADATA` `localhost`) | `set sonic DEVICE_METADATA localhost hostname …` |
 
+**Built** (`zebra-rs/src/config/sonic.rs`, `--feature sonic`). The rule is one
+keyword under `sonic` for each list, named after the list without `_LIST`; a
+table whose rows have fixed keys stays as it is. Each keyword records the
+table and the list it stands for, which is what a row is in CONFIG_DB. Of the
+146 modules of the tree we build, 160 tables have one list, 14 have several,
+46 have fixed-key rows and one has both; the `sonic-events-*` modules are not
+configuration and are left out. No two keywords collide.
+
 Completion comes with the schema: `vty` builds it from the YANG zebra-rs has
-loaded, enumerations included. `?` help needs a small addition. zebra-rs takes
-its help text from an `ext:help` statement, which SONiC's models do not have;
-the generator has to derive it from each node's `description`.
+loaded, enumerations included. Help is each node's `description`, cut to its
+first sentence: zebra-rs takes help from an `ext:help` statement, which
+SONiC's models do not have. A string leaf with no `pattern` takes the rest of
+the line, since CONFIG_DB holds such values with spaces in them and this CLI
+has no quoting.
 
 This is not pretty — it is CONFIG_DB with a transaction around it — but it
 covers every modelled table on the first day, needs no per-feature code, and
 cannot disagree with SONiC about what is valid.
+
+What it took in zebra-rs and its schema library, none of it particular to
+SONiC:
+
+- libyang read none of the models. Twelve forms the grammar refused and three
+  faults of the tree it built are fixed in libyang 2.5 (its
+  `docs/sonic-yang-gaps.md`).
+- The configuration tree had no list with more than one key; 58 of SONiC's
+  lists have. An entry is now the node under one key node for each key.
+- A string with a `pattern` was the rest of the line, so a patterned key could
+  not be followed by a leaf. Patterns were also matched unanchored, which
+  refused `10.0.0.0/31` under the usual prefix pattern.
+- The block format dropped the characters of a value that are not letters,
+  digits or `_.-/:` when loading it: `lanes 1,2,3,4` came back as four values.
 
 ### 5.2 Later: a hierarchy people would choose
 
@@ -225,6 +250,19 @@ real state, and the operator is told the commit was partial. Hiding a partial
 write behind a successful `commit` would be the worst outcome of this design.
 
 ## 7. Keeping the mirror true
+
+**The import is built, as a whole copy.** A document `{"CONFIG_DB": {…}}`
+given to `vtyctl apply` replaces the `sonic` subtree with the translation of
+those tables (`zebra-rs/src/config/configdb.rs`): a row goes to the list of
+its table that has as many keys as its key has `|`-separated parts, or to the
+container of its fixed key. An import is not a commit of the history, is not
+held to the models' mandatory leaves, and leaves out and logs what it cannot
+copy. *Measured* on a SONiC VS: all 21 tables of its CONFIG_DB are modelled,
+306 rows became 1,282 lines, two values were left out (an empty string and one
+of several lines), and a `config vlan add` on the host showed in the running
+configuration at the next copy. What follows is the design for the rest: the
+process that reads CONFIG_DB is so far a script that polls, and nothing below
+about open candidates, coalescing or echo is built.
 
 CONFIG_DB changes that did not come from a commit — a `config` command, gNMI,
 a daemon — must reach zebra-rs, or `compare` and `rollback` lie.
@@ -397,7 +435,10 @@ Each phase is useful on its own and none commits us to the next.
 2. **Read-only mirror.** The `sonic` subtree generated from SONiC's YANG, the
    bridge importing CONFIG_DB. `show configuration sonic …` in `vty` with
    completion and help; no writes. Proves the schema generation and the import
-   path, and is safe.
+   path, and is safe. *The schema and the import are built (§5.1, §7). Still
+   to do: a process that follows CONFIG_DB by its keyspace notifications, the
+   models in the `bgp` container's image, and refusing an operator's own edits
+   of `sonic` while it is only a mirror.*
 3. **Commit for a few tables**: `PORT`, `VLAN`, `VLAN_MEMBER`, `INTERFACE`,
    `STATIC_ROUTE`, `BGP_NEIGHBOR`. Pre-commit check, ordered write through the
    config updater, partial-write handling. Measure commit latency.
@@ -409,10 +450,10 @@ Each phase is useful on its own and none commits us to the next.
 
 ## 13. Open questions
 
-1. **Can zebra-rs load SONiC's YANG as it is?** The models use `must`, `when`
-   and leafrefs across tables. zebra-rs's schema library has to at least parse
-   them; enforcing them can be left to the bridge's pre-commit check. Not
-   tested. This decides whether phase 2 is small.
+1. **Can zebra-rs load SONiC's YANG as it is?** *Answered: yes, from libyang
+   2.5 on.* All 146 modules load. `must` (281 uses), `when` (131) and the
+   targets of leafrefs (211) are parsed and not enforced, which is left to
+   the bridge's pre-commit check as planned.
 2. **How slow is a commit through the config updater?** Its change sorter is
    known to be expensive on large differences. Measure a one-line change, a
    50-port change and a full `rollback` on the VS before phase 3 is designed in

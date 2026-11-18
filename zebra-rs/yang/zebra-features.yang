@@ -58,4 +58,24 @@ module zebra-features {
        A leaf AC needs the cradle data plane; a commit naming one
        without it is refused.";
   }
+
+  feature sonic {
+    description
+      "zebra-rs runs on a SONiC device, where CONFIG_DB is the device's
+       configuration. It adds:
+         - `sonic`, a configuration subtree whose schema is SONiC's own
+           YANG models (sonic-yang-models), read from the directory
+           `sonic` under the YANG path: one keyword for each list of a
+           table (`sonic PORT Ethernet0 …`);
+         - a document `{\"CONFIG_DB\": {…}}` given to `vtyctl apply`,
+           which is copied into that subtree in place of what is there.
+
+       The subtree is a copy of CONFIG_DB kept by a process that reads
+       it (the read-only mirror of docs/design/sonic-junos-style-
+       config.md). A copy is not a commit of the commit history, and is
+       not held to the models' mandatory leaves.
+
+       Not a schema gate: nothing in the daemon's own models is guarded
+       by it.";
+  }
 }

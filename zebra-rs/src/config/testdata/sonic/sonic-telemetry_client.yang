@@ -1,0 +1,30 @@
+module sonic-telemetry_client {
+  yang-version 1.1;
+  namespace "http://github.com/sonic-net/sonic-telemetry_client";
+  prefix tc;
+
+  // A table with a container and a list: it stays as it is.
+  container sonic-telemetry_client {
+    container TELEMETRY_CLIENT {
+      container Global {
+        leaf retry_interval {
+          type uint64;
+        }
+      }
+      list TELEMETRY_CLIENT_LIST {
+        key "prefix name";
+        leaf prefix {
+          type string {
+            pattern 'Subscription|DestinationGroup';
+          }
+        }
+        leaf name {
+          type string;
+        }
+        leaf dst_group {
+          type string;
+        }
+      }
+    }
+  }
+}
