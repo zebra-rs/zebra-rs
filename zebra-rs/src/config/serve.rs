@@ -32,6 +32,7 @@ use super::vty::{
     EnableReply, EnableRequest, ExecCode, ExecReply, ExecRequest, ExecType, LogoutReply,
     LogoutRequest, ShowReply, ShowRequest, YangMatch,
 };
+use super::writer::{WriterBridge, WriterHub, WriterServiceServer};
 
 #[derive(Debug)]
 struct ExecService {
@@ -599,11 +600,17 @@ impl Clear for ClearService {
 
 pub struct Cli {
     pub tx: mpsc::Sender<Message>,
+    /// Where the config manager's commits meet the writer of CONFIG_DB
+    /// (`config::writer`).
+    pub writer: Arc<WriterHub>,
 }
 
 impl Cli {
-    pub fn new(config_tx: Sender<Message>) -> Self {
-        Self { tx: config_tx }
+    pub fn new(config_tx: Sender<Message>, writer: Arc<WriterHub>) -> Self {
+        Self {
+            tx: config_tx,
+            writer,
+        }
     }
 }
 
@@ -888,12 +895,16 @@ pub fn serve(cli: Cli, addr: VtyAddr) -> anyhow::Result<()> {
         sessions: sessions.clone(),
     };
     // Machine-facing APIs: running-config subscription
-    // (zebra.config.v1) and the external show provider
-    // (zebra.show.v1). Both use the session-less machine interceptor:
+    // (zebra.config.v1), the external show provider (zebra.show.v1)
+    // and the writer of CONFIG_DB (zebra.configdb.v1). They use the
+    // session-less machine interceptor:
     // they carry no role-gated operations, so there is no session to
     // resolve.
     let config_service = ConfigSubscribeService { tx: cli.tx.clone() };
     let show_provider = ShowProviderBridge { tx: cli.tx.clone() };
+    let config_db_writer = WriterBridge {
+        hub: cli.writer.clone(),
+    };
     let machine_interceptor = MachinePeerInterceptor::from_env();
 
     let interceptor = VtyPeerInterceptor::from_env(sessions.clone());
@@ -938,6 +949,10 @@ pub fn serve(cli: Cli, addr: VtyAddr) -> anyhow::Result<()> {
         ))
         .add_service(ShowProviderServiceServer::with_interceptor(
             show_provider,
+            machine_interceptor.clone(),
+        ))
+        .add_service(WriterServiceServer::with_interceptor(
+            config_db_writer,
             machine_interceptor,
         ))
         .add_service(ClearServer::with_interceptor(clear_service, interceptor));

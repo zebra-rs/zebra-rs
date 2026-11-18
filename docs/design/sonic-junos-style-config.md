@@ -447,8 +447,29 @@ Each phase is useful on its own and none commits us to the next.
    still refused and says so. *Measured* on a SONiC VS: a VLAN, an MTU, a
    description and an interface address typed in `vty`, applied on the host
    with `config apply-patch`, were in CONFIG_DB and the kernel, and the copy
-   that followed left nothing pending. What is left is for `commit` to do
-   that itself, through a process on the host (§8.3, §11). The plan was:
+   that followed left nothing pending.
+
+   *`commit` now does that itself.* A commit that changes `sonic` hands the
+   patch to a writer on the device and is made when the writer answers
+   (`proto/configdb.proto`, `zebra-rs/src/config/writer.rs`). The writer is a
+   script on the host, where SONiC's updater is: it takes each order with
+   `vtyctl config-db wait`, runs `config apply-patch`, and answers with
+   `vtyctl config-db done`. A refusal by the updater is the commit's refusal,
+   word for word; with no writer connected the commit is refused at once.
+   The commit is parked while the writer works and the config task goes on:
+   `config apply-patch` begins by asking zebra-rs for its running config
+   (`show runningconfiguration all` runs `vtysh -c 'show running-config'`),
+   and held, the two waited for each other. *Measured* on a SONiC VS: a
+   commit of a VLAN, an MTU, a description and an address took 6.1 s and
+   was in CONFIG_DB and the kernel; a member of a VLAN that does not exist
+   was refused with the updater's leafref error; the changes were undone
+   by a second commit.
+
+   Not done: the writer as a service of the image; `commit confirmed` and
+   `rollback` of a change of CONFIG_DB (an earlier commit is still taken
+   with `sonic` as it is now); and such a commit in `show commit history`
+   when the copy of CONFIG_DB lands before the commit is made here, which
+   it usually does. The plan was:
    `PORT`, `VLAN`, `VLAN_MEMBER`, `INTERFACE`,
    `STATIC_ROUTE`, `BGP_NEIGHBOR`. Pre-commit check, ordered write through the
    config updater, partial-write handling. Measure commit latency.

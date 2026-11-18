@@ -294,7 +294,7 @@ async fn run(arg: Arg) -> anyhow::Result<()> {
     config.subscribe_show("rib", rib.show.tx.clone());
     config.subscribe_show("policy", policy.show.tx.clone());
 
-    let cli = Cli::new(config.tx.clone());
+    let cli = Cli::new(config.tx.clone(), config.config_db_writer.clone());
 
     let vty_addr = config::VtyAddr::parse(&arg.vty_socket)?;
 

@@ -67,4 +67,5 @@ mod subscribe;
 mod token;
 mod tracing;
 mod util;
+mod writer;
 mod yaml;

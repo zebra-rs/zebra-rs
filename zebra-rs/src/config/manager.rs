@@ -38,6 +38,11 @@ use std::rc::Rc;
 use tokio::sync::mpsc::{self, Receiver, Sender, UnboundedReceiver, UnboundedSender};
 use tokio::sync::oneshot;
 
+/// How long a commit waits for the writer of CONFIG_DB. SONiC's updater
+/// takes about three seconds for a small change from the shell, and
+/// longer where a service has to settle after it.
+const CONFIG_DB_WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
 /// What a commit that changes `sonic` is answered with.
 const SONIC_IS_A_COPY: &str = "% `sonic` is a copy of CONFIG_DB and is changed there: \
      give `compare config-db` to SONiC's `config apply-patch`, or `discard`\n";
@@ -265,6 +270,17 @@ pub struct ConfigManager {
     /// itself (docs/design/sonic-junos-style-config.md, phase 3) is
     /// what will turn this off.
     pub sonic_read_only: Cell<bool>,
+    /// Where a commit's change of CONFIG_DB is handed to the process
+    /// that writes it, and its answer waited for (`config::writer`).
+    pub config_db_writer: std::sync::Arc<super::writer::WriterHub>,
+    /// The commit being made changes `sonic`, and the writer has just
+    /// made that change in CONFIG_DB: it is committed here as well, and
+    /// the copy that follows finds it there.
+    config_db_written: Cell<bool>,
+    /// A commit is parked, waiting for the writer's answer. One at a
+    /// time: a second would be a patch against a CONFIG_DB the first is
+    /// about to change.
+    config_db_writing: Cell<bool>,
     /// What the last commits produced, for `rollback`.
     pub history: CommitHistory,
     pub modes: HashMap<String, Mode>,
@@ -524,6 +540,9 @@ impl ConfigManager {
             store: ConfigStore::new(),
             importing: Cell::new(false),
             sonic_read_only: Cell::new(true),
+            config_db_writer: Default::default(),
+            config_db_written: Cell::new(false),
+            config_db_writing: Cell::new(false),
             history: CommitHistory::default(),
             tx,
             rx,
@@ -989,10 +1008,12 @@ impl ConfigManager {
     fn commit(&self, startup: bool, from_file: bool) -> anyhow::Result<()> {
         let mut errors = Vec::<String>::new();
         self.store.candidate.borrow().validate(&mut errors);
-        if self.importing.get() {
+        if self.importing.get() || self.config_db_written.get() {
             // CONFIG_DB is what it is. A row the model calls incomplete
             // is still a row of the device's configuration, and the copy
-            // of it here says so: it is logged, not refused.
+            // of it here says so: it is logged, not refused. The rows an
+            // operator's commit changed were checked by SONiC's updater
+            // when it wrote them.
             errors.retain(|error| {
                 let of_sonic = error.starts_with("'sonic ");
                 if of_sonic {
@@ -2193,7 +2214,33 @@ impl ConfigManager {
     /// Whether `sonic` may not be changed by what is running now: it is
     /// a copy, and this is not the import that makes it one.
     fn sonic_is_a_copy(&self) -> bool {
-        self.sonic_read_only.get() && !self.importing.get()
+        self.sonic_read_only.get() && !self.importing.get() && !self.config_db_written.get()
+    }
+
+    /// The patch of CONFIG_DB this command needs written before it runs:
+    /// it is a `commit` typed in a session, and the candidate changes
+    /// `sonic`. `None` for every other command, and for a commit that
+    /// commit validation would refuse anyway: CONFIG_DB is not changed
+    /// for a commit that will not be made.
+    fn config_db_write_for(&self, mode_name: &str, input: &str) -> Option<String> {
+        if mode_name != "configure" || !self.sonic_read_only.get() {
+            return None;
+        }
+        let mode = self.modes.get(mode_name)?;
+        let (code, _comps, state) = parse(input, mode.entry.clone(), None, State::new());
+        if code != ExecCode::Success || paths_str(&state.paths) != "/commit" {
+            return None;
+        }
+        let patch = self.config_db_patch().ok()?;
+        if patch.is_empty() {
+            return None;
+        }
+        let mut errors = Vec::new();
+        self.store.candidate.borrow().validate(&mut errors);
+        if errors.iter().any(|error| !error.starts_with("'sonic ")) {
+            return None;
+        }
+        serde_json::to_string(&patch).ok()
     }
 
     /// The interactive sessions' uncommitted edits, with the running
@@ -2337,6 +2384,35 @@ impl ConfigManager {
         match m {
             Message::Execute(req) => {
                 let mut resp = ExecuteResponse::new();
+                // A commit that changes `sonic` changes CONFIG_DB first,
+                // through the writer on the device, and is made here
+                // when that is done. It is parked meanwhile and this
+                // task goes on with its queue: SONiC's updater itself
+                // asks zebra-rs for its running config before it writes
+                // anything, and would wait for a commit that waits for
+                // it.
+                if let Some(patch) = self.config_db_write_for(&req.mode, &req.input) {
+                    if self.config_db_writing.replace(true) {
+                        resp.code = ExecCode::Show;
+                        resp.output =
+                            "% Another commit is waiting for CONFIG_DB to be changed\n".to_string();
+                        resp.hostname = self.running_hostname();
+                        let _ = req.resp.send(resp);
+                        return;
+                    }
+                    let hub = self.config_db_writer.clone();
+                    let tx = self.tx.clone();
+                    tokio::spawn(async move {
+                        let outcome = hub.write(patch, CONFIG_DB_WRITE_TIMEOUT).await;
+                        let _ = tx
+                            .send(Message::ConfigDbWritten {
+                                request: req,
+                                outcome,
+                            })
+                            .await;
+                    });
+                    return;
+                }
                 match self.modes.get(&req.mode) {
                     Some(mode) => {
                         (resp.code, resp.output, resp.paths) = self.execute(mode, &req.input);
@@ -2347,6 +2423,34 @@ impl ConfigManager {
                 }
                 // Stamped after `execute` so a `commit` that changed
                 // the hostname reports the just-promoted value.
+                resp.hostname = self.running_hostname();
+                let _ = req.resp.send(resp);
+            }
+            Message::ConfigDbWritten {
+                request: req,
+                outcome,
+            } => {
+                self.config_db_writing.set(false);
+                let mut resp = ExecuteResponse::new();
+                match (outcome, self.modes.get(&req.mode)) {
+                    (Err(why), _) => {
+                        resp.code = ExecCode::Show;
+                        resp.output = format!(
+                            "% CONFIG_DB was not changed, and nothing is committed: {}\n",
+                            why.trim_end()
+                        );
+                    }
+                    // CONFIG_DB has the change. The commit is made of
+                    // whatever is pending now: the change of `sonic`, if
+                    // the copy of CONFIG_DB has not brought it already,
+                    // and the rest.
+                    (Ok(()), Some(mode)) => {
+                        self.config_db_written.set(true);
+                        (resp.code, resp.output, resp.paths) = self.execute(mode, &req.input);
+                        self.config_db_written.set(false);
+                    }
+                    (Ok(()), None) => resp.code = ExecCode::Nomatch,
+                }
                 resp.hostname = self.running_hostname();
                 let _ = req.resp.send(resp);
             }

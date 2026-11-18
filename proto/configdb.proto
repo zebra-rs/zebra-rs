@@ -1,0 +1,52 @@
+// Copyright 2026 Zebra Project.
+
+syntax = "proto3";
+
+// The writer of CONFIG_DB on a SONiC device (`--feature sonic`).
+//
+// zebra-rs holds CONFIG_DB's tables as the `sonic` subtree of its
+// configuration and does not write CONFIG_DB itself: SONiC has its own
+// updater for that (`config apply-patch`), which validates a change
+// against SONiC's models and applies it in an order the device's
+// services can follow. A process on the device that can run it takes
+// the changes from here.
+//
+// When a commit changes `sonic`, the change is an order: the JSON Patch
+// (RFC 6902, on `config_db.json`) that makes it. The writer waits for
+// orders, applies each, and says what became of it. The commit waits for
+// that answer, and is refused when the answer is a refusal, when none
+// comes in time, or when no writer is waiting at all.
+//
+// Two unary calls, not a stream, so that a writer can be a shell script
+// around `vtyctl config-db wait` and `vtyctl config-db done`.
+package zebra.configdb.v1;
+
+service WriterService {
+  // Wait for an order. Answers with the next one, or with `id` 0 when
+  // `timeout_seconds` pass with none. A writer calls it again at once:
+  // that it is waiting is how zebra-rs knows there is a writer.
+  rpc Wait(WaitRequest) returns (Order);
+  // What became of the order `id`.
+  rpc Done(Result) returns (DoneReply);
+}
+
+message WaitRequest {
+  // 0 is a default of 30 seconds.
+  uint32 timeout_seconds = 1;
+}
+
+message Order {
+  // 0 for no order.
+  uint64 id = 1;
+  // A JSON Patch on config_db.json, as `config apply-patch` takes it.
+  string patch = 2;
+}
+
+message Result {
+  uint64 id = 1;
+  bool ok = 2;
+  // Why not, for the operator whose commit it was.
+  string message = 3;
+}
+
+message DoneReply {}

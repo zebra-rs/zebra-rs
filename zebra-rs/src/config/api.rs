@@ -161,6 +161,12 @@ pub enum Message {
     Execute(ExecuteRequest),
     Completion(CompletionRequest),
     Deploy(DeployRequest),
+    /// The writer of CONFIG_DB has answered for the commit `request`
+    /// was parked for (`ConfigManager::config_db_write_for`).
+    ConfigDbWritten {
+        request: ExecuteRequest,
+        outcome: Result<(), String>,
+    },
     DisplayTx(DisplayTxRequest),
     ClearTx(ClearTxRequest),
     /// Register a per-instance (e.g. per-VRF) show channel under a

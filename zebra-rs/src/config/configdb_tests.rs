@@ -551,3 +551,205 @@ fn import_timing() {
     time("emptied", serde_json::json!({}));
     println!("lines: {}", rows * 5);
 }
+
+// --- A commit that changes `sonic`: through the writer of CONFIG_DB ---
+
+/// A line typed in a session, taken the way the daemon takes it: off
+/// the manager's queue. `commit` waits for the writer there.
+async fn session(cm: &mut ConfigManager, line: &str) -> String {
+    let (tx, mut rx) = oneshot::channel();
+    let request = super::super::api::ExecuteRequest::new("configure", line, tx);
+    cm.process_message(Message::Execute(request)).await;
+    // A commit parked for the writer is answered by a later message of
+    // the manager's own queue, which the daemon's loop would take.
+    loop {
+        tokio::select! {
+            reply = &mut rx => return reply.expect("a reply").output,
+            Some(message) = cm.rx.recv() => cm.process_message(message).await,
+        }
+    }
+}
+
+/// A writer that applies each order to `db`, as SONiC's updater does to
+/// CONFIG_DB, unless `refuse` says why not. It counts the orders.
+fn writer(
+    cm: &ConfigManager,
+    db: std::sync::Arc<std::sync::Mutex<serde_json::Value>>,
+    refuse: Option<&'static str>,
+) -> std::sync::Arc<std::sync::atomic::AtomicUsize> {
+    let hub = cm.config_db_writer.clone();
+    let orders = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = orders.clone();
+    tokio::spawn(async move {
+        while let Some((id, patch)) = hub.wait(std::time::Duration::from_secs(5)).await {
+            counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let answer = match refuse {
+                Some(why) => Err(why.to_string()),
+                None => {
+                    let patch: serde_json::Value = serde_json::from_str(&patch).unwrap();
+                    apply_patch(&mut db.lock().unwrap(), &patch);
+                    Ok(())
+                }
+            };
+            hub.done(id, answer);
+        }
+    });
+    orders
+}
+
+fn shared(tables: serde_json::Value) -> std::sync::Arc<std::sync::Mutex<serde_json::Value>> {
+    std::sync::Arc::new(std::sync::Mutex::new(tables))
+}
+
+/// `commit` gives the change of `sonic` to the writer, and when the
+/// writer has made it in CONFIG_DB the commit is made here: the edits
+/// are running, with whatever else was pending, and are a commit of the
+/// history. The copy of CONFIG_DB that follows changes nothing.
+#[tokio::test]
+async fn a_commit_writes_config_db_through_the_writer() {
+    let mut cm = manager("writer");
+    let db = shared(tables());
+    import(&cm, tables());
+    let orders = writer(&cm, db.clone(), None);
+    tokio::task::yield_now().await;
+
+    edit(&cm, "set sonic PORT Ethernet0 mtu 1500");
+    edit(&cm, "delete sonic PORT Ethernet4");
+    edit(&cm, "set sonic INTERFACE_IPPREFIX Ethernet0 192.0.2.1/24");
+    edit(&cm, "set system hostname r1");
+    let wanted = candidate(&cm);
+    assert_eq!(session(&mut cm, "commit").await, "");
+
+    assert_eq!(orders.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(running(&cm), wanted);
+    assert_eq!(cm.history.len(), 1);
+    // CONFIG_DB has the change, and nothing but the change.
+    let written = db.lock().unwrap().clone();
+    assert_eq!(written["PORT"]["Ethernet0"]["mtu"], "1500");
+    assert_eq!(written["PORT"]["Ethernet0"]["lanes"], "1,2,3,4");
+    assert!(written["PORT"].get("Ethernet4").is_none());
+    assert!(written["INTERFACE"].get("Ethernet0|192.0.2.1/24").is_some());
+
+    // The mirror then copies what CONFIG_DB holds: the same.
+    import(&cm, written);
+    assert_eq!(running(&cm), wanted);
+    assert_eq!(run(&cm, "compare"), "");
+    assert_eq!(cm.history.len(), 1);
+}
+
+/// What the writer refuses is not committed, here or there, and the
+/// reason is the answer. The edits stay to be corrected.
+#[tokio::test]
+async fn a_change_the_writer_refuses_is_not_committed() {
+    let mut cm = manager("writer-refuses");
+    let db = shared(tables());
+    import(&cm, tables());
+    let orders = writer(&cm, db.clone(), Some("Error: PORT Ethernet8 has no lanes"));
+    tokio::task::yield_now().await;
+
+    edit(&cm, "set sonic PORT Ethernet8 mtu 1500");
+    edit(&cm, "set system hostname r1");
+    let pending = candidate(&cm);
+    assert_eq!(
+        session(&mut cm, "commit").await,
+        "% CONFIG_DB was not changed, and nothing is committed: Error: PORT Ethernet8 has no lanes\n"
+    );
+    assert_eq!(orders.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(running(&cm), IMPORTED);
+    assert_eq!(candidate(&cm), pending);
+    assert_eq!(*db.lock().unwrap(), tables());
+    assert_eq!(cm.history.len(), 0);
+}
+
+/// With no writer on the device the commit is refused at once and says
+/// so.
+#[tokio::test]
+async fn without_a_writer_the_commit_is_refused() {
+    let mut cm = manager("writer-absent");
+    import(&cm, tables());
+    edit(&cm, "set sonic PORT Ethernet0 mtu 1500");
+    assert_eq!(
+        session(&mut cm, "commit").await,
+        "% CONFIG_DB was not changed, and nothing is committed: no writer of CONFIG_DB is connected\n"
+    );
+    assert_eq!(running(&cm), IMPORTED);
+}
+
+/// A commit that does not change `sonic` asks nothing of the writer,
+/// and one that commit validation refuses is not written first.
+#[tokio::test]
+async fn the_writer_is_asked_only_for_a_change_of_config_db() {
+    let mut cm = manager("writer-not-asked");
+    let db = shared(tables());
+    import(&cm, tables());
+    let orders = writer(&cm, db.clone(), None);
+    tokio::task::yield_now().await;
+
+    edit(&cm, "set system hostname r1");
+    assert_eq!(session(&mut cm, "commit").await, "");
+    assert_eq!(session(&mut cm, "commit").await, "");
+    assert_eq!(session(&mut cm, "compare").await, "");
+
+    // `vni` is mandatory: this commit is refused, with or without the
+    // change of `sonic` beside it.
+    edit(&cm, "set sonic PORT Ethernet0 mtu 1500");
+    edit(&cm, "set vxlan vx1 local-address 10.0.0.1");
+    assert!(
+        session(&mut cm, "commit")
+            .await
+            .contains("missing mandatory node")
+    );
+    assert_eq!(orders.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert_eq!(*db.lock().unwrap(), tables());
+}
+
+/// While a commit waits for the writer the manager serves everything
+/// else: SONiC's updater asks for the running config before it writes,
+/// and gets it. A second commit that would change CONFIG_DB is told to
+/// wait.
+#[tokio::test]
+async fn the_manager_is_not_held_while_the_writer_works() {
+    let mut cm = manager("writer-parked");
+    import(&cm, tables());
+    let hub = cm.config_db_writer.clone();
+    // A writer that takes the order and holds it until told.
+    let (release, held) = oneshot::channel::<()>();
+    let taken = std::sync::Arc::new(tokio::sync::Notify::new());
+    let took = taken.clone();
+    tokio::spawn(async move {
+        let (id, _) = hub
+            .wait(std::time::Duration::from_secs(5))
+            .await
+            .expect("an order");
+        took.notify_one();
+        let _ = held.await;
+        hub.done(id, Ok(()));
+    });
+    tokio::task::yield_now().await;
+
+    edit(&cm, "set sonic PORT Ethernet0 mtu 1500");
+    let (tx, mut reply) = oneshot::channel();
+    let request = super::super::api::ExecuteRequest::new("configure", "commit", tx);
+    cm.process_message(Message::Execute(request)).await;
+    taken.notified().await;
+    assert!(reply.try_recv().is_err(), "answered before the writer was");
+
+    // Asked meanwhile, as the updater asks.
+    assert!(run(&cm, "show running-config formal").contains("sonic PORT Ethernet0 mtu 9100\n"));
+    let (tx, second) = oneshot::channel();
+    let request = super::super::api::ExecuteRequest::new("configure", "commit", tx);
+    cm.process_message(Message::Execute(request)).await;
+    assert_eq!(
+        second.await.unwrap().output,
+        "% Another commit is waiting for CONFIG_DB to be changed\n"
+    );
+
+    release.send(()).unwrap();
+    let message = cm.rx.recv().await.expect("the writer's answer");
+    cm.process_message(message).await;
+    assert_eq!(reply.await.unwrap().output, "");
+    assert!(running(&cm).contains("sonic PORT Ethernet0 mtu 1500\n"));
+    // And the next commit is taken again.
+    edit(&cm, "set system hostname r1");
+    assert_eq!(session(&mut cm, "commit").await, "");
+}
