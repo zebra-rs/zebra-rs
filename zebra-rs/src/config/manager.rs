@@ -1830,14 +1830,13 @@ impl ConfigManager {
         let running = self.store.running.borrow().clone();
         // A copy of CONFIG_DB is not this daemon's to save: SONiC keeps
         // it (`config save`), and it is copied in again at start.
-        let running =
-            if self.sonic_read_only.get() && running.lookup(&"sonic".to_string()).is_some() {
-                let without = carbon_copy(&running, None);
-                without.configs.borrow_mut().retain(|c| c.name != "sonic");
-                without
-            } else {
-                running
-            };
+        let running = if self.sonic_mirrored() && running.lookup(&"sonic".to_string()).is_some() {
+            let without = carbon_copy(&running, None);
+            without.configs.borrow_mut().retain(|c| c.name != "sonic");
+            without
+        } else {
+            running
+        };
         let mut output = String::new();
         match format {
             ConfigFormat::Cli => running.format(&mut output),
@@ -1876,7 +1875,7 @@ impl ConfigManager {
         // The copy of CONFIG_DB is no part of a commit to go back to:
         // an earlier commit is the configuration made here as it was
         // then, with `sonic` as CONFIG_DB has it now.
-        let mirror = self.sonic_read_only.get();
+        let mirror = self.sonic_mirrored();
         let mut sonic_now = String::new();
         if mirror && let Some(sonic) = self.store.running.borrow().lookup(&"sonic".to_string()) {
             sonic.list(&mut sonic_now);
@@ -2130,8 +2129,11 @@ impl ConfigManager {
             };
         }
 
-        // CONFIG_DB, to be copied into the `sonic` subtree.
-        if let Some(tables) = super::configdb::document(config) {
+        // CONFIG_DB, to be copied into the `sonic` subtree. Without the
+        // subtree the document is read as any other, and refused as one.
+        if self.sonic_mirrored()
+            && let Some(tables) = super::configdb::document(config)
+        {
             return self.import_config_db(&tables);
         }
 
@@ -2234,7 +2236,20 @@ impl ConfigManager {
     /// Whether `sonic` may not be changed by what is running now: it is
     /// a copy, and this is not the import that makes it one.
     fn sonic_is_a_copy(&self) -> bool {
-        self.sonic_read_only.get() && !self.importing.get() && !self.config_db_written.get()
+        self.sonic_mirrored() && !self.importing.get() && !self.config_db_written.get()
+    }
+
+    /// Whether this daemon has a `sonic` subtree that is a copy of
+    /// CONFIG_DB: it runs with `--feature sonic` and has the models.
+    /// Everything that treats `sonic` differently from the rest of the
+    /// configuration asks this first, so that without the subtree the
+    /// daemon does exactly what it did before there was one.
+    fn sonic_mirrored(&self) -> bool {
+        self.sonic_read_only.get()
+            && self
+                .modes
+                .get("configure")
+                .is_some_and(|mode| super::sonic::grafted(&mode.entry).is_some())
     }
 
     /// The patch of CONFIG_DB this command needs written before it runs:
@@ -2243,7 +2258,7 @@ impl ConfigManager {
     /// commit validation would refuse anyway: CONFIG_DB is not changed
     /// for a commit that will not be made.
     fn config_db_write_for(&self, mode_name: &str, input: &str) -> Option<String> {
-        if mode_name != "configure" || !self.sonic_read_only.get() {
+        if mode_name != "configure" || !self.sonic_mirrored() {
             return None;
         }
         let mode = self.modes.get(mode_name)?;

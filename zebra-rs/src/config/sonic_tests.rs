@@ -181,7 +181,13 @@ fn the_feature_turns_sonic_on() {
     assert_eq!(code(&off, line), ExecCode::Nomatch);
     let reply = off.deploy(r#"{"CONFIG_DB": {"PORT": {}}}"#);
     assert_eq!(reply.apply_code, ApplyCode::ParseError);
-    assert!(reply.cmd.contains("--feature sonic"), "{}", reply.cmd);
+    // Without the feature the document is a configuration like any
+    // other, with a key the schema does not have.
+    assert!(
+        reply.cmd.contains("unknown key `CONFIG_DB`"),
+        "{}",
+        reply.cmd
+    );
 
     let no_models = start("feature-no-models", YANG.to_string(), &["sonic"]);
     assert_eq!(code(&no_models, line), ExecCode::Nomatch);

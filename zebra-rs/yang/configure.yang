@@ -20,6 +20,10 @@ module configure {
     prefix config;
   }
 
+  import zebra-features {
+    prefix feat;
+  }
+
   import iana-bgp-community-types {
     prefix bct;
     reference
@@ -132,6 +136,7 @@ module configure {
     // `sonic` change in CONFIG_DB, as the JSON Patch SONiC's
     // `config apply-patch` takes.
     leaf config-db {
+      if-feature feat:sonic;
       ext:help "Pending changes of sonic, as a patch of CONFIG_DB";
       type empty;
     }

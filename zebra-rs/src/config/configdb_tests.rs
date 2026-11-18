@@ -8,14 +8,20 @@ use super::*;
 const MODELS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src/config/testdata/sonic");
 const YANG: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/yang");
 
+/// A daemon as it is anywhere but on a SONiC device: no feature, no
+/// models.
 fn plain(name: &str) -> ConfigManager {
     let path =
         std::env::temp_dir().join(format!("zebra-rs-configdb-{name}-{}", std::process::id()));
     test_support::manager(&path, Vec::new(), Default::default())
 }
 
+/// A daemon started with `--feature sonic`, with the test models as its
+/// `sonic` subtree.
 fn manager(name: &str) -> ConfigManager {
-    let cm = plain(name);
+    let path =
+        std::env::temp_dir().join(format!("zebra-rs-configdb-{name}-{}", std::process::id()));
+    let cm = test_support::manager(&path, vec!["sonic".to_string()], Default::default());
     let (sonic, _) = super::super::sonic::sonic_entry(YANG, Path::new(MODELS));
     graft(
         &cm.modes.get("configure").expect("configure mode").entry,
@@ -255,13 +261,69 @@ fn only_the_wrapped_document_is_config_db() {
     assert_eq!(running(&cm), "");
 }
 
-/// A daemon with no SONiC models refuses CONFIG_DB and says why.
-#[test]
-fn without_the_models_config_db_is_refused() {
-    let cm = plain("no-models");
+/// Anywhere but on a SONiC device, none of this is there. A document
+/// in the wrapper is a configuration with a key the schema does not
+/// have, `sonic` and `compare config-db` are not commands, and a commit
+/// asks nothing of a writer, should one be waiting.
+#[tokio::test]
+async fn without_the_feature_nothing_here_is_there() {
+    let mut cm = plain("no-feature");
     let reply = import(&cm, tables());
     assert_eq!(reply.apply_code, ApplyCode::ParseError);
-    assert!(reply.cmd.contains("no SONiC models"), "{}", reply.cmd);
+    assert!(
+        reply.cmd.contains("unknown key `CONFIG_DB`"),
+        "{}",
+        reply.cmd
+    );
+
+    let mode = cm.modes.get("configure").expect("configure mode");
+    for line in [
+        "set sonic PORT Ethernet0 mtu 9100",
+        "delete sonic",
+        "compare config-db",
+    ] {
+        let (code, output, _) = cm.execute(mode, line);
+        assert_eq!((code, output.as_str()), (ExecCode::Nomatch, ""), "`{line}`");
+    }
+
+    let orders = writer(&cm, shared(tables()), None);
+    tokio::task::yield_now().await;
+    edit(&cm, "set system hostname r1");
+    assert_eq!(
+        session(&mut cm, "compare formal").await,
+        "+system hostname r1\n"
+    );
+    assert_eq!(session(&mut cm, "commit").await, "");
+    assert_eq!(orders.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert_eq!(running(&cm), "system hostname r1\n");
+    assert_eq!(cm.history.len(), 1);
+    // `save` writes all of it, and `rollback` reads all of it back.
+    commit(&cm, &["set system hostname r2"]);
+    assert!(run(&cm, "save formal").starts_with("Configuration saved"));
+    assert_eq!(
+        std::fs::read_to_string(&cm.config_path).unwrap(),
+        "set system hostname r2\n"
+    );
+    let _ = std::fs::remove_file(&cm.config_path);
+    assert_eq!(run(&cm, "rollback 1"), "");
+    assert_eq!(candidate(&cm), "system hostname r1\n");
+}
+
+/// With the feature and no models there is no `sonic` either: CONFIG_DB
+/// is refused, and the patch has nothing to be of.
+#[test]
+fn with_the_feature_and_no_models() {
+    let path = std::env::temp_dir().join(format!(
+        "zebra-rs-configdb-no-models-{}",
+        std::process::id()
+    ));
+    let cm = test_support::manager(&path, vec!["sonic".to_string()], Default::default());
+    let reply = import(&cm, tables());
+    assert_eq!(reply.apply_code, ApplyCode::ParseError);
+    let mode = cm.modes.get("configure").expect("configure mode");
+    let (code, why, _) = cm.execute(mode, "compare config-db");
+    assert_eq!(code, ExecCode::Nomatch);
+    assert!(why.contains("No SONiC models are loaded"), "{why}");
 }
 
 const READ_ONLY: &str = "% `sonic` is a copy of CONFIG_DB and is changed there: \
@@ -452,104 +514,6 @@ fn the_patch_applied_is_the_candidate() {
     // And that is committed like any change that is not of `sonic`.
     assert_eq!(run(&cm, "commit"), "");
     assert_eq!(running(&cm), wanted);
-}
-
-/// Without the models there is no CONFIG_DB to patch.
-#[test]
-fn compare_config_db_needs_the_models() {
-    let cm = plain("patch-no-models");
-    let mode = cm.modes.get("configure").expect("configure mode");
-    let (code, why, _) = cm.execute(mode, "compare config-db");
-    assert_eq!(code, ExecCode::Nomatch);
-    assert!(why.contains("--feature sonic"), "{why}");
-}
-
-/// An earlier commit is the configuration made here as it was then. The
-/// copy is not part of it: going back leaves `sonic` as CONFIG_DB has
-/// it now, and `compare rollback` shows no change of it.
-#[test]
-fn rollback_leaves_the_copy_as_it_is_now() {
-    let cm = manager("read-only-rollback");
-    import(&cm, tables());
-    commit(&cm, &["set system hostname r1"]);
-    commit(&cm, &["set system hostname r2"]);
-    // CONFIG_DB changes after the commit to go back to.
-    let mut later = tables();
-    later["PORT"]["Ethernet0"]["mtu"] = "1500".into();
-    later["PORT"].as_object_mut().unwrap().remove("Ethernet4");
-    import(&cm, later);
-    let copy_now: String = running(&cm)
-        .lines()
-        .filter(|l| l.starts_with("sonic"))
-        .map(|l| format!("{l}\n"))
-        .collect();
-
-    assert_eq!(
-        run(&cm, "compare rollback 1"),
-        " system {\n-  hostname r1;\n+  hostname r2;\n }\n"
-    );
-    assert_eq!(run(&cm, "rollback 1"), "");
-    assert_eq!(candidate(&cm), format!("{copy_now}system hostname r1\n"));
-    assert_eq!(run(&cm, "commit"), "");
-    assert_eq!(running(&cm), format!("{copy_now}system hostname r1\n"));
-}
-
-/// `save` writes the configuration made here. The copy is SONiC's to
-/// save and is copied in again at start.
-#[test]
-fn save_leaves_the_copy_out() {
-    let cm = manager("read-only-save");
-    import(&cm, tables());
-    commit(&cm, &["set system hostname r1"]);
-    for format in ["formal", "cli", "json", "yaml"] {
-        assert!(run(&cm, &format!("save {format}")).starts_with("Configuration saved"));
-        let saved = std::fs::read_to_string(&cm.config_path).unwrap();
-        assert!(saved.contains("hostname"), "{format}: {saved}");
-        assert!(!saved.contains("sonic"), "{format}: {saved}");
-        assert!(!saved.contains("Ethernet0"), "{format}: {saved}");
-    }
-    let _ = std::fs::remove_file(&cm.config_path);
-    // What is running still has it.
-    assert!(running(&cm).contains("sonic PORT Ethernet0\n"));
-}
-
-/// Not a test of what is copied: how long a copy of a large CONFIG_DB
-/// takes. `cargo test --release -p zebra-rs import_timing -- --ignored
-/// --nocapture`.
-#[test]
-#[ignore = "timing, run by hand"]
-fn import_timing() {
-    let rows: usize = std::env::var("ROWS")
-        .ok()
-        .and_then(|n| n.parse().ok())
-        .unwrap_or(2000);
-    let big = |mtu: &str| {
-        let ports: serde_json::Map<String, serde_json::Value> = (0..rows)
-            .map(|n| {
-                (
-                    format!("Ethernet{n}"),
-                    serde_json::json!({"lanes": format!("{n}"), "admin_status": "up",
-                                       "mtu": mtu, "description": format!("port {n} of the lot")}),
-                )
-            })
-            .collect();
-        serde_json::json!({ "PORT": ports })
-    };
-    let cm = manager("timing");
-    let time = |what: &str, tables: serde_json::Value| {
-        let start = std::time::Instant::now();
-        let reply = import(&cm, tables);
-        assert_eq!(reply.apply_code, ApplyCode::Applied, "{}", reply.cmd);
-        println!("{what}: {:?}", start.elapsed());
-    };
-    time("first copy", big("9100"));
-    time("same again", big("9100"));
-    let mut one = big("9100");
-    one["PORT"]["Ethernet7"]["mtu"] = "1500".into();
-    time("one leaf changed", one);
-    time("every row changed", big("1500"));
-    time("emptied", serde_json::json!({}));
-    println!("lines: {}", rows * 5);
 }
 
 // --- A commit that changes `sonic`: through the writer of CONFIG_DB ---
@@ -754,4 +718,92 @@ async fn the_manager_is_not_held_while_the_writer_works() {
     // And the next commit is taken again.
     edit(&cm, "set system hostname r1");
     assert_eq!(session(&mut cm, "commit").await, "");
+}
+
+/// Not a test of what is copied: how long a copy of a large CONFIG_DB
+/// takes. `cargo test --release -p zebra-rs import_timing -- --ignored
+/// --nocapture`.
+#[test]
+#[ignore = "timing, run by hand"]
+fn import_timing() {
+    let rows: usize = std::env::var("ROWS")
+        .ok()
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(2000);
+    let big = |mtu: &str| {
+        let ports: serde_json::Map<String, serde_json::Value> = (0..rows)
+            .map(|n| {
+                (
+                    format!("Ethernet{n}"),
+                    serde_json::json!({"lanes": format!("{n}"), "admin_status": "up",
+                                       "mtu": mtu, "description": format!("port {n} of the lot")}),
+                )
+            })
+            .collect();
+        serde_json::json!({ "PORT": ports })
+    };
+    let cm = manager("timing");
+    let time = |what: &str, tables: serde_json::Value| {
+        let start = std::time::Instant::now();
+        let reply = import(&cm, tables);
+        assert_eq!(reply.apply_code, ApplyCode::Applied, "{}", reply.cmd);
+        println!("{what}: {:?}", start.elapsed());
+    };
+    time("first copy", big("9100"));
+    time("same again", big("9100"));
+    let mut one = big("9100");
+    one["PORT"]["Ethernet7"]["mtu"] = "1500".into();
+    time("one leaf changed", one);
+    time("every row changed", big("1500"));
+    time("emptied", serde_json::json!({}));
+    println!("lines: {}", rows * 5);
+}
+
+/// An earlier commit is the configuration made here as it was then. The
+/// copy is not part of it: going back leaves `sonic` as CONFIG_DB has
+/// it now, and `compare rollback` shows no change of it.
+#[test]
+fn rollback_leaves_the_copy_as_it_is_now() {
+    let cm = manager("read-only-rollback");
+    import(&cm, tables());
+    commit(&cm, &["set system hostname r1"]);
+    commit(&cm, &["set system hostname r2"]);
+    // CONFIG_DB changes after the commit to go back to.
+    let mut later = tables();
+    later["PORT"]["Ethernet0"]["mtu"] = "1500".into();
+    later["PORT"].as_object_mut().unwrap().remove("Ethernet4");
+    import(&cm, later);
+    let copy_now: String = running(&cm)
+        .lines()
+        .filter(|l| l.starts_with("sonic"))
+        .map(|l| format!("{l}\n"))
+        .collect();
+
+    assert_eq!(
+        run(&cm, "compare rollback 1"),
+        " system {\n-  hostname r1;\n+  hostname r2;\n }\n"
+    );
+    assert_eq!(run(&cm, "rollback 1"), "");
+    assert_eq!(candidate(&cm), format!("{copy_now}system hostname r1\n"));
+    assert_eq!(run(&cm, "commit"), "");
+    assert_eq!(running(&cm), format!("{copy_now}system hostname r1\n"));
+}
+
+/// `save` writes the configuration made here. The copy is SONiC's to
+/// save and is copied in again at start.
+#[test]
+fn save_leaves_the_copy_out() {
+    let cm = manager("read-only-save");
+    import(&cm, tables());
+    commit(&cm, &["set system hostname r1"]);
+    for format in ["formal", "cli", "json", "yaml"] {
+        assert!(run(&cm, &format!("save {format}")).starts_with("Configuration saved"));
+        let saved = std::fs::read_to_string(&cm.config_path).unwrap();
+        assert!(saved.contains("hostname"), "{format}: {saved}");
+        assert!(!saved.contains("sonic"), "{format}: {saved}");
+        assert!(!saved.contains("Ethernet0"), "{format}: {saved}");
+    }
+    let _ = std::fs::remove_file(&cm.config_path);
+    // What is running still has it.
+    assert!(running(&cm).contains("sonic PORT Ethernet0\n"));
 }
