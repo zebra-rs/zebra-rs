@@ -10572,3 +10572,7 @@ module test-insomnia-gated {
 #[cfg(test)]
 #[path = "apply_isolation_tests.rs"]
 mod apply_isolation_tests;
+
+#[cfg(test)]
+#[path = "multikey_tests.rs"]
+mod multikey_tests;

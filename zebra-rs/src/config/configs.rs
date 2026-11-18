@@ -378,11 +378,23 @@ impl Config {
         }
     }
 
-    /// Helper method to marshal keys (list entries)
-    fn marshal_keys(&self, out: &mut String) {
-        let keys = self.keys.borrow();
-        for (pos, key) in keys.iter().enumerate() {
-            key.json_marshal(pos, out);
+    /// Helper method to marshal the entries of a list node. An entry is
+    /// one object with all its keys, also where the list has several
+    /// (RFC 7951 §5.4): the nodes of the keys before the last are not
+    /// objects of their own.
+    fn marshal_entries(&self, out: &mut String) {
+        for (pos, (keys, entry)) in self.entries().iter().enumerate() {
+            self.append_comma_if_needed(pos, out);
+            out.push('{');
+            let keys: Vec<String> = keys
+                .iter()
+                .map(|(leaf, value)| format!("\"{leaf}\":{}", format_json_value(value)))
+                .collect();
+            out.push_str(&keys.join(","));
+            entry.marshal_configs(out);
+            if entry.configs.borrow().is_empty() {
+                out.push('}');
+            }
         }
     }
 
@@ -416,21 +428,8 @@ impl Config {
         if has_keys {
             // This is a list node
             out.push_str(&format!("\"{}\": [", self.name));
-            self.marshal_keys(out);
+            self.marshal_entries(out);
             out.push(']');
-        } else if self.has_prefix() {
-            // This is a keyed entry
-            out.push('{');
-            out.push_str(&format!(
-                "\"{}\":{}",
-                self.prefix,
-                format_json_value(&self.name)
-            ));
-            self.marshal_keys(out);
-            self.marshal_configs(out);
-            if !has_configs && self.keys.borrow().is_empty() {
-                out.push('}');
-            }
         } else {
             // This is a regular node
             self.marshal_key_value(out);
@@ -453,15 +452,9 @@ impl Config {
     }
 
     pub fn json(&self, out: &mut String) {
-        let keys = self.keys.borrow();
-        if !keys.is_empty() {
+        if !self.keys.borrow().is_empty() {
             out.push('[');
-            for (pos, key) in keys.iter().enumerate() {
-                if pos != 0 {
-                    out.push(',');
-                }
-                key.json_marshal(0, out);
-            }
+            self.marshal_entries(out);
             out.push(']');
             return;
         }
@@ -512,8 +505,40 @@ impl Config {
         commands
     }
 
+    /// Whether this is the node of a key that is not its list's last:
+    /// the first of `key "name port"`. The entry is a key node further
+    /// down, and this one is only the way to it. It has no line and no
+    /// leaves of its own, and does not outlive the entries under it.
+    ///
+    /// A key node holds key nodes only then: the lists inside an entry
+    /// are among its `configs`.
+    pub fn is_partial_key(&self) -> bool {
+        !self.prefix.is_empty() && !self.keys.borrow().is_empty()
+    }
+
+    /// The entries of this list node: the key nodes under it, or for a
+    /// list with several keys the nodes of the last key. Each comes
+    /// with all its keys in order, as (key leaf, value).
+    pub fn entries(&self) -> Vec<(Vec<(String, String)>, Rc<Config>)> {
+        type Entries = Vec<(Vec<(String, String)>, Rc<Config>)>;
+        fn walk(node: &Config, keys: &[(String, String)], out: &mut Entries) {
+            for key in node.keys.borrow().iter() {
+                let mut keys = keys.to_vec();
+                keys.push((key.prefix.clone(), key.name.clone()));
+                if key.is_partial_key() {
+                    walk(key, &keys, out);
+                } else {
+                    out.push((keys, key.clone()));
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(self, &[], &mut out);
+        out
+    }
+
     pub fn list(&self, output: &mut String) {
-        if !self.has_dir() || self.presence || !self.prefix.is_empty() {
+        if (!self.has_dir() || self.presence || !self.prefix.is_empty()) && !self.is_partial_key() {
             let commands = self.list_command();
             if !commands.is_empty() {
                 let base = commands.join(" ");
@@ -580,13 +605,20 @@ impl Config {
     }
 
     pub fn validate(&self, errors: &mut Vec<String>) {
+        // A list's requirements are of its entries. A node of a key
+        // that is not the last has entries under it and is not one.
+        let entries = if self.prefix.is_empty() {
+            self.entries()
+        } else {
+            Vec::new()
+        };
         for m in self.mandatory.iter() {
-            for key in self.keys.borrow().iter() {
+            for (keys, key) in entries.iter() {
                 if !key.has_mandatory(m) {
                     let mut parents = VecDeque::<String>::new();
                     self.parents(&mut parents);
                     parents.push_back(self.name.clone());
-                    parents.push_back(key.name.clone());
+                    parents.extend(keys.iter().map(|(_, value)| value.clone()));
                     let parents = Vec::from(parents);
                     let parents = parents.join(" ");
                     errors.push(format!("'{}' missing mandatory node '{}'", parents, m));
@@ -605,12 +637,12 @@ impl Config {
         // entry must carry at least one child (`configs`/`keys`) or a
         // leaf-list value (`list`); a bare `... <key>` is rejected.
         if !self.non_empty.is_empty() {
-            for key in self.keys.borrow().iter() {
+            for (keys, key) in entries.iter() {
                 if !key.has_dir() && key.list.borrow().is_empty() {
                     let mut parents = VecDeque::<String>::new();
                     self.parents(&mut parents);
                     parents.push_back(self.name.clone());
-                    parents.push_back(key.name.clone());
+                    parents.extend(keys.iter().map(|(_, value)| value.clone()));
                     let parents = Vec::from(parents);
                     let parents = parents.join(" ");
                     errors.push(format!("'{}' requires {}", parents, self.non_empty));
@@ -812,7 +844,11 @@ fn config_delete(config: Rc<Config>, name: &String) {
 pub fn delete(paths: Vec<CommandPath>, mut config: Rc<Config>) -> bool {
     // Leaf-list members the path names, and how many of them were there.
     let (mut named, mut removed) = (0, 0);
-    for path in paths.iter() {
+    // The nodes on the way that are keys before their list's last: a
+    // key value followed by another.
+    let mut partial_keys: Vec<Rc<Config>> = Vec::new();
+    let key_matched = |path: &CommandPath| ymatch_enum(path.ymatch) == YangMatch::KeyMatched;
+    for (at, path) in paths.iter().enumerate() {
         match ymatch_enum(path.ymatch) {
             YangMatch::Dir | YangMatch::DirMatched | YangMatch::Leaf | YangMatch::Key => {
                 let Some(next) = config.lookup(&path.name) else {
@@ -825,6 +861,9 @@ pub fn delete(paths: Vec<CommandPath>, mut config: Rc<Config>) -> bool {
                     return false;
                 };
                 config = next;
+                if paths.get(at + 1).is_some_and(key_matched) {
+                    partial_keys.push(config.clone());
+                }
             }
             YangMatch::LeafMatched => {
                 // `as_str()` (not `as_ref()`): the `lua` feature pulls in
@@ -867,6 +906,11 @@ pub fn delete(paths: Vec<CommandPath>, mut config: Rc<Config>) -> bool {
     while let Some(parent) = config.parent.upgrade() {
         config_delete(parent.clone(), &config.name);
         config = parent;
+        // A key before the last, with no entry left under it, is not
+        // an entry: it goes with the last of them.
+        if !config.has_dir() && partial_keys.iter().any(|k| Rc::ptr_eq(k, &config)) {
+            continue;
+        }
         if config.has_dir() || config.has_prefix() || config.presence {
             // Exception: an empty entry of an `ext:non-empty` list is dead
             // config — a bare `... <key>` (e.g. `router isis afi-safi ipv4`)
