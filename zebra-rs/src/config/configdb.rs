@@ -265,3 +265,168 @@ fn row_target(
         .find(|(path, _, _)| accepts(&format!("sonic {}", path.join(" "))))
         .or(Some(first))
 }
+
+// --- The other way: the `sonic` subtree as CONFIG_DB, and a change of
+// it as a patch ---
+
+use super::configs::Config;
+
+/// The tables of CONFIG_DB a `sonic` subtree stands for, as
+/// `config_db.json` has them: the inverse of [`translate`].
+///
+/// Every value is a string, as CONFIG_DB holds it; a leaf-list is an
+/// array of them; a row with no field is `{}`.
+pub fn export(schema: &Rc<Entry>, sonic: Option<&Rc<Config>>) -> Map<String, Value> {
+    let mut tables: Map<String, Value> = Map::new();
+    let Some(sonic) = sonic else {
+        return tables;
+    };
+    let entry_of = |parent: &Rc<Entry>, name: &str| {
+        parent.dir.borrow().iter().find(|e| e.name == name).cloned()
+    };
+    let mut put = |table: &str, key: String, fields: Map<String, Value>| {
+        let rows = tables
+            .entry(table.to_string())
+            .or_insert_with(|| Value::Object(Map::new()));
+        if let Value::Object(rows) = rows {
+            rows.insert(key, Value::Object(fields));
+        }
+    };
+    let rows_of = |list: &Rc<Config>| -> Vec<(String, Map<String, Value>)> {
+        list.entries()
+            .into_iter()
+            .map(|(keys, row)| {
+                let key: Vec<String> = keys.into_iter().map(|(_, value)| value).collect();
+                (key.join("|"), fields(&row))
+            })
+            .collect()
+    };
+    for node in sonic.configs.borrow().iter() {
+        let Some(entry) = entry_of(schema, &node.name) else {
+            continue;
+        };
+        let table = entry
+            .extension
+            .get(EXT_TABLE)
+            .cloned()
+            .unwrap_or_else(|| node.name.clone());
+        if entry.extension.contains_key(EXT_LIST) {
+            for (key, row) in rows_of(node) {
+                put(&table, key, row);
+            }
+            continue;
+        }
+        // The table as it is: rows with fixed keys, and lists by name.
+        for child in node.configs.borrow().iter() {
+            match entry_of(&entry, &child.name) {
+                Some(e) if e.is_list() => {
+                    for (key, row) in rows_of(child) {
+                        put(&table, key, row);
+                    }
+                }
+                Some(_) => put(&table, child.name.clone(), fields(child)),
+                None => {}
+            }
+        }
+    }
+    tables
+}
+
+/// The fields of a row: its leaves and leaf-lists.
+fn fields(row: &Rc<Config>) -> Map<String, Value> {
+    let mut out = Map::new();
+    for leaf in row.configs.borrow().iter() {
+        let list = leaf.list.borrow();
+        if !list.is_empty() {
+            let members = list.iter().cloned().map(Value::String).collect();
+            out.insert(leaf.name.clone(), Value::Array(members));
+        } else if !leaf.value.borrow().is_empty() {
+            out.insert(
+                leaf.name.clone(),
+                Value::String(leaf.value.borrow().clone()),
+            );
+        }
+    }
+    out
+}
+
+/// One step of a JSON Pointer (RFC 6901): a row's key has `/` in it
+/// when it holds a prefix.
+fn pointer(steps: &[&str]) -> String {
+    steps
+        .iter()
+        .map(|step| format!("/{}", step.replace('~', "~0").replace('/', "~1")))
+        .collect()
+}
+
+/// What turns the tables `from` into the tables `to`, as a JSON Patch
+/// (RFC 6902) on `config_db.json`: the form SONiC's `config apply-patch`
+/// takes.
+///
+/// It says only what differs, field by field. What neither side has is
+/// not in it, so what the copy leaves out of CONFIG_DB (a table with no
+/// model, a value it cannot hold) is not touched by applying it. A
+/// table is added with its first row and removed with its last: CONFIG_DB
+/// has no table with no row.
+pub fn patch(from: &Map<String, Value>, to: &Map<String, Value>) -> Vec<Value> {
+    let op = |op: &str, path: String, value: Option<&Value>| {
+        let mut step = Map::new();
+        step.insert("op".to_string(), Value::String(op.to_string()));
+        step.insert("path".to_string(), Value::String(path));
+        if let Some(value) = value {
+            step.insert("value".to_string(), value.clone());
+        }
+        Value::Object(step)
+    };
+    let rows = |tables: &'_ Map<String, Value>, table: &str| -> Map<String, Value> {
+        match tables.get(table) {
+            Some(Value::Object(rows)) => rows.clone(),
+            _ => Map::new(),
+        }
+    };
+    let mut names: Vec<&String> = from.keys().chain(to.keys()).collect();
+    names.sort();
+    names.dedup();
+
+    let mut steps = Vec::new();
+    for table in names {
+        let (old, new) = (rows(from, table), rows(to, table));
+        if new.is_empty() {
+            if !old.is_empty() {
+                steps.push(op("remove", pointer(&[table]), None));
+            }
+            continue;
+        }
+        if old.is_empty() {
+            steps.push(op("add", pointer(&[table]), Some(&Value::Object(new))));
+            continue;
+        }
+        let mut keys: Vec<&String> = old.keys().chain(new.keys()).collect();
+        keys.sort();
+        keys.dedup();
+        for key in keys {
+            match (old.get(key), new.get(key)) {
+                (Some(_), None) => steps.push(op("remove", pointer(&[table, key]), None)),
+                (None, Some(row)) => steps.push(op("add", pointer(&[table, key]), Some(row))),
+                (Some(Value::Object(was)), Some(Value::Object(is))) => {
+                    let mut fields: Vec<&String> = was.keys().chain(is.keys()).collect();
+                    fields.sort();
+                    fields.dedup();
+                    for field in fields {
+                        let path = pointer(&[table, key, field]);
+                        match (was.get(field), is.get(field)) {
+                            (Some(_), None) => steps.push(op("remove", path, None)),
+                            (None, Some(value)) => steps.push(op("add", path, Some(value))),
+                            (Some(a), Some(b)) if a != b => {
+                                steps.push(op("replace", path, Some(b)))
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    steps
+}

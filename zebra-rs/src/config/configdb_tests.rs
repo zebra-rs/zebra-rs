@@ -264,43 +264,67 @@ fn without_the_models_config_db_is_refused() {
     assert!(reply.cmd.contains("no SONiC models"), "{}", reply.cmd);
 }
 
-const READ_ONLY: &str =
-    "% `sonic` is a copy of CONFIG_DB and is not changed here: use SONiC's `config` command\n";
+const READ_ONLY: &str = "% `sonic` is a copy of CONFIG_DB and is changed there: \
+     give `compare config-db` to SONiC's `config apply-patch`, or `discard`";
 
-/// The answer to a line a session types, whatever its code.
-fn answer(cm: &ConfigManager, line: &str) -> (ExecCode, String) {
-    let mode = cm.modes.get("configure").expect("configure mode");
-    let (code, output, _) = cm.execute(mode, line);
-    (code, output)
+/// The patch `compare config-db` prints.
+fn pending_patch(cm: &ConfigManager) -> serde_json::Value {
+    serde_json::from_str(&run(cm, "compare config-db")).expect("a JSON Patch")
 }
 
-/// The copy is the import's alone to change. A session's `set` or
-/// `delete` of it is refused and says where it is changed, and the
-/// candidate is as it was.
+/// Apply a JSON Patch of the three operations `compare config-db` uses
+/// to `tables`, as SONiC's `config apply-patch` does to CONFIG_DB.
+fn apply_patch(tables: &mut serde_json::Value, patch: &serde_json::Value) {
+    for step in patch.as_array().expect("an array of steps") {
+        let path: Vec<String> = step["path"]
+            .as_str()
+            .unwrap()
+            .split('/')
+            .skip(1)
+            .map(|s| s.replace("~1", "/").replace("~0", "~"))
+            .collect();
+        let (last, parents) = path.split_last().unwrap();
+        let mut at = &mut *tables;
+        for step in parents {
+            at = at
+                .get_mut(step)
+                .unwrap_or_else(|| panic!("no {step} in {path:?}"));
+        }
+        let object = at.as_object_mut().expect("an object");
+        match step["op"].as_str().unwrap() {
+            "remove" => {
+                object
+                    .remove(last)
+                    .unwrap_or_else(|| panic!("nothing at {path:?}"));
+            }
+            "replace" => {
+                assert!(object.contains_key(last), "nothing to replace at {path:?}");
+                object.insert(last.clone(), step["value"].clone());
+            }
+            "add" => {
+                object.insert(last.clone(), step["value"].clone());
+            }
+            other => panic!("op {other}"),
+        }
+    }
+}
+
+/// The copy is edited in the candidate like the rest of the
+/// configuration. A commit of such an edit is refused: the subtree is
+/// changed in CONFIG_DB, and the refusal says how.
 #[test]
-fn an_operator_does_not_edit_the_copy() {
+fn a_commit_does_not_change_the_copy() {
     let cm = manager("read-only");
     import(&cm, tables());
-    for line in [
-        "set sonic PORT Ethernet0 mtu 1500",
-        "set sonic PORT Ethernet8 lanes 9,10,11,12",
-        "delete sonic PORT Ethernet0",
-        "delete sonic",
-    ] {
-        assert_eq!(
-            answer(&cm, line),
-            (ExecCode::Nomatch, READ_ONLY.to_string()),
-            "`{line}`"
-        );
-    }
+    edit(&cm, "set sonic PORT Ethernet0 mtu 1500");
+    edit(&cm, "delete sonic PORT Ethernet4");
+    assert_eq!(run(&cm, "commit"), READ_ONLY);
+    assert_eq!(running(&cm), IMPORTED);
+    // The edits are still there to be given to CONFIG_DB, or dropped.
+    assert_ne!(run(&cm, "compare"), "");
+    run(&cm, "discard");
     assert_eq!(candidate(&cm), IMPORTED);
-    assert_eq!(run(&cm, "compare"), "");
-    // A line the schema does not know is refused as any other.
-    assert_eq!(
-        answer(&cm, "set sonic PORT Ethernet0 mtu 99999"),
-        (ExecCode::Nomatch, String::new())
-    );
-    // Everything else is edited as ever, and the import still copies.
+    // Everything else is committed as ever, and the import still copies.
     commit(&cm, &["set system hostname r1"]);
     let mut more = tables();
     more["PORT"]["Ethernet0"]["mtu"] = "1500".into();
@@ -311,32 +335,133 @@ fn an_operator_does_not_edit_the_copy() {
 /// Nor does a document given to `vtyctl apply`, in any format: only the
 /// one that says it is CONFIG_DB.
 #[test]
-fn a_document_does_not_edit_the_copy() {
+fn a_document_does_not_change_the_copy() {
     let cm = manager("read-only-apply");
     import(&cm, tables());
     for document in [
         "set sonic PORT Ethernet0 mtu 1500\n",
         "set system hostname r1\nset sonic PORT Ethernet0 mtu 1500\n",
         "delete sonic PORT Ethernet4\n",
-        r#"{"system": {"hostname": "r1"}, "sonic": {"PORT": [{"name": "Ethernet0", "mtu": 1500}]}}"#,
     ] {
         let reply = cm.deploy(document);
-        assert_eq!(reply.apply_code, ApplyCode::ParseError, "{document}");
+        assert_ne!(reply.apply_code, ApplyCode::Applied, "{document}");
+        assert_eq!(reply.cmd, READ_ONLY, "{document}");
     }
     assert_eq!(running(&cm), IMPORTED);
+    assert_eq!(candidate(&cm), IMPORTED);
 }
 
-/// A change of the copy that reaches a commit some other way is refused
-/// there.
+/// The subtree stands for the tables it was copied from: what is
+/// exported is what was imported, values as the strings CONFIG_DB holds.
 #[test]
-fn a_commit_does_not_change_the_copy() {
-    let cm = manager("read-only-commit");
+fn the_subtree_exports_as_the_tables_it_was_copied_from() {
+    let cm = manager("export");
+    let db = serde_json::json!({
+        "PORT": {
+            "Ethernet0": {"lanes": "1,2,3,4", "admin_status": "up", "mtu": "9100",
+                          "description": "uplink to spine 1"},
+            "Ethernet4": {"lanes": "5,6,7,8"},
+        },
+        "INTERFACE": {
+            "Ethernet0": {},
+            "Ethernet0|10.0.0.0/31": {},
+            "Ethernet0|2001:db8::/64": {"scope": "global"},
+        },
+        "DEVICE_METADATA": {"localhost": {"hostname": "sonic1", "bgp_asn": "65100"}},
+        "TELEMETRY_CLIENT": {
+            "Global": {"retry_interval": "30"},
+            "Subscription|s1": {"dst_group": "g1"},
+        },
+        "STATIC_ROUTE": {
+            "192.0.2.0/24": {"nexthop": "10.0.0.1"},
+            "default|198.51.100.0/24": {"ifname": ["Ethernet0", "Ethernet4"]},
+        },
+    });
+    import(&cm, db.clone());
+    let configure = &cm.modes.get("configure").expect("configure mode").entry;
+    let schema = super::super::sonic::grafted(configure).expect("sonic");
+    let sonic = cm.store.running.borrow().lookup(&"sonic".to_string());
+    let exported = super::super::configdb::export(&schema, sonic.as_ref());
+    assert_eq!(serde_json::Value::Object(exported), db);
+    // With nothing pending there is nothing to patch.
+    assert_eq!(pending_patch(&cm), serde_json::json!([]));
+}
+
+/// `compare config-db` is the pending edits of `sonic` as a JSON Patch
+/// of CONFIG_DB: one step for each field, row or table that differs.
+#[test]
+fn compare_config_db_is_a_patch() {
+    let cm = manager("patch");
     import(&cm, tables());
-    cm.sonic_read_only.set(false);
-    edit(&cm, "set sonic PORT Ethernet0 mtu 1500");
-    cm.sonic_read_only.set(true);
-    assert_eq!(run(&cm, "commit"), READ_ONLY.trim_end());
-    assert_eq!(running(&cm), IMPORTED);
+    for line in [
+        "set sonic PORT Ethernet0 mtu 1500",
+        "set sonic PORT Ethernet0 description to spine 2",
+        "delete sonic PORT Ethernet0 admin_status",
+        "delete sonic PORT Ethernet4",
+        "set sonic PORT Ethernet8 lanes 9,10,11,12",
+        "set sonic INTERFACE_IPPREFIX Ethernet0 192.0.2.1/24",
+        "delete sonic TELEMETRY_CLIENT",
+        "set sonic STATIC_ROUTE default 198.51.100.0/24 ifname Ethernet0",
+        // Not `sonic`: no part of the patch.
+        "set system hostname r1",
+    ] {
+        edit(&cm, line);
+    }
+    assert_eq!(
+        pending_patch(&cm),
+        serde_json::json!([
+            {"op": "add", "path": "/INTERFACE/Ethernet0|192.0.2.1~124", "value": {}},
+            {"op": "remove", "path": "/PORT/Ethernet0/admin_status"},
+            {"op": "replace", "path": "/PORT/Ethernet0/description", "value": "to spine 2"},
+            {"op": "replace", "path": "/PORT/Ethernet0/mtu", "value": "1500"},
+            {"op": "remove", "path": "/PORT/Ethernet4"},
+            {"op": "add", "path": "/PORT/Ethernet8", "value": {"lanes": "9,10,11,12"}},
+            {"op": "add", "path": "/STATIC_ROUTE",
+             "value": {"default|198.51.100.0/24": {"ifname": ["Ethernet0"]}}},
+            {"op": "remove", "path": "/TELEMETRY_CLIENT"},
+        ])
+    );
+}
+
+/// The patch is the change: applied to CONFIG_DB and copied back, the
+/// subtree is what the candidate had, and nothing of `sonic` is pending.
+/// What is pending besides is still pending.
+#[test]
+fn the_patch_applied_is_the_candidate() {
+    let cm = manager("patch-applied");
+    let mut db = tables();
+    import(&cm, db.clone());
+    for line in [
+        "set sonic PORT Ethernet0 mtu 1500",
+        "delete sonic PORT Ethernet4",
+        "set sonic PORT Ethernet8 lanes 9,10,11,12",
+        "set sonic INTERFACE_IPPREFIX Ethernet0 192.0.2.1/24",
+        "delete sonic INTERFACE_IPPREFIX Ethernet0 10.0.0.0/31",
+        "delete sonic DEVICE_METADATA localhost bgp_asn",
+        "set system hostname r1",
+    ] {
+        edit(&cm, line);
+    }
+    let wanted = candidate(&cm);
+    apply_patch(&mut db, &pending_patch(&cm));
+    import(&cm, db);
+
+    assert_eq!(pending_patch(&cm), serde_json::json!([]));
+    assert_eq!(candidate(&cm), wanted);
+    assert_eq!(run(&cm, "compare formal"), "+system hostname r1\n");
+    // And that is committed like any change that is not of `sonic`.
+    assert_eq!(run(&cm, "commit"), "");
+    assert_eq!(running(&cm), wanted);
+}
+
+/// Without the models there is no CONFIG_DB to patch.
+#[test]
+fn compare_config_db_needs_the_models() {
+    let cm = plain("patch-no-models");
+    let mode = cm.modes.get("configure").expect("configure mode");
+    let (code, why, _) = cm.execute(mode, "compare config-db");
+    assert_eq!(code, ExecCode::Nomatch);
+    assert!(why.contains("--feature sonic"), "{why}");
 }
 
 /// An earlier commit is the configuration made here as it was then. The

@@ -64,6 +64,7 @@ pub fn configure_mode_create(entry: Rc<Entry>) -> Mode {
     mode.install_func(String::from("/discard"), discard);
     mode.install_func(String::from("/compare"), compare);
     mode.install_func(String::from("/compare/formal"), compare_formal);
+    mode.install_func(String::from("/compare/config-db"), compare_config_db);
     // An earlier commit is named by its number, which the schema calls
     // `commit` and the operator does not type (`rollback 2`), or by its
     // revision (`rollback revision <id>`).
@@ -241,6 +242,21 @@ fn compare_formal(config: &ConfigManager) -> (ExecCode, String) {
         out.push_str(change.value());
     }
     (ExecCode::Show, out)
+}
+
+/// `compare config-db`: what the candidate's `sonic` subtree changes in
+/// CONFIG_DB, as a JSON Patch (RFC 6902) on `config_db.json`. It is what
+/// SONiC's `config apply-patch` takes: the subtree is a copy of
+/// CONFIG_DB, and a change of it is made there.
+fn compare_config_db(config: &ConfigManager) -> (ExecCode, String) {
+    match config.config_db_patch() {
+        Ok(patch) => {
+            let mut out = serde_json::to_string_pretty(&patch).unwrap_or_else(|_| "[]".into());
+            out.push('\n');
+            (ExecCode::Show, out)
+        }
+        Err(why) => (ExecCode::Nomatch, why),
+    }
 }
 
 /// Bare `rollback`: commit 0.

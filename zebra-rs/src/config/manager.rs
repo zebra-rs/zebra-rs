@@ -38,9 +38,9 @@ use std::rc::Rc;
 use tokio::sync::mpsc::{self, Receiver, Sender, UnboundedReceiver, UnboundedSender};
 use tokio::sync::oneshot;
 
-/// What an edit of `sonic` is answered with while it is a mirror.
-const SONIC_IS_A_COPY: &str =
-    "% `sonic` is a copy of CONFIG_DB and is not changed here: use SONiC's `config` command\n";
+/// What a commit that changes `sonic` is answered with.
+const SONIC_IS_A_COPY: &str = "% `sonic` is a copy of CONFIG_DB and is changed there: \
+     give `compare config-db` to SONiC's `config apply-patch`, or `discard`\n";
 
 pub struct ConfigStore {
     pub running: RefCell<Rc<Config>>,
@@ -256,13 +256,14 @@ pub struct ConfigManager {
     /// elsewhere, not a change someone made here. It is not held to the
     /// models' mandatory leaves and is not a commit of the history.
     importing: Cell<bool>,
-    /// The `sonic` subtree is a copy of CONFIG_DB and nothing else:
-    /// only an import changes it. An operator's `set sonic …` is
-    /// refused, `save` leaves the subtree out, and an earlier commit is
-    /// loaded with the subtree as it is now. This is the read-only
-    /// mirror of docs/design/sonic-junos-style-config.md, phase 2; a
-    /// commit that writes to CONFIG_DB (phase 3) is what will turn it
-    /// off.
+    /// The running `sonic` subtree is a copy of CONFIG_DB and nothing
+    /// else: only an import changes it. It is edited in the candidate
+    /// like the rest, and `compare config-db` gives the edits as a patch
+    /// of CONFIG_DB; a commit that would change the subtree here is
+    /// refused, `save` leaves it out, and an earlier commit is loaded
+    /// with the subtree as it is now. A commit that writes CONFIG_DB
+    /// itself (docs/design/sonic-junos-style-config.md, phase 3) is
+    /// what will turn this off.
     pub sonic_read_only: Cell<bool>,
     /// What the last commits produced, for `rollback`.
     pub history: CommitHistory,
@@ -1018,8 +1019,10 @@ impl ConfigManager {
             self.ordered_leaf_list_value(line)
         });
 
-        // The same, for a change of `sonic` that did not come by a typed
-        // line: nothing but an import commits one.
+        // `sonic` is a copy of CONFIG_DB. It is edited in the candidate
+        // like anything else, and what the edits come to is a change of
+        // CONFIG_DB (`compare config-db`), made there: nothing but the
+        // import of what CONFIG_DB then holds commits one here.
         if self.sonic_is_a_copy()
             && diff
                 .lines()
@@ -1880,14 +1883,6 @@ impl ConfigManager {
             return (code, String::new(), state.paths);
         }
 
-        // `sonic` is a copy of CONFIG_DB: only an import edits it.
-        if (state.set || state.delete)
-            && state.paths.get(1).is_some_and(|path| path.name == "sonic")
-            && self.sonic_is_a_copy()
-        {
-            return (ExecCode::Nomatch, SONIC_IS_A_COPY.to_string(), state.paths);
-        }
-
         // Handle "set"
         if state.set {
             let paths = path_try_trim("set", state.paths.clone());
@@ -2175,6 +2170,24 @@ impl ConfigManager {
             exec_code: ExecCode::Success,
             cmd: String::new(),
         }
+    }
+
+    /// What the candidate's `sonic` subtree changes in CONFIG_DB: a JSON
+    /// Patch on `config_db.json` from the tables the running subtree
+    /// stands for to those the candidate's does (`config::configdb`).
+    pub fn config_db_patch(&self) -> Result<Vec<serde_json::Value>, String> {
+        let mode = self.modes.get("configure").expect("configure mode");
+        let Some(schema) = super::sonic::grafted(&mode.entry) else {
+            return Err(
+                "% No SONiC models are loaded (start with `--feature sonic`)\n".to_string(),
+            );
+        };
+        let name = "sonic".to_string();
+        let tables =
+            |config: &Rc<Config>| super::configdb::export(&schema, config.lookup(&name).as_ref());
+        let running = tables(&self.store.running.borrow());
+        let candidate = tables(&self.store.candidate.borrow());
+        Ok(super::configdb::patch(&running, &candidate))
     }
 
     /// Whether `sonic` may not be changed by what is running now: it is

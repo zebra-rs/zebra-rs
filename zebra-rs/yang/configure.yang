@@ -128,6 +128,13 @@ module configure {
       ext:help "Set-style flat statement listing";
       type empty;
     }
+    // On a SONiC device (`--feature sonic`): what the pending edits of
+    // `sonic` change in CONFIG_DB, as the JSON Patch SONiC's
+    // `config apply-patch` takes.
+    leaf config-db {
+      ext:help "Pending changes of sonic, as a patch of CONFIG_DB";
+      type empty;
+    }
     // `compare rollback <n>` and `compare rollback revision <id>`: the
     // candidate against an earlier commit.
     container rollback {

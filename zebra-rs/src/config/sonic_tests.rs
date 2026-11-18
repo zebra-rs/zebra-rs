@@ -173,12 +173,7 @@ fn the_feature_turns_sonic_on() {
     let line = "set sonic PORT Ethernet0 lanes 1,2,3,4";
 
     let on = start("feature-on", with_models.clone(), &["sonic"]);
-    // The line is one the schema knows, and is refused for another
-    // reason: the subtree is a copy.
-    let mode = on.modes.get("configure").expect("configure mode");
-    let (refused, why, _) = on.execute(mode, line);
-    assert_eq!(refused, ExecCode::Nomatch);
-    assert!(why.contains("copy of CONFIG_DB"), "{why}");
+    assert_eq!(code(&on, line), ExecCode::Show);
     let reply = on.deploy(r#"{"CONFIG_DB": {"PORT": {"Ethernet4": {"lanes": "5,6,7,8"}}}}"#);
     assert_eq!(reply.apply_code, ApplyCode::Applied, "{}", reply.cmd);
 

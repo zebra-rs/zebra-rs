@@ -441,7 +441,15 @@ Each phase is useful on its own and none commits us to the next.
    keeps it as CONFIG_DB has it now. Still to do, outside zebra-rs: the
    process that follows CONFIG_DB by its keyspace notifications, and the
    models in the `bgp` container's image.*
-3. **Commit for a few tables**: `PORT`, `VLAN`, `VLAN_MEMBER`, `INTERFACE`,
+3. **Commit for a few tables**: *the first half is built.* `sonic` is edited
+   in the candidate, and `compare config-db` gives the pending edits as the
+   JSON Patch that SONiC's `config apply-patch` takes; a `commit` of them is
+   still refused and says so. *Measured* on a SONiC VS: a VLAN, an MTU, a
+   description and an interface address typed in `vty`, applied on the host
+   with `config apply-patch`, were in CONFIG_DB and the kernel, and the copy
+   that followed left nothing pending. What is left is for `commit` to do
+   that itself, through a process on the host (§8.3, §11). The plan was:
+   `PORT`, `VLAN`, `VLAN_MEMBER`, `INTERFACE`,
    `STATIC_ROUTE`, `BGP_NEIGHBOR`. Pre-commit check, ordered write through the
    config updater, partial-write handling. Measure commit latency.
 4. **All modelled tables**, and conflict handling for external changes during
@@ -456,10 +464,14 @@ Each phase is useful on its own and none commits us to the next.
    2.5 on.* All 146 modules load. `must` (281 uses), `when` (131) and the
    targets of leafrefs (211) are parsed and not enforced, which is left to
    the bridge's pre-commit check as planned.
-2. **How slow is a commit through the config updater?** Its change sorter is
-   known to be expensive on large differences. Measure a one-line change, a
-   50-port change and a full `rollback` on the VS before phase 3 is designed in
-   detail.
+2. **How slow is a commit through the config updater?** *Measured* on a
+   SONiC VS, `config apply-patch` from the shell: one leaf 2.8 s, one new row
+   2.8 s, a leaf on each of 32 ports 3.6 s, `config rollback` to a checkpoint
+   4.4 s. A dry run of the 32-port patch is 2.0 s, so most of each is starting
+   the command and loading the models, not the change: called as a library by
+   a process that stays up, it should be well under a second for a small
+   change. Good enough for a commit an operator types. The updater is on the
+   host only; the `bgp` container does not have it.
 3. **Does `commit` imply `config save`?** Junos operators expect a committed
    configuration to survive a reboot. SONiC separates the two on purpose.
 4. **Multi-ASIC and chassis.** CONFIG_DB is per namespace and there is one
