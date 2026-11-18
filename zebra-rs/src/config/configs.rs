@@ -677,6 +677,17 @@ fn under(parent: Option<&Rc<Config>>) -> Weak<Config> {
     parent.map(Rc::downgrade).unwrap_or_default()
 }
 
+/// Make the child `name` of `parent` a copy of `child`, or remove it
+/// for `None`. The copy is `parent`'s own: `child` stays where it is.
+pub fn replace_child(parent: &Rc<Config>, name: &str, child: Option<&Rc<Config>>) {
+    let mut configs = parent.configs.borrow_mut();
+    configs.retain(|config| config.name != name);
+    if let Some(child) = child {
+        configs.push(carbon_copy(child, Some(parent.clone())));
+        configs.sort_by(compare_configs);
+    }
+}
+
 pub fn carbon_copy(conf: &Rc<Config>, parent: Option<Rc<Config>>) -> Rc<Config> {
     let p = Rc::new(Config {
         name: conf.name.clone(),

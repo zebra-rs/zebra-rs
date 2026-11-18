@@ -2239,33 +2239,65 @@ impl ConfigManager {
         });
         let mut problems = translation.problems;
 
+        // The subtree CONFIG_DB translates to, built on a root of its
+        // own: each line is read against the schema and set, as an
+        // earlier commit is rebuilt (`Self::history_tree`). Run as typed
+        // commands on the candidate, each line was also matched against
+        // everything configured so far, and a copy of ten thousand lines
+        // took the config task more than a second.
+        let root = Rc::new(Config::new("".to_string(), None));
+        for line in translation.lines.iter() {
+            let body = line.strip_prefix("set ").unwrap_or(line);
+            match self.paths(body.to_string()) {
+                Some(paths) => set(paths, root.clone()),
+                None => problems.push(format!("not taken by the model: {line}")),
+            }
+        }
+        let name = "sonic".to_string();
+        let copy = root.lookup(&name);
+        for problem in problems.iter() {
+            tracing::warn!("config-db: {problem}");
+        }
+        let report = |changed: bool| {
+            tracing::info!(
+                tables = translation.tables,
+                rows = translation.rows,
+                lines = translation.lines.len(),
+                left_out = problems.len(),
+                unmodelled_tables = translation.unmodelled.len(),
+                changed,
+                "config-db: imported"
+            );
+        };
+
+        // What is running is that already: nothing to commit, and no
+        // need to render the two configurations to find that out.
+        let running = self.store.running.borrow().lookup(&name);
+        let same = match (&running, &copy) {
+            (None, None) => true,
+            (Some(running), Some(copy)) => running.same_as(copy),
+            _ => false,
+        };
+        if same {
+            report(false);
+            return DeployResponse {
+                apply_code: ApplyCode::Applied,
+                exec_code: ExecCode::Success,
+                cmd: String::new(),
+            };
+        }
+
+        // The candidate of this commit: the running config with the
+        // subtree replaced. Uncommitted edits are set aside for it.
         let edits = self.set_aside_edits();
         if edits.is_some() {
             self.store.discard();
         }
+        super::configs::replace_child(&self.store.candidate.borrow(), &name, copy.as_ref());
         self.importing.set(true);
-        // Nomatch when there is no `sonic` yet, which is as good.
-        let _ = self.execute(mode, "delete sonic");
-        for line in translation.lines.iter() {
-            let (code, _, _) = self.execute(mode, line);
-            if code != ExecCode::Show {
-                problems.push(format!("not taken by the model: {line}"));
-            }
-        }
         let committed = self.commit_config();
         self.importing.set(false);
-
-        for problem in problems.iter() {
-            tracing::warn!("config-db: {problem}");
-        }
-        tracing::info!(
-            tables = translation.tables,
-            rows = translation.rows,
-            lines = translation.lines.len(),
-            left_out = problems.len(),
-            unmodelled_tables = translation.unmodelled.len(),
-            "config-db: imported"
-        );
+        report(true);
         match committed {
             Ok(()) => {
                 if edits.is_some() {

@@ -387,3 +387,42 @@ fn save_leaves_the_copy_out() {
     // What is running still has it.
     assert!(running(&cm).contains("sonic PORT Ethernet0\n"));
 }
+
+/// Not a test of what is copied: how long a copy of a large CONFIG_DB
+/// takes. `cargo test --release -p zebra-rs import_timing -- --ignored
+/// --nocapture`.
+#[test]
+#[ignore = "timing, run by hand"]
+fn import_timing() {
+    let rows: usize = std::env::var("ROWS")
+        .ok()
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(2000);
+    let big = |mtu: &str| {
+        let ports: serde_json::Map<String, serde_json::Value> = (0..rows)
+            .map(|n| {
+                (
+                    format!("Ethernet{n}"),
+                    serde_json::json!({"lanes": format!("{n}"), "admin_status": "up",
+                                       "mtu": mtu, "description": format!("port {n} of the lot")}),
+                )
+            })
+            .collect();
+        serde_json::json!({ "PORT": ports })
+    };
+    let cm = manager("timing");
+    let time = |what: &str, tables: serde_json::Value| {
+        let start = std::time::Instant::now();
+        let reply = import(&cm, tables);
+        assert_eq!(reply.apply_code, ApplyCode::Applied, "{}", reply.cmd);
+        println!("{what}: {:?}", start.elapsed());
+    };
+    time("first copy", big("9100"));
+    time("same again", big("9100"));
+    let mut one = big("9100");
+    one["PORT"]["Ethernet7"]["mtu"] = "1500".into();
+    time("one leaf changed", one);
+    time("every row changed", big("1500"));
+    time("emptied", serde_json::json!({}));
+    println!("lines: {}", rows * 5);
+}
