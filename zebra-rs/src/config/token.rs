@@ -6,8 +6,6 @@ pub enum Token {
     Comment(String),
     LeftBrace,
     RightBrace,
-    LeftBracket,
-    RightBracket,
     SemiColon,
 }
 
@@ -15,10 +13,17 @@ pub fn tokenizer(input: String) -> Vec<Token> {
     let mut tokens = Vec::<Token>::new();
     let mut chars = input.chars().peekable();
     // Whether a statement has begun and not ended: a word has been read
-    // since the last `;`, `{` or `}`. A `#`, a quote or a bracket there
-    // is the start of a value (`description port #3`), which the writer
-    // put down as it is; only where a statement would begin is `#` a
-    // comment.
+    // since the last `;`, `{` or `}`. A `#` there is the start of a
+    // value (`description port #3`), which the writer put down as it
+    // is; only where a statement would begin is `#` a comment.
+    //
+    // A statement can begin with a value: the members of a leaf-list
+    // are written one to a statement, in a block. One that begins with
+    // a quote or a bracket is a word like any other. Those two used to
+    // be read as punctuation there (and then skipped, or dropped with
+    // the letters after them), which nothing ever wrote. One that
+    // begins with `#` cannot be told from a comment, so the writer does
+    // not begin a statement with it (`Config::write`).
     let mut in_statement = false;
 
     while let Some(ch) = chars.next() {
@@ -34,20 +39,10 @@ pub fn tokenizer(input: String) -> Vec<Token> {
                     _ => Token::SemiColon,
                 });
             }
-            '"' | '#' | '[' | ']' if !in_statement => match ch {
-                '"' => {
-                    let _s: String = chars
-                        .by_ref()
-                        .take_while(|c| c.is_alphabetic() || c.is_ascii_digit() || c == &'.')
-                        .collect();
-                }
-                '#' => {
-                    let s: String = chars.by_ref().take_while(|c| c != &'\n').collect();
-                    tokens.push(Token::Comment(s));
-                }
-                '[' => tokens.push(Token::LeftBracket),
-                _ => tokens.push(Token::RightBracket),
-            },
+            '#' if !in_statement => {
+                let s: String = chars.by_ref().take_while(|c| c != &'\n').collect();
+                tokens.push(Token::Comment(s));
+            }
             _ => {
                 // A word: everything up to whitespace or the `;`, `{` or
                 // `}` that ends a statement. The writer puts a name or a
@@ -113,6 +108,12 @@ mod tests {
                 "mtu",
                 "9100"
             ]
+        );
+        // A statement that begins with a quote or a bracket is a value
+        // too: a member of a leaf-list, in its block.
+        assert_eq!(
+            words("member {\n  [0-9]+:100;\n  ]x;\n  \"quoted\";\n  plain;\n}"),
+            ["member", "[0-9]+:100", "]x", "\"quoted\"", "plain"]
         );
         assert_eq!(
             tokenizer("x 1,2;".to_string()),

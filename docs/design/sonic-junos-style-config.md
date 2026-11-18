@@ -262,10 +262,19 @@ of the tree we build. An import is not a commit of the history, is not
 held to the models' mandatory leaves, and leaves out and logs what it cannot
 copy. A leaf-list is left out whole when one member of it cannot be held (a
 member is one word): the field is one value in CONFIG_DB, and copied in part
-it would be written back in part. An import is committed by itself, with
-whatever the candidate holds set aside and put back as an edit of the new
-running configuration: a session's uncommitted edits, or a startup
-configuration whose commit was refused and that waits to be completed. *Measured* on a SONiC VS: all 21 tables of its CONFIG_DB are modelled,
+it would be written back in part.
+
+An import is not made as a commit. The translated subtree replaces the
+`sonic` child of the running configuration directly, the subscribers of the
+running configuration are told the lines that changed, and what the candidate
+holds follows as an edit of the new running configuration: a session's
+uncommitted edits, or a startup configuration whose commit was refused and
+that waits to be completed. Made as a commit it was held to every check of
+one, and was refused whenever what is running would not be committed again
+(a startup configuration is let off checks a commit is not), so the mirror
+never filled. A document that was copied is known by its length and a hash
+and is not read again while the subtree is still what it came to, and a copy
+logs only the faults the copy before it did not. *Measured* on a SONiC VS: all 21 tables of its CONFIG_DB are modelled,
 306 rows became 1,282 lines, two values were left out (an empty string and one
 of several lines), and a `config vlan add` on the host showed in the running
 configuration at the next copy. What follows is the design for the rest: the

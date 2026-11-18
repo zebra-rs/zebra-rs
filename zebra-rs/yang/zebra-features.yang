@@ -70,14 +70,24 @@ module zebra-features {
          - a document `{\"CONFIG_DB\": {…}}` given to `vtyctl apply`,
            which is copied into that subtree in place of what is there.
 
-       The subtree is a copy of CONFIG_DB kept by a process that reads
-       it (the read-only mirror of docs/design/sonic-junos-style-
-       config.md). A copy is not a commit of the commit history, and is
-       not held to the models' mandatory leaves. Nothing else changes
-       the subtree: `set sonic …` is refused, `save` leaves it out, and
-       `rollback` keeps it as it is.
+       The running subtree is a copy of CONFIG_DB, kept by a process
+       that reads it (docs/design/sonic-junos-style-config.md). A copy
+       is not a commit of the commit history, and is not held to the
+       models' mandatory leaves. `save` leaves the subtree out, and
+       `rollback` and a whole document given to `vtyctl apply` keep it
+       as it is.
 
-       Not a schema gate: nothing in the daemon's own models is guarded
-       by it.";
+       The subtree is edited in the candidate like the rest of the
+       configuration. `compare config-db`, which this feature adds to
+       configure mode, prints the pending edits as the JSON Patch that
+       SONiC's `config apply-patch` takes. `commit` has that patch
+       written by a writer process on the device
+       (proto/configdb.proto, `vtyctl config-db`), and is made when
+       the writer has answered; with no writer it is refused. Nothing
+       else changes the subtree: a document given to `vtyctl apply`
+       that would is refused.
+
+       Without SONiC's models under the YANG path the feature is
+       reported at startup and adds nothing.";
   }
 }

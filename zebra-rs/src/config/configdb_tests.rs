@@ -27,6 +27,16 @@ fn manager(name: &str) -> ConfigManager {
         &cm.modes.get("configure").expect("configure mode").entry,
         &sonic,
     );
+    // As `init` says it of a daemon that found the models.
+    cm.sonic_mirror.set(true);
+    cm
+}
+
+/// The same models where `sonic` is no copy of anything: configuration
+/// like the rest, to read a document into.
+fn unmirrored(name: &str) -> ConfigManager {
+    let cm = manager(name);
+    cm.sonic_mirror.set(false);
     cm
 }
 
@@ -860,8 +870,7 @@ async fn a_table_the_copy_left_rows_out_of_is_neither_added_nor_removed() {
 
 /// A startup config with what a commit refuses and a startup tolerates:
 /// one route with both discard keywords. It is running, and from then on
-/// every commit of a candidate that has it is refused, a copy of
-/// CONFIG_DB among them.
+/// every commit of a candidate that has it is refused.
 fn start_with_what_no_commit_takes(cm: &ConfigManager) {
     std::fs::write(
         &cm.config_path,
@@ -874,25 +883,161 @@ fn start_with_what_no_commit_takes(cm: &ConfigManager) {
     assert!(running(cm).contains("nexthop unreachable\n"));
 }
 
-/// A copy that is refused leaves the subtree as it was, and what is
-/// noted of CONFIG_DB is what that subtree does not have of it.
+/// A copy is not a commit and is held to none of a commit's checks:
+/// CONFIG_DB is what the device is configured with. Where what is
+/// running would not be committed again (a startup config is let off
+/// what a commit is refused for), the copy is made all the same. Made
+/// as a commit of the running config with the subtree replaced, it was
+/// refused every time, and the subtree was never filled.
 #[test]
-fn a_patch_knows_what_a_refused_copy_did_not_bring() {
-    let cm = manager("left-out-refused");
-    import(&cm, serde_json::json!({}));
+fn a_copy_is_made_where_no_commit_would_be() {
+    let cm = manager("copy-not-commit");
     start_with_what_no_commit_takes(&cm);
-    let before = running(&cm);
+    let routes = running(&cm);
     let reply = import(&cm, tables());
-    assert_ne!(reply.apply_code, ApplyCode::Applied);
-    assert_eq!(running(&cm), before);
+    assert_eq!(reply.apply_code, ApplyCode::Applied, "{}", reply.cmd);
+    assert_eq!(running(&cm), format!("{routes}{IMPORTED}"));
+    assert_eq!(candidate(&cm), running(&cm));
+    // It is no commit of the history either, and a commit is refused as
+    // it was before the copy.
+    assert_eq!(cm.history.len(), 1);
+    edit(&cm, "set system hostname r1");
+    assert_eq!(run(&cm, "commit"), BOTH_DISCARDS);
+}
 
-    edit(&cm, "set sonic PORT Ethernet8 lanes 9,10,11,12");
+/// A row the model calls incomplete is copied, and is then in every
+/// candidate. It is CONFIG_DB's, and refuses no commit made here: of
+/// something else, or of another row through the writer.
+#[tokio::test]
+async fn an_incomplete_row_that_was_copied_refuses_no_commit() {
+    let mut cm = manager("incomplete-commit");
+    // `lanes` is mandatory.
+    let config_db = serde_json::json!({"PORT": {"Ethernet0": {"mtu": "9100"}}});
+    let db = shared(config_db.clone());
+    import(&cm, config_db);
+    commit(&cm, &["set system hostname r1"]);
+    assert!(running(&cm).contains("system hostname r1\n"));
+
+    let orders = writer(&cm, db.clone(), None);
+    tokio::task::yield_now().await;
+    edit(&cm, "set sonic PORT Ethernet4 lanes 5,6,7,8");
+    assert_eq!(session(&mut cm, "commit").await, "");
+    assert_eq!(orders.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert!(running(&cm).contains("sonic PORT Ethernet4 lanes 5,6,7,8\n"));
+}
+
+/// The subscribers of the running configuration are told what a copy
+/// changed, line by line, as they are told what a commit did.
+#[test]
+fn a_copy_is_told_to_the_subscribers_of_the_running_config() {
+    let cm = manager("copy-subscribers");
+    let (tx, mut events) = mpsc::channel(8);
+    cm.config_subscribers.borrow_mut().push(ConfigSubscriber {
+        format: config_pb::Format::Path,
+        path: vec!["sonic".to_string(), "PORT".to_string()],
+        tx,
+    });
+    let told = |events: &mut mpsc::Receiver<config_pb::ConfigEvent>| {
+        let mut lines = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            for change in event.changes {
+                let op = if change.op == config_pb::Op::Set as i32 {
+                    "set"
+                } else {
+                    "delete"
+                };
+                lines.push(format!("{op} {}", change.path.join(" ")));
+            }
+        }
+        lines
+    };
+
+    import(&cm, tables());
     assert_eq!(
-        pending_patch(&cm),
-        serde_json::json!([
-            {"op": "add", "path": "/PORT/Ethernet8", "value": {"lanes": "9,10,11,12"}},
-        ])
+        told(&mut events),
+        [
+            "set sonic PORT Ethernet0",
+            "set sonic PORT Ethernet0 admin_status up",
+            "set sonic PORT Ethernet0 description uplink to spine 1",
+            "set sonic PORT Ethernet0 lanes 1,2,3,4",
+            "set sonic PORT Ethernet0 mtu 9100",
+            "set sonic PORT Ethernet4",
+            "set sonic PORT Ethernet4 lanes 5,6,7,8",
+        ]
     );
+    let mut changed = tables();
+    changed["PORT"]["Ethernet0"]["mtu"] = "1500".into();
+    changed["PORT"].as_object_mut().unwrap().remove("Ethernet4");
+    import(&cm, changed.clone());
+    assert_eq!(
+        told(&mut events),
+        [
+            "delete sonic PORT Ethernet0 mtu 9100",
+            "delete sonic PORT Ethernet4",
+            "delete sonic PORT Ethernet4 lanes 5,6,7,8",
+            "set sonic PORT Ethernet0 mtu 1500",
+        ]
+    );
+    // The same again changes nothing, and nothing is told.
+    import(&cm, changed);
+    assert_eq!(told(&mut events), Vec::<String>::new());
+}
+
+/// The document that was copied last is not read again: the process
+/// that copies CONFIG_DB may give the same one on a timer. Shown here by
+/// what a second reading would do, which is to put the subtree back as
+/// the document has it. A commit that writes CONFIG_DB changes the
+/// subtree, and the document is then read again: it is no longer what
+/// is running.
+#[tokio::test]
+async fn a_document_that_was_copied_is_not_read_again() {
+    let mut cm = manager("copy-seen");
+    import(&cm, tables());
+    assert_eq!(running(&cm), IMPORTED);
+
+    // The subtree changed behind the manager's back, as nothing does.
+    let line = cm
+        .paths("sonic PORT Ethernet0 mtu 1500".to_string())
+        .expect("a line of the model");
+    super::super::configs::set(line, cm.store.running.borrow().clone());
+    let touched = IMPORTED.replace("mtu 9100", "mtu 1500");
+    assert_eq!(running(&cm), touched);
+    import(&cm, tables());
+    assert_eq!(running(&cm), touched, "the same document was read again");
+    // Another document is read, and then the first one again.
+    let mut other = tables();
+    other["PORT"]["Ethernet0"]["mtu"] = "9000".into();
+    import(&cm, other);
+    assert_eq!(running(&cm), IMPORTED.replace("mtu 9100", "mtu 9000"));
+    import(&cm, tables());
+    assert_eq!(running(&cm), IMPORTED);
+
+    // A commit through the writer: the subtree is what was written.
+    let orders = writer(&cm, shared(tables()), None);
+    tokio::task::yield_now().await;
+    edit(&cm, "set sonic PORT Ethernet0 mtu 1500");
+    assert_eq!(session(&mut cm, "commit").await, "");
+    assert_eq!(orders.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(running(&cm), touched);
+    // The document from before the commit, late: read, as any document
+    // is that is not known to be what is running.
+    import(&cm, tables());
+    assert_eq!(running(&cm), IMPORTED);
+}
+
+/// A copy says what it could not copy, and what it copied incomplete,
+/// once: the copy after it says only what is new.
+#[test]
+fn a_copy_says_only_what_the_one_before_it_did_not() {
+    let cm = manager("copy-said");
+    let said = |problems: &[&str]| {
+        cm.config_db_said_anew(problems.iter().map(|p| p.to_string()).collect())
+    };
+    assert_eq!(said(&["a", "b"]), ["a", "b"]);
+    assert_eq!(said(&["a", "b"]), Vec::<String>::new());
+    assert_eq!(said(&["b", "c"]), ["c"]);
+    // Gone and back is new again.
+    assert_eq!(said(&["a", "b", "c"]), ["a"]);
 }
 
 // --- What a copy and a whole document leave alone ---
@@ -1140,8 +1285,7 @@ fn free_text_from_config_db_is_rendered_as_json() {
 
     for format in [" json", " yaml"] {
         let document = run(&cm, &format!("show running-config{format}"));
-        let fresh = manager("json-text-fresh");
-        fresh.sonic_read_only.set(false);
+        let fresh = unmirrored("json-text-fresh");
         let reply = fresh.deploy(&document);
         assert_eq!(
             reply.apply_code,

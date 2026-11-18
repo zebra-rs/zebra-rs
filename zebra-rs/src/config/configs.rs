@@ -323,7 +323,23 @@ impl Config {
                 }
             }
 
-            if !self.list.borrow().is_empty() {
+            // A member that begins with `#` would be read back as a
+            // comment where a statement begins, which is where the block
+            // below puts it. Such a leaf-list is written one statement
+            // to a member, each after the name: the same lines to the
+            // loader, in the same order.
+            let hash = self.list.borrow().iter().any(|v| v.starts_with('#'));
+            if hash && !brace {
+                let indent = " ".repeat(depth * INDENT_LEVEL);
+                for (at, value) in self.list.borrow().iter().enumerate() {
+                    if at != 0 {
+                        out.push_str(&indent);
+                        self.prefix_write(out);
+                        out.push_str(&self.name);
+                    }
+                    out.push_str(&format!(" {value};\n"));
+                }
+            } else if !self.list.borrow().is_empty() {
                 out.push_str(" {\n");
                 for value in self.list.borrow().iter() {
                     out.push_str(&" ".repeat((depth + 1) * INDENT_LEVEL));
@@ -1257,6 +1273,65 @@ mod tests {
         // the enabled handlers fan it out to both MUP AFIs (draft-ietf-bess-mup-safi).
         let mut args = Args(["mup".to_string()].into_iter().collect());
         assert_eq!(args.afi_safi(), Some(AfiSafi::new(Afi::Ip, Safi::Mup)));
+    }
+
+    /// A member of a leaf-list is written where a statement begins, and
+    /// one that begins with a bracket or a quote is read back as it was
+    /// written. One that begins with `#` would be read as a comment
+    /// there, so a leaf-list that has one is written a statement to a
+    /// member, after the name. Either way the file loads into the lines
+    /// the tree lists, in their order.
+    #[test]
+    fn a_leaf_list_member_is_read_back_whatever_it_begins_with() {
+        let member = |root: &Rc<Config>, list: &str, value: &str| {
+            let paths = vec![
+                CommandPath {
+                    name: "prefix-test".to_string(),
+                    ymatch: YangMatch::Dir as i32,
+                    ..Default::default()
+                },
+                CommandPath {
+                    name: list.to_string(),
+                    ymatch: YangMatch::LeafList as i32,
+                    ..Default::default()
+                },
+                CommandPath {
+                    name: value.to_string(),
+                    ymatch: YangMatch::LeafListMatched as i32,
+                    ..Default::default()
+                },
+            ];
+            set(paths, root.clone());
+        };
+        let root = Rc::new(Config::new("".to_string(), None));
+        for value in ["[0-9]+:100", "]x", "\"quoted\"", "plain"] {
+            member(&root, "member", value);
+        }
+        for value in ["first", "#3", "[spare]", "last"] {
+            member(&root, "tag", value);
+        }
+
+        let mut file = String::new();
+        root.format(&mut file);
+        assert_eq!(
+            file,
+            "prefix-test {\n\
+             \x20 member {\n\
+             \x20   [0-9]+:100;\n\
+             \x20   ]x;\n\
+             \x20   \"quoted\";\n\
+             \x20   plain;\n\
+             \x20 }\n\
+             \x20 tag first;\n\
+             \x20 tag #3;\n\
+             \x20 tag [spare];\n\
+             \x20 tag last;\n\
+             }\n"
+        );
+        let mut formal = String::new();
+        root.formal(&mut formal);
+        let listed: Vec<&str> = formal.lines().collect();
+        assert_eq!(crate::config::files::load_config_file(file), listed);
     }
 
     #[test]

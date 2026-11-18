@@ -20,7 +20,6 @@ fn manager(name: &str) -> ConfigManager {
     // These tests type `set sonic …` to say what the schema takes. On a
     // device the subtree is a copy of CONFIG_DB and that is refused:
     // see configdb_tests.
-    cm.sonic_read_only.set(false);
     cm
 }
 
@@ -193,6 +192,11 @@ fn the_feature_turns_sonic_on() {
 
     let no_models = start("feature-no-models", YANG.to_string(), &["sonic"]);
     assert_eq!(code(&no_models, line), ExecCode::Nomatch);
+    // Only the daemon that has the subtree takes it for a copy of
+    // CONFIG_DB.
+    assert!(on.sonic_mirror.get());
+    assert!(!off.sonic_mirror.get());
+    assert!(!no_models.sonic_mirror.get());
     // The daemon's own configuration is as ever.
     edit(&no_models, "set system hostname r1");
 }

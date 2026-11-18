@@ -47,6 +47,23 @@ impl State {
         }
     }
 
+    /// Which key of its list the next word is, while a list's keys are
+    /// being read: 0 for the first.
+    pub(super) fn key_index(&self) -> usize {
+        self.index
+    }
+
+    /// A state at key `index` of a list, for the tests of what is
+    /// offered there.
+    #[cfg(test)]
+    pub(super) fn at_key(index: usize) -> Self {
+        State {
+            ymatch: YangMatch::Key,
+            index,
+            ..State::new()
+        }
+    }
+
     pub fn set_active_choice_case(&mut self, choice_name: &str, case_name: &str) {
         self.choice_states
             .insert(choice_name.to_string(), case_name.to_string());
