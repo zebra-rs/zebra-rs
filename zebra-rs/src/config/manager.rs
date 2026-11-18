@@ -38,6 +38,26 @@ use std::rc::Rc;
 use tokio::sync::mpsc::{self, Receiver, Sender, UnboundedReceiver, UnboundedSender};
 use tokio::sync::oneshot;
 
+/// What a commit is answered with when its change of CONFIG_DB was not
+/// made, or not known to have been.
+///
+/// Only with no writer is it certain that CONFIG_DB is as it was.
+/// SONiC's updater can fail after it has written some or all of a
+/// change (its last step checks CONFIG_DB against what it meant to
+/// write, and fails when anything else wrote meanwhile), and a writer
+/// that does not answer may yet finish. Whatever did reach CONFIG_DB is
+/// copied back here, so `compare` then shows what is left.
+fn config_db_refusal(why: &str) -> String {
+    let why = why.trim_end();
+    if why == super::writer::NO_WRITER {
+        return format!("% CONFIG_DB was not changed, and nothing is committed: {why}\n");
+    }
+    format!(
+        "% The change of CONFIG_DB failed, and nothing is committed here: {why}\n\
+         % CONFIG_DB may have been changed in part: `compare` shows what is still pending\n"
+    )
+}
+
 /// How long a commit waits for the writer of CONFIG_DB. SONiC's updater
 /// takes about three seconds for a small change from the shell, and
 /// longer where a service has to settle after it.
@@ -2435,10 +2455,7 @@ impl ConfigManager {
                 match (outcome, self.modes.get(&req.mode)) {
                     (Err(why), _) => {
                         resp.code = ExecCode::Show;
-                        resp.output = format!(
-                            "% CONFIG_DB was not changed, and nothing is committed: {}\n",
-                            why.trim_end()
-                        );
+                        resp.output = config_db_refusal(&why);
                     }
                     // CONFIG_DB has the change. The commit is made of
                     // whatever is pending now: the change of `sonic`, if

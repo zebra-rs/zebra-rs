@@ -30,6 +30,10 @@ pub use pb::writer_service_server::WriterServiceServer;
 /// is applying an order, or calling again.
 const PRESENT_FOR: Duration = Duration::from_secs(15);
 
+/// Why a change is not written when no writer is there. The one refusal
+/// after which CONFIG_DB is certainly as it was.
+pub const NO_WRITER: &str = "no writer of CONFIG_DB is connected";
+
 /// The wait of a writer that names none.
 const DEFAULT_WAIT: Duration = Duration::from_secs(30);
 
@@ -62,7 +66,7 @@ impl WriterHub {
     /// `Err` is why it was not written, for the operator.
     pub async fn write(&self, patch: String, timeout: Duration) -> Result<(), String> {
         if !self.present() {
-            return Err("no writer of CONFIG_DB is connected".to_string());
+            return Err(NO_WRITER.to_string());
         }
         let id = self.next_id.fetch_add(1, Ordering::SeqCst) + 1;
         let (tx, rx) = oneshot::channel();

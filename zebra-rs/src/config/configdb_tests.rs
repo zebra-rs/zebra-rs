@@ -652,7 +652,9 @@ async fn a_change_the_writer_refuses_is_not_committed() {
     let pending = candidate(&cm);
     assert_eq!(
         session(&mut cm, "commit").await,
-        "% CONFIG_DB was not changed, and nothing is committed: Error: PORT Ethernet8 has no lanes\n"
+        "% The change of CONFIG_DB failed, and nothing is committed here: \
+         Error: PORT Ethernet8 has no lanes\n\
+         % CONFIG_DB may have been changed in part: `compare` shows what is still pending\n"
     );
     assert_eq!(orders.load(std::sync::atomic::Ordering::SeqCst), 1);
     assert_eq!(running(&cm), IMPORTED);
