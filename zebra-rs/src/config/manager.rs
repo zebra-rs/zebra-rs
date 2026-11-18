@@ -2188,7 +2188,10 @@ impl ConfigManager {
     ///
     /// A whole-config document (CLI brace, JSON, YAML) replaces the
     /// configuration, so nothing of an edit can be kept next to it: the
-    /// candidate becomes the new running config.
+    /// candidate becomes the new running config. It replaces the
+    /// configuration made here: the copy of CONFIG_DB under `sonic`
+    /// stays as it is running, as it does over a `rollback`
+    /// ([`Self::history_tree`]).
     ///
     /// One candidate that differs from the running config is not an
     /// edit: a startup config whose commit was refused
@@ -2249,6 +2252,12 @@ impl ConfigManager {
         // it is. A whole-config document starts from nothing.
         if format_type != ConfigFormat::SetDelete {
             self.store.candidate_clear();
+            // Nothing but the copy of CONFIG_DB, which is no part of a
+            // document: `save` leaves it out, so a document that is all
+            // of the configuration made here does not have it. Started
+            // from nothing, every such document would be a commit that
+            // deletes `sonic`, and be refused for it.
+            self.sonic_carried_over();
         } else if edits.is_some() {
             self.store.discard();
         }
@@ -2295,6 +2304,19 @@ impl ConfigManager {
             exec_code: ExecCode::Success,
             cmd: String::new(),
         }
+    }
+
+    /// Give the candidate the `sonic` subtree as it is running, on a
+    /// daemon where that subtree is a copy of CONFIG_DB: for a candidate
+    /// built from something that does not have the copy, and is not
+    /// meant to change it.
+    fn sonic_carried_over(&self) {
+        if !self.sonic_mirrored() {
+            return;
+        }
+        let name = "sonic".to_string();
+        let sonic = self.store.running.borrow().lookup(&name);
+        super::configs::replace_child(&self.store.candidate.borrow(), &name, sonic.as_ref());
     }
 
     /// What the candidate's `sonic` subtree changes in CONFIG_DB: a JSON
@@ -2522,7 +2544,8 @@ impl ConfigManager {
     ///
     /// The subtree is replaced whole: what CONFIG_DB no longer has is
     /// gone from it. Nothing else of the configuration is touched, and
-    /// uncommitted edits are set aside and put back as over an apply.
+    /// what the candidate holds (uncommitted edits, or a startup config
+    /// that was refused) is set aside and put back as over an apply.
     /// What of CONFIG_DB cannot be copied is logged and left out; the
     /// import is refused only on a device with no SONiC models.
     pub(super) fn import_config_db(
@@ -2593,8 +2616,21 @@ impl ConfigManager {
         }
 
         // The candidate of this commit: the running config with the
-        // subtree replaced. Uncommitted edits are set aside for it.
-        let edits = self.set_aside_edits();
+        // subtree replaced. What the candidate holds is set aside for
+        // it, whatever that is. A startup config whose commit was
+        // refused is in it as an operator's edits are
+        // ([`ConfigStore::refused_load`]), and an apply leaves that one
+        // where it is, to complete it. A copy of CONFIG_DB completes
+        // nothing: run on that candidate, it would be refused with the
+        // startup config, every time, and drop it; or, where a `load`
+        // was refused beside a session's edits, commit those edits.
+        let refused_load = self.store.refused_load.get();
+        let edits = self.has_uncommitted().then(|| {
+            (
+                self.store.candidate.borrow().clone(),
+                self.store.running.borrow().clone(),
+            )
+        });
         if edits.is_some() {
             self.store.discard();
         }
@@ -2604,10 +2640,21 @@ impl ConfigManager {
         self.importing.set(false);
         report(true);
         self.config_db_copied(&sonic, tables);
+        // What was set aside goes back as an edit of what is running
+        // now, a refused startup config as much as a session's edits:
+        // left without the copy, its commit would be one that deletes
+        // `sonic`. It is still a startup config that was refused.
+        let put_back = |edits: Option<(Rc<Config>, Rc<Config>)>| {
+            let held = edits.is_some();
+            self.put_back(edits);
+            if held {
+                self.store.refused_load.set(refused_load);
+            }
+        };
         match committed {
             Ok(()) => {
                 if edits.is_some() {
-                    self.put_back(edits);
+                    put_back(edits);
                 }
                 DeployResponse {
                     apply_code: ApplyCode::Applied,
@@ -2616,7 +2663,7 @@ impl ConfigManager {
                 }
             }
             Err(e) => {
-                self.put_back(edits);
+                put_back(edits);
                 DeployResponse {
                     apply_code: ApplyCode::MissingMandatory,
                     exec_code: ExecCode::Success,

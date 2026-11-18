@@ -858,19 +858,33 @@ async fn a_table_the_copy_left_rows_out_of_is_neither_added_nor_removed() {
     }
 }
 
+/// A startup config with what a commit refuses and a startup tolerates:
+/// one route with both discard keywords. It is running, and from then on
+/// every commit of a candidate that has it is refused, a copy of
+/// CONFIG_DB among them.
+fn start_with_what_no_commit_takes(cm: &ConfigManager) {
+    std::fs::write(
+        &cm.config_path,
+        "set router static ipv4 route 10.9.9.0/24 nexthop blackhole\n\
+         set router static ipv4 route 10.9.9.0/24 nexthop unreachable\n",
+    )
+    .unwrap();
+    cm.load_config();
+    let _ = std::fs::remove_file(&cm.config_path);
+    assert!(running(cm).contains("nexthop unreachable\n"));
+}
+
 /// A copy that is refused leaves the subtree as it was, and what is
 /// noted of CONFIG_DB is what that subtree does not have of it.
 #[test]
 fn a_patch_knows_what_a_refused_copy_did_not_bring() {
     let cm = manager("left-out-refused");
     import(&cm, serde_json::json!({}));
-    // A candidate no commit takes (`vni` is mandatory), which is not an
-    // operator's edit to be set aside: a refused startup config.
-    edit(&cm, "set vxlan vx1 local-address 10.0.0.1");
-    cm.store.refused_load.set(true);
+    start_with_what_no_commit_takes(&cm);
+    let before = running(&cm);
     let reply = import(&cm, tables());
     assert_ne!(reply.apply_code, ApplyCode::Applied);
-    assert_eq!(running(&cm), "");
+    assert_eq!(running(&cm), before);
 
     edit(&cm, "set sonic PORT Ethernet8 lanes 9,10,11,12");
     assert_eq!(
@@ -879,6 +893,264 @@ fn a_patch_knows_what_a_refused_copy_did_not_bring() {
             {"op": "add", "path": "/PORT/Ethernet8", "value": {"lanes": "9,10,11,12"}},
         ])
     );
+}
+
+// --- What a copy and a whole document leave alone ---
+
+/// A startup config whose commit was refused stays in the candidate,
+/// for a session to complete. A copy of CONFIG_DB is not that session:
+/// it is committed by itself, and the file's lines are still there
+/// afterwards, on the copy, to be completed. Run on that candidate, the
+/// copy was refused with the file, every time, and dropped it.
+#[test]
+fn a_copy_leaves_a_refused_startup_config_to_be_completed() {
+    let cm = manager("refused-startup");
+    // `vni` is mandatory.
+    std::fs::write(
+        &cm.config_path,
+        "set vxlan vx1 local-address 10.0.0.1\nset system hostname r1\n",
+    )
+    .unwrap();
+    cm.load_config();
+    let _ = std::fs::remove_file(&cm.config_path);
+    assert!(cm.store.refused_load.get());
+    assert_eq!(running(&cm), "");
+    let file = candidate(&cm);
+    assert!(
+        file.contains("vxlan vx1 local-address 10.0.0.1\n"),
+        "{file}"
+    );
+
+    // The copy, and a second one that changes it.
+    let mut more = tables();
+    more["PORT"]["Ethernet0"]["mtu"] = "1500".into();
+    for (tables, copied) in [
+        (tables(), IMPORTED.to_string()),
+        (more, IMPORTED.replace("mtu 9100", "mtu 1500")),
+    ] {
+        let reply = import(&cm, tables);
+        assert_eq!(reply.apply_code, ApplyCode::Applied, "{}", reply.cmd);
+        assert_eq!(running(&cm), copied);
+        // The file's lines and the copy's, in the order of the tree.
+        let sorted = |text: &str| {
+            let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
+            lines.sort();
+            lines
+        };
+        assert_eq!(sorted(&candidate(&cm)), sorted(&format!("{copied}{file}")));
+        assert!(
+            cm.store.refused_load.get(),
+            "still a refused startup config"
+        );
+    }
+
+    // Completed, it is committed, with `sonic` as CONFIG_DB has it.
+    edit(&cm, "set vxlan vx1 vni 100");
+    assert_eq!(run(&cm, "commit"), "");
+    assert!(!cm.store.refused_load.get());
+    let now = running(&cm);
+    assert!(now.contains("sonic PORT Ethernet0 mtu 1500\n"), "{now}");
+    assert!(now.contains("system hostname r1\n"), "{now}");
+    assert!(now.contains("vxlan vx1 vni 100\n"), "{now}");
+}
+
+/// Nor does a copy commit what a refused `load` left in the candidate
+/// beside a session's edits: they are as pending after it as before.
+#[test]
+fn a_copy_does_not_commit_what_a_refused_load_left() {
+    let cm = manager("refused-load");
+    import(&cm, tables());
+    edit(&cm, "set system hostname pending");
+    edit(&cm, "set sonic PORT Ethernet0 mtu 1500");
+    // `load` commits the candidate with the file's lines, and is refused
+    // for the edit of `sonic`.
+    std::fs::write(&cm.config_path, "set vxlan vx1 vni 100\n").unwrap();
+    run(&cm, "load");
+    let _ = std::fs::remove_file(&cm.config_path);
+    assert!(cm.store.refused_load.get());
+    assert_eq!(running(&cm), IMPORTED);
+    let pending = run(&cm, "compare formal");
+
+    let mut more = tables();
+    more["PORT"]["Ethernet8"] = serde_json::json!({"lanes": "9,10,11,12"});
+    let reply = import(&cm, more);
+    assert_eq!(reply.apply_code, ApplyCode::Applied, "{}", reply.cmd);
+    let now = running(&cm);
+    assert!(
+        now.contains("sonic PORT Ethernet8 lanes 9,10,11,12\n"),
+        "{now}"
+    );
+    assert!(now.contains("sonic PORT Ethernet0 mtu 9100\n"), "{now}");
+    assert!(!now.contains("system hostname"), "{now}");
+    assert!(!now.contains("vxlan"), "{now}");
+    assert_eq!(run(&cm, "compare formal"), pending);
+    assert!(cm.store.refused_load.get());
+}
+
+/// A document that is all of the configuration does not have the copy:
+/// `save` leaves it out. Applied, it replaces the configuration made
+/// here and leaves `sonic` as it is running, in each of the formats
+/// that are a whole configuration. Started from nothing, every such
+/// document was a commit that deletes `sonic`, and was refused.
+#[test]
+fn a_whole_config_document_leaves_the_copy_as_it_is() {
+    let cm = manager("whole-config");
+    import(&cm, tables());
+    commit(&cm, &["set system hostname r1", "set vxlan vx1 vni 100"]);
+    let with = |hostname: &str| {
+        format!("vxlan vx1\nvxlan vx1 vni 100\n{IMPORTED}system hostname {hostname}\n")
+    };
+    assert_eq!(running(&cm), with("r1"));
+    for format in ["cli", "json", "yaml"] {
+        assert!(run(&cm, &format!("save {format}")).starts_with("Configuration saved"));
+        let saved = std::fs::read_to_string(&cm.config_path).unwrap();
+        assert!(!saved.contains("sonic"), "{format}: {saved}");
+        // What was saved, again: nothing changes.
+        let reply = cm.deploy(&saved);
+        assert_eq!(
+            reply.apply_code,
+            ApplyCode::Applied,
+            "{format}: {}",
+            reply.cmd
+        );
+        assert_eq!(running(&cm), with("r1"), "{format}");
+        // With a change, and without what it does not have any more.
+        let changed = saved.replace("r1", "r2");
+        let reply = cm.deploy(&changed);
+        assert_eq!(
+            reply.apply_code,
+            ApplyCode::Applied,
+            "{format}: {}",
+            reply.cmd
+        );
+        assert_eq!(running(&cm), with("r2"), "{format}");
+        let reply = cm.deploy(&saved);
+        assert_eq!(
+            reply.apply_code,
+            ApplyCode::Applied,
+            "{format}: {}",
+            reply.cmd
+        );
+    }
+    let _ = std::fs::remove_file(&cm.config_path);
+
+    // A document with the copy in it, as `show running-config json`
+    // prints it, says of `sonic` what is running: applied. One that
+    // says something else is refused, as any other change of it by a
+    // document is.
+    let whole = run(&cm, "show running-config json");
+    let reply = cm.deploy(&whole);
+    assert_eq!(reply.apply_code, ApplyCode::Applied, "{}", reply.cmd);
+    assert_eq!(running(&cm), with("r1"));
+    let reply = cm.deploy(&whole.replace("9100", "1500"));
+    assert_ne!(reply.apply_code, ApplyCode::Applied);
+    assert_eq!(reply.cmd, READ_ONLY);
+    assert_eq!(running(&cm), with("r1"));
+    assert_eq!(candidate(&cm), with("r1"));
+}
+
+/// A member of a leaf-list is one word. One that is not would be read
+/// as a member for each of its words, so the leaf-list is said and left
+/// out, whole: copied in part, the first edit of it would write it back
+/// without the members the copy could not hold.
+#[test]
+fn a_leaf_list_with_a_member_of_several_words_is_left_out() {
+    let cm = manager("leaf-list-words");
+    let db = serde_json::json!({"STATIC_ROUTE": {
+        "default|198.51.100.0/24": {"nexthop": "10.0.0.2", "ifname@": "Ethernet 0,Ethernet4"},
+        "default|203.0.113.0/24": {"ifname": ["Ethernet8", "to spine"]},
+        "Vrf-red|203.0.113.0/24": {"ifname": ["Ethernet8", ""]},
+        "Vrf-red|198.51.100.0/24": {"ifname@": "Ethernet0,Ethernet4"},
+    }});
+    let mut problems = translate(&cm, db.clone()).problems;
+    problems.sort();
+    assert_eq!(
+        problems,
+        [
+            "STATIC_ROUTE|Vrf-red|203.0.113.0/24: a member of `ifname` is empty",
+            "STATIC_ROUTE|default|198.51.100.0/24: a member of `ifname` is not one word",
+            "STATIC_ROUTE|default|203.0.113.0/24: a member of `ifname` is not one word",
+        ]
+    );
+    let reply = import(&cm, db);
+    assert_eq!(reply.apply_code, ApplyCode::Applied, "{}", reply.cmd);
+    assert_eq!(
+        running(&cm),
+        "\
+sonic STATIC_ROUTE Vrf-red 198.51.100.0/24
+sonic STATIC_ROUTE Vrf-red 198.51.100.0/24 ifname Ethernet0
+sonic STATIC_ROUTE Vrf-red 198.51.100.0/24 ifname Ethernet4
+sonic STATIC_ROUTE Vrf-red 203.0.113.0/24
+sonic STATIC_ROUTE default 198.51.100.0/24
+sonic STATIC_ROUTE default 198.51.100.0/24 nexthop 10.0.0.2
+sonic STATIC_ROUTE default 203.0.113.0/24
+"
+    );
+    // What is left out is not touched by an edit of the row beside it.
+    edit(
+        &cm,
+        "set sonic STATIC_ROUTE default 198.51.100.0/24 nexthop 10.0.0.9",
+    );
+    assert_eq!(
+        pending_patch(&cm),
+        serde_json::json!([
+            {"op": "replace", "path": "/STATIC_ROUTE/default|198.51.100.0~124/nexthop",
+             "value": "10.0.0.9"},
+        ])
+    );
+}
+
+/// Free text copied from CONFIG_DB is whatever CONFIG_DB holds: quotes,
+/// backslashes, and what looks like a number and is not one. The JSON
+/// and YAML renderings of a configuration with it are still documents,
+/// and read back as the same configuration.
+#[test]
+fn free_text_from_config_db_is_rendered_as_json() {
+    let cm = manager("json-text");
+    let db = serde_json::json!({"PORT": {"Ethernet0": {
+        "lanes": "1,2,3,4",
+        "description": "rack \"A\", row \\7",
+    }}, "DEVICE_METADATA": {"localhost": {"hostname": "007", "bgp_asn": "65100"}}});
+    let reply = import(&cm, db);
+    assert_eq!(reply.apply_code, ApplyCode::Applied, "{}", reply.cmd);
+    let want = running(&cm);
+    assert!(
+        want.contains("sonic PORT Ethernet0 description rack \"A\", row \\7\n"),
+        "{want}"
+    );
+    assert!(
+        want.contains("sonic DEVICE_METADATA localhost hostname 007\n"),
+        "{want}"
+    );
+
+    let json: serde_json::Value =
+        serde_json::from_str(&run(&cm, "show running-config json")).expect("JSON");
+    let port = &json["sonic"]["PORT"][0];
+    assert_eq!(port["description"], "rack \"A\", row \\7");
+    assert_eq!(
+        json["sonic"]["DEVICE_METADATA"]["localhost"]["hostname"],
+        "007"
+    );
+    assert_eq!(
+        json["sonic"]["DEVICE_METADATA"]["localhost"]["bgp_asn"],
+        65100
+    );
+    let yaml = run(&cm, "show running-config yaml");
+    assert!(!yaml.contains("failed"), "{yaml}");
+
+    for format in [" json", " yaml"] {
+        let document = run(&cm, &format!("show running-config{format}"));
+        let fresh = manager("json-text-fresh");
+        fresh.sonic_read_only.set(false);
+        let reply = fresh.deploy(&document);
+        assert_eq!(
+            reply.apply_code,
+            ApplyCode::Applied,
+            "`{format}`: {}",
+            reply.cmd
+        );
+        assert_eq!(running(&fresh), want, "`{format}`");
+    }
 }
 
 // --- Maps, and what CONFIG_DB has no form for ---

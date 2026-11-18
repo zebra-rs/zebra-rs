@@ -13,25 +13,52 @@ use std::rc::{Rc, Weak};
 
 const INDENT_LEVEL: usize = 2;
 
-/// Format a value for JSON output, preserving boolean and numeric types
+/// Format a value for JSON output, preserving boolean and numeric types.
+///
+/// A number is what JSON calls one (RFC 8259 §6), and is written as it
+/// is. Asking Rust's parsers instead took `007`, `+5`, `.5`, `nan` and
+/// `inf` for numbers too, none of which a JSON reader takes: one such
+/// value made the whole document unreadable. Anything else is a string,
+/// with what a string has to escape escaped: a value is free text where
+/// its leaf is (a description, a banner).
 fn format_json_value(value: &str) -> String {
-    // Check if it's a boolean
     if value == "true" || value == "false" {
         return value.to_string();
     }
-
-    // Check if it's an integer (positive or negative)
-    if value.parse::<i64>().is_ok() {
+    if is_json_number(value) {
         return value.to_string();
     }
+    serde_json::Value::String(value.to_string()).to_string()
+}
 
-    // Check if it's a floating point number
-    if value.parse::<f64>().is_ok() {
-        return value.to_string();
+/// Whether `text` is a JSON number: `-`, an integer with no leading
+/// zero, a fraction, an exponent.
+fn is_json_number(text: &str) -> bool {
+    fn digits(text: &str) -> usize {
+        text.bytes().take_while(u8::is_ascii_digit).count()
     }
-
-    // Default case: treat as string and add quotes
-    format!("\"{}\"", value)
+    let rest = text.strip_prefix('-').unwrap_or(text);
+    let int = digits(rest);
+    if int == 0 || (int > 1 && rest.starts_with('0')) {
+        return false;
+    }
+    let mut rest = &rest[int..];
+    if let Some(fraction) = rest.strip_prefix('.') {
+        let len = digits(fraction);
+        if len == 0 {
+            return false;
+        }
+        rest = &fraction[len..];
+    }
+    if let Some(exponent) = rest.strip_prefix(['e', 'E']) {
+        let exponent = exponent.strip_prefix(['+', '-']).unwrap_or(exponent);
+        let len = digits(exponent);
+        if len == 0 {
+            return false;
+        }
+        rest = &exponent[len..];
+    }
+    rest.is_empty()
 }
 
 #[derive(Clone, Debug)]
@@ -1795,6 +1822,90 @@ mod tests {
         // No member named: the whole leaf-list.
         assert!(delete(label(&[]), root.clone()));
         assert_eq!(members(&root), None);
+    }
+
+    /// A value is written as a JSON number only where it is one, and as
+    /// a string with its quotes, backslashes and control characters
+    /// escaped: whatever the value, what is written is JSON, and reads
+    /// back as the value.
+    #[test]
+    fn a_value_is_written_as_json() {
+        for (value, written) in [
+            ("9100", "9100"),
+            ("0", "0"),
+            ("-5", "-5"),
+            ("1.5", "1.5"),
+            ("1e5", "1e5"),
+            ("-0.5E-3", "-0.5E-3"),
+            ("true", "true"),
+            ("false", "false"),
+            // What Rust's parsers take for a number and JSON does not.
+            ("007", "\"007\""),
+            ("+5", "\"+5\""),
+            (".5", "\".5\""),
+            ("5.", "\"5.\""),
+            ("1e", "\"1e\""),
+            ("-", "\"-\""),
+            ("nan", "\"nan\""),
+            ("inf", "\"inf\""),
+            ("-inf", "\"-inf\""),
+            ("infinity", "\"infinity\""),
+            // Free text.
+            ("uplink", "\"uplink\""),
+            ("rack \"A\"", "\"rack \\\"A\\\"\""),
+            ("a\\b", "\"a\\\\b\""),
+            ("tab\there", "\"tab\\there\""),
+        ] {
+            assert_eq!(format_json_value(value), written, "{value:?}");
+            let read: serde_json::Value =
+                serde_json::from_str(&format_json_value(value)).expect(value);
+            if let serde_json::Value::String(read) = read {
+                assert_eq!(read, value);
+            }
+        }
+
+        // A tree with such values is a JSON document, and a YAML one.
+        let root = Rc::new(Config::new("".to_string(), None));
+        let leaf = |name: &str, value: &str| {
+            vec![
+                CommandPath {
+                    name: "port".to_string(),
+                    ymatch: YangMatch::Dir as i32,
+                    ..Default::default()
+                },
+                CommandPath {
+                    name: name.to_string(),
+                    ymatch: YangMatch::Leaf as i32,
+                    ..Default::default()
+                },
+                CommandPath {
+                    name: value.to_string(),
+                    ymatch: YangMatch::LeafMatched as i32,
+                    ..Default::default()
+                },
+            ]
+        };
+        set(leaf("description", "rack \"A\", row \\7"), root.clone());
+        set(leaf("alias", "007"), root.clone());
+        set(leaf("gain", "nan"), root.clone());
+        set(leaf("mtu", "9100"), root.clone());
+        let mut json = String::new();
+        root.json(&mut json);
+        let read: serde_json::Value = serde_json::from_str(&json).expect(&json);
+        assert_eq!(
+            read,
+            serde_json::json!({"port": {
+                "alias": "007",
+                "description": "rack \"A\", row \\7",
+                "gain": "nan",
+                "mtu": 9100,
+            }})
+        );
+        let mut yaml = String::new();
+        root.yaml(&mut yaml);
+        assert!(!yaml.contains("failed"), "{yaml}");
+        let read: serde_json::Value = serde_yaml::from_str(&yaml).expect(&yaml);
+        assert_eq!(read["port"]["description"], "rack \"A\", row \\7");
     }
 
     #[test]

@@ -260,7 +260,12 @@ is a row whose fields are the entries of the one list its model has inside it,
 the field's name being the entry's key: the eleven QoS and cable-length tables
 of the tree we build. An import is not a commit of the history, is not
 held to the models' mandatory leaves, and leaves out and logs what it cannot
-copy. *Measured* on a SONiC VS: all 21 tables of its CONFIG_DB are modelled,
+copy. A leaf-list is left out whole when one member of it cannot be held (a
+member is one word): the field is one value in CONFIG_DB, and copied in part
+it would be written back in part. An import is committed by itself, with
+whatever the candidate holds set aside and put back as an edit of the new
+running configuration: a session's uncommitted edits, or a startup
+configuration whose commit was refused and that waits to be completed. *Measured* on a SONiC VS: all 21 tables of its CONFIG_DB are modelled,
 306 rows became 1,282 lines, two values were left out (an empty string and one
 of several lines), and a `config vlan add` on the host showed in the running
 configuration at the next copy. What follows is the design for the rest: the
@@ -441,7 +446,9 @@ Each phase is useful on its own and none commits us to the next.
    path, and is safe. *The schema and the import are built (§5.1, §7), and
    the subtree is read-only: a session's `set sonic …` is refused and pointed
    at SONiC's `config` command, `save` leaves the subtree out, and `rollback`
-   keeps it as CONFIG_DB has it now. Still to do, outside zebra-rs: the
+   keeps it as CONFIG_DB has it now. So does a document that is a whole
+   configuration given to `vtyctl apply` (block format, JSON, YAML): it
+   replaces what was configured here and leaves `sonic` as it is running. Still to do, outside zebra-rs: the
    process that follows CONFIG_DB by its keyspace notifications, and the
    models in the `bgp` container's image.*
 3. **Commit for a few tables**: *the first half is built.* `sonic` is edited
@@ -473,7 +480,9 @@ Each phase is useful on its own and none commits us to the next.
    - **The writer is whoever may commit.** `Wait` and `Done` need the admin
      role of the vty socket, as `vtyctl apply` does: the writer runs as root.
      A commit is made on the writer's word, so a caller without the role
-     neither takes an order nor answers for one.
+     neither takes an order nor answers for one. A writer is there while it
+     waits, and for 15 seconds after its last wait or answer: an order may
+     take longer to apply than that.
    - **No patch before the first copy.** Until CONFIG_DB has been copied once
      the running subtree is empty because nothing is known, and a row typed
      then would be added as the first of its table, replacing the table.

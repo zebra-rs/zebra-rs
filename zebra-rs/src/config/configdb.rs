@@ -38,8 +38,10 @@
 //!
 //! A table the models do not have, a row no list of its table takes, a
 //! field its list does not have, and a value this configuration cannot
-//! hold (empty, or of several lines). The mirror is of everything else:
-//! one row that cannot be read does not stop the import.
+//! hold (empty, or of several lines; for a member of a leaf-list, of
+//! several words). A leaf-list is left out whole when one member of it
+//! is. The mirror is of everything else: one row that cannot be read
+//! does not stop the import.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
@@ -225,22 +227,47 @@ pub fn translate(
                     }
                     continue;
                 };
-                let values: Vec<Value> = match value {
+                let members: Vec<Value> = match value {
                     Value::Array(members) => members.clone(),
                     Value::String(s) if field.ends_with('@') || leaf.is_leaflist() => s
                         .split(',')
                         .filter(|member| !member.is_empty())
                         .map(|member| Value::String(member.to_string()))
                         .collect(),
-                    other => vec![other.clone()],
-                };
-                for value in values.iter() {
-                    match scalar(value) {
-                        Ok(text) => out.lines.push(format!("{row} {name} {text}")),
-                        Err(why) => out
-                            .problems
-                            .push(format!("{table}|{key}: the value of `{name}` {why}")),
+                    other => {
+                        match scalar(other) {
+                            Ok(text) => out.lines.push(format!("{row} {name} {text}")),
+                            Err(why) => out
+                                .problems
+                                .push(format!("{table}|{key}: the value of `{name}` {why}")),
+                        }
+                        continue;
                     }
+                };
+                // A member of a leaf-list is one word: its line takes a
+                // member for each word after the leaf-list's name, so
+                // `rack a` would be read as two. And the members are
+                // copied all or none. The field is one value in
+                // CONFIG_DB, and what is written back for an edit of it
+                // is all of it: copied in part, the first edit would
+                // drop the members the copy could not hold.
+                let one_word = leaf.is_leaflist();
+                let texts: Result<Vec<String>, &str> = members
+                    .iter()
+                    .map(|member| match scalar(member) {
+                        Ok(text) if one_word && text.contains(char::is_whitespace) => {
+                            Err("is not one word")
+                        }
+                        text => text,
+                    })
+                    .collect();
+                match texts {
+                    Ok(texts) => out
+                        .lines
+                        .extend(texts.iter().map(|text| format!("{row} {name} {text}"))),
+                    Err(why) => out
+                        .problems
+                        .push(format!("{table}|{key}: a member of `{name}` {why}")),
                 }
             }
         }

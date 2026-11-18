@@ -35,8 +35,8 @@ pub mod pb {
 }
 pub use pb::writer_service_server::WriterServiceServer;
 
-/// How long a writer may be between two waits and still be there: it
-/// is applying an order, or calling again.
+/// How long a writer may go unheard and still be there: it is between
+/// an answer and its next wait, or between two waits.
 const PRESENT_FOR: Duration = Duration::from_secs(15);
 
 /// Why a change is not written when no writer is there. The one refusal
@@ -55,9 +55,12 @@ pub struct WriterHub {
     queued: Notify,
     /// Orders taken or queued, each with where its answer goes.
     pending: Mutex<HashMap<u64, oneshot::Sender<Result<(), String>>>>,
-    /// Writers waiting now, and when one last was.
+    /// Writers waiting now, and when one was last heard: a wait of its
+    /// ended, or it answered for an order. An order may take longer to
+    /// apply than a writer may go unheard, and the writer that has just
+    /// answered for it is as much there as one that has just waited.
     waiting: AtomicUsize,
-    last_wait: Mutex<Option<Instant>>,
+    last_heard: Mutex<Option<Instant>>,
 }
 
 impl WriterHub {
@@ -65,7 +68,7 @@ impl WriterHub {
     pub fn present(&self) -> bool {
         self.waiting.load(Ordering::SeqCst) > 0
             || self
-                .last_wait
+                .last_heard
                 .lock()
                 .unwrap()
                 .is_some_and(|at| at.elapsed() < PRESENT_FOR)
@@ -109,7 +112,7 @@ impl WriterHub {
         impl Drop for Waiting<'_> {
             fn drop(&mut self) {
                 self.0.waiting.fetch_sub(1, Ordering::SeqCst);
-                *self.0.last_wait.lock().unwrap() = Some(Instant::now());
+                *self.0.last_heard.lock().unwrap() = Some(Instant::now());
             }
         }
         self.waiting.fetch_add(1, Ordering::SeqCst);
@@ -138,6 +141,9 @@ impl WriterHub {
     /// of it, and it would still be handed out after its commit was
     /// answered.
     pub fn done(&self, id: u64, answer: Result<(), String>) -> bool {
+        // Heard, whatever becomes of the answer: a writer that answers
+        // too late for its commit is there for the next one.
+        *self.last_heard.lock().unwrap() = Some(Instant::now());
         if self
             .queue
             .lock()
@@ -423,8 +429,43 @@ mod tests {
         let hub = WriterHub::default();
         assert_eq!(hub.wait(Duration::from_millis(1)).await, None);
         assert!(hub.present());
-        *hub.last_wait.lock().unwrap() =
+        *hub.last_heard.lock().unwrap() =
             Some(Instant::now() - PRESENT_FOR - Duration::from_secs(1));
         assert!(!hub.present());
+    }
+
+    /// An order can take longer to apply than a writer may go unheard.
+    /// The writer that answers for it is there again, for the commit
+    /// that follows before its next wait; and so is one whose answer
+    /// came too late for its own commit.
+    #[tokio::test]
+    async fn a_writer_that_has_just_answered_is_there() {
+        let long_ago = || Some(Instant::now() - PRESENT_FOR - Duration::from_secs(5));
+        let hub = Arc::new(WriterHub::default());
+        assert_eq!(hub.wait(Duration::from_millis(1)).await, None);
+        let commit = {
+            let hub = hub.clone();
+            tokio::spawn(async move { hub.write("[]".into(), SOON).await })
+        };
+        let (id, _) = hub.wait(SOON).await.expect("an order");
+        // Applying it took a while.
+        *hub.last_heard.lock().unwrap() = long_ago();
+        assert!(!hub.present());
+        assert!(hub.done(id, Ok(())));
+        assert_eq!(commit.await.unwrap(), Ok(()));
+        assert!(hub.present(), "it has just answered");
+        // The next commit is taken, and waits for the writer's next call.
+        let next = {
+            let hub = hub.clone();
+            tokio::spawn(async move { hub.write("[]".into(), SOON).await })
+        };
+        let (id, _) = hub.wait(SOON).await.expect("the next order");
+        assert!(hub.done(id, Ok(())));
+        assert_eq!(next.await.unwrap(), Ok(()));
+
+        // An answer nobody waits for any more says as much.
+        *hub.last_heard.lock().unwrap() = long_ago();
+        assert!(!hub.done(99, Ok(())));
+        assert!(hub.present());
     }
 }
