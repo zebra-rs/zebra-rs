@@ -74,7 +74,13 @@ impl CapAfiMap {
     }
 }
 
+/// Record the families our current OPEN carries. Bits from an earlier
+/// OPEN of an attempt that never reached Established are cleared, so a
+/// family removed from the configuration since then is not kept.
 pub fn cap_register_send(bgp_cap: &BgpCap, cap_map: &mut CapAfiMap) {
+    for entry in cap_map.entries.values_mut() {
+        entry.send = false;
+    }
     for mp in bgp_cap.mp.values() {
         if let Some(entry) = cap_map.get_mut(mp) {
             entry.send = true;
@@ -82,7 +88,12 @@ pub fn cap_register_send(bgp_cap: &BgpCap, cap_map: &mut CapAfiMap) {
     }
 }
 
+/// Record the families the neighbor's current OPEN carries, clearing
+/// those of an earlier OPEN as `cap_register_send` does.
 pub fn cap_register_recv(bgp_cap: &BgpCap, cap_map: &mut CapAfiMap) {
+    for entry in cap_map.entries.values_mut() {
+        entry.recv = false;
+    }
     for mp in bgp_cap.mp.values() {
         if let Some(entry) = cap_map.get_mut(mp) {
             entry.recv = true;
