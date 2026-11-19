@@ -37610,7 +37610,8 @@ mod stale_sweep_per_family_tests {
     }
 
     /// An IPv4-unicast End-of-RIB from a session that did not enable IPv4
-    /// unicast is not ours: the IPv4 stale timer stays (RFC 4724 §4.2).
+    /// unicast is dropped with the rest of its IPv4 unicast, so it does not
+    /// end the IPv4 stale period: the timer stays.
     #[tokio::test]
     async fn an_ipv4_eor_from_a_session_without_ipv4_unicast_leaves_the_timer() {
         let mut fx = Fx::new();

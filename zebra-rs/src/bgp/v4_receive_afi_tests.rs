@@ -1,6 +1,6 @@
-//! IPv4 unicast from a session that did not enable it on our side is
-//! ignored, as FRR does. A session outside every IPv4 update group would
-//! keep such rows: nothing it is sent later can withdraw them. A neighbor
+//! IPv4 unicast from a session that did not enable it on our side is not
+//! ours to take, and is ignored; FRR's `bgp_update_receive()` skips a
+//! family not enabled on the peer (`peer->afc`) the same way. A neighbor
 //! that sent no Multiprotocol capability still has IPv4 unicast enabled on
 //! our side, so its routes are taken.
 
