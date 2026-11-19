@@ -1,6 +1,7 @@
 # OSPF: applicability of RFC 4222 (packet priority and congestion avoidance)
 
-Status: **Assessment, 2026-11-18. Nothing in this document is implemented.**
+Status: **Assessment, 2026-11-18, with two findings reproduced on
+2026-11-19. Nothing in this document is implemented.**
 zebra-rs OSPF was read at `main` `f59b36fe` against RFC 4222 (BCP 112,
 "Prioritized Treatment of Specific OSPF Version 2 Packets and Congestion
 Avoidance"). FRR, holo and BIRD were read in source. Commercial behaviour
@@ -8,8 +9,11 @@ comes from vendor documentation.
 
 What is and is not verified:
 
-- **zebra-rs:** every finding is from reading the code. None was
-  reproduced by a test, and no backlog depth was measured.
+- **zebra-rs, reproduced:** the packet-size limit (§4.2) and the
+  re-origination of every redistributed LSA (§4.5), both for OSPFv2, in
+  a two-router lab on a release build of `main` `bd2cebd0`.
+- **zebra-rs, read only:** everything else, including all of OSPFv3. No
+  backlog depth was measured.
 - **FRR:** read directly at `9b9c7c4138` (2026-11-18, `frr-10.8.0-dev`).
 - **holo, BIRD:** read by a research agent (holo `af71aedb`, BIRD master
   `94568d7`, version 2.20.0). The dead-timer and retransmission points
@@ -33,10 +37,18 @@ zebra-rs:
 | 4 | Slow flooding to a neighbor with many unacknowledged LSAs | Yes, later. Fixed pacing is what most stacks ship; the adaptive form is optional. |
 | 5 | Limit adjacencies brought up at once | Yes. It is the most widely adopted of the five. |
 
-Two gaps outside the RFC matter more than any of the five for the large
-networks the RFC is about (§4): **no OSPF packet is sized to the MTU**,
-and **the receive buffer is 16 KB**. Between two zebra-rs routers a
-Database Description stops fitting at about 816 LSAs.
+Three gaps outside the RFC matter more than any of the five for the
+large networks the RFC is about (§4):
+
+- **No OSPF packet is sized to the MTU, and the receive buffer is
+  16 KB.** Reproduced: two zebra-rs routers synchronize 453 Type-5 LSAs
+  and fail, silently and for good, from 454.
+- **Every redistributed route re-originates every Type-5 LSA.**
+  Reproduced: adding 199 routes sent 20,102 LS Updates to one neighbor.
+  This is a storm of the router's own making, the case the RFC's
+  Appendix A lists as "injecting a large number of external routes".
+- **OSPFv3 can take a live neighbor down** when its dead-timer event
+  overtakes queued Hellos (§3.1). Read, not reproduced.
 
 The proposed order of work is in §6.
 
@@ -160,7 +172,7 @@ Not implemented: only a Hello restarts the timer
 absent, and warns that stale low-priority packets can then keep a dead
 adjacency alive. OSPFv2 does not need it. For OSPFv3 it would hide the
 problem of §3.1 in the common case; putting the packets in the main queue
-removes the problem instead (§6, step 2).
+removes the problem instead (§6, step 3).
 
 ### 3.4 Recommendation 3
 
@@ -211,6 +223,8 @@ carries the whole database summary (§4.1).
 configurable, the SPF throttle defaults to 50 / 200 / 5000 ms, and SPF
 runs off the main task in both versions.
 
+`min-ls-interval` does not cover redistributed Type-5 LSAs (§4.5).
+
 ---
 
 ## 4. Gaps the RFC takes for granted
@@ -238,20 +252,59 @@ clamp the 16-bit length field (`Ospfv2Packet::emit`, and the same in
 `v3.rs`, each with a `debug_assert!`), and an IP datagram cannot be that
 large.
 
-### 4.2 The receive buffer is 16 KB
+### 4.2 The receive buffer is 16 KB (reproduced)
 
 Both readers receive into `[0u8; 1024 * 16]`. A larger datagram is
 truncated, fails the length check and is dropped without a log line.
+Together with §4.1 this caps what two zebra-rs routers can synchronize.
 
-A Database Description header is 20 bytes per LSA, so the largest summary
-zebra-rs can receive is about 816 LSAs. Two zebra-rs routers whose
-database is larger than that should fail to synchronize, because each
-sends the other one oversized packet. FRR accepts packets up to 65,535
-bytes and sends MTU-sized ones, so a zebra-rs to FRR adjacency holds up
-to about 3,270 LSAs, the 64 KB limit of §4.1.
+**Lab (2026-11-19, OSPFv2, release build of `main` `bd2cebd0`).** Two
+routers on a point-to-point link. `b` holds `N` static `/32` routes and
+`redistribute static`, so it originates `N` Type-5 LSAs; it is started
+first and holds all of them before `a` starts. Namespaces and daemons
+are fresh for every run.
 
-This is the finding most worth reproducing before any work starts: two
-daemons, about a thousand redistributed routes, then restart one.
+| `N` | `a` sees `b` | `b` sees `a` | Type-5 LSAs on `a` |
+|---|---|---|---|
+| 100, 400, 452, 453 | Full | Full | all `N` |
+| 454, 500, 815 | Loading | Full | 0 |
+| 816, 1000 | Exchange | Exchange | 0 |
+
+Both boundaries are where one packet passes 16,384 bytes, IP header
+included:
+
+- **LS Update answering the request, from `N = 454`.** `a` requests all
+  `N` LSAs in one LS Request and `b` answers with all of them in one LS
+  Update: `20 + 24 + 4 + 36·N` bytes, which is 16,356 at 453 and 16,392
+  at 454.
+- **Database Description, from `N = 816`.** `b`'s summary lists its
+  Router-LSA and the `N` Type-5 LSAs: `20 + 24 + 8 + 20·(N + 1)` bytes,
+  which is 16,372 at 815 and 16,392 at 816.
+
+What was observed at `N = 454`:
+
+- **On the wire:** every 5 s `a` sends `LS-Request [len 5472]` and `b`
+  answers `LS-Update [len 16372]`, in IP fragments.
+- **In the receiver:** each answer is read as `recvmsg(...) = 16384`
+  with `MSG_TRUNC`.
+- **In the show output:** `a` stays in Loading with 454 requests
+  outstanding and none of the LSAs; `b` shows the neighbor as Full.
+- **In the logs:** nothing, on either router.
+
+The state does not clear by itself. `a` repeats the same request every
+`RxmtInterval` and `b` gives the same answer.
+
+So the limit is a size, not a count: an adjacency cannot form when the
+LSAs one router lacks total more than about 16.3 KB. That is 453 Type-5
+LSAs at 36 bytes each, and fewer of anything larger. A Router-LSA with
+many links, or an Opaque LSA, counts for more.
+
+Not reproduced, from reading:
+
+- **OSPFv3** has the same 16 KB buffer and the same whole-list packets.
+- **Toward FRR**, which accepts packets up to 65,535 bytes and sends
+  MTU-sized ones, the limit should be the 64 KB of §4.1: about 3,270
+  LSAs in the Database Description zebra-rs sends.
 
 ### 4.3 Flooding is unicast on broadcast networks
 
@@ -265,6 +318,35 @@ a LAN with `N` neighbors costs `N` packets per LSA instead of one.
 RFC 5340 §A.1: "OSPF protocol packets are sent with IP precedence set to
 Internetwork Control". `socket::ospf_socket_ipv6` sets no traffic class;
 `socket::ospf_socket_ipv4` sets `IPTOS_PREC_INTERNETCONTROL`.
+
+### 4.5 Every redistributed route re-originates every Type-5 LSA (reproduced)
+
+Found in the lab of §4.2: with 1,000 static routes on `b`, the Type-5
+LSA of the first route had sequence number `0x800003e8` (1,000) and that
+of the last `0x80000001`.
+
+`Ospf::route_redist_add` runs for each batch of routes the RIB delivers
+and calls `as_external_redist_resync_all`. `as_external_redist_resync`
+then calls `as_external_lsa_originate_for_prefix` for every redistributed
+prefix. That function does not compare with the instance already in the
+database: it takes the next sequence number and floods. Nothing on this
+path applies `min-ls-interval`, although RFC 2328 §12.4 forbids a new
+instance of an LSA within `MinLSInterval`.
+
+In the lab each static route arrived as its own batch, so `N` routes
+cost `N·(N+1)/2` originations.
+
+**Measured with a neighbor.** With the adjacency Full and one route
+redistributed, 199 more routes were applied in one commit. `b` sent
+20,102 LS Update packets, one LSA each, where 199 would have done
+(`2 + 3 + … + 200 = 20,099`). The same step with 1,000 routes would send
+about 500,000 to every neighbor.
+
+`as_external_redist_resync_v3` has the same loop; OSPFv3 was not run.
+
+This is an LSA storm of the router's own making, and it is the case the
+RFC's Appendix A names as "(g) injecting a large number of external
+routes to OSPF".
 
 ---
 
@@ -384,13 +466,18 @@ Each step is the same change in OSPFv2 and OSPFv3.
 
 1. **Size packets to the MTU and enlarge the receive buffer** (§4.1,
    §4.2). Split Database Description, LS Request, LS Update and LS Ack at
-   the interface MTU; receive up to 65,535 bytes. This comes first
-   because pacing and retransmission limits mean little while one packet
-   carries a whole list.
-2. **Send OSPFv3 packets through the main queue**, as `Message::Recv`,
+   the interface MTU; receive up to 65,535 bytes. This comes first: it
+   is reproduced, it stops adjacencies from forming at a few hundred
+   LSAs, and pacing and retransmission limits mean little while one
+   packet carries a whole list.
+2. **Originate only what changed when redistributing** (§4.5): skip a
+   prefix whose LSA would be identical, and put the path under
+   `min-ls-interval`. It is independent of the other steps and small, so
+   it can also go first.
+3. **Send OSPFv3 packets through the main queue**, as `Message::Recv`,
    which is already generic over the version. This gives OSPFv3 the
    ordering of §3.1 and makes recommendation 2 unnecessary.
-3. **Take Hello sending out of the backlog** (§3.2). The smallest change
+4. **Take Hello sending out of the backlog** (§3.2). The smallest change
    is a second channel that carries only `HelloTimer`, polled first with
    a `biased` select: the Hello is still built by the main task, so
    sequence numbers stay in sending order, and `InactivityTimer` and
@@ -399,26 +486,31 @@ Each step is the same change in OSPFv2 and OSPFv3.
    would break that ordering unless Hellos, LS Acks and their timers all
    moved together, and would require the authentication sequence check
    to run before the split.
-4. **Limit adjacencies in progress** (recommendation 5): a configurable
+5. **Limit adjacencies in progress** (recommendation 5): a configurable
    count of neighbors in ExStart, Exchange and Loading, with the others
    waiting in 2-Way in arrival order. Defaults elsewhere range from 10
    (Arista) to 300 (IOS XE).
-5. **Repair retransmission and pace flooding** (§3.4, §3.5). Give each
+6. **Repair retransmission and pace flooding** (§3.4, §3.5). Give each
    LSA its own due time, send at most an MTU-sized packet per expiry, and
    batch flooded LSAs per neighbor with a fixed gap. The adaptive gap of
    recommendation 4 can follow, with FRR master as the reference.
-6. **Small items:** mark OSPFv3 packets Internetwork Control (§4.4);
+7. **Small items:** mark OSPFv3 packets Internetwork Control (§4.4);
    multicast LS Updates on broadcast networks (§4.3).
 
-Not proposed: recommendation 3 (nobody implements it, and step 5 removes
-most of what it is meant to cure) and recommendation 2 (step 2 covers
+Not proposed: recommendation 3 (nobody implements it, and step 6 removes
+most of what it is meant to cure) and recommendation 2 (step 3 covers
 it).
 
 ---
 
 ## 7. Open points
 
-- **Reproduce §4.2** before starting; it decides how urgent step 1 is.
+- **Keep the reproductions as tests.** The lab of §4.2 and §4.5 was a
+  throwaway. Two BDD features would hold the fixes: one that
+  synchronizes 1,000 redistributed routes, one that counts the LS
+  Updates sent when routes are added.
+- **Run the same lab for OSPFv3**, where both findings are read, not
+  reproduced.
 - **Measure the backlog.** §3.1 and §3.2 state the condition for a false
   neighbor-down, not how easily it is met. A storm test of 10,000 to
   100,000 LSAs with short Hello timers would show it.
