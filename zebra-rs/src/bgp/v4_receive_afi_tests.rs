@@ -310,3 +310,39 @@ async fn the_drop_is_logged_once_per_session() {
     ingest(&mut bgp, id, mp_reach()).await;
     assert!(logged(&bgp), "and the session stays marked");
 }
+
+/// The mark is per session: `route_clean()` clears it, so the next
+/// session logs its first drop at info again.
+#[tokio::test]
+async fn the_next_session_logs_its_first_drop_again() {
+    let mut bgp = bgp_with(1);
+    let id = add_peer(&mut bgp, EVPN_ONLY);
+    ingest(&mut bgp, id, plain()).await;
+    assert!(bgp.peers.get_by_idx(id).unwrap().v4_not_enabled_logged);
+
+    let mut top = BgpTop {
+        router_id: &bgp.router_id,
+        srv6_ipv6_export: None,
+        local_rib: &mut bgp.local_rib,
+        shard: &mut bgp.shard,
+        tx: &bgp.tx,
+        rib_client: &bgp.ctx.rib,
+        attr_store: &mut bgp.attr_store,
+        update_groups: &mut bgp.update_groups,
+        interface_addrs: &bgp.interface_addrs,
+        vrf_export: None,
+        color_policy: None,
+        flex_algo_routes: None,
+        flex_algo_srv6_routes: None,
+        vrf_import: None,
+        nexthop_cache: None,
+        vrf_transport_v4: None,
+        vrf_transport_v6: None,
+        as_sets_withdraw: bgp.as_sets_withdraw,
+    };
+    crate::bgp::route::route_clean(id, &mut top, &mut bgp.peers, None);
+    assert!(
+        !bgp.peers.get_by_idx(id).unwrap().v4_not_enabled_logged,
+        "the session that ended takes its mark with it"
+    );
+}
