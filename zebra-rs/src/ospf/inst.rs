@@ -2988,6 +2988,20 @@ fn redist_rtype_ident(rtype: crate::rib::RibType) -> usize {
     }
 }
 
+/// The prefixes a redistribution pass looks at: all of them (`all`), or
+/// those of `only` that are there (`has`) when the pass is for the
+/// prefixes of one batch of routes.
+fn redist_scope<P: Copy + Ord>(
+    only: Option<&[P]>,
+    all: impl Iterator<Item = P>,
+    has: impl Fn(&P) -> bool,
+) -> BTreeSet<P> {
+    match only {
+        None => all.collect(),
+        Some(prefixes) => prefixes.iter().copied().filter(has).collect(),
+    }
+}
+
 /// Evaluate a policy-list (route-map) against one redistributed
 /// prefix. Returns the final metric (`base_metric` unless a matching
 /// entry `set med`/metric) or `None` when the route is denied.
@@ -5131,17 +5145,29 @@ impl Ospf<Ospfv2> {
     /// carries the VPNv4 routes BGP imported into the VRF (the L3VPN
     /// PE-CE down direction).
     pub fn as_external_redist_resync(&mut self, rtype: crate::rib::RibType) {
+        self.as_external_redist_sync(rtype, None);
+    }
+
+    /// [`Self::as_external_redist_resync`], for the prefixes in `only`
+    /// when given.
+    ///
+    /// A route the RIB adds or withdraws concerns its own prefix, and the
+    /// route handlers pass just that: the cost of a route is then its
+    /// own, not a pass over every redistributed prefix. The pass over all
+    /// of them (`None`) is for a change of configuration or policy, and
+    /// refreshes the Router-LSA's E-bit with it. FRR handles a
+    /// redistributed route the same way (`ospf_zebra_read_route`).
+    fn as_external_redist_sync(&mut self, rtype: crate::rib::RibType, only: Option<&[Ipv4Net]>) {
         // RFC 3623 §2: a restarting router changes none of its LSAs; its
         // exit brings these in line (`gr_restart_exit`).
         if self.in_restart() {
             return;
         }
         let entry = self.redist.get(&rtype).copied();
-        let prev_originated = self
-            .redist_originated
-            .get(&rtype)
-            .cloned()
-            .unwrap_or_default();
+        let originated = self.redist_originated.get(&rtype);
+        let prev_originated = redist_scope(only, originated.into_iter().flatten().copied(), |p| {
+            originated.is_some_and(|set| set.contains(p))
+        });
 
         // Desired prefix -> advertised metric. A bound route-map
         // filters (deny drops the prefix from the set, so a stale
@@ -5150,18 +5176,25 @@ impl Ospf<Ospfv2> {
         // parity).
         let route_map = self.redist_route_map.get(&rtype);
         let desired: BTreeMap<Ipv4Net, u32> = if let Some(e) = entry {
-            self.redist_v4
-                .iter()
-                .filter(|((rt, _), _)| *rt == rtype)
-                .filter_map(|((_, prefix), _)| {
+            let cached = redist_scope(
+                only,
+                self.redist_v4
+                    .range((rtype, Ipv4Net::default())..)
+                    .take_while(|((rt, _), _)| *rt == rtype)
+                    .map(|((_, prefix), _)| *prefix),
+                |p| self.redist_v4.contains_key(&(rtype, *p)),
+            );
+            cached
+                .into_iter()
+                .filter_map(|prefix| {
                     let metric = match route_map {
                         None => e.metric,
                         Some(name) => {
                             let list = self.policy_lists.get(name)?;
-                            redist_policy_eval(list, (*prefix).into(), e.metric)?
+                            redist_policy_eval(list, prefix.into(), e.metric)?
                         }
                     };
-                    Some((*prefix, metric))
+                    Some((prefix, metric))
                 })
                 .collect()
         } else {
@@ -5201,14 +5234,23 @@ impl Ospf<Ospfv2> {
             self.redist_originated.remove(&rtype);
         }
 
-        self.router_lsa_originate();
+        // The E-bit follows the configuration, which a route does not
+        // change.
+        if only.is_none() {
+            self.router_lsa_originate();
+        }
     }
 
     /// Run [`Self::as_external_redist_resync`] for every source that is
     /// either configured or still has originated state to clean up.
-    /// Called from the RIB route-churn handlers, where any subscribed
-    /// source may have changed.
     pub fn as_external_redist_resync_all(&mut self) {
+        self.as_external_redist_sync_all(None);
+    }
+
+    /// [`Self::as_external_redist_resync_all`], for the prefixes in `only`
+    /// when given: every source is asked about them, in the same order,
+    /// since any of them may redistribute the same prefix.
+    fn as_external_redist_sync_all(&mut self, only: Option<&[Ipv4Net]>) {
         let rtypes: BTreeSet<crate::rib::RibType> = self
             .redist
             .keys()
@@ -5216,7 +5258,7 @@ impl Ospf<Ospfv2> {
             .chain(self.redist_originated.keys().copied())
             .collect();
         for rtype in rtypes {
-            self.as_external_redist_resync(rtype);
+            self.as_external_redist_sync(rtype, only);
         }
     }
 
@@ -5288,8 +5330,8 @@ impl Ospf<Ospfv2> {
             && let Some(_e) = entry
         {
             self.redist_v4
-                .iter()
-                .filter(|((rtype, _prefix), _entry)| *rtype == RibType::Connected)
+                .range((RibType::Connected, Ipv4Net::default())..)
+                .take_while(|((rtype, _prefix), _entry)| *rtype == RibType::Connected)
                 .map(|((_, prefix), _)| *prefix)
                 .collect()
         } else {
@@ -5381,6 +5423,14 @@ impl Ospf<Ospfv2> {
     /// otherwise. Called from config changes and the RIB route-churn
     /// handlers.
     pub fn default_originate_resync(&mut self) {
+        self.default_originate_sync();
+        self.router_lsa_originate();
+    }
+
+    /// [`Self::default_originate_resync`] without the Router-LSA: for a
+    /// default route the RIB added or withdrew, which does not change the
+    /// E-bit.
+    fn default_originate_sync(&mut self) {
         // RFC 3623 §2: a restarting router changes none of its LSAs; its
         // exit brings these in line (`gr_restart_exit`).
         if self.in_restart() {
@@ -5410,7 +5460,6 @@ impl Ospf<Ospfv2> {
             self.as_external_lsa_flush_for_prefix(prefix);
             self.default_originated = false;
         }
-        self.router_lsa_originate();
     }
 
     /// True when this router should translate Type-7 → Type-5 for
@@ -5702,56 +5751,71 @@ impl Ospf<Ospfv2> {
     /// every NSSA area to resync. Per-area filtering happens inside
     /// `nssa_redist_connected_resync`.
     fn route_redist_add(&mut self, rtype: crate::rib::RibType, batch: crate::rib::RouteBatch) {
+        let mut prefixes = Vec::new();
         if let crate::rib::RouteBatch::V4(entries) = batch {
             for e in entries {
+                prefixes.push(e.prefix);
                 self.redist_v4.insert((rtype, e.prefix), e);
             }
         }
         // v6 batches arrive only for v3 subscriptions, which this
         // v2 instance doesn't issue today.
-
-        let area_ids: Vec<Ipv4Addr> = self.areas.iter().map(|(&id, _)| id).collect();
-        for area_id in area_ids {
-            self.nssa_redist_connected_resync(area_id);
-        }
-        self.as_external_redist_resync_all();
-        self.default_originate_resync();
+        self.route_redist_changed(&prefixes);
     }
 
     /// `RibRx::RouteDel` handler. Mirror of `route_redist_add`.
     fn route_redist_del(&mut self, rtype: crate::rib::RibType, batch: crate::rib::RouteBatch) {
+        let mut prefixes = Vec::new();
         if let crate::rib::RouteBatch::V4(entries) = batch {
             for e in entries {
+                prefixes.push(e.prefix);
                 self.redist_v4.remove(&(rtype, e.prefix));
             }
         }
+        self.route_redist_changed(&prefixes);
+    }
 
+    /// Bring this router's LSAs in line with the routes of `prefixes`,
+    /// which a batch from the RIB has just added to the cache or taken
+    /// out of it. Only those prefixes are looked at: the RIB reports a
+    /// route by itself, and each used to cost a pass over every
+    /// redistributed prefix, a Router-LSA with it.
+    fn route_redist_changed(&mut self, prefixes: &[Ipv4Net]) {
+        // The Type-7s of an NSSA are few (connected routes), and carry
+        // the area's forwarding address and this router's ABR status
+        // besides the route: all of them are gone over, as before.
         let area_ids: Vec<Ipv4Addr> = self.areas.iter().map(|(&id, _)| id).collect();
         for area_id in area_ids {
             self.nssa_redist_connected_resync(area_id);
         }
-        self.as_external_redist_resync_all();
-        self.default_originate_resync();
+        self.as_external_redist_sync_all(Some(prefixes));
+        if prefixes.iter().any(|p| p.prefix_len() == 0) {
+            self.default_originate_sync();
+        }
     }
 
     /// `RibRx::TableRouteAdd` handler (`redistribute table <id>`).
     fn table_route_add(&mut self, table_id: u32, batch: crate::rib::RouteBatch) {
+        let mut prefixes = Vec::new();
         if let crate::rib::RouteBatch::V4(entries) = batch {
             for e in entries {
+                prefixes.push(e.prefix);
                 self.redist_table_v4.insert((table_id, e.prefix), e);
             }
         }
-        self.as_external_table_resync(table_id);
+        self.as_external_table_sync(table_id, Some(&prefixes));
     }
 
     /// `RibRx::TableRouteDel` handler — mirror of `table_route_add`.
     fn table_route_del(&mut self, table_id: u32, batch: crate::rib::RouteBatch) {
+        let mut prefixes = Vec::new();
         if let crate::rib::RouteBatch::V4(entries) = batch {
             for e in entries {
+                prefixes.push(e.prefix);
                 self.redist_table_v4.remove(&(table_id, e.prefix));
             }
         }
-        self.as_external_table_resync(table_id);
+        self.as_external_table_sync(table_id, Some(&prefixes));
     }
 
     /// Reconcile the self-originated Type-5 set for one
@@ -5760,27 +5824,40 @@ impl Ospf<Ospfv2> {
     /// (deny drops the prefix so the stale LSA flushes; `set med`
     /// overrides the metric; unresolved map = deny-all).
     pub fn as_external_table_resync(&mut self, table_id: u32) {
+        self.as_external_table_sync(table_id, None);
+    }
+
+    /// [`Self::as_external_table_resync`], for the prefixes in `only` when
+    /// given: those of a batch of the table's routes, as
+    /// [`Self::as_external_redist_sync`].
+    fn as_external_table_sync(&mut self, table_id: u32, only: Option<&[Ipv4Net]>) {
         let entry = self.redist_table.get(&table_id).copied();
-        let prev_originated = self
-            .redist_table_originated
-            .get(&table_id)
-            .cloned()
-            .unwrap_or_default();
+        let originated = self.redist_table_originated.get(&table_id);
+        let prev_originated = redist_scope(only, originated.into_iter().flatten().copied(), |p| {
+            originated.is_some_and(|set| set.contains(p))
+        });
 
         let route_map = self.redist_table_route_map.get(&table_id);
         let desired: BTreeMap<Ipv4Net, u32> = if let Some(e) = entry {
-            self.redist_table_v4
-                .iter()
-                .filter(|((t, _), _)| *t == table_id)
-                .filter_map(|((_, prefix), _)| {
+            let cached = redist_scope(
+                only,
+                self.redist_table_v4
+                    .range((table_id, Ipv4Net::default())..)
+                    .take_while(|((t, _), _)| *t == table_id)
+                    .map(|((_, prefix), _)| *prefix),
+                |p| self.redist_table_v4.contains_key(&(table_id, *p)),
+            );
+            cached
+                .into_iter()
+                .filter_map(|prefix| {
                     let metric = match route_map {
                         None => e.metric,
                         Some(name) => {
                             let list = self.policy_lists.get(name)?;
-                            redist_policy_eval(list, (*prefix).into(), e.metric)?
+                            redist_policy_eval(list, prefix.into(), e.metric)?
                         }
                     };
-                    Some((*prefix, metric))
+                    Some((prefix, metric))
                 })
                 .collect()
         } else {
@@ -5820,7 +5897,9 @@ impl Ospf<Ospfv2> {
             self.redist_table_originated.remove(&table_id);
         }
 
-        self.router_lsa_originate();
+        if only.is_none() {
+            self.router_lsa_originate();
+        }
     }
 
     /// Run [`Self::as_external_table_resync`] for every table that is
@@ -6405,11 +6484,13 @@ impl Ospf<Ospfv2> {
                         ls_id,
                         received_seq
                     );
-                    // Only this LSA is originated anew: the copy in the
-                    // database is the neighbour's now, and the others are
-                    // still ours and unchanged (`keeps_own`).
-                    self.as_external_redist_resync_all();
-                    self.default_originate_resync();
+                    // Only this LSA is looked at, and originated anew:
+                    // the copy in the database is the neighbour's now
+                    // (`keeps_own`).
+                    self.as_external_redist_sync_all(Some(network.as_slice()));
+                    if network.is_some_and(|p| p.prefix_len() == 0) {
+                        self.default_originate_sync();
+                    }
                 } else {
                     let owning_area = self
                         .areas
@@ -9304,32 +9385,41 @@ impl Ospf<Ospfv3> {
     /// Type-7 redistribution. v4 batches never arrive for a v3
     /// subscription.
     fn route_redist_add(&mut self, rtype: crate::rib::RibType, batch: crate::rib::RouteBatch) {
+        let mut prefixes = Vec::new();
         if let crate::rib::RouteBatch::V6(entries) = batch {
             for e in entries {
+                prefixes.push(e.prefix);
                 self.redist_v6.insert((rtype, e.prefix), e);
             }
         }
-        let area_ids: Vec<Ipv4Addr> = self.areas.iter().map(|(&id, _)| id).collect();
-        for area_id in area_ids {
-            self.nssa_redist_connected_resync_v3(area_id);
-        }
-        self.as_external_redist_resync_all_v3();
-        self.default_originate_resync_v3();
+        self.route_redist_changed(&prefixes);
     }
 
     /// `RibRx::RouteDel` handler (v3). Mirror of `route_redist_add`.
     fn route_redist_del(&mut self, rtype: crate::rib::RibType, batch: crate::rib::RouteBatch) {
+        let mut prefixes = Vec::new();
         if let crate::rib::RouteBatch::V6(entries) = batch {
             for e in entries {
+                prefixes.push(e.prefix);
                 self.redist_v6.remove(&(rtype, e.prefix));
             }
         }
+        self.route_redist_changed(&prefixes);
+    }
+
+    /// Bring this router's LSAs in line with the routes of `prefixes`,
+    /// which a batch from the RIB has just added to the cache or taken
+    /// out of it: only those prefixes are looked at, as in OSPFv2.
+    fn route_redist_changed(&mut self, prefixes: &[ipnet::Ipv6Net]) {
+        // An NSSA's Type-7s are all gone over, as in OSPFv2.
         let area_ids: Vec<Ipv4Addr> = self.areas.iter().map(|(&id, _)| id).collect();
         for area_id in area_ids {
             self.nssa_redist_connected_resync_v3(area_id);
         }
-        self.as_external_redist_resync_all_v3();
-        self.default_originate_resync_v3();
+        self.as_external_redist_sync_all_v3(Some(prefixes));
+        if prefixes.iter().any(|p| p.prefix_len() == 0) {
+            self.default_originate_sync_v3();
+        }
     }
 
     /// Stash an IPv6 address learned from netlink on the matching
@@ -10399,34 +10489,51 @@ impl Ospf<Ospfv3> {
     /// injecting them into the CE-facing OSPFv3 is the L3VPN PE-CE down
     /// direction.
     pub fn as_external_redist_resync_v3(&mut self, rtype: crate::rib::RibType) {
+        self.as_external_redist_sync_v3(rtype, None);
+    }
+
+    /// [`Self::as_external_redist_resync_v3`], for the prefixes in `only`
+    /// when given: those of a batch of routes from the RIB, as OSPFv2's
+    /// `as_external_redist_sync`.
+    fn as_external_redist_sync_v3(
+        &mut self,
+        rtype: crate::rib::RibType,
+        only: Option<&[ipnet::Ipv6Net]>,
+    ) {
         // RFC 3623 §2: a restarting router changes none of its LSAs; its
         // exit brings these in line (`gr_restart_exit`).
         if self.in_restart() {
             return;
         }
         let entry = self.redist.get(&rtype).copied();
-        let prev_originated = self
-            .redist_originated_v6
-            .get(&rtype)
-            .cloned()
-            .unwrap_or_default();
+        let originated = self.redist_originated_v6.get(&rtype);
+        let prev_originated = redist_scope(only, originated.into_iter().flatten().copied(), |p| {
+            originated.is_some_and(|set| set.contains(p))
+        });
 
         // Desired prefix -> advertised metric, filtered/modified by a
         // bound route-map exactly like the v2 sibling.
         let route_map = self.redist_route_map.get(&rtype);
         let desired: BTreeMap<ipnet::Ipv6Net, u32> = if let Some(e) = entry {
-            self.redist_v6
-                .iter()
-                .filter(|((rt, _), _)| *rt == rtype)
-                .filter_map(|((_, prefix), _)| {
+            let cached = redist_scope(
+                only,
+                self.redist_v6
+                    .range((rtype, ipnet::Ipv6Net::default())..)
+                    .take_while(|((rt, _), _)| *rt == rtype)
+                    .map(|((_, prefix), _)| *prefix),
+                |p| self.redist_v6.contains_key(&(rtype, *p)),
+            );
+            cached
+                .into_iter()
+                .filter_map(|prefix| {
                     let metric = match route_map {
                         None => e.metric,
                         Some(name) => {
                             let list = self.policy_lists.get(name)?;
-                            redist_policy_eval(list, (*prefix).into(), e.metric)?
+                            redist_policy_eval(list, prefix.into(), e.metric)?
                         }
                     };
-                    Some((*prefix, metric))
+                    Some((prefix, metric))
                 })
                 .collect()
         } else {
@@ -10467,14 +10574,22 @@ impl Ospf<Ospfv3> {
         }
 
         // A v3 router that redistributes is an ASBR; refresh the
-        // Router-LSA so the E-bit reflects it.
-        self.router_lsa_originate();
+        // Router-LSA so the E-bit reflects it. That follows the
+        // configuration, which a route does not change.
+        if only.is_none() {
+            self.router_lsa_originate();
+        }
     }
 
     /// Run [`Self::as_external_redist_resync_v3`] for every source that
     /// is either configured or still has originated state to clean up.
-    /// Called from the RIB route-churn handlers.
     pub fn as_external_redist_resync_all_v3(&mut self) {
+        self.as_external_redist_sync_all_v3(None);
+    }
+
+    /// [`Self::as_external_redist_resync_all_v3`], for the prefixes in
+    /// `only` when given, as OSPFv2's `as_external_redist_sync_all`.
+    fn as_external_redist_sync_all_v3(&mut self, only: Option<&[ipnet::Ipv6Net]>) {
         let rtypes: BTreeSet<crate::rib::RibType> = self
             .redist
             .keys()
@@ -10482,7 +10597,7 @@ impl Ospf<Ospfv3> {
             .chain(self.redist_originated_v6.keys().copied())
             .collect();
         for rtype in rtypes {
-            self.as_external_redist_resync_v3(rtype);
+            self.as_external_redist_sync_v3(rtype, only);
         }
     }
 
@@ -10513,8 +10628,8 @@ impl Ospf<Ospfv3> {
 
         let desired: BTreeSet<ipnet::Ipv6Net> = if area_type.is_nssa() && entry.is_some() {
             self.redist_v6
-                .iter()
-                .filter(|((rtype, _prefix), _entry)| *rtype == RibType::Connected)
+                .range((RibType::Connected, ipnet::Ipv6Net::default())..)
+                .take_while(|((rtype, _prefix), _entry)| *rtype == RibType::Connected)
                 .map(|((_, prefix), _)| *prefix)
                 .collect()
         } else {
@@ -10645,6 +10760,13 @@ impl Ospf<Ospfv3> {
 
     /// v3 sibling of `default_originate_resync` (::/0).
     pub fn default_originate_resync_v3(&mut self) {
+        self.default_originate_sync_v3();
+        self.router_lsa_originate();
+    }
+
+    /// [`Self::default_originate_resync_v3`] without the Router-LSA, as
+    /// OSPFv2's `default_originate_sync`.
+    fn default_originate_sync_v3(&mut self) {
         // RFC 3623 §2: a restarting router changes none of its LSAs; its
         // exit brings these in line (`gr_restart_exit`).
         if self.in_restart() {
@@ -10674,7 +10796,6 @@ impl Ospf<Ospfv3> {
             self.as_external_lsa_flush_for_prefix_v3(prefix);
             self.default_originated_v6 = false;
         }
-        self.router_lsa_originate();
     }
 
     /// RFC 2328 §12.4.3 for OSPFv3 (RFC 5340 §4.4.3.4) — an Area
@@ -11770,19 +11891,25 @@ impl Ospf<Ospfv3> {
                 // Redistributed (the default route among them),
                 // translated, or none of ours: flushed, as OSPFv2's. It
                 // used to stay, a route advertised that was gone.
-                let redistributed = self
+                let owned: Vec<ipnet::Ipv6Net> = self
                     .redist_originated_v6
                     .values()
-                    .any(|set| set.iter().any(|p| nssa_v3_ls_id(p) == ls_id))
-                    || (ls_id == 0 && self.default_originated_v6);
+                    .flat_map(|set| set.iter().filter(|p| nssa_v3_ls_id(p) == ls_id))
+                    .copied()
+                    .collect();
+                let redistributed = !owned.is_empty() || (ls_id == 0 && self.default_originated_v6);
                 let owning_area = self
                     .areas
                     .iter()
                     .find(|(_, a)| a.nssa_translated.contains(&Ipv4Addr::from(ls_id)))
                     .map(|(&id, _)| id);
                 if redistributed {
-                    self.as_external_redist_resync_all_v3();
-                    self.default_originate_resync_v3();
+                    // Only this LSA is looked at, and originated anew
+                    // (`keeps_own`).
+                    self.as_external_redist_sync_all_v3(Some(&owned));
+                    if ls_id == 0 {
+                        self.default_originate_sync_v3();
+                    }
                 } else if let Some(a) = owning_area {
                     self.nssa_translate_resync(a);
                 } else if let Some(lsa) = self.lsdb_as.flush_lsa_by_raw_key(key, &self.tx, None) {
@@ -28356,6 +28483,158 @@ mod redistribution_tests {
         assert_eq!(seqs6(&top, 2), [Some(FIRST + 1); 2], "v3: and only then");
     }
 
+    /// A route from the RIB concerns its own prefix. Here the metric is
+    /// configured anew and nothing has gone over the LSAs since: the next
+    /// route gets an LSA with the new metric, and the LSAs of the other
+    /// routes wait for the pass a change of configuration runs. Every
+    /// route used to run that pass, over all of them.
+    #[tokio::test(start_paused = true)]
+    async fn a_route_is_handled_by_itself() {
+        // OSPFv2.
+        let mut top = v2_redistributing(3);
+        top.redist.get_mut(&RibType::Static).unwrap().metric = 30;
+        top.route_redist_add(RibType::Static, route4(v4(4)));
+        assert_eq!(seqs4(&top, 4), [Some(FIRST); 4], "v2: only route 4");
+        top.route_redist_del(RibType::Static, route4(v4(1)));
+        assert_eq!(
+            seqs4(&top, 4),
+            [None, Some(FIRST), Some(FIRST), Some(FIRST)],
+            "v2: only route 1"
+        );
+        top.as_external_redist_resync(RibType::Static);
+        assert_eq!(
+            seqs4(&top, 4),
+            [None, Some(FIRST + 1), Some(FIRST + 1), Some(FIRST)],
+            "v2: the pass over all of them"
+        );
+
+        // OSPFv3.
+        let mut top = v3_redistributing(3);
+        top.redist.get_mut(&RibType::Static).unwrap().metric = 30;
+        top.route_redist_add(RibType::Static, route6(v6(4)));
+        assert_eq!(seqs6(&top, 4), [Some(FIRST); 4], "v3: only route 4");
+        top.route_redist_del(RibType::Static, route6(v6(1)));
+        assert_eq!(
+            seqs6(&top, 4),
+            [None, Some(FIRST), Some(FIRST), Some(FIRST)],
+            "v3: only route 1"
+        );
+        top.as_external_redist_resync_v3(RibType::Static);
+        assert_eq!(
+            seqs6(&top, 4),
+            [None, Some(FIRST + 1), Some(FIRST + 1), Some(FIRST)],
+            "v3: the pass over all of them"
+        );
+    }
+
+    /// The routes of `redistribute table` are handled the same way.
+    #[tokio::test(start_paused = true)]
+    async fn a_table_route_is_handled_by_itself() {
+        const TABLE: u32 = 100;
+        let mut top = v2_top();
+        top.redist_table.insert(TABLE, RedistEntry::default());
+        for n in 1..=3 {
+            top.table_route_add(TABLE, route4(v4(n)));
+        }
+        assert_eq!(seqs4(&top, 3), [Some(FIRST); 3]);
+
+        top.redist_table.get_mut(&TABLE).unwrap().metric = 30;
+        top.table_route_add(TABLE, route4(v4(4)));
+        top.table_route_del(TABLE, route4(v4(1)));
+        assert_eq!(
+            seqs4(&top, 4),
+            [None, Some(FIRST), Some(FIRST), Some(FIRST)],
+            "only routes 4 and 1"
+        );
+        top.as_external_table_resync(TABLE);
+        assert_eq!(
+            seqs4(&top, 4),
+            [None, Some(FIRST + 1), Some(FIRST + 1), Some(FIRST)],
+            "the pass over all of them"
+        );
+    }
+
+    /// A route does not change the Router-LSA, whose E-bit follows the
+    /// configuration: it is not originated for one. Every route used to
+    /// originate it, MinLSInterval apart. A change of configuration
+    /// still does.
+    #[tokio::test(start_paused = true)]
+    async fn a_route_leaves_the_router_lsa_alone() {
+        let past_min_ls_interval = || tokio::time::advance(Duration::from_secs(6));
+
+        // OSPFv2.
+        let mut top = v2_redistributing(1);
+        let key = v2_lsa_key(OspfLsType::Router, ME, ME);
+        let router = |top: &Ospf| seq(&top.areas.get(AREA0).unwrap().lsdb, key);
+        past_min_ls_interval().await;
+        top.router_lsa_originate();
+        let before = router(&top);
+        assert!(before.is_some(), "v2: a Router-LSA");
+        past_min_ls_interval().await;
+        top.route_redist_add(RibType::Static, route4(v4(2)));
+        top.route_redist_del(RibType::Static, route4(v4(1)));
+        assert_eq!(router(&top), before, "v2: a route");
+        top.as_external_redist_resync(RibType::Static);
+        assert_eq!(router(&top), before.map(|seq| seq + 1), "v2: configuration");
+
+        // OSPFv3.
+        let mut top = v3_redistributing(1);
+        let key = (ospf_packet::OSPFV3_ROUTER_LSA_TYPE, 0, ME);
+        let router = |top: &Ospf<Ospfv3>| seq(&top.areas.get(AREA0).unwrap().lsdb, key);
+        past_min_ls_interval().await;
+        top.router_lsa_originate();
+        let before = router(&top);
+        assert!(before.is_some(), "v3: a Router-LSA");
+        past_min_ls_interval().await;
+        top.route_redist_add(RibType::Static, route6(v6(2)));
+        top.route_redist_del(RibType::Static, route6(v6(1)));
+        assert_eq!(router(&top), before, "v3: a route");
+        top.as_external_redist_resync_v3(RibType::Static);
+        assert_eq!(router(&top), before.map(|seq| seq + 1), "v3: configuration");
+    }
+
+    /// An LSA a neighbour sends back is looked at by itself as well: the
+    /// others are not gone over on its account.
+    #[tokio::test(start_paused = true)]
+    async fn a_returned_lsa_is_looked_at_by_itself() {
+        const LATER: u32 = 0x8000_0009;
+        fn learned_back<V: OspfVersion>(key: OspfLsaKey) -> Message<V> {
+            Message::Lsdb(LsdbEvent::SelfOriginatedReceived, Some(AREA0), key)
+        }
+
+        // OSPFv2.
+        let mut top = v2_redistributing(3);
+        top.redist.get_mut(&RibType::Static).unwrap().metric = 30;
+        let key = key4(v4(2));
+        let mut back = top.lsdb_as.tables[&key].data.clone();
+        back.h.ls_seq_number = LATER;
+        back.update();
+        let (tx, tracing) = (top.tx.clone(), top.tracing.clone());
+        top.lsdb_as.insert_received(back, &tx, None, &tracing);
+        top.process_msg(learned_back(key)).await;
+        assert_eq!(
+            seqs4(&top, 3),
+            [Some(FIRST), Some(LATER + 1), Some(FIRST)],
+            "v2"
+        );
+
+        // OSPFv3.
+        let mut top = v3_redistributing(3);
+        top.redist.get_mut(&RibType::Static).unwrap().metric = 30;
+        let key = key6(v6(2));
+        let mut back = top.lsdb_as.tables[&key].data.clone();
+        back.h.ls_seq_number = LATER;
+        back.update();
+        let (tx, tracing) = (top.tx.clone(), top.tracing.clone());
+        top.lsdb_as.install_lsa(back, &tx, None, &tracing);
+        top.process_msg(learned_back(key)).await;
+        assert_eq!(
+            seqs6(&top, 3),
+            [Some(FIRST), Some(LATER + 1), Some(FIRST)],
+            "v3"
+        );
+    }
+
     /// The other LSAs a route change runs through are left alone too: the
     /// Type-7 of a connected route in an NSSA, and the default route of
     /// `default-information originate`.
@@ -28372,9 +28651,11 @@ mod redistribution_tests {
         area.area_type.kind = AreaTypeKind::Nssa;
         area.redistribute.connected = Some(RedistEntry::default());
         top.default_originate = Some(always);
+        top.default_originate_resync();
         for n in 1..=3 {
             top.route_redist_add(RibType::Connected, route4(v4(n)));
         }
+        top.route_redist_add(RibType::Static, route4("0.0.0.0/0".parse().unwrap()));
         let type7 = v2_lsa_key(OspfLsType::NssaAsExternal, v4(1).network(), ME);
         let default = v2_lsa_key(OspfLsType::AsExternal, Ipv4Addr::UNSPECIFIED, ME);
         let nssa = &top.areas.get(AREA1).unwrap().lsdb;
@@ -28387,9 +28668,11 @@ mod redistribution_tests {
         area.area_type.kind = AreaTypeKind::Nssa;
         area.redistribute.connected = Some(RedistEntry::default());
         top.default_originate = Some(always);
+        top.default_originate_resync_v3();
         for n in 1..=3 {
             top.route_redist_add(RibType::Connected, route6(v6(n)));
         }
+        top.route_redist_add(RibType::Static, route6("::/0".parse().unwrap()));
         let type7 = (OSPFV3_NSSA_LSA_TYPE, nssa_v3_ls_id(&v6(1)), ME);
         let default = key6("::/0".parse().unwrap());
         let nssa = &top.areas.get(AREA1).unwrap().lsdb;

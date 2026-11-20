@@ -370,6 +370,29 @@ FRR draws the same lines (read at `9b9c7c4138`): `ospf6d` in
 the one it holds (`ospf_external_info_add`). Neither applies
 `min-ls-interval` to a single external LSA, and neither does this fix.
 
+**A route is handled by itself (2026-11-19).** After the fix above each
+route still ran a pass over every redistributed prefix, which only
+compared, and originated a Router-LSA, MinLSInterval apart. The route
+handlers now look at the prefixes of the batch alone
+(`route_redist_changed`), as FRR does in `ospf_zebra_read_route`:
+
+- **Type-5 LSAs** of `redistribute <source>` and `redistribute table`:
+  the batch's prefixes only. So is the LSA a neighbor sends back.
+- **The default route** of `default-information originate`: only when
+  the batch has a default route.
+- **The Router-LSA:** not for a route. Its E-bit follows the
+  configuration.
+- **Type-7 LSAs of an NSSA:** all of them, as before. They are few
+  (connected routes), and carry the area's forwarding address and this
+  router's ABR status besides the route.
+
+The pass over every prefix remains for a change of configuration or
+policy, a Router ID change and the exit from a graceful restart.
+
+Measured: the 199 routes now cost 199 LS Update packets in both
+versions, and an OSPFv3 router originates 5,000 static routes in 2 s
+where the 26.11.4 package took 24 s.
+
 ---
 
 ## 5. Other implementations
