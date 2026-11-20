@@ -529,6 +529,26 @@ impl<V: OspfVersion> Lsdb<V> {
         self.put(lsa_key, lsa, tx, area_id);
     }
 
+    /// Whether this router already holds `lsa` as its own, with the same
+    /// contents: an instance it originated, not at MaxAge, that
+    /// [`contents_changed`] finds no different. Originating `lsa` again
+    /// would only raise the sequence number and flood a copy that tells
+    /// no one anything.
+    ///
+    /// An instance learned back from a neighbour does not count, whatever
+    /// its contents: nothing refreshes it, so this router has to originate
+    /// it anew (RFC 2328 §13.4). FRR `ospf6d` draws the same line in
+    /// `ospf6_lsa_originate`.
+    pub fn originated_same(&self, lsa: &V::Lsa) -> bool {
+        let h = V::lsa_header(lsa);
+        let key: OspfLsaKey = (V::ls_type(h), V::ls_id(h), V::adv_router(h));
+        self.tables.get(&key).is_some_and(|own| {
+            own.originated
+                && own.current_age() < OSPF_MAX_AGE
+                && !contents_changed::<V>(&own.data, lsa)
+        })
+    }
+
     /// Install one of this router's own LSAs restored from a graceful-restart
     /// checkpoint, unless the database already holds an instance at least
     /// as recent (RFC 2328 §13.1): a neighbour may have sent a newer copy
