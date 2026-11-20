@@ -1,0 +1,12 @@
+module sonic-types {
+  yang-version 1.1;
+  namespace "http://github.com/sonic-net/sonic-types";
+  prefix stypes;
+
+  typedef admin_status {
+    type enumeration {
+      enum up;
+      enum down;
+    }
+  }
+}

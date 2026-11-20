@@ -6,70 +6,63 @@ pub enum Token {
     Comment(String),
     LeftBrace,
     RightBrace,
-    LeftBracket,
-    RightBracket,
     SemiColon,
 }
 
 pub fn tokenizer(input: String) -> Vec<Token> {
     let mut tokens = Vec::<Token>::new();
     let mut chars = input.chars().peekable();
+    // Whether a statement has begun and not ended: a word has been read
+    // since the last `;`, `{` or `}`. A `#` there is the start of a
+    // value (`description port #3`), which the writer put down as it
+    // is; only where a statement would begin is `#` a comment.
+    //
+    // A statement can begin with a value: the members of a leaf-list
+    // are written one to a statement, in a block. One that begins with
+    // a quote or a bracket is a word like any other. Those two used to
+    // be read as punctuation there (and then skipped, or dropped with
+    // the letters after them), which nothing ever wrote. One that
+    // begins with `#` cannot be told from a comment, so the writer does
+    // not begin a statement with it (`Config::write`).
+    let mut in_statement = false;
 
     while let Some(ch) = chars.next() {
         match ch {
             ch if ch.is_whitespace() => {
                 continue;
             }
-            'a'..='z' | 'A'..='Z' | '0'..='9' | ':' | '/' => {
-                // ':' as a leader covers IPv6 prefixes that start with the
-                // double-colon shorthand: `::/0`, `::1/128`, etc. Without
-                // it the tokenizer dropped the leading `:` characters and
-                // mis-tokenized `::/0` as `0`, so the file loader emitted
-                // `set ... route 0 nexthop ...`. libyang then rejected
-                // the line as not-a-valid-IPv6-prefix and the default
-                // route silently disappeared. CLI input arrives already
-                // split by the shell, so the bug only surfaced on
-                // startup-config / saved-config loads.
-                //
-                // '/' as a leader covers absolute filesystem paths used as
-                // leaf values (e.g. `source-path /etc/zebra-rs/lua/sgt.json`
-                // for `lua-map` / `lua-script`). '/' was already a valid
-                // continuation char, so without it as a leader the loader
-                // dropped the leading slash and emitted a relative path,
-                // which then failed to open at the wrong cwd.
-                let s: String = iter::once(ch)
-                    .chain(from_fn(|| {
-                        chars.by_ref().next_if(|c| {
-                            c.is_alphabetic()
-                                || c.is_ascii_digit()
-                                || c == &'_'
-                                || c == &'.'
-                                || c == &'-'
-                                || c == &'/'
-                                || c == &':'
-                        })
-                    }))
-                    .collect();
-                tokens.push(Token::String(s));
+            '{' | '}' | ';' => {
+                in_statement = false;
+                tokens.push(match ch {
+                    '{' => Token::LeftBrace,
+                    '}' => Token::RightBrace,
+                    _ => Token::SemiColon,
+                });
             }
-            '"' => {
-                let _s: String = chars
-                    .by_ref()
-                    .take_while(|c| c.is_alphabetic() || c.is_ascii_digit() || c == &'.')
-                    .collect();
-            }
-            '#' => {
+            '#' if !in_statement => {
                 let s: String = chars.by_ref().take_while(|c| c != &'\n').collect();
                 tokens.push(Token::Comment(s));
             }
-            '{' => {
-                tokens.push(Token::LeftBrace);
+            _ => {
+                // A word: everything up to whitespace or the `;`, `{` or
+                // `}` that ends a statement. The writer puts a name or a
+                // value down as it is, so whatever a value may hold is
+                // part of the word: the commas of `lanes 1,2,3,4`, the
+                // sign of `-10`, the `@` of an address, as well as the
+                // leading `::` of an IPv6 prefix and the leading `/` of a
+                // path. A word used to be letters, digits and `_.-/:`
+                // only, and any other character was dropped without a
+                // word: `1,2,3,4` loaded as four values.
+                let s: String = iter::once(ch)
+                    .chain(from_fn(|| {
+                        chars
+                            .by_ref()
+                            .next_if(|c| !c.is_whitespace() && !matches!(c, ';' | '{' | '}'))
+                    }))
+                    .collect();
+                tokens.push(Token::String(s));
+                in_statement = true;
             }
-            '}' => tokens.push(Token::RightBrace),
-            '[' => tokens.push(Token::LeftBracket),
-            ']' => tokens.push(Token::RightBracket),
-            ';' => tokens.push(Token::SemiColon),
-            _ => {}
         }
     }
     tokens
@@ -78,6 +71,59 @@ pub fn tokenizer(input: String) -> Vec<Token> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn words(input: &str) -> Vec<String> {
+        tokenizer(input.to_string())
+            .into_iter()
+            .filter_map(|t| match t {
+                Token::String(s) => Some(s),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A value is one word whatever characters it holds, up to the end
+    /// of its statement.
+    #[test]
+    fn test_tokenizer_keeps_a_value_whole() {
+        assert_eq!(words("lanes 1,2,3,4;"), ["lanes", "1,2,3,4"]);
+        assert_eq!(words("offset -10;"), ["offset", "-10"]);
+        assert_eq!(
+            words("contact noc@example.com;"),
+            ["contact", "noc@example.com"]
+        );
+        assert_eq!(words("pattern (a|b)*c+;"), ["pattern", "(a|b)*c+"]);
+        assert_eq!(words("route ::/0 {"), ["route", "::/0"]);
+        assert_eq!(words("a{b;}"), ["a", "b"]);
+        // A `#` inside a statement is part of a value. One where a
+        // statement would begin is a comment, to the end of its line.
+        assert_eq!(
+            words("description port #3 [spare] \"x\";\n# a comment; here\nmtu 9100;"),
+            [
+                "description",
+                "port",
+                "#3",
+                "[spare]",
+                "\"x\"",
+                "mtu",
+                "9100"
+            ]
+        );
+        // A statement that begins with a quote or a bracket is a value
+        // too: a member of a leaf-list, in its block.
+        assert_eq!(
+            words("member {\n  [0-9]+:100;\n  ]x;\n  \"quoted\";\n  plain;\n}"),
+            ["member", "[0-9]+:100", "]x", "\"quoted\"", "plain"]
+        );
+        assert_eq!(
+            tokenizer("x 1,2;".to_string()),
+            [
+                Token::String("x".into()),
+                Token::String("1,2".into()),
+                Token::SemiColon
+            ]
+        );
+    }
 
     #[test]
     fn test_tokenizer_accepts_uppercase_and_underscore() {

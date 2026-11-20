@@ -1,0 +1,17 @@
+module sonic-zdup {
+  yang-version 1.1;
+  namespace "http://github.com/sonic-net/sonic-zdup";
+  prefix dup;
+
+  // A second module that defines a keyword another already has.
+  container sonic-zdup {
+    container PORT {
+      list PORT_LIST {
+        key "name";
+        leaf name {
+          type string;
+        }
+      }
+    }
+  }
+}

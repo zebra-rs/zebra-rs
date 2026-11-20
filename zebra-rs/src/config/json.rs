@@ -155,12 +155,11 @@ pub fn spanned_to_list(
                 return;
             }
             let mut p = p.clone();
-            if !entry.key.is_empty() {
-                if let Some(me) = entries.iter().find(|e| e.key == entry.key[0]) {
-                    p.push(me.value.key_value());
-                    lines.push(format!("set {}", p.join(" ")));
-                } else {
-                    // A list entry without its key field can't be
+            // A list entry is addressed by all its keys, in the order
+            // the list names them, wherever they are in the object.
+            for key in entry.key.iter() {
+                let Some(me) = entries.iter().find(|e| e.key == *key) else {
+                    // A list entry without a key field can't be
                     // addressed at all — report it instead of silently
                     // dropping the whole object.
                     errors.push(DocError::new(
@@ -168,14 +167,18 @@ pub fn spanned_to_list(
                         format!(
                             "{}: list entry is missing its key `{}`",
                             display_path(&p, &entry.name),
-                            entry.key[0]
+                            key
                         ),
                     ));
                     return;
-                }
+                };
+                p.push(me.value.key_value());
+            }
+            if !entry.key.is_empty() {
+                lines.push(format!("set {}", p.join(" ")));
             }
             for me in entries.iter() {
-                if !entry.key.is_empty() && me.key == entry.key[0] {
+                if entry.key.contains(&me.key) {
                     continue;
                 }
                 match entry_dir(entry.clone(), &me.key) {

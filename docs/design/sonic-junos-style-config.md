@@ -149,17 +149,42 @@ models, not written by hand:
 | table container `PORT` with list `PORT_LIST` keyed `name` | `set sonic PORT Ethernet0 …` |
 | leaf `admin_status` | `set sonic PORT Ethernet0 admin_status up` |
 | list with two keys (`VLAN_MEMBER`: vlan, port) | `set sonic VLAN_MEMBER Vlan100 Ethernet0 …` |
+| a table with two lists (`INTERFACE_LIST`, `INTERFACE_IPPREFIX_LIST`) | one keyword for each: `set sonic INTERFACE Ethernet0`, `set sonic INTERFACE_IPPREFIX Ethernet0 10.0.0.0/31` |
 | leaf-list (`BGP_PEER_RANGE` `ip_range`) | one `set` line per member |
 | a single fixed-key entry (`DEVICE_METADATA` `localhost`) | `set sonic DEVICE_METADATA localhost hostname …` |
 
+**Built** (`zebra-rs/src/config/sonic.rs`, `--feature sonic`). The rule is one
+keyword under `sonic` for each list, named after the list without `_LIST`; a
+table whose rows have fixed keys stays as it is. Each keyword records the
+table and the list it stands for, which is what a row is in CONFIG_DB. Of the
+146 modules of the tree we build, 160 tables have one list, 14 have several,
+46 have fixed-key rows and one has both; the `sonic-events-*` modules are not
+configuration and are left out. No two keywords collide.
+
 Completion comes with the schema: `vty` builds it from the YANG zebra-rs has
-loaded, enumerations included. `?` help needs a small addition. zebra-rs takes
-its help text from an `ext:help` statement, which SONiC's models do not have;
-the generator has to derive it from each node's `description`.
+loaded, enumerations included. Help is each node's `description`, cut to its
+first sentence: zebra-rs takes help from an `ext:help` statement, which
+SONiC's models do not have. A string leaf with no `pattern` takes the rest of
+the line, since CONFIG_DB holds such values with spaces in them and this CLI
+has no quoting.
 
 This is not pretty — it is CONFIG_DB with a transaction around it — but it
 covers every modelled table on the first day, needs no per-feature code, and
 cannot disagree with SONiC about what is valid.
+
+What it took in zebra-rs and its schema library, none of it particular to
+SONiC:
+
+- libyang read none of the models. Twelve forms the grammar refused and three
+  faults of the tree it built are fixed in libyang 2.5 (its
+  `docs/sonic-yang-gaps.md`).
+- The configuration tree had no list with more than one key; 58 of SONiC's
+  lists have. An entry is now the node under one key node for each key.
+- A string with a `pattern` was the rest of the line, so a patterned key could
+  not be followed by a leaf. Patterns were also matched unanchored, which
+  refused `10.0.0.0/31` under the usual prefix pattern.
+- The block format dropped the characters of a value that are not letters,
+  digits or `_.-/:` when loading it: `lanes 1,2,3,4` came back as four values.
 
 ### 5.2 Later: a hierarchy people would choose
 
@@ -225,6 +250,36 @@ real state, and the operator is told the commit was partial. Hiding a partial
 write behind a successful `commit` would be the worst outcome of this design.
 
 ## 7. Keeping the mirror true
+
+**The import is built, as a whole copy.** A document `{"CONFIG_DB": {…}}`
+given to `vtyctl apply` replaces the `sonic` subtree with the translation of
+those tables (`zebra-rs/src/config/configdb.rs`): a row goes to the list of
+its table that has as many keys as its key has `|`-separated parts, or to the
+container of its fixed key. A map (`DSCP_TO_TC_MAP|AZURE` is `{"0": "1", …}`)
+is a row whose fields are the entries of the one list its model has inside it,
+the field's name being the entry's key: the eleven QoS and cable-length tables
+of the tree we build. An import is not a commit of the history, is not
+held to the models' mandatory leaves, and leaves out and logs what it cannot
+copy. A leaf-list is left out whole when one member of it cannot be held (a
+member is one word): the field is one value in CONFIG_DB, and copied in part
+it would be written back in part.
+
+An import is not made as a commit. The translated subtree replaces the
+`sonic` child of the running configuration directly, the subscribers of the
+running configuration are told the lines that changed, and what the candidate
+holds follows as an edit of the new running configuration: a session's
+uncommitted edits, or a startup configuration whose commit was refused and
+that waits to be completed. Made as a commit it was held to every check of
+one, and was refused whenever what is running would not be committed again
+(a startup configuration is let off checks a commit is not), so the mirror
+never filled. A document that was copied is known by its length and a hash
+and is not read again while the subtree is still what it came to, and a copy
+logs only the faults the copy before it did not. *Measured* on a SONiC VS: all 21 tables of its CONFIG_DB are modelled,
+306 rows became 1,282 lines, two values were left out (an empty string and one
+of several lines), and a `config vlan add` on the host showed in the running
+configuration at the next copy. What follows is the design for the rest: the
+process that reads CONFIG_DB is so far a script that polls, and nothing below
+about open candidates, coalescing or echo is built.
 
 CONFIG_DB changes that did not come from a commit — a `config` command, gNMI,
 a daemon — must reach zebra-rs, or `compare` and `rollback` lie.
@@ -397,8 +452,86 @@ Each phase is useful on its own and none commits us to the next.
 2. **Read-only mirror.** The `sonic` subtree generated from SONiC's YANG, the
    bridge importing CONFIG_DB. `show configuration sonic …` in `vty` with
    completion and help; no writes. Proves the schema generation and the import
-   path, and is safe.
-3. **Commit for a few tables**: `PORT`, `VLAN`, `VLAN_MEMBER`, `INTERFACE`,
+   path, and is safe. *The schema and the import are built (§5.1, §7), and
+   the subtree is read-only: a session's `set sonic …` is refused and pointed
+   at SONiC's `config` command, `save` leaves the subtree out, and `rollback`
+   keeps it as CONFIG_DB has it now. So does a document that is a whole
+   configuration given to `vtyctl apply` (block format, JSON, YAML): it
+   replaces what was configured here and leaves `sonic` as it is running. Still to do, outside zebra-rs: the
+   process that follows CONFIG_DB by its keyspace notifications, and the
+   models in the `bgp` container's image.*
+3. **Commit for a few tables**: *the first half is built.* `sonic` is edited
+   in the candidate, and `compare config-db` gives the pending edits as the
+   JSON Patch that SONiC's `config apply-patch` takes; a `commit` of them is
+   still refused and says so. *Measured* on a SONiC VS: a VLAN, an MTU, a
+   description and an interface address typed in `vty`, applied on the host
+   with `config apply-patch`, were in CONFIG_DB and the kernel, and the copy
+   that followed left nothing pending.
+
+   *`commit` now does that itself.* A commit that changes `sonic` hands the
+   patch to a writer on the device and is made when the writer answers
+   (`proto/configdb.proto`, `zebra-rs/src/config/writer.rs`). The writer is a
+   script on the host, where SONiC's updater is: it takes each order with
+   `vtyctl config-db wait`, runs `config apply-patch`, and answers with
+   `vtyctl config-db done`. A refusal by the updater is the commit's refusal,
+   word for word; with no writer connected the commit is refused at once.
+   The commit is parked while the writer works and the config task goes on:
+   `config apply-patch` begins by asking zebra-rs for its running config
+   (`show runningconfiguration all` runs `vtysh -c 'show running-config'`),
+   and held, the two waited for each other. *Measured* on a SONiC VS: a
+   commit of a VLAN, an MTU, a description and an address took 6.1 s and
+   was in CONFIG_DB and the kernel; a member of a VLAN that does not exist
+   was refused with the updater's leafref error; the changes were undone
+   by a second commit.
+
+   What such a commit is held to:
+
+   - **The writer is whoever may commit.** `Wait` and `Done` need the admin
+     role of the vty socket, as `vtyctl apply` does: the writer runs as root.
+     A commit is made on the writer's word, so a caller without the role
+     neither takes an order nor answers for one. A writer is there while it
+     waits, and for 15 seconds after its last wait or answer: an order may
+     take longer to apply than that.
+   - **No patch before the first copy.** Until CONFIG_DB has been copied once
+     the running subtree is empty because nothing is known, and a row typed
+     then would be added as the first of its table, replacing the table.
+     `compare config-db` and `commit` say so and do nothing.
+   - **A patch knows what the copy left out.** A table is added with its first
+     row and removed with its last, and which those are is CONFIG_DB's to say.
+     zebra-rs keeps the keys of the rows the last copy had and the subtree
+     does not (a key no list takes, a row the model refuses, a table with no
+     model). A table that has such a row is neither added nor removed, and a
+     row that is there is not added: its fields are.
+   - **Nothing is written that the patch does not say.** What is typed under
+     `sonic` and is no row and no field of one (an entry of a map with no
+     value; in a model that has them, a leaf of `type empty` or a container
+     in a row) has no form in CONFIG_DB. The commit is refused and names the
+     lines.
+   - **Refused before the write, or said after it.** Every check of a commit
+     runs before the writer is asked, on the candidate as it will be
+     committed. A commit can still be refused when the writer has answered,
+     if another writer committed meanwhile what it cannot be beside; the
+     refusal then says that CONFIG_DB has the change.
+   - **The candidate is held while the writer works.** The commit is made of
+     the candidate when the writer has answered, with `sonic` open to it. An
+     edit typed meanwhile would be committed here without having been
+     written, so `set`, `delete`, `discard`, `rollback`, `load` and a second
+     `commit` are refused until the commit is made; `show` and `compare` are
+     answered. This is per daemon while there is one candidate (§8.1).
+
+   Not closed: the patch is made against CONFIG_DB as of the last copy. A
+   change another writer makes after that copy and before the commit is not
+   seen, and where it created a table the commit also creates, the commit's
+   `add` of the table replaces it. JSON Patch has no test for "not there";
+   closing this needs the writer to make the comparison, or a copy taken as
+   part of the commit.
+
+   Not done: the writer as a service of the image; `commit confirmed` and
+   `rollback` of a change of CONFIG_DB (an earlier commit is still taken
+   with `sonic` as it is now); and such a commit in `show commit history`
+   when the copy of CONFIG_DB lands before the commit is made here, which
+   it usually does. The plan was:
+   `PORT`, `VLAN`, `VLAN_MEMBER`, `INTERFACE`,
    `STATIC_ROUTE`, `BGP_NEIGHBOR`. Pre-commit check, ordered write through the
    config updater, partial-write handling. Measure commit latency.
 4. **All modelled tables**, and conflict handling for external changes during
@@ -409,14 +542,18 @@ Each phase is useful on its own and none commits us to the next.
 
 ## 13. Open questions
 
-1. **Can zebra-rs load SONiC's YANG as it is?** The models use `must`, `when`
-   and leafrefs across tables. zebra-rs's schema library has to at least parse
-   them; enforcing them can be left to the bridge's pre-commit check. Not
-   tested. This decides whether phase 2 is small.
-2. **How slow is a commit through the config updater?** Its change sorter is
-   known to be expensive on large differences. Measure a one-line change, a
-   50-port change and a full `rollback` on the VS before phase 3 is designed in
-   detail.
+1. **Can zebra-rs load SONiC's YANG as it is?** *Answered: yes, from libyang
+   2.5 on.* All 146 modules load. `must` (281 uses), `when` (131) and the
+   targets of leafrefs (211) are parsed and not enforced, which is left to
+   the bridge's pre-commit check as planned.
+2. **How slow is a commit through the config updater?** *Measured* on a
+   SONiC VS, `config apply-patch` from the shell: one leaf 2.8 s, one new row
+   2.8 s, a leaf on each of 32 ports 3.6 s, `config rollback` to a checkpoint
+   4.4 s. A dry run of the 32-port patch is 2.0 s, so most of each is starting
+   the command and loading the models, not the change: called as a library by
+   a process that stays up, it should be well under a second for a small
+   change. Good enough for a commit an operator types. The updater is on the
+   host only; the `bgp` container does not have it.
 3. **Does `commit` imply `config save`?** Junos operators expect a committed
    configuration to survive a reboot. SONiC separates the two on purpose.
 4. **Multi-ASIC and chassis.** CONFIG_DB is per namespace and there is one

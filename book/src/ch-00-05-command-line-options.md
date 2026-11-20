@@ -119,6 +119,20 @@ relay), with their show commands. The insomnia package ships a systemd
 drop-in that sets the flag. `--feature iso` is its old name; it still
 works, with a warning at startup.
 
+`--feature sonic` is for a SONiC device, where CONFIG_DB holds the
+device's configuration. It adds the `sonic` configuration subtree, whose
+schema is SONiC's own YANG models, and lets a process copy CONFIG_DB into
+it: what is running under `sonic` is that copy. The subtree is edited in
+the candidate like the rest of the configuration. `compare config-db`
+prints the pending edits as the JSON Patch that SONiC's `config
+apply-patch` takes, and `commit` hands that patch to a writer process on
+the device and is made when the writer has written it; with no writer
+connected the commit is refused. `save` leaves the subtree out, and
+`rollback` keeps it as CONFIG_DB has it. The models are read from a
+directory named `sonic` under the YANG path; without them the flag is
+reported at startup and adds nothing.
+`docs/design/sonic-junos-style-config.md` has the design.
+
 The DHCP *client* is not among them. `interface <name> ipv4 address
 dhcp`, `ipv6 address autoconf`, `ipv6 address dhcpv6` and their options
 are there without any flag, and so is the use of the name servers they

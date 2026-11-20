@@ -1,0 +1,34 @@
+module sonic-dscp-tc-map {
+  yang-version 1.1;
+  namespace "http://github.com/sonic-net/sonic-dscp-tc-map";
+  prefix dtm;
+
+  container sonic-dscp-tc-map {
+    container DSCP_TO_TC_MAP {
+      description "DSCP_TO_TC_MAP part of config_db.json";
+      list DSCP_TO_TC_MAP_LIST {
+        key "name";
+        leaf name {
+          type string {
+            pattern '[a-zA-Z0-9][-a-zA-Z0-9_]*';
+          }
+        }
+        // A map: CONFIG_DB holds the entries of this list as the row's
+        // own fields, {"<dscp>": "<tc>"}.
+        list DSCP_TO_TC_MAP {
+          key "dscp";
+          leaf dscp {
+            type string {
+              pattern "6[0-3]|[1-5][0-9]?|[0-9]?";
+            }
+          }
+          leaf tc {
+            type string {
+              pattern "[0-7]";
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -32,6 +32,7 @@ use super::vty::{
     EnableReply, EnableRequest, ExecCode, ExecReply, ExecRequest, ExecType, LogoutReply,
     LogoutRequest, ShowReply, ShowRequest, YangMatch,
 };
+use super::writer::{WriterBridge, WriterHub, WriterServiceServer};
 
 #[derive(Debug)]
 struct ExecService {
@@ -45,7 +46,7 @@ struct ExecService {
 ///
 /// Wraps [`SessionTable::require_admin`] with the tonic-side mapping so
 /// every gated handler does the same boilerplate.
-fn enforce_admin<T>(
+pub(super) fn enforce_admin<T>(
     sessions: &SessionTable,
     request: &tonic::Request<T>,
 ) -> Result<(), tonic::Status> {
@@ -599,11 +600,17 @@ impl Clear for ClearService {
 
 pub struct Cli {
     pub tx: mpsc::Sender<Message>,
+    /// Where the config manager's commits meet the writer of CONFIG_DB
+    /// (`config::writer`).
+    pub writer: Arc<WriterHub>,
 }
 
 impl Cli {
-    pub fn new(config_tx: Sender<Message>) -> Self {
-        Self { tx: config_tx }
+    pub fn new(config_tx: Sender<Message>, writer: Arc<WriterHub>) -> Self {
+        Self {
+            tx: config_tx,
+            writer,
+        }
     }
 }
 
@@ -894,6 +901,14 @@ pub fn serve(cli: Cli, addr: VtyAddr) -> anyhow::Result<()> {
     // resolve.
     let config_service = ConfigSubscribeService { tx: cli.tx.clone() };
     let show_provider = ShowProviderBridge { tx: cli.tx.clone() };
+    // The writer of CONFIG_DB (zebra.configdb.v1) is a machine too, but
+    // what it says decides a commit: it is held to the admin role, and
+    // so is behind the interceptor that resolves a session, as `Apply`
+    // is.
+    let config_db_writer = WriterBridge {
+        hub: cli.writer.clone(),
+        sessions: sessions.clone(),
+    };
     let machine_interceptor = MachinePeerInterceptor::from_env();
 
     let interceptor = VtyPeerInterceptor::from_env(sessions.clone());
@@ -939,6 +954,10 @@ pub fn serve(cli: Cli, addr: VtyAddr) -> anyhow::Result<()> {
         .add_service(ShowProviderServiceServer::with_interceptor(
             show_provider,
             machine_interceptor,
+        ))
+        .add_service(WriterServiceServer::with_interceptor(
+            config_db_writer,
+            interceptor.clone(),
         ))
         .add_service(ClearServer::with_interceptor(clear_service, interceptor));
 
