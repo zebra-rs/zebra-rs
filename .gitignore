@@ -46,6 +46,9 @@ typescript
 
 # Scratch daemon config dropped in the repo root for local testing; never commit it.
 /zebra.yaml
+# The commit history a daemon keeps beside its config file (`-c <file>`
+# makes `<file>.commits/`): copies of the configuration, secrets included.
+*.commits/
 
 # Python (BDD helper scripts)
 __pycache__/

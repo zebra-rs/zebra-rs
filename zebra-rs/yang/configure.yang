@@ -72,9 +72,30 @@ module configure {
   // defined under the `show` container in exec.yang (and grafted into
   // configure mode). See book/src/ch-06-02-show-config-commands.md.
 
-  leaf commit {
+  // `commit confirmed [<minutes>]` is taken back by the daemon unless a
+  // plain `commit` confirms it in time. A presence container, as `save`
+  // is, so bare `commit` stays a valid terminal; `confirmed` is a
+  // presence list, as `rollback` is, for its optional number.
+  container commit {
     ext:help "Commit candidate config to running config";
-    type empty;
+    presence "Commit";
+    // The rest of the line is the text, spaces included: the daemon
+    // takes it off the line before the line is parsed.
+    leaf comment {
+      ext:help "A note for the commit history: the rest of the line";
+      type string;
+    }
+    list confirmed {
+      ext:help "Roll the commit back unless a commit confirms it";
+      ext:presence "Roll back in 10 minutes";
+      key minutes;
+      leaf minutes {
+        ext:help "Minutes until the rollback";
+        type uint16 {
+          range "1..65535";
+        }
+      }
+    }
   }
 
   leaf discard {

@@ -62,10 +62,10 @@ declare -A _cli_array_pre
 declare -i _cli_first_level_registered=0
 
 # 1 once this shell has entered configure mode. Gates the exit-time
-# uncommitted-changes prompt in _cli_exit_hook: the candidate config is
-# global to the daemon, so without this gate an operator who only ran
-# `show` would be asked about — and could discard — someone else's
-# pending edits. Sticky for the shell's life, including across `disable`: a
+# uncommitted-changes prompt in _cli_exit_hook: a session that has not
+# been in configure mode has no candidate of its own, and what the
+# daemon shows it as the candidate is not its to commit or discard.
+# Sticky for the shell's life, including across `disable`: a
 # session that dropped back to View should still be told, and get the
 # "admin role required" answer, rather than silently walking away.
 declare -i _cli_entered_configure=0
@@ -778,8 +778,11 @@ _cli_enable_rpc ()
   else
     local pw
     if [[ -t 0 ]]; then
+      # _cli_enable_read_timeout: set by a caller that must not wait for
+      # ever (the exit hook: the shell is already leaving).
       stty -echo
-      read -r -p "Root password: " pw
+      read ${_cli_enable_read_timeout:+-t ${_cli_enable_read_timeout}} \
+        -r -p "Root password: " pw
       stty echo
       echo
     else
@@ -864,31 +867,64 @@ disable ()
   return ${rc}
 }
 
-# Run `commit` or `discard` on the way out and report what happened.
+# Run `commit` on the way out and show what the daemon said.
 #
 # Not routed through _cli_exec: that sends -m ${CLI_MODE}, which is
-# `exec` by the time we are exiting, where neither command exists. The
-# explicit -m configure is admin-gated, and vtyhelper answers a denial
-# by exiting 1 with no output at all — so without this wrapper a user
-# who answers `y` sees nothing and keeps their uncommitted changes.
+# `exec` by the time we are exiting, where the command does not exist.
+#
+# The status is vtyhelper's: 0 the daemon ran the line, 3 it could not
+# be reached, 4 it refused the line for want of the admin role (the
+# explicit -m configure is admin-gated, and the helper answers a denial
+# with no output at all), anything else another failure the helper has
+# explained. 0 does not say the commit was made: a commit the daemon
+# refuses (a validation error, another session's commit over the same
+# leaf) comes back as its reason, shown here, with status 0. Whether
+# anything is still uncommitted is the caller's to ask.
 _cli_exit_config_cmd ()
 {
-  local out rc
+  local out
+  local -i rc
   out=$(${cli_command} -m configure -- "$1" 2>&1)
   rc=$?
   # vtyhelper prints a bare `Show` marker line ahead of the reply body;
-  # a successful commit/discard has nothing after it.
+  # a successful commit has nothing after it, or a note.
   out=${out#Show}
-  if [[ ${rc} -eq 3 ]]; then
-    # The daemon could not be reached: the helper's warning says so.
-    printf '%s\n' "${out}" >&2
-    echo "% ${1} not done; changes left uncommitted." >&2
-  elif [[ ${rc} -ne 0 ]]; then
-    echo "% ${1} failed (admin role required — run 'enable'); changes left uncommitted." >&2
-  elif [[ -n ${out//[[:space:]]/} ]]; then
-    # Validation errors from commit land here; the candidate is intact.
-    printf '%s\n' "${out#$'\n'}" >&2
+  # The reason of a refused commit, a note of a successful one, or the
+  # helper's own warning (the daemon out of reach, a refusal it explains).
+  [[ -n ${out//[[:space:]]/} ]] && printf '%s\n' "${out#$'\n'}" >&2
+  return ${rc}
+}
+
+# `commit` on the way out, taking the admin role again when it has
+# lapsed: it is held for 900 seconds past the last admin command, and
+# edits can wait longer than that. Without this the operator who
+# answers `y` would lose them to a refusal no retry could cure, the
+# shell being already on its way out.
+#
+# Returns 0 when the daemon ran the commit (made or refused: see
+# _cli_exit_config_cmd), non-zero when it cannot be run at all, having
+# said why.
+_cli_exit_commit ()
+{
+  local -i rc
+  _cli_exit_config_cmd commit
+  rc=$?
+  if (( rc == 4 )); then
+    # The password prompt must not hold a shell that is leaving.
+    local _cli_enable_read_timeout=${CLI_EXIT_PROMPT_TIMEOUT:-30}
+    if _cli_enable_rpc >&2; then
+      _cli_exit_config_cmd commit
+      rc=$?
+    fi
+    (( rc == 4 )) && echo "% commit not done: the admin role is required." >&2
   fi
+  case ${rc} in
+    0|4) ;;
+    # The helper has said that the daemon cannot be reached, or why it
+    # refused.
+    *) echo "% commit not done." >&2 ;;
+  esac
+  return ${rc}
 }
 
 # Bash EXIT trap. Two jobs, in this order: offer to commit pending
@@ -912,10 +948,20 @@ _cli_exit_hook ()
   # question; and with no tty at all bash drops the prompt silently and
   # blocks on a read that eats stdin.
   if [[ ${_cli_entered_configure} -eq 1 && -t 0 && -t 2 ]]; then
+    local ans
+    # tried: a commit was asked for. lost: the edits it was to commit go
+    # with the session all the same, which is then said.
+    local -i rc tried=0 lost=0
     # 0 = differs, 1 = identical, 2 = unknown. Ask only on a definite
     # 0, so a daemon that is down or slow never delays an exit.
-    if ${cli_command} -u >/dev/null 2>&1; then
-      local ans
+    #
+    # Asked again while a commit that was asked for has left the changes
+    # uncommitted. The candidate is this session's own and ends with it
+    # at the Logout below: a commit that is refused cannot be put right
+    # later, so its reason is shown and the question comes back. A
+    # second `y` is what a refusal over another session's commit asks
+    # for; one over a validation error can only be given up.
+    while ${cli_command} -u >/dev/null 2>&1; do
       # The timeout is not optional. A tty reports EOF once, not
       # stickily, so after a Ctrl-D exit this read blocks forever on a
       # shell that has already decided to die — and further Ctrl-D
@@ -924,17 +970,35 @@ _cli_exit_hook ()
       # Kept to 70 columns so an 80-column terminal has room for the
       # answer instead of wrapping the question.
       read -t "${CLI_EXIT_PROMPT_TIMEOUT:-30}" -r -p \
-        "You have uncommitted changes. Commit? [y=commit n=discard other=keep] " ans
-      if [[ $? -gt 128 ]]; then
-        # Timed out: leave the candidate alone and close the prompt line.
-        echo >&2
-      else
-        echo >&2
-        case ${ans} in
-          [Yy]*) _cli_exit_config_cmd commit ;;
-          [Nn]*) _cli_exit_config_cmd discard ;;
-        esac
+        "You have uncommitted changes. Commit? [y=commit other=discard] " ans
+      rc=$?
+      # Close the prompt line.
+      echo >&2
+      if (( rc > 128 )); then
+        # Timed out: the edits go with the session, as for any answer
+        # but `y`.
+        lost=${tried}
+        break
       fi
+      case ${ans} in
+        [Yy]*)
+          tried=1
+          if ! _cli_exit_commit; then
+            lost=1
+            break
+          fi ;;
+        # Any answer but `y` loses the edits; `n` says so to the daemon
+        # as well.
+        [Nn]*)
+          ${cli_command} -m configure -- discard >/dev/null 2>&1
+          break ;;
+        *) break ;;
+      esac
+    done
+    # Said where `y` was the answer and the commit was not made: nothing
+    # else on the screen says the edits are gone.
+    if (( lost )); then
+      echo "% Not committed: the uncommitted changes are lost with this session." >&2
     fi
   fi
 

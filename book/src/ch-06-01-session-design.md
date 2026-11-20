@@ -186,10 +186,14 @@ at the first existing session, at init (pid ≤ 1), or after
             - Parent bash death (pidfd, immediate; /proc poll on
               kernels < 5.3, D31); for a parent-less client (D30),
               the client's own death
-            - Idle TTL expiry (~10 min, periodic sweep), unless the
-              session holds an admin role with time left
-            - Explicit Logout RPC (bash EXIT trap)
+            - Explicit Logout RPC (bash EXIT trap), from the shell
+              itself
             - Daemon shutdown
+[lapse]   Idle TTL expiry (~10 min, periodic sweep), unless the session
+          holds an admin role with time left: the entry goes, the
+          session does not end. Its key is kept while the shell lives,
+          and the next RPC from the shell, or from anything below it,
+          is the same session again (D32).
 ```
 
 Bash-death detection uses a three-tier strategy:
@@ -199,13 +203,18 @@ Bash-death detection uses a three-tier strategy:
    `kill -9`. (Linux 5.3+.) On older kernels the syscall returns
    `ENOSYS`; the session is kept and the watcher polls
    `/proc/{bash_pid}` once a second instead (D31).
+   The same polling takes over when a pidfd cannot be had or kept
+   for a shell that is still there (the daemon is out of file
+   descriptors): that is no news of the shell, and its session is
+   kept.
 2. **`Logout` RPC** sent from the bash EXIT trap. Covers normal
    `exit` cleanly even if pidfd notification is briefly delayed.
    The same trap first offers to commit uncommitted config changes
    (D29); the logout is deliberately last, because the session must
-   still be Admin for that commit to be accepted.
+   still be Admin for that commit to be accepted. A logout is taken
+   from the session's own shell only (D32).
 3. **Periodic `/proc/{bash_pid}` sweep** every 60s. Backstop for
-   any case the above miss.
+   any case the above miss, the shells of lapsed sessions included.
 
 On session termination, the daemon aborts any streaming RPCs bound
 to the session (see [Streaming RPCs](#streaming-rpcs-phase-7)) and
@@ -409,7 +418,7 @@ Each phase is intended to ship as an independent PR.
 | D8 | Session key derivation assumes the direct vty-bash-to-vtyhelper parent relationship; the daemon verifies via `/proc` (parent uid match) but does not inspect the parent's command name. Parent-less clients are keyed on themselves (D30). |
 | D9 | vtyctl receives no special-casing. Stateful RPCs (configure, enable, monitor) naturally fail across vtyctl invocations because the session is not continuous. |
 | D10 | Script-driven admin operations use `sudo vtyctl …` (root), not interactive enable. |
-| D11 | Configure-mode locking is not part of the initial implementation. Concurrent edits are tolerated; conflict-resolution policy is left to commit semantics. |
+| D11 | Configure-mode locking is not part of the implementation. Each session that enters configure mode has a candidate of its own, kept in the config manager under the session's key and dropped when the session's shell is gone (not when its entry lapses for being idle). A commit by anyone else is carried into it; where both changed the same leaf, the session's edit is kept and its next `commit` is refused once, naming the leaf. |
 | D12 | The daemon and its clients must share a PID namespace. `peer_pid == 0` from SO_PEERCRED is rejected as cross-PID-ns access. |
 | D13 | TACACS+ integration is authentication-only via `pam_tacplus`. No login/command accounting, no per-command authorization. |
 | D14 | vtypam communicates result via exit code only. priv-lvl and TACACS+ AV-pairs are not propagated to the daemon. |
@@ -425,9 +434,10 @@ Each phase is intended to ship as an independent PR.
 | D26 | **Root peers bypass the parent-uid check.** `resolve_session_key` skips Guard 2 when `peer_uid == 0`. Rationale: the strict match rejected the common `sudo <cmd>` pattern, where the outer `sudo` process retains the invoking user's ruid while the client itself runs as uid 0. Risk surface: any uid-0 connector is trusted regardless of ancestry, but `SO_PEERCRED`'s effective-uid attestation already implies that — a process running as root can already do anything on the host. The remaining guards (D12 cross-PID-namespace, ParentVanished) still fire for root peers. Non-root peers are unaffected — the parent-uid match is still enforced, so a setuid escalation to a non-zero uid is still refused. |
 | D27 | **`zebra-rs` Linux group for passwordless enable.** Package postinstall creates the group. Supplementary membership is checked on `enable` via `getgrouplist`; members are promoted without PAM. Group name overridable with `ZEBRA_VTY_CONFIG_GROUP`. Missing group → PAM-only fallback. |
 | D28 | **PAM authenticates root for non-group callers.** Non-members who type `enable`/`configure` are prompted for the root password immediately (no passwordless probe). Client `auth_user` is ignored. |
-| D29 | **Uncommitted changes are confirmed at shell exit, from the client.** The bash `EXIT` trap asks `vtyhelper -u` (a comparison of `show running-config formal` against `show candidate-config formal`, both exec-mode and un-gated) and, when they differ, prompts `y`=commit / `n`=discard / anything else=leave pending. It runs **before** the `Logout` RPC: dropping the session first would make the commit re-resolve as a fresh View session and be refused. The check is client-side because none of the daemon's session-teardown paths owns the candidate — `ExecService` has no handle to `ConfigStore` — and because only the client has a terminal to ask on. Since the candidate is global (D11), the prompt is gated on *this shell* having entered configure mode, so a read-only session is never offered the chance to discard someone else's edits. |
+| D29 | **Uncommitted changes are confirmed at shell exit, from the client.** The bash `EXIT` trap asks `vtyhelper -u` (a comparison of `show running-config formal` against `show candidate-config formal`, both exec-mode and un-gated) and, when they differ, prompts `y`=commit / anything else=discard: the candidate is the session's and ends with it. Because it ends there, a `y` whose commit is not made is not left at that: a commit the daemon refuses shows its reason and the question is asked again (`vtyhelper -u` still says "differs"); a refusal for want of the admin role makes the trap take the role again (`_cli_enable_rpc`, its password prompt under the same timeout) and commit; and when the commit cannot be made the last line says the edits are lost. It runs **before** the `Logout` RPC: dropping the session first would make the commit re-resolve as a fresh View session and be refused. The check is client-side because none of the daemon's session-teardown paths owns the candidate — `ExecService` has no handle to `ConfigStore` — and because only the client has a terminal to ask on. The prompt is gated on *this shell* having entered configure mode: a session that never did has no candidate of its own (D11). |
 | D30 | **Parent-less clients get a session keyed on their own pid.** Guard 1 used to reject any peer whose `/proc` `PPid` was 0 or 1 as an "orphan client (no parent shell)". That refused two legitimate automation shapes: a daemon that speaks gRPC to the socket itself (systemd service, snap daemon — `PPid` 1), and anything started by `docker exec` / `nsenter -p`, whose parent sits outside the daemon's PID namespace (`PPid` 0). The resolver now keys such a peer on `(uid, peer_pid)` and points the pidfd death watcher at the client, so the session lives exactly as long as the process. Authorization is unchanged: the role still comes from the `SO_PEERCRED` uid (root → Admin per D20, others → View plus `enable`), and D26 already trusted any uid-0 connector regardless of ancestry — the orphan guard was a session-lifetime mechanism, not an authorization gate. A child the agent forks (`vtyctl`) attaches to the agent's session because its `PPid` is the agent pid. `ParentVanished` still fires when a parent pid *was* reported but has since disappeared. |
 | D31 | **Kernels without `pidfd_open` keep their sessions.** The death watcher used to treat every `pidfd_open` failure as "the parent is already dead" and dropped the session on the spot. On Linux < 5.3 (Ubuntu 16.04) the syscall returns `ENOSYS` for every live process, so each RPC created a session that was gone before the next one arrived: root still worked (Admin at creation), but non-root operators lost `enable` between RPCs and the log carried one warning per RPC. `ENOSYS` now keeps the session and falls back to polling `/proc/{bash_pid}` every second, so bash death is still noticed within about a second and a reused PID cannot inherit a stale session for long; the notice is logged once per daemon lifetime. Every other open failure (`ESRCH`, the parent really is gone) still drops the session immediately. |
+| D32 | **A session ends with its shell, and only then.** Two things used to end one early, which since D11 costs the operator the candidate and not just the role. (1) *The idle sweep.* It removed the entry of a live shell, and the next piped command (`show \| compare`: the helper's parent is then a subshell of the shell) found no session up the parent chain and was given a new one keyed on the subshell, with no candidate. The sweep now remembers the key of an entry it removes while the shell lives; `resolve` gives the session its entry back under that key, for the shell and for anything below it, and does not report it as new (its watcher is still there). The polling watcher goes on while the key is remembered, and the sweep checks the remembered shells too, so the end of the shell is still reported. (2) *A logout or a watcher failure that was not the shell's end.* A vty started inside the vty shares the outer shell's session through the parent walk and sends `Logout` as it exits; a `pidfd_open` that fails for want of a descriptor says nothing of the shell. `Logout` is now taken only from the process the session is bound to or one that process ran itself (`SessionTable::is_shell_of`), and a pidfd that cannot be had or kept for a live shell falls back to polling as `ENOSYS` does. |
 
 ## Deferred work
 

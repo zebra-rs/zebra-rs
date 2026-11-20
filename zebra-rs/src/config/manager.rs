@@ -1,16 +1,17 @@
 use crate::config::api::{ClearTxResponse, DeployResponse, DisplayTxRequest, DisplayTxResponse};
 
-use super::api::{CompletionResponse, ConfigOp, ExecuteResponse, Message};
+use super::api::{CompletionResponse, ConfigOp, Context, ExecuteResponse, Message};
 use super::bfd::{despawn_bfd, spawn_bfd};
 use super::bgp::{despawn_bgp, spawn_bgp};
 use super::check;
 use super::commands::Mode;
 use super::commands::{configure_mode_create, exec_mode_create, prettify_json};
 use super::configs::{carbon_copy, delete, set};
+use super::confirm::PendingConfirm;
 use super::cradle::spawn_cradle;
 use super::dhcpc::spawn_dhcpc;
 use super::files::load_config_file;
-use super::history::CommitHistory;
+use super::history::{CommitHistory, Origin};
 use super::isis::{despawn_isis, spawn_isis};
 use super::json::{DocError, json_read};
 use super::label_check;
@@ -247,8 +248,16 @@ pub struct ConfigManager {
     /// writes to that file.
     pub config_format: RefCell<ConfigFormat>,
     pub store: ConfigStore,
+    /// The candidates of the sessions that have been in configure mode,
+    /// each out of here while a command of its session runs
+    /// (`config::private`).
+    pub candidates: RefCell<HashMap<super::session::SessionKey, super::private::SessionCandidate>>,
     /// What the last commits produced, for `rollback`.
     pub history: CommitHistory,
+    /// The `commit confirmed` awaiting its confirmation, if one is.
+    pub confirm: RefCell<Option<PendingConfirm>>,
+    /// The number of its timer, and of the next one after it.
+    pub confirm_generation: Cell<u64>,
     pub modes: HashMap<String, Mode>,
     pub tx: Sender<Message>,
     pub rx: Receiver<Message>,
@@ -504,7 +513,10 @@ impl ConfigManager {
             config_format: RefCell::new(ConfigFormat::Cli),
             modes: HashMap::new(),
             store: ConfigStore::new(),
+            candidates: RefCell::new(HashMap::new()),
             history: CommitHistory::default(),
+            confirm: RefCell::new(None),
+            confirm_generation: Cell::new(0),
             tx,
             rx,
             cm_clients: RefCell::new(HashMap::new()),
@@ -781,9 +793,14 @@ impl ConfigManager {
 
     /// Every line among `lines` (config lines without `set`) whose
     /// leaf value fails its [`check::value_check`], as commit errors. A
-    /// failed [`check::startup_tolerant_check`] is one too, except in the
-    /// `startup` config, where it is only logged.
-    fn value_errors(&self, lines: impl Iterator<Item = String>, startup: bool) -> Vec<String> {
+    /// failed [`check::startup_tolerant_check`] is one too, except in a
+    /// commit that is held to what the startup config is: there it is
+    /// only logged, as `tolerated` names the commit.
+    fn value_errors(
+        &self,
+        lines: impl Iterator<Item = String>,
+        tolerated: Option<&str>,
+    ) -> Vec<String> {
         let mut errors = Vec::new();
         for line in lines {
             let Some(paths) = self.paths(line.clone()) else {
@@ -801,18 +818,16 @@ impl ConfigManager {
             if let Some(check) = check::startup_tolerant_check(&path)
                 && let Err(e) = check(value)
             {
-                if startup {
-                    tracing::warn!("startup config: '{line}': {e}; ignored");
-                } else {
-                    errors.push(format!("'{line}': {e}"));
+                match tolerated {
+                    Some(what) => tracing::warn!("{what}: '{line}': {e}; ignored"),
+                    None => errors.push(format!("'{line}': {e}")),
                 }
             }
             let keys: Vec<&str> = args.0.iter().map(String::as_str).collect();
             if let Err(e) = check::reserved_vrf(&path, &keys) {
-                if startup {
-                    tracing::warn!("startup config: '{line}': {e}");
-                } else {
-                    errors.push(format!("'{line}': {e}"));
+                match tolerated {
+                    Some(what) => tracing::warn!("{what}: '{line}': {e}"),
+                    None => errors.push(format!("'{line}': {e}")),
                 }
             }
         }
@@ -832,7 +847,7 @@ impl ConfigManager {
             })
     }
 
-    fn paths(&self, input: String) -> Option<Vec<CommandPath>> {
+    pub(super) fn paths(&self, input: String) -> Option<Vec<CommandPath>> {
         let mode = self.modes.get("configure")?;
         let state = State::new();
 
@@ -930,8 +945,13 @@ impl ConfigManager {
     /// Commit the candidate. Refuses it, dispatching nothing, when it
     /// fails validation: mandatory nodes, the leaf value checks, or a label
     /// check it would newly break.
+    ///
+    /// An operator's commit with nothing about the operator: what the
+    /// tests of everything a commit checks and dispatches type. The
+    /// `commit` command is [`Self::commit_as`].
+    #[cfg(test)]
     pub fn commit_config(&self) -> anyhow::Result<()> {
-        self.commit(false, false)
+        self.commit(false, Origin::Commit, &Context::default())
     }
 
     /// Commit the startup config. As [`Self::commit_config`], except that a
@@ -945,11 +965,46 @@ impl ConfigManager {
     /// file. It is what the commit history marks the commit with, and
     /// is not `startup`: a file that is missing, or sets nothing, is
     /// committed this way too.
-    fn commit_startup_config(&self, from_file: bool) -> anyhow::Result<()> {
-        self.commit(true, from_file)
+    fn commit_startup_config(&self, from_file: bool, ctx: &Context) -> anyhow::Result<()> {
+        let origin = if from_file {
+            Origin::ConfigFile
+        } else {
+            Origin::Commit
+        };
+        self.commit(true, origin, ctx)
     }
 
-    fn commit(&self, startup: bool, from_file: bool) -> anyhow::Result<()> {
+    /// Commit the candidate while the daemon runs, as a commit made by
+    /// `origin` for the caller `ctx`: its user and its comment are
+    /// recorded with it.
+    pub(super) fn commit_as(&self, origin: Origin, ctx: &Context) -> anyhow::Result<()> {
+        self.commit(false, origin, ctx)
+    }
+
+    /// Commit the candidate as the daemon's rollback of a `commit
+    /// confirmed` nobody confirmed (`config::confirm`).
+    ///
+    /// The candidate is then a configuration that was running. What it
+    /// fails of the checks the startup config is only warned about, it
+    /// failed while it ran, and the unconfirmed commit cured it or was
+    /// refused: it is held to those no more now than then. Refusing it
+    /// for one would leave the router with the very change that may
+    /// have cut the operator off.
+    pub(super) fn commit_rollback(&self) -> anyhow::Result<()> {
+        self.commit(true, Origin::Unconfirmed, &Context::default())
+    }
+
+    /// `startup`: the candidate is held to what the startup config is,
+    /// which a check that only a new commit must pass is logged for and
+    /// does not refuse. The startup config itself, and a rollback to a
+    /// configuration that was running ([`Self::commit_rollback`]).
+    fn commit(&self, startup: bool, origin: Origin, ctx: &Context) -> anyhow::Result<()> {
+        // What such a check's warning calls the commit.
+        let what = if origin == Origin::Unconfirmed {
+            "rollback of an unconfirmed commit"
+        } else {
+            "startup config"
+        };
         let mut errors = Vec::<String>::new();
         self.store.candidate.borrow().validate(&mut errors);
         if !errors.is_empty() {
@@ -979,7 +1034,7 @@ impl ConfigManager {
             diff.lines()
                 .filter_map(|l| l.strip_prefix('+'))
                 .map(str::to_string),
-            startup,
+            startup.then_some(what),
         );
         if !errors.is_empty() {
             return Err(anyhow::anyhow!(errors.join("\n")));
@@ -995,7 +1050,7 @@ impl ConfigManager {
                 return Err(anyhow::anyhow!(etree.join("\n")));
             }
             for error in &etree {
-                tracing::warn!("startup config: {error}");
+                tracing::warn!("{what}: {error}");
             }
         }
 
@@ -1010,7 +1065,7 @@ impl ConfigManager {
                 return Err(anyhow::anyhow!(addresses.join("\n")));
             }
             for error in &addresses {
-                tracing::warn!("startup config: {error}");
+                tracing::warn!("{what}: {error}");
             }
         }
 
@@ -1024,7 +1079,7 @@ impl ConfigManager {
                 return Err(anyhow::anyhow!(modes.join("\n")));
             }
             for error in &modes {
-                tracing::warn!("startup config: {error}");
+                tracing::warn!("{what}: {error}");
             }
         }
 
@@ -1040,7 +1095,7 @@ impl ConfigManager {
                 return Err(anyhow::anyhow!(pd.errors.join("\n")));
             }
             for error in &pd.errors {
-                tracing::warn!("startup config: {error}");
+                tracing::warn!("{what}: {error}");
             }
         }
         if !pd.warnings.is_empty() {
@@ -1060,7 +1115,7 @@ impl ConfigManager {
                 return Err(anyhow::anyhow!(max_prefix.join("\n")));
             }
             for error in &max_prefix {
-                tracing::warn!("startup config: {error}");
+                tracing::warn!("{what}: {error}");
             }
         }
 
@@ -1079,7 +1134,7 @@ impl ConfigManager {
                 return Err(anyhow::anyhow!(discards.join("\n")));
             }
             for error in &discards {
-                tracing::warn!("startup config: {error}; the route is a blackhole");
+                tracing::warn!("{what}: {error}; the route is a blackhole");
             }
         }
 
@@ -1101,7 +1156,7 @@ impl ConfigManager {
                 return Err(anyhow::anyhow!(violations.join("\n")));
             }
             for violation in &violations {
-                tracing::warn!("startup config: {violation}");
+                tracing::warn!("{what}: {violation}");
             }
         }
         space.add_reserved(label_check::sr_blocks(&candidate_leaves));
@@ -1453,14 +1508,25 @@ impl ConfigManager {
             despawn_stamp(self);
         }
 
+        let base = self.store.running.borrow().clone();
         self.store.commit();
         // The candidate's lines are the running config's now. A commit
         // that changed none is not one to roll back to, and that is what
         // keeps the configuration a daemon starts with nothing in out of
         // the history.
         if running != candidate {
-            self.history.record(candidate, from_file);
+            // The daemon's own commits are nobody's.
+            let user = match origin {
+                Origin::Commit | Origin::Apply => ctx.user.clone(),
+                Origin::ConfigFile | Origin::Unconfirmed | Origin::Start => None,
+            };
+            self.history
+                .record(candidate, origin, user, ctx.comment.clone());
         }
+        // A `commit confirmed` awaits confirmation and this is another
+        // commit (its own takes it out first): going back keeps this one.
+        let committed = self.store.running.borrow().clone();
+        self.confirm_carry(&base, &committed);
 
         // External gRPC subscribers — post-commit, so a reader that
         // fetches state on an event sees the committed tree (the JSON
@@ -1516,7 +1582,15 @@ impl ConfigManager {
         Ok((format_type, cmds))
     }
 
+    /// Load the config file and commit it, as the daemon does when it
+    /// starts.
     pub fn load_config(&self) {
+        self.load_config_for(&Context::default());
+    }
+
+    /// Load the config file and commit it, for the caller `ctx`: the
+    /// daemon at startup, or the session that typed `load`.
+    pub fn load_config_for(&self, ctx: &Context) {
         // The startup load used to be completely silent: an unreadable
         // file, a shadowed path (`~/.zebra-rs/zebra-rs.conf` wins over
         // /etc when both exist), and per-command rejections were all
@@ -1563,12 +1637,15 @@ impl ConfigManager {
                         );
                         return;
                     };
+                    // The file's lines, a `commit` among them included,
+                    // are the file's and not an operator's.
+                    let line = ctx.line_of(Origin::ConfigFile);
                     for cmd in cmds.iter() {
                         // `execute` answers a successful set/delete
                         // with `Show` (same contract the Deploy
                         // handler checks); anything else means the
                         // command was refused.
-                        let (code, _output, _paths) = self.execute(mode, cmd);
+                        let (code, _output, _paths) = self.execute_as(&line, mode, cmd);
                         if code != ExecCode::Show {
                             rejected.push(cmd.clone());
                         }
@@ -1612,7 +1689,7 @@ impl ConfigManager {
         // operator hand-edited into an invalid state (e.g. a bare
         // `router isis afi-safi ipv4`) is diagnosable, rather than the
         // daemon silently coming up with no config.
-        if let Err(e) = self.commit_startup_config(from_file) {
+        if let Err(e) = self.commit_startup_config(from_file, ctx) {
             tracing::error!(
                 "startup config {} rejected by commit validation: {}",
                 self.config_path.display(),
@@ -1740,6 +1817,51 @@ impl ConfigManager {
         output
     }
 
+    /// Load the config file as the daemon does when it starts, and tell
+    /// the commit history what the daemon then runs.
+    pub fn load_startup_config(&self) {
+        self.load_config();
+        let mut running = String::new();
+        self.store.running.borrow().list(&mut running);
+        self.history.started_with(running);
+    }
+
+    /// Keep the commit history in `dir`, or without one in the
+    /// directory beside the config file that is named after it
+    /// (`zebra-rs.conf.commits`). Called before the config file is
+    /// loaded, so that its commit joins the history kept there.
+    ///
+    /// A config file that is there and is not a file has no such
+    /// directory: `-c /dev/null`, the way to start with no
+    /// configuration, would have every daemon started so on the host
+    /// keep its commits in the one `/dev/null.commits`, and read the
+    /// others' as its own. The history is then in memory only, unless
+    /// `dir` is given.
+    pub fn keep_history(&self, dir: Option<&Path>) {
+        match dir.map(Path::to_path_buf).or_else(|| self.history_beside()) {
+            Some(dir) => self.history.keep_in(&dir),
+            None => tracing::info!(
+                "commit history: {} is not a regular file; kept in memory only \
+                 (--commit-history-dir names a directory)",
+                self.config_path.display()
+            ),
+        }
+    }
+
+    /// The directory the commit history is kept in by default: beside
+    /// the config file, named after it. `None` when what is at the
+    /// config file's path is not a regular file.
+    fn history_beside(&self) -> Option<PathBuf> {
+        // Not followed by a check of what the file is when it is read:
+        // a file that is not there yet is a regular file to be.
+        let special = std::fs::metadata(&self.config_path).is_ok_and(|meta| !meta.is_file());
+        (!special).then(|| {
+            let mut name = self.config_path.clone().into_os_string();
+            name.push(".commits");
+            PathBuf::from(name)
+        })
+    }
+
     /// The configuration of commit `n` of the history, as a tree of its
     /// own for the caller to keep or to read.
     ///
@@ -1790,7 +1912,33 @@ impl ConfigManager {
         }
     }
 
+    /// Run a line typed by an operator of whom nothing is known, on the
+    /// candidate that is there: [`Self::execute_as`] with no context,
+    /// which is what a test of a command types.
+    #[cfg(test)]
     pub fn execute(&self, mode: &Mode, input: &str) -> (ExecCode, String, Vec<CommandPath>) {
+        self.execute_as(&Context::default(), mode, input)
+    }
+
+    /// Run a line in `mode` for the caller `ctx`, on the candidate that
+    /// is in place. The context goes on to the handler of the command.
+    pub fn execute_as(
+        &self,
+        ctx: &Context,
+        mode: &Mode,
+        input: &str,
+    ) -> (ExecCode, String, Vec<CommandPath>) {
+        // `commit … comment <text>`: the text is the rest of the line,
+        // spaces and all, which the parser would not take as one value.
+        // It goes with this line and no further: not a commit after
+        // all, or a refused one, leaves it to no later commit.
+        if let Some((command, comment)) = super::commands::split_commit_comment(input) {
+            return match comment {
+                Some(comment) => self.execute_as(&ctx.commented(comment), mode, &command),
+                None => (ExecCode::Incomplete, String::new(), Vec::new()),
+            };
+        }
+
         let state = State::new();
 
         let candidate = self.store.candidate.borrow().clone();
@@ -1828,7 +1976,7 @@ impl ConfigManager {
         // Lookup command.
         let path = paths_str(&state.paths);
         if let Some(f) = mode.fmap.get(&path) {
-            let (code, input) = f(self);
+            let (code, input) = f(self, ctx);
             return (code, input, state.paths);
         }
         // A command that carries values is installed under its path
@@ -1836,7 +1984,7 @@ impl ConfigManager {
         if !mode.amap.is_empty() {
             let (path, args) = path_from_command(&state.paths);
             if let Some(f) = mode.amap.get(&path) {
-                let (code, output) = f(self, args);
+                let (code, output) = f(self, ctx, args);
                 return (code, output, state.paths);
             }
         }
@@ -1941,7 +2089,7 @@ impl ConfigManager {
     /// running config's own copy. That much is seen without rendering
     /// either tree ([`Config::same_as`]); only trees that differ are
     /// rendered, and the renderings decide.
-    fn has_uncommitted(&self) -> bool {
+    pub(super) fn has_uncommitted(&self) -> bool {
         if self
             .store
             .running
@@ -1952,6 +2100,37 @@ impl ConfigManager {
         }
         let (running, candidate) = self.renderings();
         running != candidate
+    }
+
+    /// The interactive sessions' uncommitted edits, with the running
+    /// config they are an edit of, for a commit that is not theirs to
+    /// be made without them. `None` when there are none.
+    pub(super) fn set_aside_edits(&self) -> Option<(Rc<Config>, Rc<Config>)> {
+        (!self.store.refused_load.get() && self.has_uncommitted()).then(|| {
+            (
+                self.store.candidate.borrow().clone(),
+                self.store.running.borrow().clone(),
+            )
+        })
+    }
+
+    /// Leave the candidate with what [`Self::set_aside_edits`] found in
+    /// it: the edits, on the running config as it is now, or with no
+    /// edits the running config.
+    pub(super) fn put_back(&self, edits: Option<(Rc<Config>, Rc<Config>)>) {
+        match edits {
+            Some((edits, base)) => {
+                let running = self.store.running.borrow().clone();
+                // The same tree: nothing was committed.
+                if !Rc::ptr_eq(&base, &running) {
+                    super::rebase::rebase(&base, &running, &edits, |line| {
+                        self.paths(line.to_string())
+                    });
+                }
+                self.store.candidate.replace(edits);
+            }
+            None => self.store.discard(),
+        }
     }
 
     /// Apply a streamed-in config document (`vtyctl apply`): run its
@@ -1992,7 +2171,13 @@ impl ConfigManager {
     /// set aside. The document runs on it as on any candidate, and so
     /// either completes it and brings the startup config up, or is
     /// refused with it, which drops it.
-    fn deploy(&self, config: &str) -> DeployResponse {
+    ///
+    /// `user` is the login name of the caller, which the commit is
+    /// recorded with.
+    pub(super) fn deploy_as(&self, config: &str, user: Option<String>) -> DeployResponse {
+        // The document's lines are the apply's: a `commit` among them
+        // is recorded as an apply, and confirms no `commit confirmed`.
+        let ctx = Context::session(None, user).line_of(Origin::Apply);
         let mode = self.modes.get("configure").unwrap();
 
         // A document with no line in it applies nothing. Its format
@@ -2030,12 +2215,7 @@ impl ConfigManager {
         // are none, which is every apply on a box nobody is configuring
         // by hand: it then runs on the candidate as it always did, with
         // no copy and nothing to put back.
-        let edits = (!self.store.refused_load.get() && self.has_uncommitted()).then(|| {
-            (
-                self.store.candidate.borrow().clone(),
-                self.store.running.borrow().clone(),
-            )
-        });
+        let edits = self.set_aside_edits();
         // The apply's own candidate. For `set`/`delete` lines it is the
         // running config, which they change: a copy of it when the
         // candidate holds the edits, and with no edits the candidate as
@@ -2048,22 +2228,10 @@ impl ConfigManager {
         // Leave the candidate with what the apply found in it: the
         // edits, on the running config as it is now, or with no edits
         // the running config.
-        let put_back = |edits: Option<(Rc<Config>, Rc<Config>)>| match edits {
-            Some((edits, base)) => {
-                let running = self.store.running.borrow().clone();
-                // The same tree: nothing was committed.
-                if !Rc::ptr_eq(&base, &running) {
-                    super::rebase::rebase(&base, &running, &edits, |line| {
-                        self.paths(line.to_string())
-                    });
-                }
-                self.store.candidate.replace(edits);
-            }
-            None => self.store.discard(),
-        };
+        let put_back = |edits| self.put_back(edits);
 
         for cmd in cmds.iter() {
-            let (code, _output, _paths) = self.execute(mode, cmd);
+            let (code, _output, _paths) = self.execute_as(&ctx, mode, cmd);
             if code != ExecCode::Show {
                 put_back(edits);
                 return DeployResponse {
@@ -2079,7 +2247,7 @@ impl ConfigManager {
         // Err *before* any dispatch. Surface it instead of swallowing
         // it, and drop the rejected lines so they don't linger into the
         // next apply.
-        if let Err(e) = self.commit_config() {
+        if let Err(e) = self.commit_as(Origin::Apply, &ctx) {
             put_back(edits);
             return DeployResponse {
                 apply_code: ApplyCode::MissingMandatory,
@@ -2102,17 +2270,30 @@ impl ConfigManager {
         }
     }
 
+    /// [`Self::deploy_as`] for a caller of whom nothing is known.
+    #[cfg(test)]
+    pub(super) fn deploy(&self, config: &str) -> DeployResponse {
+        self.deploy_as(config, None)
+    }
+
+    /// What `show commit history` prints: the commits kept, and under
+    /// them the commit that awaits confirmation, if one does. The same
+    /// for a session's `show` and for `vtyctl show`.
+    pub(super) fn commit_history(&self) -> String {
+        let mut listing = self.history.render();
+        if let Some(status) = self.confirm_status() {
+            listing.push_str(&status);
+        }
+        listing
+    }
+
     pub async fn process_message(&mut self, m: Message) {
         match m {
             Message::Execute(req) => {
                 let mut resp = ExecuteResponse::new();
-                match self.modes.get(&req.mode) {
-                    Some(mode) => {
-                        (resp.code, resp.output, resp.paths) = self.execute(mode, &req.input);
-                    }
-                    None => {
-                        resp.code = ExecCode::Nomatch;
-                    }
+                match self.execute_for(&req.ctx, &req.mode, &req.input) {
+                    Some(reply) => (resp.code, resp.output, resp.paths) = reply,
+                    None => resp.code = ExecCode::Nomatch,
                 }
                 // Stamped after `execute` so a `commit` that changed
                 // the hostname reports the just-promoted value.
@@ -2121,19 +2302,19 @@ impl ConfigManager {
             }
             Message::Completion(req) => {
                 let mut resp = CompletionResponse::new();
-                match self.modes.get(&req.mode) {
-                    Some(mode) => {
-                        (resp.code, resp.comps) =
-                            self.completion(mode, &req.input, req.interactive).await;
-                    }
-                    None => {
-                        resp.code = ExecCode::Nomatch;
-                    }
+                match self
+                    .completion_for(req.session, &req.mode, &req.input, req.interactive)
+                    .await
+                {
+                    Some(reply) => (resp.code, resp.comps) = reply,
+                    None => resp.code = ExecCode::Nomatch,
                 }
                 let _ = req.resp.send(resp);
             }
+            Message::SessionEnd { key } => self.session_end(&key),
+            Message::ConfirmTimeout { generation } => self.confirm_timeout(generation),
             Message::Deploy(req) => {
-                let resp = self.deploy(&req.config);
+                let resp = self.deploy_as(&req.config, req.user);
                 let _ = req.resp.send(resp);
             }
             Message::DisplayTx(req) => {
@@ -2165,7 +2346,9 @@ impl ConfigManager {
                     .collect::<Vec<_>>()
                     == ["show", "commit", "history"]
                 {
-                    reply_static_show(req, self.history.render(), self.history.render_json());
+                    // The text is the one a session's `show` has: the
+                    // commit that awaits confirmation is in it.
+                    reply_static_show(req, self.commit_history(), self.history.render_json());
                     return;
                 }
                 // `show running-config [formal|json|yaml]` is owned by the
@@ -2204,29 +2387,34 @@ impl ConfigManager {
                 // running-config above: the candidate store lives here, and
                 // without this arm the request would fall through to the rib
                 // task, which has no handler for it.
+                //
+                // The candidate is the one of the session that asks, as
+                // that session's own `show` has it: `vtyctl show` run
+                // from a vty shell is that shell's session.
                 if req.paths.iter().any(|p| p.name == "candidate-config") {
-                    let candidate = || self.store.candidate.borrow();
-                    let render_json = || {
-                        let mut compact = String::new();
-                        candidate().json(&mut compact);
-                        super::commands::prettify_json(compact)
-                    };
-                    let text = if req.paths.iter().any(|p| p.name == "formal") {
-                        let mut out = String::new();
-                        candidate().formal(&mut out);
-                        out
-                    } else if req.paths.iter().any(|p| p.name == "yaml") {
-                        let mut out = String::new();
-                        candidate().yaml(&mut out);
-                        out
-                    } else if req.paths.iter().any(|p| p.name == "json") {
-                        render_json()
-                    } else {
-                        let mut out = String::new();
-                        candidate().format(&mut out);
-                        out
-                    };
-                    let json = render_json();
+                    let (text, json) = self.with_candidate_of(req.session, |candidate| {
+                        let render_json = || {
+                            let mut compact = String::new();
+                            candidate.json(&mut compact);
+                            super::commands::prettify_json(compact)
+                        };
+                        let text = if req.paths.iter().any(|p| p.name == "formal") {
+                            let mut out = String::new();
+                            candidate.formal(&mut out);
+                            out
+                        } else if req.paths.iter().any(|p| p.name == "yaml") {
+                            let mut out = String::new();
+                            candidate.yaml(&mut out);
+                            out
+                        } else if req.paths.iter().any(|p| p.name == "json") {
+                            render_json()
+                        } else {
+                            let mut out = String::new();
+                            candidate.format(&mut out);
+                            out
+                        };
+                        (text, render_json())
+                    });
                     reply_static_show(req, text, json);
                     return;
                 }
@@ -2602,7 +2790,7 @@ fn top_from_exec(exec: &Rc<Entry>, name: &str) -> Option<Rc<Entry>> {
 }
 
 pub async fn event_loop(mut config: ConfigManager) {
-    config.load_config();
+    config.load_startup_config();
     loop {
         tokio::select! {
             Some(msg) = config.rx.recv() => {
@@ -2795,6 +2983,46 @@ pub(crate) mod test_support {
             assert_eq!(run(cm, line), "", "`{line}`");
         }
         assert_eq!(run(cm, "commit"), "");
+    }
+
+    /// What `vtyctl show` and MCP are answered for an exec-mode `line`
+    /// asked by `session`: the second phase of a show, which a
+    /// session's own reply does not go through. The text, or the JSON
+    /// of `-j`.
+    pub async fn shown(
+        cm: &mut ConfigManager,
+        session: Option<crate::config::session::SessionKey>,
+        line: &str,
+        json: bool,
+    ) -> String {
+        use crate::config::api::{DisplayRequest, DisplayTxRequest};
+        use tokio::time::timeout;
+
+        let paths = {
+            let mode = cm.modes.get("exec").expect("exec mode");
+            cm.execute(mode, line).2
+        };
+        let (resp, answered) = oneshot::channel();
+        cm.process_message(Message::DisplayTx(DisplayTxRequest {
+            paths: paths.clone(),
+            session,
+            resp,
+        }))
+        .await;
+        let wait = std::time::Duration::from_secs(5);
+        let answer = timeout(wait, answered)
+            .await
+            .expect("no answer to the show")
+            .expect("the manager answers");
+        let (resp, mut output) = mpsc::channel(4);
+        answer
+            .tx
+            .send(DisplayRequest { paths, json, resp })
+            .expect("the answer takes the request");
+        timeout(wait, output.recv())
+            .await
+            .expect("no output")
+            .expect("output")
     }
 
     /// The running config, as a commit diffs it.
@@ -3260,7 +3488,7 @@ mod save_config_tests {
             valid.iter().all(|l| candidate.lines().any(|c| c == l)),
             "{candidate}"
         );
-        let errors = cm.value_errors(candidate.lines().map(str::to_string), false);
+        let errors = cm.value_errors(candidate.lines().map(str::to_string), None);
         assert_eq!(errors, Vec::<String>::new(), "{candidate}");
 
         // The reflector modes (design D3) are enumerations YANG checks
@@ -3792,7 +4020,10 @@ mod save_config_tests {
             // The same candidate, loaded as the startup config, only warns.
             let mut candidate = String::new();
             cm.store.candidate.borrow().list(&mut candidate);
-            let errors = cm.value_errors(candidate.lines().map(str::to_string), true);
+            let errors = cm.value_errors(
+                candidate.lines().map(str::to_string),
+                Some("startup config"),
+            );
             assert_eq!(errors, Vec::<String>::new(), "{candidate}");
             cm.store.discard();
         }
@@ -3839,7 +4070,10 @@ mod save_config_tests {
             let mut candidate = String::new();
             cm.store.candidate.borrow().list(&mut candidate);
             assert!(candidate.contains(&line), "{candidate}");
-            let errors = cm.value_errors(candidate.lines().map(str::to_string), true);
+            let errors = cm.value_errors(
+                candidate.lines().map(str::to_string),
+                Some("startup config"),
+            );
             assert_eq!(errors, Vec::<String>::new(), "{candidate}");
             cm.store.discard();
         }
@@ -3852,7 +4086,7 @@ mod save_config_tests {
         let mut candidate = String::new();
         cm.store.candidate.borrow().list(&mut candidate);
         assert!(candidate.contains(&valid), "{candidate}");
-        let errors = cm.value_errors(candidate.lines().map(str::to_string), false);
+        let errors = cm.value_errors(candidate.lines().map(str::to_string), None);
         assert_eq!(errors, Vec::<String>::new(), "{candidate}");
     }
 
@@ -3879,7 +4113,10 @@ mod save_config_tests {
         );
         let mut candidate = String::new();
         cm.store.candidate.borrow().list(&mut candidate);
-        let errors = cm.value_errors(candidate.lines().map(str::to_string), true);
+        let errors = cm.value_errors(
+            candidate.lines().map(str::to_string),
+            Some("startup config"),
+        );
         assert_eq!(errors, Vec::<String>::new(), "{candidate}");
         cm.store.discard();
 
@@ -3888,7 +4125,7 @@ mod save_config_tests {
         assert_eq!(code, ExecCode::Show, "set rejected: {output:?}");
         let mut candidate = String::new();
         cm.store.candidate.borrow().list(&mut candidate);
-        let errors = cm.value_errors(candidate.lines().map(str::to_string), false);
+        let errors = cm.value_errors(candidate.lines().map(str::to_string), None);
         assert_eq!(errors, Vec::<String>::new(), "{candidate}");
     }
 

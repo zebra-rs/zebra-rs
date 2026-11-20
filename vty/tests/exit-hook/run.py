@@ -156,6 +156,12 @@ def run(script, env_extra=None, tty=True, timeout=20.0, hup_after=None):
             if line.strip()
         ]
         os.unlink(log.name)
+        # What the stub remembers between its calls.
+        for suffix in (".state.commits", ".state.clean"):
+            try:
+                os.unlink(log.name + suffix)
+            except FileNotFoundError:
+                pass
 
     text = out.decode("utf-8", "replace")
     if VERBOSE:
@@ -174,10 +180,19 @@ def check(name, condition, detail=""):
         FAILURES.append(name)
 
 
+LOST = "the uncommitted changes are lost with this session"
+
+
+def commits(r):
+    return sum(1 for c in r.calls if "-m configure commit" in c)
+
+
 def case_commit():
     r = run([ENTER_CONFIGURE, b"exit\n", b"y\n"], {"STUB_UNCOMMITTED": "0"})
     check("dirty + y prompts", PROMPT in r.output)
     check("dirty + y commits", r.called("-m configure commit"), str(r.calls))
+    check("a commit that is made is asked once", r.output.count(PROMPT) == 1, r.output[-300:])
+    check("a commit that is made loses nothing", LOST not in r.output, r.output[-300:])
     # Logout must come after the commit: dropping the session first
     # would demote the next RPC to a View session and the commit would
     # be refused.
@@ -241,20 +256,141 @@ def case_never_configured():
 
 
 def case_commit_denied():
+    """The admin role lapsed while the edits waited, and cannot be taken
+    again: there is no committing, and the operator who answered `y` is
+    told the edits are gone. The Logout drops them."""
     r = run(
-        [ENTER_CONFIGURE, b"exit\n", b"y\n"],
-        {"STUB_UNCOMMITTED": "0", "STUB_COMMIT_RC": "1"},
+        [IN_GROUP, ENTER_CONFIGURE, b"exit\n", b"y\n"],
+        {"STUB_UNCOMMITTED": "0", "STUB_COMMIT_SEQ": "denied", "STUB_ENABLE_RC": "1"},
     )
-    check("denied commit is reported", "commit failed" in r.output, r.output[-300:])
+    check("denied commit asks for the role", r.called("-e"), str(r.calls))
+    check("denied commit is reported", "admin role is required" in r.output, r.output[-300:])
+    check("denied commit says the edits are lost", LOST in r.output, r.output[-300:])
+    check("denied commit is not asked again", r.output.count(PROMPT) == 1, r.output[-400:])
+    check("denied commit still logs out", r.called("-l"), str(r.calls))
+    check("denied commit exits", not r.timed_out)
+
+
+def case_commit_after_role_lapsed():
+    """The role lapsed and is given again: the commit is made after all,
+    without a second question."""
+    r = run(
+        [IN_GROUP, ENTER_CONFIGURE, b"exit\n", b"y\n"],
+        {"STUB_UNCOMMITTED": "0", "STUB_COMMIT_SEQ": "denied ok"},
+    )
+    check("lapsed role is taken again", r.called("-e"), str(r.calls))
+    check("lapsed role: no password for the group", "Root password:" not in r.output, r.output[-300:])
+    check("lapsed role: commit is repeated", commits(r) == 2, str(r.calls))
+    at = [i for i, c in enumerate(r.calls) if "-m configure commit" in c]
+    check(
+        "lapsed role: the role is taken between the two commits",
+        len(at) == 2 and at[0] < r.index_of("-e") < at[1],
+        str(r.calls),
+    )
+    check("lapsed role: nothing is lost", LOST not in r.output, r.output[-300:])
+    check("lapsed role: asked once", r.output.count(PROMPT) == 1, r.output[-400:])
+
+
+# Whoever runs the tests may or may not be in the group that is given
+# the role without a password; each case says which it is about.
+NOT_IN_GROUP = b"_cli_in_config_group () { return 1; }\n"
+IN_GROUP = b"_cli_in_config_group () { return 0; }\n"
+
+
+def case_commit_role_needs_password():
+    """Outside the group the role costs the root password, asked for
+    here as `enable` asks. The prompt must not hold a shell that is
+    leaving: unanswered, it gives up like the question before it."""
+    r = run(
+        [NOT_IN_GROUP, ENTER_CONFIGURE, b"exit\n", b"y\n", b"secret\n"],
+        {"STUB_UNCOMMITTED": "0", "STUB_COMMIT_SEQ": "denied ok"},
+    )
+    check("password: asked for", "Root password:" in r.output, r.output[-400:])
+    check("password: not echoed", "secret" not in r.output, r.output[-400:])
+    check("password: commit is repeated", commits(r) == 2, str(r.calls))
+    check("password: nothing is lost", LOST not in r.output, r.output[-300:])
+
+    r = run(
+        [NOT_IN_GROUP, ENTER_CONFIGURE, b"exit\n", b"y\n"],
+        {"STUB_UNCOMMITTED": "0", "STUB_COMMIT_SEQ": "denied", "STUB_ENABLE_RC": "1"},
+        timeout=12,
+    )
+    check("password unanswered: does not hang", not r.timed_out, "hung at the password")
+    check("password unanswered: edits said lost", LOST in r.output, r.output[-300:])
+    check("password unanswered: still logs out", r.called("-l"), str(r.calls))
 
 
 def case_commit_validation_error():
+    """A commit the daemon refuses leaves the edits uncommitted. Its
+    reason is shown and the question comes back; giving up is said."""
     r = run(
         [ENTER_CONFIGURE, b"exit\n", b"y\n"],
         {"STUB_UNCOMMITTED": "0", "STUB_COMMIT_OUT": "% mandatory node missing"},
+        timeout=12,
     )
     check("validation errors surface", "mandatory node missing" in r.output, r.output[-300:])
     check("no bare Show marker leaks", "\nShow\n" not in r.output, r.output[-300:])
+    check("refused commit asks again", r.output.count(PROMPT) == 2, r.output[-400:])
+    check("refused commit, no answer: edits said lost", LOST in r.output, r.output[-300:])
+    check("refused commit does not hang", not r.timed_out)
+    check("refused commit still logs out", r.called("-l"), str(r.calls))
+
+    r = run(
+        [ENTER_CONFIGURE, b"exit\n", b"y\n", b"n\n"],
+        {"STUB_UNCOMMITTED": "0", "STUB_COMMIT_OUT": "% mandatory node missing"},
+    )
+    check("refused commit then n discards", r.called("-m configure discard"), str(r.calls))
+    check("refused commit then n: one commit", commits(r) == 1, str(r.calls))
+
+
+def case_commit_refused_once():
+    """Another session's commit changed a leaf this one edited: the
+    daemon refuses the commit once and takes it when it is typed again.
+    At exit that second `y` must be possible."""
+    refusal = "% Another commit changed what this session has edited."
+    r = run(
+        [ENTER_CONFIGURE, b"exit\n", b"y\n", b"y\n"],
+        {
+            "STUB_UNCOMMITTED": "0",
+            "STUB_COMMIT_SEQ": "refused ok",
+            "STUB_COMMIT_OUT": refusal,
+        },
+    )
+    check("refusal is shown", refusal in r.output, r.output[-400:])
+    check("refused once: asked twice", r.output.count(PROMPT) == 2, r.output[-400:])
+    check("refused once: committed the second time", commits(r) == 2, str(r.calls))
+    check("refused once: nothing is lost", LOST not in r.output, r.output[-300:])
+    check(
+        "refused once: logout is last",
+        r.calls and r.calls[-1] == "-l",
+        str(r.calls),
+    )
+
+
+def case_commit_note():
+    """A commit that is made may say something (others committed
+    meanwhile). That is no refusal."""
+    note = "Note: others committed while these edits were pending"
+    r = run(
+        [ENTER_CONFIGURE, b"exit\n", b"y\n"],
+        {"STUB_UNCOMMITTED": "0", "STUB_COMMIT_SEQ": "noted", "STUB_COMMIT_OUT": note},
+    )
+    check("a commit's note is shown", note in r.output, r.output[-300:])
+    check("a noted commit is asked once", r.output.count(PROMPT) == 1, r.output[-400:])
+    check("a noted commit loses nothing", LOST not in r.output, r.output[-300:])
+
+
+def case_commit_unreachable():
+    for outcome, said in (("unreachable", "Cannot reach zebra-rs"), ("failed", "stub failure")):
+        r = run(
+            [ENTER_CONFIGURE, b"exit\n", b"y\n"],
+            {"STUB_UNCOMMITTED": "0", "STUB_COMMIT_SEQ": outcome},
+        )
+        check(f"{outcome}: the helper's reason is shown", said in r.output, r.output[-300:])
+        check(f"{outcome}: commit not done is said", "commit not done" in r.output, r.output[-300:])
+        check(f"{outcome}: edits said lost", LOST in r.output, r.output[-300:])
+        check(f"{outcome}: not asked again", r.output.count(PROMPT) == 1, r.output[-400:])
+        check(f"{outcome}: no role is asked for", not r.called("-e"), str(r.calls))
 
 
 def case_no_tty():
@@ -297,7 +433,12 @@ def main():
         case_unknown,
         case_never_configured,
         case_commit_denied,
+        case_commit_after_role_lapsed,
+        case_commit_role_needs_password,
         case_commit_validation_error,
+        case_commit_refused_once,
+        case_commit_note,
+        case_commit_unreachable,
         case_no_tty,
         case_prompt_width,
         case_sighup,
