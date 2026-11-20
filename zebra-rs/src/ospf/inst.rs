@@ -3858,18 +3858,21 @@ impl Ospf<Ospfv2> {
     /// change.
     ///
     /// A VL is *viable* when its transit area is a non-backbone,
-    /// non-stub area whose SPF reaches the peer ABR **as a direct
-    /// adjacency** (single-hop transit — the peer is our SPF first hop,
-    /// so the first-hop neighbor address IS the far VL endpoint).
-    /// Multi-hop transit needs the FRR-style backlink walk over a
-    /// full-path SPF and is deferred; such VLs stay down with a debug
-    /// log.
+    /// non-stub area whose SPF reaches the peer ABR. A directly
+    /// adjacent peer is our SPF first hop, so the first-hop neighbor
+    /// address IS the far VL endpoint; for a peer further away the
+    /// endpoint comes from the backlink walk of
+    /// `vl_peer_addr_backlink`.
     ///
     /// Viable VLs materialize as a synthetic `OspfLink` in area 0
     /// (making this router backbone-attached): unicast Hellos to
     /// `peer_addr` drive a normal P2P adjacency, and `router_lsa_build`
     /// emits a `VirtualLink` entry once the neighbor is Full. VLs that
     /// stop being viable (or are deconfigured) tear down synchronously.
+    ///
+    /// A new VL's first Hello waits for the kernel route to
+    /// `peer_addr`, which the RIB reports (`vl_route_watch`,
+    /// `VirtualLinkState::hello_hold`).
     ///
     /// Loop-safety: `router_lsa_originate` fires only when something
     /// actually changed, so a converged topology re-floods nothing and
@@ -3975,6 +3978,10 @@ impl Ospf<Ospfv2> {
                 Self::vl_apply_config(link, cfg);
                 let prefix = Ipv4Net::new(v.local_addr, 32).unwrap();
                 let vl = link.vl.as_mut().unwrap();
+                // The first Hello still waits for a route, and the far
+                // end's address is another one now: wait for that one.
+                let moved = (vl.hello_hold.is_some() && vl.peer_addr != v.peer_addr)
+                    .then_some((vl.peer_addr, v.peer_addr));
                 if vl.peer_addr != v.peer_addr
                     || vl.first_hop_addr != v.first_hop_addr
                     || vl.first_hop_ifindex != v.first_hop_ifindex
@@ -4004,6 +4011,10 @@ impl Ospf<Ospfv2> {
                         v.peer_addr
                     );
                 }
+                if let Some((old, new)) = moved {
+                    self.vl_route_watch(new);
+                    self.vl_route_unwatch(old);
+                }
             } else {
                 let idx = self.vl_ifindex_next;
                 self.vl_ifindex_next = self.vl_ifindex_next.wrapping_add(1).max(VL_IFINDEX_BASE);
@@ -4026,15 +4037,25 @@ impl Ospf<Ospfv2> {
                     secondary: false,
                 }];
                 link.ident.prefix = prefix;
+                // A restarting router's kernel kept the routes it had
+                // (RFC 3623), whatever the RIB knows of them by now:
+                // nothing to wait for.
+                let hello_hold = (!self.in_restart()).then(|| {
+                    tokio::time::Instant::now() + Duration::from_secs(link.hello_interval().into())
+                });
                 {
                     let vl = link.vl.as_mut().unwrap();
                     vl.peer_addr = v.peer_addr;
                     vl.first_hop_addr = v.first_hop_addr;
                     vl.first_hop_ifindex = v.first_hop_ifindex;
+                    vl.hello_hold = hello_hold;
                 }
                 self.links.insert(idx, link);
                 self.areas.fetch(AREA0).links.insert(idx);
                 keep.insert(idx);
+                if hello_hold.is_some() {
+                    self.vl_route_watch(v.peer_addr);
+                }
                 let _ = self.tx.send(Message::Ifsm(idx, IfsmEvent::InterfaceUp));
                 changed = true;
                 ospf_fsm_trace!(
@@ -4060,6 +4081,7 @@ impl Ospf<Ospfv2> {
             .copied()
             .collect();
         for idx in stale {
+            let mut waiting = None;
             if let Some(link) = self.links.get_mut(&idx) {
                 ospf_fsm_trace!(
                     self.tracing,
@@ -4069,11 +4091,18 @@ impl Ospf<Ospfv2> {
                     link.name
                 );
                 ospf_ifsm(link, IfsmEvent::InterfaceDown);
+                waiting = link
+                    .vl
+                    .filter(|vl| vl.hello_hold.is_some())
+                    .map(|vl| vl.peer_addr);
             }
             if let Some(area0) = self.areas.get_mut(AREA0) {
                 area0.links.remove(&idx);
             }
             self.links.remove(&idx);
+            if let Some(peer_addr) = waiting {
+                self.vl_route_unwatch(peer_addr);
+            }
             changed = true;
         }
 
@@ -4084,6 +4113,99 @@ impl Ospf<Ospfv2> {
             self.abr_summary_originate();
             self.nssa_translate_resync_all();
         }
+    }
+
+    /// Ask the RIB to report when `peer_addr` has a route
+    /// (`RibRx::NexthopUpdate`). It answers at once, and again whenever
+    /// the answer changes. Its queue is in order, so the answer follows
+    /// the installation of every route handed to it before this.
+    fn vl_route_watch(&self, peer_addr: Ipv4Addr) {
+        let _ = self.ctx.rib.send(rib::Message::NexthopRegister {
+            proto: self.proto_label.clone(),
+            nh: std::net::IpAddr::V4(peer_addr),
+            vrf_id: self.ctx.vrf_id(),
+        });
+    }
+
+    /// End [`Self::vl_route_watch`] for `peer_addr`, unless another
+    /// virtual link still waits on the same address: the RIB keeps one
+    /// registration per protocol and address.
+    fn vl_route_unwatch(&self, peer_addr: Ipv4Addr) {
+        let shared = self.links.values().any(|l| {
+            l.vl.is_some_and(|vl| vl.peer_addr == peer_addr && vl.hello_hold.is_some())
+        });
+        if shared {
+            return;
+        }
+        let _ = self.ctx.rib.send(rib::Message::NexthopUnregister {
+            proto: self.proto_label.clone(),
+            nh: std::net::IpAddr::V4(peer_addr),
+            vrf_id: self.ctx.vrf_id(),
+        });
+    }
+
+    /// The RIB has a route to `peer_addr`, in the kernel too: every
+    /// virtual link whose first Hello waited for it sends the Hello it
+    /// owes (`VirtualLinkState::hello_hold`).
+    fn vl_route_ready(&mut self, peer_addr: Ipv4Addr) {
+        let mut released = false;
+        for link in self.links.values_mut() {
+            let Some(vl) = link.vl.as_mut() else {
+                continue;
+            };
+            if vl.peer_addr != peer_addr || vl.hello_hold.take().is_none() {
+                continue;
+            }
+            released = true;
+            ospf_fsm_trace!(
+                self.tracing,
+                Ifsm,
+                false,
+                "[VL] {} has a route to {}",
+                link.name,
+                peer_addr
+            );
+            if std::mem::take(&mut vl.hello_due) {
+                let _ = self.tx.send(Message::HelloTimer(link.index));
+            }
+        }
+        if released {
+            self.vl_route_unwatch(peer_addr);
+        }
+    }
+
+    /// Whether the Hello now due on link `index` has to wait: a virtual
+    /// link's first Hello, for the route to its far end
+    /// (`VirtualLinkState::hello_hold`). The wait ends here when no
+    /// route was reported in time, and the Hello is sent as it always
+    /// was.
+    fn vl_hello_held(&mut self, index: u32) -> bool {
+        let Some(link) = self.links.get_mut(&index) else {
+            return false;
+        };
+        let Some(vl) = link.vl.as_mut() else {
+            return false;
+        };
+        let Some(deadline) = vl.hello_hold else {
+            return false;
+        };
+        if tokio::time::Instant::now() < deadline {
+            vl.hello_due = true;
+            return true;
+        }
+        vl.hello_hold = None;
+        vl.hello_due = false;
+        let peer_addr = vl.peer_addr;
+        ospf_fsm_trace!(
+            self.tracing,
+            Ifsm,
+            false,
+            "[VL] {} has no route to {} from the RIB after a HelloInterval; sending anyway",
+            link.name,
+            peer_addr
+        );
+        self.vl_route_unwatch(peer_addr);
+        false
     }
 
     /// Copy a virtual link's configuration (interval overrides +
@@ -8432,6 +8554,9 @@ impl Ospf<Ospfv2> {
                     self.pending_hello.insert(index);
                     return;
                 }
+                if self.vl_hello_held(index) {
+                    return;
+                }
                 let now = chrono::Utc::now();
                 let chains = &self.key_chains;
                 let tracing = &self.tracing;
@@ -8662,6 +8787,16 @@ impl Ospf<Ospfv2> {
             }
             RibRx::AddrDel(addr) => {
                 self.addr_del(addr);
+            }
+            // The route a virtual link's first Hello waits for.
+            RibRx::NexthopUpdate {
+                nh: std::net::IpAddr::V4(nh),
+                resolution,
+                ..
+            } => {
+                if resolution.reachable {
+                    self.vl_route_ready(nh);
+                }
             }
             // Redistribute delivery. Today only `Connected` is
             // subscribed (per-area NSSA redistribute connected); the
@@ -25263,6 +25398,8 @@ mod gr_helper_tests {
             peer_addr: v2_addr(P),
             first_hop_addr: v2_addr(P),
             first_hop_ifindex: 3,
+            hello_hold: None,
+            hello_due: false,
         });
         v2_receive(&mut top, 3, P, v2_grace_naming(P, v2_addr(P))).await;
         let msg = Message::Nfsm(3, v2_addr(P), SeqNumberMismatch);
@@ -29589,5 +29726,247 @@ mod own_adj_sid_label_tests {
             own_adj_sid_label(&SidLabelTlv::Label(15001), srgb, None),
             Some((15001, 0))
         );
+    }
+}
+
+#[cfg(test)]
+mod virtual_link_tests {
+    //! A virtual link's first Hello waits for the route to its far end
+    //! (`VirtualLinkState::hello_hold`).
+
+    use std::net::IpAddr;
+
+    use super::link_scope_tests::{P, v2_addr, v2_top};
+    use super::*;
+    use crate::rib::client::{ProtoId, RibClient, RibInbound};
+    use crate::rib::nht::NexthopResolution;
+
+    const AREA1: Ipv4Addr = Ipv4Addr::new(0, 0, 0, 1);
+    const NO_HELLO: [Ipv4Addr; 0] = [];
+    const NO_WATCH: [(bool, Ipv4Addr); 0] = [];
+
+    /// `v2_top` with link 3 in transit area 1, a virtual link through
+    /// that area to P configured, and the area's SPF reaching P as link
+    /// 3's neighbour: all `vl_reconcile` needs to bring the link up.
+    struct Lab {
+        top: Ospf,
+        /// The packets the instance queued for sending.
+        sent: UnboundedReceiver<Message>,
+        /// What the instance sent to the RIB.
+        rib: UnboundedReceiver<RibInbound>,
+    }
+
+    fn lab() -> Lab {
+        let mut top = v2_top();
+        top.in_commit = false;
+        let (ptx, sent) = mpsc::unbounded_channel();
+        top.ptx = ptx;
+        let (rib_tx, rib) = mpsc::unbounded_channel();
+        top.ctx.rib = RibClient::new(rib_tx, ProtoId::from_raw(1));
+
+        top.areas.get_mut(AREA0).unwrap().links.remove(&3);
+        let area = top.areas.fetch(AREA1);
+        area.links.insert(3);
+        area.virtual_links.insert(P, Default::default());
+        let vertex = top.lsp_map.get(P);
+        let mut path = spf::Path::new(vertex);
+        path.cost = 10;
+        path.nexthops.insert(vec![vertex]);
+        top.spf_results
+            .insert(AREA1, BTreeMap::from([(vertex, path)]));
+        Lab { top, sent, rib }
+    }
+
+    impl Lab {
+        /// The virtual link's index.
+        fn vl(&self) -> u32 {
+            let vl = self.top.links.values().find(|l| l.vl.is_some());
+            vl.expect("a virtual link").index
+        }
+
+        /// Run the interface events and Hello timers queued for the
+        /// virtual link, and give the destinations of the Hellos it sent.
+        /// Its periodic timer is taken away, so that a test sends each
+        /// `HelloTimer` itself.
+        async fn hellos(&mut self) -> Vec<Ipv4Addr> {
+            let vl = self.vl();
+            loop {
+                let queued: Vec<Message> =
+                    std::iter::from_fn(|| self.top.rx.try_recv().ok()).collect();
+                let mine: Vec<Message> = queued
+                    .into_iter()
+                    .filter(
+                        |m| matches!(m, Message::Ifsm(i, _) | Message::HelloTimer(i) if *i == vl),
+                    )
+                    .collect();
+                if mine.is_empty() {
+                    break;
+                }
+                for msg in mine {
+                    self.top.process_msg(msg).await;
+                }
+                self.top.links.get_mut(&vl).unwrap().timer.hello = None;
+            }
+            std::iter::from_fn(|| self.sent.try_recv().ok())
+                .filter_map(|m| match m {
+                    Message::Send(packet, index, dest, _)
+                        if index == vl && packet.typ == ospf_packet::OspfType::Hello =>
+                    {
+                        dest
+                    }
+                    _ => None,
+                })
+                .collect()
+        }
+
+        /// A Hello comes due on the virtual link.
+        async fn hello_due(&mut self) -> Vec<Ipv4Addr> {
+            let _ = self.top.tx.send(Message::HelloTimer(self.vl()));
+            self.hellos().await
+        }
+
+        /// The addresses the instance asked the RIB to watch (`true`) or
+        /// to stop watching (`false`) since the last call.
+        fn watches(&mut self) -> Vec<(bool, Ipv4Addr)> {
+            std::iter::from_fn(|| self.rib.try_recv().ok())
+                .filter_map(|inbound| match inbound.msg {
+                    rib::Message::NexthopRegister {
+                        nh: IpAddr::V4(nh), ..
+                    } => Some((true, nh)),
+                    rib::Message::NexthopUnregister {
+                        nh: IpAddr::V4(nh), ..
+                    } => Some((false, nh)),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        /// The RIB reports whether it has a route to `nh`.
+        fn route(&mut self, nh: Ipv4Addr, reachable: bool) {
+            self.top.process_rib_msg(RibRx::NexthopUpdate {
+                vrf_id: 0,
+                nh: IpAddr::V4(nh),
+                resolution: NexthopResolution {
+                    reachable,
+                    ..Default::default()
+                },
+            });
+        }
+    }
+
+    /// The link comes up and asks the RIB about the far end. Its first
+    /// Hello is sent when the RIB reports a route, not before: sent at
+    /// once, it was refused by a kernel that had no route yet.
+    #[tokio::test(start_paused = true)]
+    async fn the_first_hello_waits_for_the_route() {
+        let mut lab = lab();
+        let peer = v2_addr(P);
+        lab.top.vl_reconcile();
+
+        assert_eq!(lab.watches(), [(true, peer)]);
+        assert_eq!(lab.hellos().await, NO_HELLO, "held: no route yet");
+        lab.route(peer, false);
+        lab.route(Ipv4Addr::new(203, 0, 113, 1), true);
+        assert_eq!(lab.hellos().await, NO_HELLO, "nor now");
+
+        lab.route(peer, true);
+        assert_eq!(lab.hellos().await, [peer], "the Hello it owed");
+        assert_eq!(lab.watches(), [(false, peer)]);
+
+        // Nothing is held or owed afterwards.
+        assert_eq!(lab.hello_due().await, [peer]);
+        lab.route(peer, true);
+        assert_eq!(lab.hellos().await, NO_HELLO);
+        assert_eq!(lab.watches(), NO_WATCH);
+    }
+
+    /// The RIB answers before the first Hello is due: that Hello is sent
+    /// as usual, and once.
+    #[tokio::test(start_paused = true)]
+    async fn a_route_reported_first_holds_nothing() {
+        let mut lab = lab();
+        let peer = v2_addr(P);
+        lab.top.vl_reconcile();
+        lab.route(peer, true);
+
+        assert_eq!(lab.hellos().await, [peer]);
+        assert_eq!(lab.watches(), [(true, peer), (false, peer)]);
+    }
+
+    /// Without a word from the RIB the Hello goes out one HelloInterval
+    /// after the link came up, when the second Hello always did. A route
+    /// the RIB's tracking does not count, a default route for one, is no
+    /// worse off than before.
+    #[tokio::test(start_paused = true)]
+    async fn the_hello_is_sent_after_one_interval_without_a_route() {
+        let mut lab = lab();
+        let peer = v2_addr(P);
+        lab.top.vl_reconcile();
+        assert_eq!(lab.hellos().await, NO_HELLO);
+
+        tokio::time::advance(Duration::from_secs(9)).await;
+        assert_eq!(lab.hello_due().await, NO_HELLO, "still inside the interval");
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert_eq!(lab.hello_due().await, [peer]);
+        assert_eq!(lab.watches(), [(true, peer), (false, peer)]);
+        assert_eq!(lab.hello_due().await, [peer], "and from then on");
+    }
+
+    /// The far end's address changes while the Hello waits: the wait
+    /// moves to the new address, and the Hello goes there.
+    #[tokio::test(start_paused = true)]
+    async fn the_wait_follows_the_far_end_to_another_address() {
+        let mut lab = lab();
+        let peer = v2_addr(P);
+        let moved = Ipv4Addr::new(198, 51, 100, 9);
+        lab.top.vl_reconcile();
+        assert_eq!(lab.hellos().await, NO_HELLO);
+        assert_eq!(lab.watches(), [(true, peer)]);
+
+        let nbrs = &mut lab.top.links.get_mut(&3).unwrap().nbrs;
+        nbrs.get_mut(&peer).unwrap().ident.prefix = Ipv4Net::new(moved, 24).unwrap();
+        lab.top.vl_reconcile();
+        assert_eq!(lab.watches(), [(true, moved), (false, peer)]);
+
+        lab.route(peer, true);
+        assert_eq!(lab.hellos().await, NO_HELLO, "the old address is not it");
+        lab.route(moved, true);
+        assert_eq!(lab.hellos().await, [moved]);
+    }
+
+    /// A link taken down while its Hello waits stops watching.
+    #[tokio::test(start_paused = true)]
+    async fn a_link_gone_while_waiting_stops_watching() {
+        let mut lab = lab();
+        let peer = v2_addr(P);
+        lab.top.vl_reconcile();
+        assert_eq!(lab.watches(), [(true, peer)]);
+
+        lab.top.areas.get_mut(AREA1).unwrap().virtual_links.clear();
+        lab.top.vl_reconcile();
+        assert!(lab.top.links.values().all(|l| l.vl.is_none()));
+        assert_eq!(lab.watches(), [(false, peer)]);
+    }
+
+    /// A restarting router's kernel kept its routes (RFC 3623): the
+    /// link's Hello goes out at once, as it needs to for the adjacency to
+    /// be back within the grace period.
+    #[tokio::test(start_paused = true)]
+    async fn a_restarting_router_does_not_wait() {
+        let mut lab = lab();
+        let peer = v2_addr(P);
+        lab.top.restarting = Some(super::super::neigh::RestartingState {
+            grace_period: 120,
+            reason: ospf_packet::GraceRestartReason::SoftwareRestart,
+            entered_at: tokio::time::Instant::now(),
+            abort_timer: None,
+            expected_full_count: 0,
+            current_full_count: 0,
+            adjacencies: Default::default(),
+        });
+        lab.top.vl_reconcile();
+
+        assert_eq!(lab.watches(), NO_WATCH);
+        assert_eq!(lab.hellos().await, [peer]);
     }
 }
