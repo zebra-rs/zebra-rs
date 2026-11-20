@@ -121,8 +121,9 @@ pub const OSPF_MIN_LS_ARRIVAL_MS: u32 = 1000;
 /// a deferred re-origination knows which originator to re-run. One
 /// entry per distinct self-LSA the throttle covers (the topology-churn
 /// LSAs — Router-LSA and the per-interface Network-LSA); summaries /
-/// externals re-originate on route changes and are diff-gated, so they
-/// don't storm and aren't tracked here.
+/// externals re-originate on route changes and are diff-gated
+/// (`abr_summary_sync_area`, `Ospf::keeps_own`), so they don't storm
+/// and aren't tracked here.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum LsaGenKey {
     /// The router's own Router-LSA(s) — regenerated for every attached
@@ -406,6 +407,13 @@ pub struct Ospf<V: OspfVersion = Ospfv2> {
     /// spawn paths guarantee a closing `CommitEnd` (the VRF replay
     /// sends a synthetic one), so the seed always clears.
     pub in_commit: bool,
+    /// Set while the exit from a graceful restart brings this router's
+    /// redistributed LSAs in line: each is then originated anew, changed
+    /// or not, as it always was at the exit. Otherwise an LSA this router
+    /// already holds as its own with the same contents is left alone
+    /// ([`Self::keeps_own`]). FRR `ospf6d` has the same exception
+    /// (`finishing_restart`).
+    pub finishing_restart: bool,
     /// Interfaces whose Hello send was deferred by `in_commit`;
     /// flushed (via re-sent `HelloTimer` messages) at `CommitEnd`.
     pub pending_hello: BTreeSet<u32>,
@@ -799,6 +807,29 @@ mod interface_config_path_tests {
 // the v2-shaped tx channel) and produce `OspfInterface<V>` /
 // `&Neighbor<V>` values typed by `V`.
 impl<V: OspfVersion> Ospf<V> {
+    /// Whether `lsa`, built for origination into `area_id`'s database
+    /// (`None`: the AS-scope one), is left as it stands there: this router
+    /// already holds it as its own with the same contents
+    /// ([`Lsdb::originated_same`]).
+    ///
+    /// The originators of the redistributed LSAs ask this before they
+    /// install and flood. They are called for every redistributed prefix
+    /// each time one route changes, and used to originate each of them
+    /// anew: adding 199 routes sent 20,102 LS Updates to a neighbour
+    /// where 199 tell it everything.
+    fn keeps_own(&self, area_id: Option<Ipv4Addr>, lsa: &V::Lsa) -> bool {
+        if self.finishing_restart {
+            return false;
+        }
+        match area_id {
+            Some(area_id) => self
+                .areas
+                .get(area_id)
+                .is_some_and(|area| area.lsdb.originated_same(lsa)),
+            None => self.lsdb_as.originated_same(lsa),
+        }
+    }
+
     /// Keep one timer on the first held Prefix-SID label to run out
     /// (`spf::ilm_hold`). Run after every event: SPF or a block update can
     /// start a hold, and an expiry ends one.
@@ -3131,6 +3162,7 @@ impl Ospf<Ospfv2> {
             gr_config: super::neigh::GracefulRestartConfig::default(),
             spf_interval: SpfIntervalConfig::default(),
             in_commit: true,
+            finishing_restart: false,
             pending_hello: BTreeSet::new(),
             min_ls_interval_ms: OSPF_MIN_LS_INTERVAL_MS,
             min_ls_arrival_ms: OSPF_MIN_LS_ARRIVAL_MS,
@@ -4941,6 +4973,9 @@ impl Ospf<Ospfv2> {
     /// (`nssa_default_lsa_originate`,
     ///  `nssa_redist_connected_originate_one`) own the policy
     /// decision before invoking this builder.
+    ///
+    /// Nothing is originated when the area's database already holds
+    /// this LSA as ours with the same contents ([`Self::keeps_own`]).
     fn nssa_lsa_originate_for_prefix(
         &mut self,
         area_id: Ipv4Addr,
@@ -4988,6 +5023,9 @@ impl Ospf<Ospfv2> {
             );
         }
         lsa.update();
+        if self.keeps_own(Some(area_id), &lsa) {
+            return;
+        }
 
         let flood_lsa = lsa.clone();
         if let Some(area) = self.areas.get_mut(area_id) {
@@ -5022,6 +5060,9 @@ impl Ospf<Ospfv2> {
     /// install it in `lsdb_as`. `metric_type_2 = true` sets the E-bit
     /// (E2); clear = E1. Forwarding address is always 0.0.0.0 (FA=0 →
     /// consumers use the SPF path to this ASBR). Floods AS-wide.
+    ///
+    /// Nothing is originated when `lsdb_as` already holds this LSA as
+    /// ours with the same contents ([`Self::keeps_own`]).
     fn as_external_lsa_originate_for_prefix(
         &mut self,
         prefix: Ipv4Net,
@@ -5057,6 +5098,9 @@ impl Ospf<Ospfv2> {
             );
         }
         lsa.update();
+        if self.keeps_own(None, &lsa) {
+            return;
+        }
 
         let flood_lsa = lsa.clone();
         self.lsdb_as
@@ -6361,6 +6405,9 @@ impl Ospf<Ospfv2> {
                         ls_id,
                         received_seq
                     );
+                    // Only this LSA is originated anew: the copy in the
+                    // database is the neighbour's now, and the others are
+                    // still ours and unchanged (`keeps_own`).
                     self.as_external_redist_resync_all();
                     self.default_originate_resync();
                 } else {
@@ -7307,6 +7354,10 @@ impl Ospf<Ospfv2> {
         // Router-Info refresh clears the gr_capable bit.
         self.router_info_lsa_originate();
         // Redistribution and NSSA translation, held back while restarting.
+        // Every redistributed LSA is originated anew, the unchanged ones
+        // too: a restored one may be old, and its refresh is timed from
+        // the restart.
+        self.finishing_restart = true;
         let area_ids: Vec<Ipv4Addr> = self.areas.iter().map(|(&id, _)| id).collect();
         for area_id in area_ids {
             self.nssa_redist_connected_resync(area_id);
@@ -7314,6 +7365,7 @@ impl Ospf<Ospfv2> {
         self.nssa_translate_resync_all();
         self.as_external_redist_resync_all();
         self.default_originate_resync();
+        self.finishing_restart = false;
         // Our LSAs held while restarting, as received now (§2.3 (5)): those
         // still ours are re-originated, the rest flushed.
         for (area_id, key) in self.relearned_unchanged() {
@@ -8992,6 +9044,7 @@ impl Ospf<Ospfv3> {
             gr_config: super::neigh::GracefulRestartConfig::default(),
             spf_interval: SpfIntervalConfig::default(),
             in_commit: true,
+            finishing_restart: false,
             pending_hello: BTreeSet::new(),
             min_ls_interval_ms: OSPF_MIN_LS_INTERVAL_MS,
             min_ls_arrival_ms: OSPF_MIN_LS_ARRIVAL_MS,
@@ -10130,6 +10183,9 @@ impl Ospf<Ospfv3> {
     /// (§A.4.7). RFC 3101 §2.4 P-bit lives in the prefix-options
     /// field (not the LSA header as in v2); the default-LSA
     /// originator leaves it clear per §2.3.
+    ///
+    /// Nothing is originated when the area's database already holds
+    /// this LSA as ours with the same contents ([`Self::keeps_own`]).
     fn nssa_lsa_originate_for_prefix_v3(
         &mut self,
         area_id: Ipv4Addr,
@@ -10213,6 +10269,9 @@ impl Ospf<Ospfv3> {
             );
         }
         lsa.update();
+        if self.keeps_own(Some(area_id), &lsa) {
+            return;
+        }
 
         let flood_lsa = lsa.clone();
         if let Some(area) = self.areas.get_mut(area_id) {
@@ -10243,7 +10302,9 @@ impl Ospf<Ospfv3> {
     /// sibling of `as_external_lsa_originate_for_prefix`; the body build
     /// mirrors `nssa_lsa_originate_for_prefix_v3` but with the AS-External
     /// LSA type, no P-bit (Propagate is NSSA-only), FA absent, and
-    /// AS-scope install/flood instead of per-area.
+    /// AS-scope install/flood instead of per-area. Like it, originates
+    /// nothing when the LSA is already ours and unchanged
+    /// ([`Self::keeps_own`]).
     fn as_external_lsa_originate_for_prefix_v3(
         &mut self,
         prefix: ipnet::Ipv6Net,
@@ -10306,6 +10367,9 @@ impl Ospf<Ospfv3> {
             );
         }
         lsa.update();
+        if self.keeps_own(None, &lsa) {
+            return;
+        }
 
         let flood_lsa = lsa.clone();
         self.lsdb_as
@@ -11504,6 +11568,8 @@ impl Ospf<Ospfv3> {
         // The Router Information LSA's restart-capable bit clears.
         self.sr_capabilities_v3_originate_all();
         // Redistribution and NSSA translation, held back while restarting.
+        // Every redistributed LSA is originated anew, as in OSPFv2.
+        self.finishing_restart = true;
         let area_ids: Vec<Ipv4Addr> = self.areas.iter().map(|(&id, _)| id).collect();
         for area_id in area_ids {
             self.nssa_redist_connected_resync_v3(area_id);
@@ -11511,6 +11577,7 @@ impl Ospf<Ospfv3> {
         self.nssa_translate_resync_all();
         self.as_external_redist_resync_all_v3();
         self.default_originate_resync_v3();
+        self.finishing_restart = false;
         // Our LSAs held while restarting, as OSPFv2's.
         for (area_id, key) in self.relearned_unchanged() {
             self.self_originated_received_v3(area_id, key);
@@ -19935,6 +20002,7 @@ mod test_support {
             gr_config: crate::ospf::neigh::GracefulRestartConfig::default(),
             spf_interval: SpfIntervalConfig::default(),
             in_commit: true,
+            finishing_restart: false,
             pending_hello: BTreeSet::new(),
             min_ls_interval_ms: OSPF_MIN_LS_INTERVAL_MS,
             min_ls_arrival_ms: OSPF_MIN_LS_ARRIVAL_MS,
@@ -28031,6 +28099,302 @@ mod gr_helper_tests {
             kills_s(&mut top, S),
             "v3: renewed, still silent, S goes down"
         );
+    }
+}
+
+#[cfg(test)]
+mod redistribution_tests {
+    //! A redistributed LSA is originated when it is new or changed, not
+    //! each time a route changes somewhere (`Ospf::keeps_own`): in OSPFv2
+    //! and in OSPFv3.
+
+    use super::super::area::{AreaTypeKind, DefaultOriginate, RedistEntry};
+    use super::super::lsdb::{LsdbEvent, OSPF_MAX_AGE, OspfLsaKey, v2_lsa_key};
+    use super::link_scope_tests::{ME, v2_top, v3_top};
+    use super::*;
+    use crate::rib::{RibSubType, RibType, RouteBatch, RouteEntryV4, RouteEntryV6};
+    use ospf_packet::{OSPFV3_AS_EXTERNAL_LSA_TYPE, OSPFV3_NSSA_LSA_TYPE};
+
+    const AREA1: Ipv4Addr = Ipv4Addr::new(0, 0, 0, 1);
+    /// The sequence number of an LSA's first instance.
+    const FIRST: u32 = 0x8000_0001;
+
+    fn v4(n: u8) -> Ipv4Net {
+        Ipv4Net::new(Ipv4Addr::new(203, 0, n, 0), 24).unwrap()
+    }
+
+    fn v6(n: u16) -> ipnet::Ipv6Net {
+        ipnet::Ipv6Net::new(Ipv6Addr::new(0x2001, 0xdb8, n, 0, 0, 0, 0, 0), 64).unwrap()
+    }
+
+    fn route4(prefix: Ipv4Net) -> RouteBatch {
+        RouteBatch::V4(vec![RouteEntryV4 {
+            prefix,
+            nexthop: Ipv4Addr::UNSPECIFIED,
+            subtype: RibSubType::Default,
+            metric: 0,
+            tag: 0,
+            ifindex: 0,
+        }])
+    }
+
+    fn route6(prefix: ipnet::Ipv6Net) -> RouteBatch {
+        RouteBatch::V6(vec![RouteEntryV6 {
+            prefix,
+            nexthop: Ipv6Addr::UNSPECIFIED,
+            subtype: RibSubType::Default,
+            metric: 0,
+            tag: 0,
+            ifindex: 0,
+        }])
+    }
+
+    /// The AS-external-LSA of a redistributed prefix.
+    fn key4(prefix: Ipv4Net) -> OspfLsaKey {
+        v2_lsa_key(OspfLsType::AsExternal, prefix.network(), ME)
+    }
+
+    fn key6(prefix: ipnet::Ipv6Net) -> OspfLsaKey {
+        (OSPFV3_AS_EXTERNAL_LSA_TYPE, nssa_v3_ls_id(&prefix), ME)
+    }
+
+    /// The sequence number of the LSA at `key`; `None` when there is none,
+    /// or a flushed one.
+    fn seq<V: OspfVersion>(lsdb: &Lsdb<V>, key: OspfLsaKey) -> Option<u32> {
+        let lsa = lsdb.tables.get(&key)?;
+        (lsa.current_age() < OSPF_MAX_AGE).then(|| V::ls_seq_number(lsa.header()))
+    }
+
+    /// The sequence numbers of the LSAs of routes 1 to `n`.
+    fn seqs4(top: &Ospf, n: u8) -> Vec<Option<u32>> {
+        (1..=n).map(|n| seq(&top.lsdb_as, key4(v4(n)))).collect()
+    }
+
+    fn seqs6(top: &Ospf<Ospfv3>, n: u16) -> Vec<Option<u32>> {
+        (1..=n).map(|n| seq(&top.lsdb_as, key6(v6(n)))).collect()
+    }
+
+    /// An OSPFv2 router redistributing static routes 1 to `n`, which the
+    /// RIB delivered one at a time.
+    fn v2_redistributing(n: u8) -> Ospf {
+        let mut top = v2_top();
+        top.redist.insert(RibType::Static, RedistEntry::default());
+        for n in 1..=n {
+            top.route_redist_add(RibType::Static, route4(v4(n)));
+        }
+        top
+    }
+
+    fn v3_redistributing(n: u16) -> Ospf<Ospfv3> {
+        let mut top = v3_top();
+        top.redist.insert(RibType::Static, RedistEntry::default());
+        for n in 1..=n {
+            top.route_redist_add(RibType::Static, route6(v6(n)));
+        }
+        top
+    }
+
+    /// Routes arrive from the RIB one at a time. Each gets its LSA, once,
+    /// and the LSAs of the routes before it are left alone. Every arrival
+    /// used to originate all of them anew: with five routes the first LSA
+    /// ended at sequence number 0x80000005.
+    #[tokio::test(start_paused = true)]
+    async fn a_new_route_originates_its_own_lsa_only() {
+        let top = v2_redistributing(5);
+        assert_eq!(seqs4(&top, 5), [Some(FIRST); 5], "v2");
+
+        let top = v3_redistributing(5);
+        assert_eq!(seqs6(&top, 5), [Some(FIRST); 5], "v3");
+    }
+
+    /// What changes an LSA originates it again, once: another metric, and
+    /// a route that is back after its LSA was flushed. A resync that
+    /// finds nothing changed originates nothing.
+    #[tokio::test(start_paused = true)]
+    async fn only_a_change_originates_an_lsa_again() {
+        // OSPFv2.
+        let mut top = v2_redistributing(3);
+        top.as_external_redist_resync(RibType::Static);
+        top.as_external_redist_resync_all();
+        assert_eq!(seqs4(&top, 3), [Some(FIRST); 3], "v2: nothing changed");
+
+        top.redist.get_mut(&RibType::Static).unwrap().metric = 30;
+        top.as_external_redist_resync(RibType::Static);
+        top.as_external_redist_resync(RibType::Static);
+        assert_eq!(seqs4(&top, 3), [Some(FIRST + 1); 3], "v2: the metric");
+        let lsa = &top.lsdb_as.tables[&key4(v4(1))].data;
+        assert!(matches!(&lsa.lsp, OspfLsp::AsExternal(body) if body.metric == 30));
+
+        top.route_redist_del(RibType::Static, route4(v4(2)));
+        assert_eq!(
+            seqs4(&top, 3),
+            [Some(FIRST + 1), None, Some(FIRST + 1)],
+            "v2: route 2 gone"
+        );
+        top.route_redist_add(RibType::Static, route4(v4(2)));
+        assert_eq!(
+            seqs4(&top, 3),
+            [Some(FIRST + 1), Some(FIRST + 2), Some(FIRST + 1)],
+            "v2: and back"
+        );
+
+        // OSPFv3.
+        let mut top = v3_redistributing(3);
+        top.as_external_redist_resync_v3(RibType::Static);
+        top.as_external_redist_resync_all_v3();
+        assert_eq!(seqs6(&top, 3), [Some(FIRST); 3], "v3: nothing changed");
+
+        top.redist.get_mut(&RibType::Static).unwrap().metric = 30;
+        top.as_external_redist_resync_v3(RibType::Static);
+        top.as_external_redist_resync_v3(RibType::Static);
+        assert_eq!(seqs6(&top, 3), [Some(FIRST + 1); 3], "v3: the metric");
+
+        top.route_redist_del(RibType::Static, route6(v6(2)));
+        assert_eq!(
+            seqs6(&top, 3),
+            [Some(FIRST + 1), None, Some(FIRST + 1)],
+            "v3: route 2 gone"
+        );
+        top.route_redist_add(RibType::Static, route6(v6(2)));
+        assert_eq!(
+            seqs6(&top, 3),
+            [Some(FIRST + 1), Some(FIRST + 2), Some(FIRST + 1)],
+            "v3: and back"
+        );
+    }
+
+    /// A neighbour sends back one of this router's LSAs with a later
+    /// sequence number (RFC 2328 §13.4). That LSA is originated above it,
+    /// although its contents are the ones wanted: the copy now in the
+    /// database is the neighbour's, which nothing would refresh. The
+    /// other LSAs are left alone; all of them used to be originated anew.
+    #[tokio::test(start_paused = true)]
+    async fn an_lsa_learned_back_is_the_only_one_originated_anew() {
+        const LATER: u32 = 0x8000_0009;
+        fn learned_back<V: OspfVersion>(key: OspfLsaKey) -> Message<V> {
+            Message::Lsdb(LsdbEvent::SelfOriginatedReceived, Some(AREA0), key)
+        }
+
+        // OSPFv2.
+        let mut top = v2_redistributing(3);
+        let key = key4(v4(2));
+        let mut back = top.lsdb_as.tables[&key].data.clone();
+        back.h.ls_seq_number = LATER;
+        back.update();
+        let (tx, tracing) = (top.tx.clone(), top.tracing.clone());
+        top.lsdb_as.insert_received(back, &tx, None, &tracing);
+        assert!(!top.lsdb_as.tables[&key].originated, "v2: the neighbour's");
+        top.process_msg(learned_back(key)).await;
+        assert_eq!(
+            seqs4(&top, 3),
+            [Some(FIRST), Some(LATER + 1), Some(FIRST)],
+            "v2"
+        );
+        assert!(top.lsdb_as.tables[&key].originated, "v2: ours again");
+
+        // OSPFv3.
+        let mut top = v3_redistributing(3);
+        let key = key6(v6(2));
+        let mut back = top.lsdb_as.tables[&key].data.clone();
+        back.h.ls_seq_number = LATER;
+        back.update();
+        let (tx, tracing) = (top.tx.clone(), top.tracing.clone());
+        top.lsdb_as.install_lsa(back, &tx, None, &tracing);
+        assert!(!top.lsdb_as.tables[&key].originated, "v3: the neighbour's");
+        top.process_msg(learned_back(key)).await;
+        assert_eq!(
+            seqs6(&top, 3),
+            [Some(FIRST), Some(LATER + 1), Some(FIRST)],
+            "v3"
+        );
+        assert!(top.lsdb_as.tables[&key].originated, "v3: ours again");
+    }
+
+    /// An LSA of this router's own that has reached MaxAge is not one to
+    /// keep: it is originated again.
+    #[tokio::test(start_paused = true)]
+    async fn an_lsa_that_aged_out_is_originated_again() {
+        let mut top = v2_redistributing(1);
+        tokio::time::advance(Duration::from_secs(OSPF_MAX_AGE.into())).await;
+        top.as_external_redist_resync(RibType::Static);
+        assert_eq!(seqs4(&top, 1), [Some(FIRST + 1)], "v2");
+
+        let mut top = v3_redistributing(1);
+        tokio::time::advance(Duration::from_secs(OSPF_MAX_AGE.into())).await;
+        top.as_external_redist_resync_v3(RibType::Static);
+        assert_eq!(seqs6(&top, 1), [Some(FIRST + 1)], "v3");
+    }
+
+    /// The exit from a graceful restart originates every redistributed LSA
+    /// anew, the unchanged ones too, as it always has: one restored from
+    /// the checkpoint may be old, and its refresh is timed from the
+    /// restart.
+    #[tokio::test(start_paused = true)]
+    async fn the_restart_exit_originates_every_lsa_anew() {
+        let restarting = || super::super::neigh::RestartingState {
+            grace_period: 120,
+            reason: ospf_packet::GraceRestartReason::SoftwareRestart,
+            entered_at: tokio::time::Instant::now(),
+            abort_timer: None,
+            expected_full_count: 0,
+            current_full_count: 0,
+            adjacencies: Default::default(),
+        };
+
+        let mut top = v2_redistributing(2);
+        top.restarting = Some(restarting());
+        top.gr_restart_abort();
+        assert_eq!(seqs4(&top, 2), [Some(FIRST + 1); 2], "v2");
+        top.as_external_redist_resync(RibType::Static);
+        assert_eq!(seqs4(&top, 2), [Some(FIRST + 1); 2], "v2: and only then");
+
+        let mut top = v3_redistributing(2);
+        top.restarting = Some(restarting());
+        top.gr_restart_abort_v3();
+        assert_eq!(seqs6(&top, 2), [Some(FIRST + 1); 2], "v3");
+        top.as_external_redist_resync_v3(RibType::Static);
+        assert_eq!(seqs6(&top, 2), [Some(FIRST + 1); 2], "v3: and only then");
+    }
+
+    /// The other LSAs a route change runs through are left alone too: the
+    /// Type-7 of a connected route in an NSSA, and the default route of
+    /// `default-information originate`.
+    #[tokio::test(start_paused = true)]
+    async fn the_nssa_and_default_lsas_are_left_alone_too() {
+        let always = DefaultOriginate {
+            always: true,
+            ..Default::default()
+        };
+
+        // OSPFv2.
+        let mut top = v2_top();
+        let area = top.areas.fetch(AREA1);
+        area.area_type.kind = AreaTypeKind::Nssa;
+        area.redistribute.connected = Some(RedistEntry::default());
+        top.default_originate = Some(always);
+        for n in 1..=3 {
+            top.route_redist_add(RibType::Connected, route4(v4(n)));
+        }
+        let type7 = v2_lsa_key(OspfLsType::NssaAsExternal, v4(1).network(), ME);
+        let default = v2_lsa_key(OspfLsType::AsExternal, Ipv4Addr::UNSPECIFIED, ME);
+        let nssa = &top.areas.get(AREA1).unwrap().lsdb;
+        assert_eq!(seq(nssa, type7), Some(FIRST), "v2: the Type-7");
+        assert_eq!(seq(&top.lsdb_as, default), Some(FIRST), "v2: the default");
+
+        // OSPFv3.
+        let mut top = v3_top();
+        let area = top.areas.fetch(AREA1);
+        area.area_type.kind = AreaTypeKind::Nssa;
+        area.redistribute.connected = Some(RedistEntry::default());
+        top.default_originate = Some(always);
+        for n in 1..=3 {
+            top.route_redist_add(RibType::Connected, route6(v6(n)));
+        }
+        let type7 = (OSPFV3_NSSA_LSA_TYPE, nssa_v3_ls_id(&v6(1)), ME);
+        let default = key6("::/0".parse().unwrap());
+        let nssa = &top.areas.get(AREA1).unwrap().lsdb;
+        assert_eq!(seq(nssa, type7), Some(FIRST), "v3: the Type-7");
+        assert_eq!(seq(&top.lsdb_as, default), Some(FIRST), "v3: the default");
     }
 }
 

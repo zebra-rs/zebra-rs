@@ -348,6 +348,28 @@ This is an LSA storm of the router's own making, and it is the case the
 RFC's Appendix A names as "(g) injecting a large number of external
 routes to OSPF".
 
+**Since fixed (2026-11-19).** The four originators (Type-5 and Type-7,
+in both versions) leave an LSA alone when the database already holds it
+as this router's own with the same contents (`Ospf::keeps_own`). The
+step measured above, 199 routes added to a Full adjacency, now sends 201
+LS Update packets in OSPFv2 and in OSPFv3, and every LSA stays at its
+first sequence number. OSPFv3 was measured before the fix too, with the
+26.11.4 package: 20,102 packets, as OSPFv2.
+
+An unchanged LSA is still originated in three cases:
+
+- **A copy learned back from a neighbor** (RFC 2328 §13.4) is not this
+  router's own. That LSA alone is originated anew, where all of them
+  were.
+- **An LSA at MaxAge.**
+- **The exit from a graceful restart** originates all of them, as it
+  did.
+
+FRR draws the same lines (read at `9b9c7c4138`): `ospf6d` in
+`ospf6_lsa_originate`, `ospfd` by comparing the route it is given with
+the one it holds (`ospf_external_info_add`). Neither applies
+`min-ls-interval` to a single external LSA, and neither does this fix.
+
 ---
 
 ## 5. Other implementations
@@ -473,7 +495,8 @@ Each step is the same change in OSPFv2 and OSPFv3.
 2. **Originate only what changed when redistributing** (§4.5): skip a
    prefix whose LSA would be identical, and put the path under
    `min-ls-interval`. It is independent of the other steps and small, so
-   it can also go first.
+   it can also go first. *Done, without the `min-ls-interval` part
+   (§4.5).*
 3. **Send OSPFv3 packets through the main queue**, as `Message::Recv`,
    which is already generic over the version. This gives OSPFv3 the
    ordering of §3.1 and makes recommendation 2 unnecessary.
