@@ -702,6 +702,21 @@ impl PeerConfig {
     /// latent bug — this method is the only supported way to set the
     /// pair, so the invariant is enforced by the type rather than by
     /// remembering it.
+    /// The per-family graceful-restart settings an OPEN is built from:
+    /// each family's Restart Time (RFC 4724) and long-lived stale time
+    /// (RFC 9494), for the families that set either. Two snapshots compare
+    /// equal exactly when a session's OPEN would carry the same per-family
+    /// part of the two capabilities; the instance-level half is
+    /// [`Self::gr_global`]. A `sub` entry another knob created does not
+    /// count.
+    pub fn effective_graceful_restart(&self) -> BTreeMap<AfiSafi, (Option<u32>, Option<u32>)> {
+        self.sub
+            .iter()
+            .filter(|(_, sub)| sub.graceful_restart.is_some() || sub.llgr.is_some())
+            .map(|(family, sub)| (*family, (sub.graceful_restart, sub.llgr)))
+            .collect()
+    }
+
     /// The effective `add-path` mode per family: what the next OPEN's
     /// ADD-PATH capability is built from. Two snapshots compare equal
     /// exactly when a session's OPEN would carry the same capability.
