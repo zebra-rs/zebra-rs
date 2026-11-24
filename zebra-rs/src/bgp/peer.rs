@@ -1236,9 +1236,9 @@ pub struct Peer {
     pub cap_send: BgpCap,
     pub cap_recv: BgpCap,
     pub cap_map: CapAfiMap,
-    /// The receive path has logged, this session, an UPDATE whose IPv4
-    /// unicast it dropped because the session did not enable the family.
-    pub v4_not_enabled_logged: bool,
+    /// The families for which the receive path has logged, this session,
+    /// an UPDATE it ignored because the session does not carry the family.
+    pub ignored_family_logged: BTreeSet<AfiSafi>,
     /// Adj-RIB-In for the main-owned families (EVPN, flowspec,
     /// BGP-LS). The sharded families' received routes live in
     /// `BgpShard::adj_in` keyed by this peer's `ident` (RIB sharding
@@ -1484,7 +1484,7 @@ impl Peer {
             cap_send: BgpCap::default(),
             cap_recv: BgpCap::default(),
             cap_map: CapAfiMap::new(),
-            v4_not_enabled_logged: false,
+            ignored_family_logged: BTreeSet::new(),
             adj_in: MainAdjIn::new(),
             adj_out: AdjRib::new(),
             max_prefix: Default::default(),

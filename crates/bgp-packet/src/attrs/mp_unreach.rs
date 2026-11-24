@@ -74,6 +74,27 @@ pub enum MpUnreachAttr {
 }
 
 impl MpUnreachAttr {
+    /// The address family the attribute withdraws from, an End-of-RIB
+    /// marker included. Every variant is named, so a new one has to say
+    /// which family it is.
+    pub fn afi_safi(&self) -> (Afi, Safi) {
+        match self {
+            Self::Ipv4Nlri(_) | Self::Ipv4Eor => (Afi::Ip, Safi::Unicast),
+            Self::Ipv6Nlri(_) | Self::Ipv6Eor => (Afi::Ip6, Safi::Unicast),
+            Self::Vpnv4(_) | Self::Vpnv4Eor => (Afi::Ip, Safi::MplsVpn),
+            Self::Vpnv6(_) | Self::Vpnv6Eor => (Afi::Ip6, Safi::MplsVpn),
+            Self::Evpn(_) | Self::EvpnEor => (Afi::L2vpn, Safi::Evpn),
+            Self::Rtcv4(_) | Self::Rtcv4Eor => (Afi::Ip, Safi::Rtc),
+            Self::Rtcv6(_) | Self::Rtcv6Eor => (Afi::Ip6, Safi::Rtc),
+            Self::Mup { afi, .. } => (*afi, Safi::Mup),
+            Self::Flowspec { afi, .. } => (*afi, Safi::Flowspec),
+            Self::Labelv4(_) | Self::Labelv4Eor => (Afi::Ip, Safi::MplsLabel),
+            Self::Labelv6(_) | Self::Labelv6Eor => (Afi::Ip6, Safi::MplsLabel),
+            Self::SrPolicy { afi, .. } => (*afi, Safi::SrTePolicy),
+            Self::LinkState { .. } => (Afi::LinkState, Safi::LinkState),
+        }
+    }
+
     pub fn attr_emit(&self, buf: &mut BytesMut) {
         match self {
             MpUnreachAttr::Vpnv4(withdraw) => {
