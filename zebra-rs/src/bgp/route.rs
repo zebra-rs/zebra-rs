@@ -14003,8 +14003,8 @@ pub fn route_sync_flowspec(peer: &mut Peer, bgp: &mut BgpTop) {
 /// UPDATE's BGP Prefix-SID attribute is malformed. Mirrors the install
 /// match in [`route_from_peer`], routing each AFI/SAFI through its
 /// `*_withdraw` path so any previously-installed copy from this peer is
-/// removed. RTC and any other family that cannot carry a Prefix-SID
-/// attribute fall through the catch-all as a no-op.
+/// removed. RTC membership has no path to withdraw here and is a no-op;
+/// the match names every family, so a new one has to choose.
 fn withdraw_mp_reach(
     peer_id: usize,
     mp: MpReachAttr,
@@ -14072,9 +14072,13 @@ fn withdraw_mp_reach(
                 route_bgpls_withdraw(peer_id, nlri, bgp, peers);
             }
         }
-        _ => {
-            // Rtcv4 / Rtcv6 and any other family that cannot carry a
-            // Prefix-SID attribute — nothing to withdraw.
+        MpReachAttr::Mup { updates, .. } => {
+            for route in updates.iter() {
+                route_mup_withdraw(peer_id, route, bgp, peers);
+            }
+        }
+        MpReachAttr::Rtcv4(_) | MpReachAttr::Rtcv6(_) => {
+            // Nothing to withdraw.
         }
     }
 }
@@ -31237,6 +31241,45 @@ mod inbound_drop_withdraw_tests {
         route_from_peer(id, packet, top, peers, None);
     }
 
+    /// One MUP Interwork Segment Discovery route, always the same key.
+    fn announce_mup(top: &mut BgpTop, peers: &mut PeerMap, id: usize, attr: BgpAttr) {
+        let mut packet = UpdatePacket::new();
+        packet.bgp_attr = Some(attr);
+        packet.mp_update = Some(MpReachAttr::Mup {
+            afi: Afi::Ip,
+            snpa: 0,
+            nhop: IpAddr::V6("2001:db8::2".parse().unwrap()),
+            updates: vec![MupRoute::Isd {
+                id: 0,
+                arch: MupArchitectureType::Gpp5g,
+                rd: "65001:1".parse().unwrap(),
+                prefix: "20.0.3.0/24".parse().unwrap(),
+            }],
+        });
+        route_from_peer(id, packet, top, peers, None);
+    }
+
+    /// MUP paths in the Loc-RIB and in the neighbor's Adj-RIB-In.
+    fn mup_rows(top: &BgpTop, peers: &PeerMap, id: usize) -> (usize, usize) {
+        let loc = top
+            .local_rib
+            .mup
+            .values()
+            .flat_map(|table| table.cands.values())
+            .map(Vec::len)
+            .sum();
+        let adj_in = peers
+            .get_by_idx(id)
+            .unwrap()
+            .adj_in
+            .mup
+            .values()
+            .flat_map(|table| table.0.values())
+            .map(Vec::len)
+            .sum();
+        (loc, adj_in)
+    }
+
     fn v4_rows(top: &BgpTop, prefix: &str) -> usize {
         let prefix: Ipv4Net = prefix.parse().unwrap();
         top.shard.v4.candidates(prefix).len()
@@ -31299,6 +31342,23 @@ mod inbound_drop_withdraw_tests {
         assert_eq!(
             v6_rows(&top, "2001:db8:13:1::/64"),
             0,
+            "looped replacement withdraws"
+        );
+    }
+
+    /// MUP withdraws like every other family: `withdraw_mp_reach` had no
+    /// arm for it, so the looped replacement left the old path in place.
+    #[tokio::test]
+    async fn own_as_loop_withdraws_the_previous_path_mup() {
+        let mut fx = Fx::new();
+        let (mut peers, id) = peers_with(ebgp_peer());
+        let mut top = fx.top();
+        announce_mup(&mut top, &mut peers, id, attr("65001 65009"));
+        assert_eq!(mup_rows(&top, &peers, id), (1, 1), "valid path in");
+        announce_mup(&mut top, &mut peers, id, attr("65001 65100 65009"));
+        assert_eq!(
+            mup_rows(&top, &peers, id),
+            (0, 0),
             "looped replacement withdraws"
         );
     }
