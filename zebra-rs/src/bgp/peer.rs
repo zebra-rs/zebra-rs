@@ -4557,7 +4557,7 @@ pub fn clear_bgp_action(
                 });
                 super::max_prefix::reap_released(bgp, peer_idx);
                 if !released && bgp.peers.get_by_idx(peer_idx).is_some() {
-                    let _ = bgp.tx.try_send(Message::Event(peer_idx, Event::Stop));
+                    bgp.stop_peer(peer_idx);
                 }
             }
             BgpClearOp::SoftBoth => {

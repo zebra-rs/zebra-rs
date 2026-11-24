@@ -108,6 +108,10 @@ pub struct BgpVrf {
     /// (8192) to match the global `Bgp::tx/rx`.
     pub tx: tokio::sync::mpsc::Sender<Message>,
     pub rx: tokio::sync::mpsc::Receiver<Message>,
+    /// Session resets [`Self::stop_peer`] could not put on `tx` because it
+    /// was full; the event loop runs them before its next message. The
+    /// per-VRF mirror of the global `Bgp::pending_stops`.
+    pub pending_stops: std::collections::BTreeSet<usize>,
     /// Priority lane for session-liveness events (keepalive / hold
     /// timer fires), the per-VRF mirror of the global `Bgp::ptx`.
     /// A CE-side ingest burst backs `rx` up with queued UPDATEs;
@@ -923,6 +927,7 @@ impl BgpVrf {
             rib_rx,
             tx,
             rx,
+            pending_stops: std::collections::BTreeSet::new(),
             ptx,
             prx,
             asn,
@@ -1690,9 +1695,7 @@ impl BgpVrf {
             }
         }
         for ident in bounce {
-            let _ = self
-                .tx
-                .try_send(Message::Event(ident, super::super::peer::Event::Stop));
+            self.stop_peer(ident);
         }
         // Push the newly-resolved keys onto the VRF listener so a
         // CE-initiated SYN authenticates passively too.
@@ -1954,9 +1957,7 @@ impl BgpVrf {
         };
         let peer_idx = peer.ident;
         peer.down_reason = Some(super::super::peer::PeerDownReason::BfdDown);
-        let _ = self
-            .tx
-            .try_send(Message::Event(peer_idx, super::super::peer::Event::Stop));
+        self.stop_peer(peer_idx);
     }
 
     /// Subscribe this VRF's reply channel with the policy actor and
@@ -2131,9 +2132,30 @@ impl BgpVrf {
         }
     }
 
+    /// Reset `ident`'s session, as the global `Bgp::stop_peer` does: a
+    /// reset that does not fit on the bounded event queue is kept in
+    /// [`Self::pending_stops`], not dropped.
+    fn stop_peer(&mut self, ident: usize) {
+        if self
+            .tx
+            .try_send(Message::Event(ident, super::super::peer::Event::Stop))
+            .is_err()
+        {
+            self.pending_stops.insert(ident);
+        }
+    }
+
+    /// Run the resets [`Self::stop_peer`] could not queue.
+    fn drain_pending_stops(&mut self) {
+        for ident in std::mem::take(&mut self.pending_stops) {
+            self.process_msg(Message::Event(ident, super::super::peer::Event::Stop));
+        }
+    }
+
     pub async fn event_loop(&mut self) {
         self.open_listeners().await;
         loop {
+            self.drain_pending_stops();
             // Priority lane first: keepalive / hold timer events must
             // not queue behind an ingest backlog on `rx` (see the
             // `ptx` field docs). `try_recv` keeps this non-blocking;
@@ -3738,7 +3760,7 @@ impl BgpVrf {
             String,
         >,
     ) {
-        use super::super::peer::{Event, PeerType};
+        use super::super::peer::PeerType;
         if self.peers.get(&addr).is_none() {
             // Not present (e.g. it never had a remote-as). Treat a
             // reconfigure of an absent peer as an add so a peer that
@@ -3808,7 +3830,7 @@ impl BgpVrf {
             // (`Message::Event(idx, Event::Stop)`). `fsm_stop` returns
             // Idle with no NOTIFICATION; the peer re-dials and OPENs with
             // the new family set / session parameters.
-            let _ = self.tx.try_send(Message::Event(ident, Event::Stop));
+            self.stop_peer(ident);
         }
         // Push a changed/removed MD5 password to the VRF listener (passive
         // side); the active dial already picked it up from `peer.config`.
@@ -4639,6 +4661,77 @@ mod tests {
             }
             assert_eq!(stopped, bounces, "{state:?}");
         }
+    }
+
+    /// The per-VRF twin of `a_bounce_survives_a_full_event_queue`: with
+    /// the VRF's event queue full, a reconfigure's reset waits in
+    /// `pending_stops` and the loop runs it.
+    #[tokio::test]
+    async fn reconfigure_bounce_survives_a_full_event_queue() {
+        use crate::bgp::peer::State;
+        use bgp_packet::{Afi, AfiSafi, Safi};
+
+        let (global_tx, _global_rx) = unbounded_channel::<BgpGlobalMsg>();
+        let ctx = test_ctx_for_vrf(8, "vrf-recfg-full");
+        let (_rib_tx, rib_rx) = mpsc::unbounded_channel();
+        let (mut vrf, _inbox) = BgpVrf::new(
+            "vrf-recfg-full".to_string(),
+            ctx,
+            Ipv4Addr::UNSPECIFIED,
+            65000,
+            /* label */ 16,
+            global_tx,
+            rib_rx,
+        );
+
+        let a: std::net::IpAddr = "192.0.2.1".parse().unwrap();
+        let resolve = || {
+            super::super::spawn::resolve_vrf_peer_config(
+                &a,
+                &crate::bgp::vrf_config::BgpVrfNeighborConfig {
+                    remote_as: Some(65001),
+                    ..Default::default()
+                },
+                &std::collections::BTreeMap::new(),
+            )
+            .unwrap()
+        };
+
+        let (ra, cfg, knobs) = resolve();
+        vrf.process_global_msg(BgpVrfMsg::AddPeer {
+            addr: a,
+            remote_as: ra,
+            config: Box::new(cfg),
+            knobs: Box::new(knobs),
+            policy_refs: std::collections::BTreeMap::new(),
+        });
+        let ident = vrf.peers.get(&a).unwrap().ident;
+        vrf.peers.get_mut(&a).unwrap().state = State::Established;
+        while vrf.rx.try_recv().is_ok() {}
+
+        // The queue takes nothing more.
+        while vrf.tx.try_send(Message::Relisten).is_ok() {}
+        let (ra, mut cfg, knobs) = resolve();
+        cfg.mp.set(AfiSafi::new(Afi::Ip6, Safi::Unicast), true);
+        vrf.process_global_msg(BgpVrfMsg::ReconfigurePeer {
+            addr: a,
+            remote_as: ra,
+            config: Box::new(cfg),
+            knobs: Box::new(knobs),
+            policy_refs: std::collections::BTreeMap::new(),
+        });
+        assert!(
+            vrf.pending_stops.contains(&ident),
+            "the reset is kept, not dropped"
+        );
+
+        vrf.drain_pending_stops();
+        assert!(vrf.pending_stops.is_empty());
+        assert_eq!(
+            vrf.peers.get(&a).unwrap().state,
+            State::Idle,
+            "the session is reset"
+        );
     }
 
     /// A `ReconfigurePeer` for a peer that is not present is treated as an

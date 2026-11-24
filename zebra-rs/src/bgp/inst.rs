@@ -1099,6 +1099,9 @@ pub struct Bgp {
     /// Bounded channel for BGP events (capacity: 8192)
     pub tx: mpsc::Sender<Message>,
     pub rx: mpsc::Receiver<Message>,
+    /// Session resets [`Self::stop_peer`] could not put on `tx` because it
+    /// was full. The event loop runs them before its next message.
+    pub(super) pending_stops: BTreeSet<usize>,
     /// Priority lane for session-liveness events (keepalive / hold
     /// timer fires). During a heavy ingest burst `rx` backs up with
     /// thousands of queued UPDATEs; timer events queued behind them
@@ -1641,6 +1644,7 @@ impl Bgp {
             shards,
             shard_results_rx,
             pending_dumps_v4: DumpBarrierV4::default(),
+            pending_stops: BTreeSet::new(),
             ctx,
             rib_rx,
             nexthop_cache: super::nht::NexthopCache::default(),
@@ -4332,7 +4336,7 @@ impl Bgp {
             if let Some(peer) = self.peers.get_mut_by_idx(ident) {
                 peer.down_reason = Some(super::peer::PeerDownReason::InterfaceDown);
             }
-            let _ = self.tx.try_send(Message::Event(ident, Event::Stop));
+            self.stop_peer(ident);
         }
     }
 
@@ -7931,7 +7935,31 @@ impl Bgp {
     /// messages. And the E-Tree role check re-runs if a Type-2 on a segment
     /// won or lost, whichever path reselected it (a best-path recompute
     /// after a MED knob change has no UPDATE behind it).
+    /// Reset `ident`'s session: the `Event::Stop` a config change, `clear
+    /// bgp`, a BFD or an interface event asks for. The event queue is
+    /// bounded and the reader tasks fill it during an ingest backlog, so a
+    /// reset that does not fit is kept in [`Self::pending_stops`] rather
+    /// than dropped: a lost one leaves the session up on what it negotiated
+    /// before the change, with nothing to say so.
+    pub(super) fn stop_peer(&mut self, ident: usize) {
+        if self
+            .tx
+            .try_send(Message::Event(ident, super::peer::Event::Stop))
+            .is_err()
+        {
+            self.pending_stops.insert(ident);
+        }
+    }
+
+    /// Run the resets [`Self::stop_peer`] could not queue.
+    pub(super) fn drain_pending_stops(&mut self) {
+        for ident in std::mem::take(&mut self.pending_stops) {
+            self.process_msg(Message::Event(ident, super::peer::Event::Stop));
+        }
+    }
+
     pub(super) fn event_upkeep(&mut self) {
+        self.drain_pending_stops();
         self.evpn_dad_drain();
         self.label_chunk_upkeep();
         self.etree_role_drain();
@@ -8819,7 +8847,7 @@ impl Bgp {
             diag = %change.diag,
             "bgp: tearing down peer on bfd-down (RFC 5882 §5)",
         );
-        let _ = self.tx.try_send(Message::Event(peer_idx, Event::Stop));
+        self.stop_peer(peer_idx);
     }
 
     /// Resolve the peer that owns a BFD session, for a `SessionKey`

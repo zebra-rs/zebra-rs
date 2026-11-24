@@ -438,9 +438,7 @@ pub fn config_interface_neighbor_neighbor_group(
         }
     }
     if let Some(ident) = stop {
-        let _ = bgp
-            .tx
-            .try_send(super::inst::Message::Event(ident, super::peer::Event::Stop));
+        bgp.stop_peer(ident);
     }
     // The (re)bound group may supply the remote-as this neighbor was
     // missing — an unmaterialized cfg becomes a dormant peer now. A
