@@ -1,9 +1,10 @@
-//! A family that a session did not enable on our side is not ours to
-//! take, and is ignored; FRR's `bgp_update_receive()` skips a family not
-//! enabled on the peer (`peer->afc`) the same way. Most of these tests use
-//! IPv4 unicast, which has the most forms on the wire; the rule is the
-//! same for every family. A neighbor that sent no Multiprotocol capability
-//! still has IPv4 unicast enabled on our side, so its routes are taken.
+//! A family that a session did not negotiate is not ours to take, and is
+//! ignored: the rule the send side follows. Negotiated means both OPENs
+//! carried the family, or ours did and the neighbor sent no Multiprotocol
+//! capability at all. FRR's `bgp_update_receive()` tests our side alone
+//! (`peer->afc`); this is stricter. Most of these tests use IPv4 unicast,
+//! which has the most forms on the wire; the rule is the same for every
+//! family.
 
 use super::*;
 use crate::bgp::peer::{Peer, PeerType, State};
@@ -207,24 +208,43 @@ async fn ipv4_unicast_from_a_session_without_it_is_ignored() {
     }
 }
 
-/// IPv4 unicast is ours to take when we enabled it, whatever the neighbor
-/// advertised: one that sent no Multiprotocol capability at all speaks
-/// IPv4 unicast (FRR assumes the configured families for it).
+/// IPv4 unicast is ours to take when the session negotiated it: both
+/// OPENs carried it, or ours did and the neighbor sent no Multiprotocol
+/// capability at all, in which case it is taken to speak IPv4 unicast
+/// (`cap_register_recv`). A neighbor whose OPEN had Multiprotocol
+/// capabilities and left IPv4 unicast out did not negotiate it, though we
+/// offered it: the EVPN-only neighbor of a session that keeps our default.
 #[tokio::test]
-async fn ipv4_unicast_enabled_on_our_side_is_taken() {
+async fn ipv4_unicast_is_taken_when_negotiated() {
     for n in [1, 2] {
-        for (who, caps) in [
-            ("negotiated", &[(Afi::Ip, Safi::Unicast, true, true)][..]),
+        for (who, recv, assumed, taken) in [
+            ("both OPENs carried it", true, false, true),
             (
-                "no capability from the neighbor",
-                &[(Afi::Ip, Safi::Unicast, true, false)][..],
+                "no Multiprotocol capability from the neighbor",
+                false,
+                true,
+                true,
             ),
+            ("the neighbor's OPEN left it out", false, false, false),
         ] {
             for (form, packet) in [("NLRI field", plain()), ("MP_REACH", mp_reach())] {
                 let mut bgp = bgp_with(n);
-                let id = add_peer(&mut bgp, caps);
+                let id = add_peer(
+                    &mut bgp,
+                    &[
+                        (Afi::Ip, Safi::Unicast, true, recv),
+                        (Afi::L2vpn, Safi::Evpn, true, !assumed),
+                    ],
+                );
+                bgp.peers
+                    .get_mut_by_idx(id)
+                    .unwrap()
+                    .cap_map
+                    .get_mut(&CapMultiProtocol::new(&Afi::Ip, &Safi::Unicast))
+                    .unwrap()
+                    .assumed = assumed;
                 ingest(&mut bgp, id, packet).await;
-                assert!(learned(&bgp), "{who}, {form} at N={n}: the route is taken");
+                assert_eq!(learned(&bgp), taken, "{who}, {form} at N={n}");
             }
         }
     }
@@ -338,7 +358,7 @@ fn v6_reach() -> UpdatePacket {
 }
 
 /// The rule is not IPv4 unicast's alone: IPv6 unicast and EVPN from a
-/// session that did not enable them are ignored too, and taken from one
+/// session that did not negotiate them are ignored too, and taken from one
 /// that did.
 #[tokio::test]
 async fn other_families_follow_the_same_rule() {
@@ -365,7 +385,7 @@ async fn other_families_follow_the_same_rule() {
     assert_eq!(
         (v6_rows(&bgp), evpn_rows(&bgp)),
         (0, 0),
-        "not enabled: ignored"
+        "not negotiated: ignored"
     );
     ingest(&mut bgp, id, plain()).await;
     assert!(learned(&bgp), "the family the session did enable is taken");
@@ -380,7 +400,11 @@ async fn other_families_follow_the_same_rule() {
     );
     ingest(&mut bgp, id, v6_reach()).await;
     ingest(&mut bgp, id, evpn()).await;
-    assert_eq!((v6_rows(&bgp), evpn_rows(&bgp)), (1, 1), "enabled: taken");
+    assert_eq!(
+        (v6_rows(&bgp), evpn_rows(&bgp)),
+        (1, 1),
+        "negotiated: taken"
+    );
 }
 
 /// An EVPN MP_REACH (an inclusive-multicast route) from 10.0.0.2.
@@ -429,7 +453,9 @@ fn info(out: &str) -> usize {
 async fn the_drop_is_logged_once_per_session() {
     let traced = |out: &str| {
         out.lines()
-            .filter(|l| l.contains("did not enable; ignored") && l.contains("category=\"adj-in\""))
+            .filter(|l| {
+                l.contains("did not negotiate; ignored") && l.contains("category=\"adj-in\"")
+            })
             .count()
     };
     for adj_in in [false, true] {
