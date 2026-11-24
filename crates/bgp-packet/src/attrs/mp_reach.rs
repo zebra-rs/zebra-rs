@@ -120,6 +120,26 @@ pub enum MpReachAttr {
 }
 
 impl MpReachAttr {
+    /// The address family the attribute carries. Every variant is named,
+    /// so a new one has to say which family it is.
+    pub fn afi_safi(&self) -> (Afi, Safi) {
+        match self {
+            Self::Ipv4 { .. } => (Afi::Ip, Safi::Unicast),
+            Self::Ipv6 { .. } => (Afi::Ip6, Safi::Unicast),
+            Self::Vpnv4(_) => (Afi::Ip, Safi::MplsVpn),
+            Self::Vpnv6(_) => (Afi::Ip6, Safi::MplsVpn),
+            Self::Evpn { .. } => (Afi::L2vpn, Safi::Evpn),
+            Self::Rtcv4(_) => (Afi::Ip, Safi::Rtc),
+            Self::Rtcv6(_) => (Afi::Ip6, Safi::Rtc),
+            Self::Mup { afi, .. } => (*afi, Safi::Mup),
+            Self::Flowspec { afi, .. } => (*afi, Safi::Flowspec),
+            Self::Labelv4 { .. } => (Afi::Ip, Safi::MplsLabel),
+            Self::Labelv6 { .. } => (Afi::Ip6, Safi::MplsLabel),
+            Self::SrPolicy { afi, .. } => (*afi, Safi::SrTePolicy),
+            Self::LinkState { .. } => (Afi::LinkState, Safi::LinkState),
+        }
+    }
+
     pub fn attr_emit(&self, buf: &mut BytesMut) {
         match self {
             MpReachAttr::Vpnv4(nlri) => {

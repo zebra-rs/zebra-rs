@@ -1,16 +1,17 @@
-//! IPv4 unicast from a session that did not enable it on our side is not
-//! ours to take, and is ignored; FRR's `bgp_update_receive()` skips a
-//! family not enabled on the peer (`peer->afc`) the same way. A neighbor
-//! that sent no Multiprotocol capability still has IPv4 unicast enabled on
-//! our side, so its routes are taken.
+//! A family that a session did not enable on our side is not ours to
+//! take, and is ignored; FRR's `bgp_update_receive()` skips a family not
+//! enabled on the peer (`peer->afc`) the same way. Most of these tests use
+//! IPv4 unicast, which has the most forms on the wire; the rule is the
+//! same for every family. A neighbor that sent no Multiprotocol capability
+//! still has IPv4 unicast enabled on our side, so its routes are taken.
 
 use super::*;
 use crate::bgp::peer::{Peer, PeerType, State};
 use crate::bgp::route::route_from_peer;
 use crate::test_log::logs;
 use bgp_packet::{
-    Afi, As4Path, BgpAttr, BgpNexthop, CapMultiProtocol, EvpnMulticast, EvpnRoute, Ipv4Nlri,
-    MpReachAttr, MpUnreachAttr, Origin, Safi, UpdatePacket,
+    Afi, AfiSafi, As4Path, BgpAttr, BgpNexthop, CapMultiProtocol, EvpnMulticast, EvpnRoute,
+    Ipv4Nlri, Ipv6Nlri, MpReachAttr, MpUnreachAttr, Origin, Safi, UpdatePacket,
 };
 use std::net::{IpAddr, Ipv4Addr};
 use std::str::FromStr;
@@ -234,7 +235,9 @@ async fn ipv4_unicast_enabled_on_our_side_is_taken() {
 /// MP attributes are not.
 #[test]
 fn strip_takes_every_ipv4_unicast_form_and_nothing_else() {
-    use crate::bgp::route::strip_ipv4_unicast;
+    use crate::bgp::route::strip_families;
+    let v4 = AfiSafi::new(Afi::Ip, Safi::Unicast);
+    let all_but_v4 = |afi, safi| AfiSafi::new(afi, safi) != v4;
     let forms: [(&str, fn(&mut UpdatePacket)); 5] = [
         ("NLRI field", |p| p.ipv4_update.push(nlri())),
         ("Withdrawn Routes", |p| p.ipv4_withdraw.push(nlri())),
@@ -249,7 +252,11 @@ fn strip_takes_every_ipv4_unicast_form_and_nothing_else() {
     for (form, fill) in forms {
         let mut packet = UpdatePacket::new();
         fill(&mut packet);
-        assert!(strip_ipv4_unicast(&mut packet), "{form}: stripped");
+        assert_eq!(
+            strip_families(&mut packet, all_but_v4),
+            vec![v4],
+            "{form}: stripped"
+        );
         assert!(
             packet.ipv4_update.is_empty()
                 && packet.ipv4_withdraw.is_empty()
@@ -262,12 +269,118 @@ fn strip_takes_every_ipv4_unicast_form_and_nothing_else() {
     let mut packet = UpdatePacket::new();
     packet.mp_update = evpn_reach();
     packet.mp_withdraw = Some(MpUnreachAttr::Ipv6Eor);
-    assert!(!strip_ipv4_unicast(&mut packet), "no IPv4 unicast to strip");
+    assert!(
+        strip_families(&mut packet, all_but_v4).is_empty(),
+        "no IPv4 unicast to strip"
+    );
     assert!(
         matches!(packet.mp_update, Some(MpReachAttr::Evpn { .. }))
             && matches!(packet.mp_withdraw, Some(MpUnreachAttr::Ipv6Eor)),
         "the other families stay"
     );
+}
+
+/// Every family the predicate turns down goes, whichever attribute carries
+/// it, and is reported once; an enabled family in the same UPDATE stays.
+#[test]
+fn strip_takes_each_family_not_enabled() {
+    use crate::bgp::route::strip_families;
+    let evpn_only = |afi, safi| (afi, safi) == (Afi::L2vpn, Safi::Evpn);
+
+    let mut packet = plain();
+    packet.ipv4_withdraw.push(nlri());
+    packet.mp_update = evpn_reach();
+    packet.mp_withdraw = Some(MpUnreachAttr::Ipv6Eor);
+    assert_eq!(
+        strip_families(&mut packet, evpn_only),
+        vec![
+            AfiSafi::new(Afi::Ip, Safi::Unicast),
+            AfiSafi::new(Afi::Ip6, Safi::Unicast)
+        ],
+    );
+    assert!(packet.ipv4_update.is_empty() && packet.ipv4_withdraw.is_empty());
+    assert!(packet.mp_withdraw.is_none(), "the IPv6 End-of-RIB goes");
+    assert!(
+        matches!(packet.mp_update, Some(MpReachAttr::Evpn { .. })),
+        "EVPN stays"
+    );
+
+    // An MP_REACH and an MP_UNREACH of one family count once.
+    let mut packet = UpdatePacket::new();
+    packet.mp_update = v6_reach().mp_update;
+    packet.mp_withdraw = Some(MpUnreachAttr::Ipv6Nlri(vec![v6_nlri()]));
+    assert_eq!(
+        strip_families(&mut packet, evpn_only),
+        vec![AfiSafi::new(Afi::Ip6, Safi::Unicast)],
+    );
+    assert!(packet.mp_update.is_none() && packet.mp_withdraw.is_none());
+}
+
+const P6: &str = "2001:db8:50::/64";
+
+fn v6_nlri() -> Ipv6Nlri {
+    Ipv6Nlri {
+        id: 0,
+        prefix: P6.parse().unwrap(),
+    }
+}
+
+/// [`P6`] in an IPv6-unicast MP_REACH_NLRI.
+fn v6_reach() -> UpdatePacket {
+    let mut packet = UpdatePacket::new();
+    packet.bgp_attr = Some(attr());
+    packet.mp_update = Some(MpReachAttr::Ipv6 {
+        snpa: 0,
+        nhop: IpAddr::V6("2001:db8::2".parse().unwrap()),
+        updates: vec![v6_nlri()],
+    });
+    packet
+}
+
+/// The rule is not IPv4 unicast's alone: IPv6 unicast and EVPN from a
+/// session that did not enable them are ignored too, and taken from one
+/// that did.
+#[tokio::test]
+async fn other_families_follow_the_same_rule() {
+    const V4_ONLY: &[(Afi, Safi, bool, bool)] = &[(Afi::Ip, Safi::Unicast, true, true)];
+    let v6_rows = |bgp: &Bgp| bgp.shard.v6.candidates(P6.parse().unwrap()).len();
+    let evpn_rows = |bgp: &Bgp| {
+        bgp.local_rib
+            .evpn
+            .values()
+            .filter(|t| !t.selected.is_empty())
+            .count()
+    };
+    let evpn = || {
+        let mut packet = UpdatePacket::new();
+        packet.bgp_attr = Some(attr());
+        packet.mp_update = evpn_reach();
+        packet
+    };
+
+    let mut bgp = bgp_with(1);
+    let id = add_peer(&mut bgp, V4_ONLY);
+    ingest(&mut bgp, id, v6_reach()).await;
+    ingest(&mut bgp, id, evpn()).await;
+    assert_eq!(
+        (v6_rows(&bgp), evpn_rows(&bgp)),
+        (0, 0),
+        "not enabled: ignored"
+    );
+    ingest(&mut bgp, id, plain()).await;
+    assert!(learned(&bgp), "the family the session did enable is taken");
+
+    let mut bgp = bgp_with(1);
+    let id = add_peer(
+        &mut bgp,
+        &[
+            (Afi::Ip6, Safi::Unicast, true, true),
+            (Afi::L2vpn, Safi::Evpn, true, true),
+        ],
+    );
+    ingest(&mut bgp, id, v6_reach()).await;
+    ingest(&mut bgp, id, evpn()).await;
+    assert_eq!((v6_rows(&bgp), evpn_rows(&bgp)), (1, 1), "enabled: taken");
 }
 
 /// An EVPN MP_REACH (an inclusive-multicast route) from 10.0.0.2.
@@ -331,6 +444,14 @@ async fn the_drop_is_logged_once_per_session() {
             [1, 0, expect, expect],
             "adj-in={adj_in}:\n{first}{second}"
         );
+        // The mark is per family: another one has its own first drop.
+        let third = logs(|| from_peer(&mut bgp, id, v6_reach()));
+        let fourth = logs(|| from_peer(&mut bgp, id, v6_reach()));
+        assert_eq!(
+            [info(&third), info(&fourth)],
+            [1, 0],
+            "adj-in={adj_in}:\n{third}{fourth}"
+        );
     }
 }
 
@@ -341,7 +462,14 @@ async fn the_next_session_logs_its_first_drop_again() {
     let mut bgp = bgp_with(1);
     let id = add_peer(&mut bgp, EVPN_ONLY);
     ingest(&mut bgp, id, plain()).await;
-    assert!(bgp.peers.get_by_idx(id).unwrap().v4_not_enabled_logged);
+    let v4 = AfiSafi::new(Afi::Ip, Safi::Unicast);
+    assert!(
+        bgp.peers
+            .get_by_idx(id)
+            .unwrap()
+            .ignored_family_logged
+            .contains(&v4)
+    );
 
     let mut top = BgpTop {
         router_id: &bgp.router_id,
@@ -365,8 +493,12 @@ async fn the_next_session_logs_its_first_drop_again() {
     };
     crate::bgp::route::route_clean(id, &mut top, &mut bgp.peers, None);
     assert!(
-        !bgp.peers.get_by_idx(id).unwrap().v4_not_enabled_logged,
-        "the session that ended takes its mark with it"
+        bgp.peers
+            .get_by_idx(id)
+            .unwrap()
+            .ignored_family_logged
+            .is_empty(),
+        "the session that ended takes its marks with it"
     );
 
     let first = logs(|| from_peer(&mut bgp, id, plain()));

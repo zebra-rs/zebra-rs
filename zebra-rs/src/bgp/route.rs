@@ -14083,23 +14083,39 @@ fn withdraw_mp_reach(
     }
 }
 
-/// Remove IPv4 unicast from `packet`: the NLRI and Withdrawn Routes
-/// fields, an IPv4-unicast MP_REACH_NLRI and MP_UNREACH_NLRI (End-of-RIB
-/// included). Returns whether there was any.
-pub(super) fn strip_ipv4_unicast(packet: &mut UpdatePacket) -> bool {
-    let mut stripped = !packet.ipv4_update.is_empty() || !packet.ipv4_withdraw.is_empty();
-    packet.ipv4_update.clear();
-    packet.ipv4_withdraw.clear();
-    if matches!(packet.mp_update, Some(MpReachAttr::Ipv4 { .. })) {
-        packet.mp_update = None;
-        stripped = true;
+/// Remove from `packet` every family `enabled` turns down: an
+/// MP_REACH_NLRI and an MP_UNREACH_NLRI (End-of-RIB included) of that
+/// family and, for IPv4 unicast, the NLRI and Withdrawn Routes fields too.
+/// Returns the families removed, each once.
+pub(super) fn strip_families(
+    packet: &mut UpdatePacket,
+    enabled: impl Fn(Afi, Safi) -> bool,
+) -> Vec<AfiSafi> {
+    let mut stripped: Vec<AfiSafi> = Vec::new();
+    let mut note = |afi, safi| {
+        let family = AfiSafi::new(afi, safi);
+        if !stripped.contains(&family) {
+            stripped.push(family);
+        }
+    };
+    if (!packet.ipv4_update.is_empty() || !packet.ipv4_withdraw.is_empty())
+        && !enabled(Afi::Ip, Safi::Unicast)
+    {
+        packet.ipv4_update.clear();
+        packet.ipv4_withdraw.clear();
+        note(Afi::Ip, Safi::Unicast);
     }
-    if matches!(
-        packet.mp_withdraw,
-        Some(MpUnreachAttr::Ipv4Nlri(_) | MpUnreachAttr::Ipv4Eor)
-    ) {
+    if let Some((afi, safi)) = packet.mp_update.as_ref().map(MpReachAttr::afi_safi)
+        && !enabled(afi, safi)
+    {
+        packet.mp_update = None;
+        note(afi, safi);
+    }
+    if let Some((afi, safi)) = packet.mp_withdraw.as_ref().map(MpUnreachAttr::afi_safi)
+        && !enabled(afi, safi)
+    {
         packet.mp_withdraw = None;
-        stripped = true;
+        note(afi, safi);
     }
     stripped
 }
@@ -14119,29 +14135,33 @@ pub fn route_from_peer(
             "recv UPDATE NLRI"
         );
     }
-    // Our side did not enable IPv4 unicast on this session, so its IPv4
-    // unicast is not ours to take; FRR's `bgp_update_receive()` skips a
+    // A family our side did not enable on this session is not ours to
+    // take, whichever family it is; FRR's `bgp_update_receive()` skips a
     // family not enabled on the peer (`peer->afc`) the same way. A neighbor
     // that sent no Multiprotocol capability still counts as enabled here.
     // Each drop goes on the adj-in trace, next to the receive trace; it is
-    // logged at info once per session. After the strip, a withdraw-only UPDATE
-    // looks like an empty one: an End-of-RIB check added later has to run
-    // before this or apply the same test.
-    if let Some(peer) = peers.get_mut_by_idx(peer_id)
-        && !peer.is_afi_safi_enabled(Afi::Ip, Safi::Unicast)
-        && strip_ipv4_unicast(&mut packet)
-    {
-        bgp_adj_in_trace!(
-            peer,
-            "UPDATE for IPv4 unicast, which this session did not enable; ignored"
-        );
-        if !peer.v4_not_enabled_logged {
-            peer.v4_not_enabled_logged = true;
-            tracing::info!(
-                peer = %peer.display_name(),
-                "bgp: UPDATE for IPv4 unicast, which this session did not enable; ignored \
-                 (logged once per session)"
+    // logged at info once per session and family. After the strip, an
+    // UPDATE that carried only such families looks like an empty one: an
+    // End-of-RIB check added later has to run before this or apply the
+    // same test.
+    if let Some(peer) = peers.get_mut_by_idx(peer_id) {
+        let stripped = strip_families(&mut packet, |afi, safi| peer.is_afi_safi_enabled(afi, safi));
+        for family in stripped {
+            bgp_adj_in_trace!(
+                peer,
+                afi = %family.afi,
+                safi = %family.safi,
+                "UPDATE for a family this session did not enable; ignored"
             );
+            if peer.ignored_family_logged.insert(family) {
+                tracing::info!(
+                    peer = %peer.display_name(),
+                    afi = %family.afi,
+                    safi = %family.safi,
+                    "bgp: UPDATE for a family this session did not enable; ignored \
+                     (logged once per session)"
+                );
+            }
         }
     }
     // enforce-first-as (RFC 4271 §6.3's optional first-AS check), judged
@@ -15301,7 +15321,7 @@ pub fn route_clean(
 
     let peer = peers.get_mut_by_idx(peer_id).expect("peer must exist");
     peer.cap_map = CapAfiMap::new();
-    peer.v4_not_enabled_logged = false;
+    peer.ignored_family_logged.clear();
     peer.cap_recv = BgpCap::default();
     peer.opt.clear();
 
@@ -31141,6 +31161,16 @@ mod inbound_drop_withdraw_tests {
         peer
     }
 
+    /// `peer`, with `afi`/`safi` enabled on our side as well.
+    fn with_family(mut peer: Peer, afi: Afi, safi: Safi) -> Peer {
+        peer.cap_map
+            .entries
+            .entry(CapMultiProtocol::new(&afi, &safi))
+            .or_default()
+            .send = true;
+        peer
+    }
+
     fn ebgp_peer() -> Peer {
         peer(PEER_AS, PeerType::EBGP)
     }
@@ -31351,7 +31381,7 @@ mod inbound_drop_withdraw_tests {
     #[tokio::test]
     async fn own_as_loop_withdraws_the_previous_path_mup() {
         let mut fx = Fx::new();
-        let (mut peers, id) = peers_with(ebgp_peer());
+        let (mut peers, id) = peers_with(with_family(ebgp_peer(), Afi::Ip, Safi::Mup));
         let mut top = fx.top();
         announce_mup(&mut top, &mut peers, id, attr("65001 65009"));
         assert_eq!(mup_rows(&top, &peers, id), (1, 1), "valid path in");
@@ -31546,7 +31576,7 @@ mod inbound_drop_withdraw_tests {
     #[tokio::test]
     async fn looped_update_still_records_rtc_membership() {
         let mut fx = Fx::new();
-        let (mut peers, id) = peers_with(ebgp_peer());
+        let (mut peers, id) = peers_with(with_family(ebgp_peer(), Afi::Ip, Safi::Rtc));
         let mut top = fx.top();
         let mut packet = UpdatePacket::new();
         packet.bgp_attr = Some(attr("65001 65100 65009"));
@@ -37247,6 +37277,13 @@ mod eor_stale_expire_tests {
         );
         peer.state = State::Established;
         peer.peer_type = PeerType::IBGP;
+        // The session enabled VPNv4: the receive path ignores an
+        // End-of-RIB for a family it did not enable.
+        peer.cap_map
+            .entries
+            .entry(bgp_packet::CapMultiProtocol::new(&Afi::Ip, &Safi::MplsVpn))
+            .or_default()
+            .send = true;
         peer
     }
 
@@ -37390,14 +37427,20 @@ mod stale_sweep_per_family_tests {
         );
         peer.state = State::Established;
         peer.peer_type = PeerType::IBGP;
-        // The session enabled IPv4 unicast: the receive path ignores an
-        // IPv4-unicast End-of-RIB from one that did not.
+        // The session enabled these families: the receive path ignores an
+        // End-of-RIB for one it did not.
+        for family in [V4U, VPNV4, VPNV6, EVPN] {
+            enable(&mut peer, family, true);
+        }
+        peer
+    }
+
+    fn enable(peer: &mut Peer, family: AfiSafi, on: bool) {
         peer.cap_map
             .entries
-            .entry(bgp_packet::CapMultiProtocol::new(&Afi::Ip, &Safi::Unicast))
+            .entry(bgp_packet::CapMultiProtocol::new(&family.afi, &family.safi))
             .or_default()
-            .send = true;
-        peer
+            .send = on;
     }
 
     fn rd() -> RouteDistinguisher {
@@ -37669,25 +37712,31 @@ mod stale_sweep_per_family_tests {
         assert_eq!(stale_v4vpn(&top, id), 0);
     }
 
-    /// An IPv4-unicast End-of-RIB from a session that did not enable IPv4
-    /// unicast is dropped with the rest of its IPv4 unicast, so it does not
-    /// end the IPv4 stale period: the timer stays.
+    /// An End-of-RIB for a family the session did not enable is dropped
+    /// with the rest of that family, so it does not end the family's stale
+    /// period: the timer stays.
     #[tokio::test]
-    async fn an_ipv4_eor_from_a_session_without_ipv4_unicast_leaves_the_timer() {
-        let mut fx = Fx::new();
-        let mut peer = established_peer();
-        peer.cap_map
-            .entries
-            .entry(bgp_packet::CapMultiProtocol::new(&Afi::Ip, &Safi::Unicast))
-            .or_default()
-            .send = false;
-        let (mut peers, id) = peers_with(peer);
-        arm(&mut peers, id, V4U);
-        let mut top = fx.top();
+    async fn an_eor_from_a_session_without_the_family_leaves_the_timer() {
+        for (family, marker) in [
+            (V4U, MpUnreachAttr::Ipv4Eor),
+            (VPNV4, MpUnreachAttr::Vpnv4Eor),
+            (EVPN, MpUnreachAttr::EvpnEor),
+        ] {
+            let mut fx = Fx::new();
+            let mut peer = established_peer();
+            enable(&mut peer, family, false);
+            let (mut peers, id) = peers_with(peer);
+            arm(&mut peers, id, family);
+            let mut top = fx.top();
 
-        eor(&mut top, &mut peers, id, MpUnreachAttr::Ipv4Eor);
+            eor(&mut top, &mut peers, id, marker);
 
-        assert_eq!(timers(&peers, id), vec![V4U], "the IPv4 stale timer stays");
+            assert_eq!(
+                timers(&peers, id),
+                vec![family],
+                "{family:?}: the stale timer stays"
+            );
+        }
     }
 
     /// The backstop timer is per family too: the VPNv6 timer expiring
