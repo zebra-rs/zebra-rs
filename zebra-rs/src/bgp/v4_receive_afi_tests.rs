@@ -7,6 +7,7 @@
 use super::*;
 use crate::bgp::peer::{Peer, PeerType, State};
 use crate::bgp::route::route_from_peer;
+use crate::test_log::logs;
 use bgp_packet::{
     Afi, As4Path, BgpAttr, BgpNexthop, CapMultiProtocol, EvpnMulticast, EvpnRoute, Ipv4Nlri,
     MpReachAttr, MpUnreachAttr, Origin, Safi, UpdatePacket,
@@ -132,32 +133,35 @@ fn mp_reach() -> UpdatePacket {
     packet
 }
 
-/// Run one UPDATE through the ingest, as the peer's FSM does, and let the
-/// pool (if any) finish with it.
+/// Run one UPDATE through `route_from_peer()`, as the peer's FSM does.
+fn from_peer(bgp: &mut Bgp, id: usize, packet: UpdatePacket) {
+    let mut top = BgpTop {
+        router_id: &bgp.router_id,
+        srv6_ipv6_export: None,
+        local_rib: &mut bgp.local_rib,
+        shard: &mut bgp.shard,
+        tx: &bgp.tx,
+        rib_client: &bgp.ctx.rib,
+        attr_store: &mut bgp.attr_store,
+        update_groups: &mut bgp.update_groups,
+        interface_addrs: &bgp.interface_addrs,
+        vrf_export: None,
+        color_policy: None,
+        flex_algo_routes: None,
+        flex_algo_srv6_routes: None,
+        vrf_import: None,
+        nexthop_cache: None,
+        vrf_transport_v4: None,
+        vrf_transport_v6: None,
+        as_sets_withdraw: bgp.as_sets_withdraw,
+    };
+    route_from_peer(id, packet, &mut top, &mut bgp.peers, bgp.shards.as_ref());
+}
+
+/// Run one UPDATE through the ingest and let the pool (if any) finish
+/// with it.
 async fn ingest(bgp: &mut Bgp, id: usize, packet: UpdatePacket) {
-    {
-        let mut top = BgpTop {
-            router_id: &bgp.router_id,
-            srv6_ipv6_export: None,
-            local_rib: &mut bgp.local_rib,
-            shard: &mut bgp.shard,
-            tx: &bgp.tx,
-            rib_client: &bgp.ctx.rib,
-            attr_store: &mut bgp.attr_store,
-            update_groups: &mut bgp.update_groups,
-            interface_addrs: &bgp.interface_addrs,
-            vrf_export: None,
-            color_policy: None,
-            flex_algo_routes: None,
-            flex_algo_srv6_routes: None,
-            vrf_import: None,
-            nexthop_cache: None,
-            vrf_transport_v4: None,
-            vrf_transport_v6: None,
-            as_sets_withdraw: bgp.as_sets_withdraw,
-        };
-        route_from_peer(id, packet, &mut top, &mut bgp.peers, bgp.shards.as_ref());
-    }
+    from_peer(bgp, id, packet);
     let Some(pool) = bgp.shards.as_ref() else {
         return;
     };
@@ -298,17 +302,34 @@ async fn evpn_next_to_ipv4_in_one_update_is_still_taken() {
     }
 }
 
-/// The drop is logged once per session, not once per UPDATE.
+/// The drop is logged at info once per session, not once per UPDATE. With
+/// `tracing adj-in` on, every drop, the first included, is also on the
+/// adj-in trace.
 #[tokio::test]
 async fn the_drop_is_logged_once_per_session() {
-    let mut bgp = bgp_with(1);
-    let id = add_peer(&mut bgp, EVPN_ONLY);
-    let logged = |bgp: &Bgp| bgp.peers.get_by_idx(id).unwrap().v4_not_enabled_logged;
-    assert!(!logged(&bgp), "nothing logged yet");
-    ingest(&mut bgp, id, plain()).await;
-    assert!(logged(&bgp), "the first drop is logged");
-    ingest(&mut bgp, id, mp_reach()).await;
-    assert!(logged(&bgp), "and the session stays marked");
+    let info = |out: &str| {
+        out.lines()
+            .filter(|l| l.starts_with("INFO ") && l.contains("(logged once per session)"))
+            .count()
+    };
+    let traced = |out: &str| {
+        out.lines()
+            .filter(|l| l.contains("did not enable; ignored") && l.contains("category=\"adj-in\""))
+            .count()
+    };
+    for adj_in in [false, true] {
+        let mut bgp = bgp_with(1);
+        let id = add_peer(&mut bgp, EVPN_ONLY);
+        bgp.peers.get_mut_by_idx(id).unwrap().tracing.adj_in = adj_in;
+        let first = logs(|| from_peer(&mut bgp, id, plain()));
+        let second = logs(|| from_peer(&mut bgp, id, mp_reach()));
+        let expect = if adj_in { 1 } else { 0 };
+        assert_eq!(
+            [info(&first), info(&second), traced(&first), traced(&second)],
+            [1, 0, expect, expect],
+            "adj-in={adj_in}:\n{first}{second}"
+        );
+    }
 }
 
 /// The mark is per session: `route_clean()` clears it, so the next

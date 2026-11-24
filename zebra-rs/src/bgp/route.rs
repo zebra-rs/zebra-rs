@@ -14119,19 +14119,19 @@ pub fn route_from_peer(
     // unicast is not ours to take; FRR's `bgp_update_receive()` skips a
     // family not enabled on the peer (`peer->afc`) the same way. A neighbor
     // that sent no Multiprotocol capability still counts as enabled here.
-    // Logged once per session. After the strip, a withdraw-only UPDATE
+    // Each drop goes on the adj-in trace, next to the receive trace; it is
+    // logged at info once per session. After the strip, a withdraw-only UPDATE
     // looks like an empty one: an End-of-RIB check added later has to run
     // before this or apply the same test.
     if let Some(peer) = peers.get_mut_by_idx(peer_id)
         && !peer.is_afi_safi_enabled(Afi::Ip, Safi::Unicast)
         && strip_ipv4_unicast(&mut packet)
     {
-        if peer.v4_not_enabled_logged {
-            tracing::debug!(
-                peer = %peer.display_name(),
-                "bgp: UPDATE for IPv4 unicast, which this session did not enable; ignored"
-            );
-        } else {
+        bgp_adj_in_trace!(
+            peer,
+            "UPDATE for IPv4 unicast, which this session did not enable; ignored"
+        );
+        if !peer.v4_not_enabled_logged {
             peer.v4_not_enabled_logged = true;
             tracing::info!(
                 peer = %peer.display_name(),
