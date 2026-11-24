@@ -14083,13 +14083,13 @@ fn withdraw_mp_reach(
     }
 }
 
-/// Remove from `packet` every family `enabled` turns down: an
+/// Remove from `packet` every family `carried` turns down: an
 /// MP_REACH_NLRI and an MP_UNREACH_NLRI (End-of-RIB included) of that
 /// family and, for IPv4 unicast, the NLRI and Withdrawn Routes fields too.
 /// Returns the families removed, each once.
 pub(super) fn strip_families(
     packet: &mut UpdatePacket,
-    enabled: impl Fn(Afi, Safi) -> bool,
+    carried: impl Fn(Afi, Safi) -> bool,
 ) -> Vec<AfiSafi> {
     let mut stripped: Vec<AfiSafi> = Vec::new();
     let mut note = |afi, safi| {
@@ -14099,20 +14099,20 @@ pub(super) fn strip_families(
         }
     };
     if (!packet.ipv4_update.is_empty() || !packet.ipv4_withdraw.is_empty())
-        && !enabled(Afi::Ip, Safi::Unicast)
+        && !carried(Afi::Ip, Safi::Unicast)
     {
         packet.ipv4_update.clear();
         packet.ipv4_withdraw.clear();
         note(Afi::Ip, Safi::Unicast);
     }
     if let Some((afi, safi)) = packet.mp_update.as_ref().map(MpReachAttr::afi_safi)
-        && !enabled(afi, safi)
+        && !carried(afi, safi)
     {
         packet.mp_update = None;
         note(afi, safi);
     }
     if let Some((afi, safi)) = packet.mp_withdraw.as_ref().map(MpUnreachAttr::afi_safi)
-        && !enabled(afi, safi)
+        && !carried(afi, safi)
     {
         packet.mp_withdraw = None;
         note(afi, safi);
@@ -14135,30 +14135,34 @@ pub fn route_from_peer(
             "recv UPDATE NLRI"
         );
     }
-    // A family our side did not enable on this session is not ours to
-    // take, whichever family it is; FRR's `bgp_update_receive()` skips a
-    // family not enabled on the peer (`peer->afc`) the same way. A neighbor
-    // that sent no Multiprotocol capability still counts as enabled here.
+    // A family the session did not negotiate is not ours to take,
+    // whichever family it is: the rule the send side follows, so a family
+    // is carried in both directions or in neither. That needs our OPEN to
+    // have carried the family and the neighbor's too, or the neighbor to
+    // have sent no Multiprotocol capability at all (`cap_register_recv`).
+    // FRR's `bgp_update_receive()` tests our side alone (`peer->afc`), so
+    // this is stricter: a neighbor whose OPEN left the family out and that
+    // sends it all the same is ignored.
     // Each drop goes on the adj-in trace, next to the receive trace; it is
     // logged at info once per session and family. After the strip, an
     // UPDATE that carried only such families looks like an empty one: an
     // End-of-RIB check added later has to run before this or apply the
     // same test.
     if let Some(peer) = peers.get_mut_by_idx(peer_id) {
-        let stripped = strip_families(&mut packet, |afi, safi| peer.is_afi_safi_enabled(afi, safi));
+        let stripped = strip_families(&mut packet, |afi, safi| peer.is_afi_safi(afi, safi));
         for family in stripped {
             bgp_adj_in_trace!(
                 peer,
                 afi = %family.afi,
                 safi = %family.safi,
-                "UPDATE for a family this session did not enable; ignored"
+                "UPDATE for a family this session did not negotiate; ignored"
             );
             if peer.ignored_family_logged.insert(family) {
                 tracing::info!(
                     peer = %peer.display_name(),
                     afi = %family.afi,
                     safi = %family.safi,
-                    "bgp: UPDATE for a family this session did not enable; ignored \
+                    "bgp: UPDATE for a family this session did not negotiate; ignored \
                      (logged once per session)"
                 );
             }
@@ -31161,13 +31165,15 @@ mod inbound_drop_withdraw_tests {
         peer
     }
 
-    /// `peer`, with `afi`/`safi` enabled on our side as well.
+    /// `peer`, with `afi`/`safi` negotiated as well.
     fn with_family(mut peer: Peer, afi: Afi, safi: Safi) -> Peer {
-        peer.cap_map
+        let entry = peer
+            .cap_map
             .entries
             .entry(CapMultiProtocol::new(&afi, &safi))
-            .or_default()
-            .send = true;
+            .or_default();
+        entry.send = true;
+        entry.recv = true;
         peer
     }
 
@@ -37277,13 +37283,15 @@ mod eor_stale_expire_tests {
         );
         peer.state = State::Established;
         peer.peer_type = PeerType::IBGP;
-        // The session enabled VPNv4: the receive path ignores an
-        // End-of-RIB for a family it did not enable.
-        peer.cap_map
+        // The session negotiated VPNv4: the receive path ignores an
+        // End-of-RIB for a family it did not.
+        let vpnv4 = peer
+            .cap_map
             .entries
             .entry(bgp_packet::CapMultiProtocol::new(&Afi::Ip, &Safi::MplsVpn))
-            .or_default()
-            .send = true;
+            .or_default();
+        vpnv4.send = true;
+        vpnv4.recv = true;
         peer
     }
 
@@ -37427,20 +37435,23 @@ mod stale_sweep_per_family_tests {
         );
         peer.state = State::Established;
         peer.peer_type = PeerType::IBGP;
-        // The session enabled these families: the receive path ignores an
-        // End-of-RIB for one it did not.
+        // The session negotiated these families: the receive path ignores
+        // an End-of-RIB for one it did not.
         for family in [V4U, VPNV4, VPNV6, EVPN] {
             enable(&mut peer, family, true);
         }
         peer
     }
 
+    /// Both halves of `family`'s negotiation, on or off.
     fn enable(peer: &mut Peer, family: AfiSafi, on: bool) {
-        peer.cap_map
+        let entry = peer
+            .cap_map
             .entries
             .entry(bgp_packet::CapMultiProtocol::new(&family.afi, &family.safi))
-            .or_default()
-            .send = on;
+            .or_default();
+        entry.send = on;
+        entry.recv = on;
     }
 
     fn rd() -> RouteDistinguisher {
@@ -37712,7 +37723,7 @@ mod stale_sweep_per_family_tests {
         assert_eq!(stale_v4vpn(&top, id), 0);
     }
 
-    /// An End-of-RIB for a family the session did not enable is dropped
+    /// An End-of-RIB for a family the session did not negotiate is dropped
     /// with the rest of that family, so it does not end the family's stale
     /// period: the timer stays.
     #[tokio::test]

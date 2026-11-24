@@ -2020,18 +2020,6 @@ impl Peer {
             .is_some_and(|cap| cap.negotiated())
     }
 
-    /// Whether this session enabled `afi`/`safi` on our side: our OPEN
-    /// carried its Multiprotocol capability, built from the configured
-    /// families. Unlike [`Self::is_afi_safi`] it does not need the
-    /// neighbor's capability, so a neighbor that sent none still counts.
-    /// FRR's `peer->afc`.
-    pub fn is_afi_safi_enabled(&self, afi: Afi, safi: Safi) -> bool {
-        self.cap_map
-            .entries
-            .get(&CapMultiProtocol::new(&afi, &safi))
-            .is_some_and(|cap| cap.send)
-    }
-
     /// The configured SRv6 `encapsulation-type` for this peer's IPv6
     /// unicast family (`afi-safi ipv6 encapsulation-type`), or `None`
     /// when unset. See [`AfiSafiEncapType`].
@@ -6001,17 +5989,12 @@ mod cap_map_open_tests {
         let next = fsm_bgp_open(&mut peer, ConnTag::Primary, open_packet(&[EVPN]));
         assert_eq!(next, State::OpenConfirm);
 
-        assert!(
-            !peer.is_afi_safi_enabled(Afi::Ip, Safi::Unicast),
-            "our current OPEN does not carry IPv4 unicast"
-        );
-        assert!(
-            !peer
-                .cap_map
-                .get(&CapMultiProtocol::new(&Afi::Ip, &Safi::Unicast))
-                .is_some_and(|cap| cap.recv),
-            "nor does the neighbor's"
-        );
+        let v4 = peer
+            .cap_map
+            .get(&CapMultiProtocol::new(&Afi::Ip, &Safi::Unicast))
+            .unwrap();
+        assert!(!v4.send, "our current OPEN does not carry IPv4 unicast");
+        assert!(!v4.recv, "nor does the neighbor's");
         assert!(!peer.is_afi_safi(Afi::Ip, Safi::Unicast));
         assert!(peer.is_afi_safi(Afi::L2vpn, Safi::Evpn));
     }
