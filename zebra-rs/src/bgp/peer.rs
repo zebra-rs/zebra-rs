@@ -2944,10 +2944,11 @@ fn process_open(peer: &mut Peer, conn: ConnTag, packet: OpenPacket) -> State {
     peer.opt.as4.recv = packet.bgp_cap.as4.is_some();
     peer.as4 = peer.opt.is_as4();
 
-    // Extended message negotiation (RFC 8654).
-    if peer.cap_send.extended.is_some() && packet.bgp_cap.extended.is_some() {
-        peer.opt.extended_message = true;
-    }
+    // Extended message negotiation (RFC 8654), for this OPEN: assigned,
+    // not only set, so that an earlier attempt which negotiated it and
+    // ended before Established does not leave it on.
+    peer.opt.extended_message =
+        peer.cap_send.extended.is_some() && packet.bgp_cap.extended.is_some();
 
     // Record received capability.
     peer.cap_recv = packet.bgp_cap;
@@ -3501,20 +3502,33 @@ pub async fn peer_read(
     }
 }
 
+/// The parse options a new connection's reader starts with. Nothing is
+/// negotiated yet, so nothing is taken from `peer.opt`: an attempt that
+/// ended before Established leaves its ADD-PATH, extended message and
+/// 4-octet AS state there, `route_clean` being the only place that clears
+/// it. The OPEN this reader parses sets them (`peer_packet_parse`).
+fn reader_parse_option(peer: &Peer) -> ParseOption {
+    ParseOption {
+        // Our half of the RFC 6793 negotiation is fixed before the OPEN
+        // exchange: it is what `build_open_packet` advertises (the knob,
+        // or forced by a local AS with no 2-octet form).
+        as4: Direct {
+            send: peer.config.four_octet || peer.open_local_as() > u16::MAX as u32,
+            recv: false,
+        },
+        // Internal or external, from configuration (RFC 4271 §1.1): the
+        // parser discards a LOCAL_PREF received over an external session
+        // (§5.1.5).
+        peer_type: peer.peer_type.into(),
+        ..Default::default()
+    }
+}
+
 pub fn peer_start_reader(peer: &Peer, conn: ConnId, read_half: OwnedReadHalf) -> Task<()> {
     let ident = peer.ident;
     let tx = peer.tx.clone();
     let config = peer.config.clone();
-    let mut opt = peer.opt.clone();
-    // Our half of the RFC 6793 negotiation is fixed before the OPEN
-    // exchange: it is what `build_open_packet` advertises (the knob, or
-    // forced by a local AS with no 2-octet form). Stamp it here rather
-    // than inherit whatever the previous session negotiated.
-    opt.as4.send = peer.config.four_octet || peer.open_local_as() > u16::MAX as u32;
-    opt.as4.recv = false;
-    // Internal or external, from configuration (RFC 4271 §1.1): the parser
-    // discards a LOCAL_PREF received over an external session (§5.1.5).
-    opt.peer_type = peer.peer_type.into();
+    let opt = reader_parse_option(peer);
     // A fresh connection proves the remote alive right now; without
     // this stamp a pre-flood `last_rx_ms` of 0 would let the very
     // first hold-timer expiry kill a session whose traffic is still
@@ -6030,6 +6044,66 @@ mod cap_map_open_tests {
 
         assert!(!peer.is_afi_safi(Afi::Ip, Safi::Unicast));
         assert!(peer.is_afi_safi(Afi::L2vpn, Safi::Evpn));
+    }
+
+    /// ADD-PATH and extended message are negotiated per OPEN, as the
+    /// families are: an attempt that negotiated them and ended before
+    /// Established does not hand them to a session whose OPEN has neither.
+    #[tokio::test]
+    async fn a_failed_attempt_does_not_leave_addpath_or_extended_message_behind() {
+        let both = AddPathValue {
+            afi: Afi::Ip,
+            safi: Safi::Unicast,
+            send_receive: AddPathSendReceive::SendReceive,
+        };
+        let mut peer = opensent_peer(&[V4]);
+        peer.config.extended_message = true;
+        peer.config.addpath.insert(V4, both.clone());
+        let _ = build_open_packet(&mut peer);
+
+        let mut open = open_packet(&[V4]);
+        open.bgp_cap.extended = Some(CapExtended::default());
+        open.bgp_cap.addpath.insert(V4, both);
+        let next = fsm_bgp_open(&mut peer, ConnTag::Primary, open);
+        assert_eq!(next, State::OpenConfirm);
+        assert!(peer.opt.is_add_path_recv(Afi::Ip, Safi::Unicast));
+        assert!(peer.opt.is_add_path_send(Afi::Ip, Safi::Unicast));
+        assert!(peer.opt.extended_message);
+
+        // The attempt ends before Established (no route_clean), and the
+        // neighbor's next OPEN carries neither capability.
+        peer.state = State::OpenSent;
+        let _ = build_open_packet(&mut peer);
+        let next = fsm_bgp_open(&mut peer, ConnTag::Primary, open_packet(&[V4]));
+        assert_eq!(next, State::OpenConfirm);
+        assert!(!peer.opt.is_add_path_recv(Afi::Ip, Safi::Unicast));
+        assert!(!peer.opt.is_add_path_send(Afi::Ip, Safi::Unicast));
+        assert!(!peer.opt.extended_message);
+    }
+
+    /// A new connection's reader starts with nothing negotiated, whatever
+    /// an earlier attempt left in `peer.opt`. What comes from
+    /// configuration, our 4-octet AS half and the session type, is kept.
+    #[tokio::test]
+    async fn a_new_reader_starts_with_nothing_negotiated() {
+        let mut peer = opensent_peer(&[V4]);
+        peer.opt.extended_message = true;
+        peer.opt.as4.recv = true;
+        peer.opt.add_path.insert(
+            V4,
+            Direct {
+                send: true,
+                recv: true,
+            },
+        );
+
+        let opt = reader_parse_option(&peer);
+        assert!(opt.add_path.is_empty());
+        assert!(!opt.extended_message);
+        assert!(!opt.as4.recv);
+        assert_eq!(opt.as4.send, peer.config.four_octet);
+        let session_type: BgpPeerType = peer.peer_type.into();
+        assert_eq!(opt.peer_type, session_type);
     }
 
     /// The assumption belongs to the OPEN it was made for: an attempt that
