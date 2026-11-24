@@ -5,10 +5,13 @@
 //! included.
 
 use super::*;
+use crate::bgp::cap::{CapAfiMap, cap_register_recv, cap_register_send};
 use crate::bgp::peer::{Peer, PeerType, State};
 use crate::bgp::route::route_sync;
 use crate::rib::RibType;
-use bgp_packet::{Afi, BgpPacket, CapMultiProtocol, MpReachAttr, ParseOption, Safi};
+use bgp_packet::{
+    Afi, AfiSafi, BgpCap, BgpPacket, CapMultiProtocol, MpReachAttr, ParseOption, Safi,
+};
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -67,6 +70,20 @@ fn add_peer(bgp: &mut Bgp, addr: &str, families: &[(Afi, Safi)]) -> (usize, Rx) 
 /// An Established eBGP neighbor at `addr`: each family with whether we
 /// sent its capability and whether the neighbor did.
 fn add_peer_with(bgp: &mut Bgp, addr: &str, caps: &[(Afi, Safi, bool, bool)]) -> (usize, Rx) {
+    add_peer_cap_map(bgp, addr, |cap_map| {
+        for (afi, safi, send, recv) in caps {
+            let entry = cap_map
+                .entries
+                .entry(CapMultiProtocol::new(afi, safi))
+                .or_default();
+            entry.send = *send;
+            entry.recv = *recv;
+        }
+    })
+}
+
+/// An Established eBGP neighbor at `addr` whose `cap_map` is set by `caps`.
+fn add_peer_cap_map(bgp: &mut Bgp, addr: &str, caps: impl FnOnce(&mut CapAfiMap)) -> (usize, Rx) {
     let (tx, rx) = mpsc::channel(64);
     Box::leak(Box::new(rx));
     let ip: IpAddr = addr.parse().unwrap();
@@ -83,15 +100,7 @@ fn add_peer_with(bgp: &mut Bgp, addr: &str, caps: &[(Afi, Safi, bool, bool)]) ->
     peer.state = State::Established;
     peer.peer_type = PeerType::EBGP;
     peer.param.local_addr = Some("10.0.0.99:179".parse().unwrap());
-    for (afi, safi, send, recv) in caps {
-        let entry = peer
-            .cap_map
-            .entries
-            .entry(CapMultiProtocol::new(afi, safi))
-            .or_default();
-        entry.send = *send;
-        entry.recv = *recv;
-    }
+    caps(&mut peer.cap_map);
     let (ptx, prx) = mpsc::unbounded_channel();
     peer.packet_tx = Some(ptx);
     bgp.peers.insert(ip, peer);
@@ -245,6 +254,32 @@ async fn ipv4_unicast_offered_by_one_side_only_is_not_negotiated() {
             "nothing in IPv4 unicast with send={send} recv={recv}"
         );
     }
+}
+
+/// A neighbor whose OPEN carried no Multiprotocol capability did not
+/// negotiate, and is taken to support IPv4 unicast, as FRR does. Its IPv4
+/// routes are taken, so it is sent ours.
+#[tokio::test]
+async fn a_neighbor_without_multiprotocol_capability_is_sent_the_ipv4_table() {
+    let mut bgp = sharded_bgp();
+    bgp.route_redist_inject(RibType::Static, PREFIX.parse().unwrap(), 10);
+    settle(&mut bgp).await;
+
+    let (c, mut rx) = add_peer_cap_map(&mut bgp, "10.0.0.2", |cap_map| {
+        let mut ours = BgpCap::default();
+        for (afi, safi) in [(Afi::Ip, Safi::Unicast), (Afi::L2vpn, Safi::Evpn)] {
+            ours.mp
+                .insert(AfiSafi::new(afi, safi), CapMultiProtocol::new(&afi, &safi));
+        }
+        cap_register_send(&ours, cap_map);
+        cap_register_recv(&BgpCap::default(), cap_map);
+    });
+    assert!(dump(&mut bgp, c).await, "the pool dumps IPv4 unicast");
+    assert_eq!(
+        sent_v4(&mut rx),
+        (vec![PREFIX.to_string()], 1),
+        "the route, then one IPv4 End-of-RIB"
+    );
 }
 
 /// Under `suppress-fib-pending` main's cursor takes the dump from the pool

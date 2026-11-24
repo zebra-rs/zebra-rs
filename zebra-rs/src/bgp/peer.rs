@@ -2002,14 +2002,10 @@ impl Peer {
     }
 
     pub fn is_afi_safi(&self, afi: Afi, safi: Safi) -> bool {
-        let afi = CapMultiProtocol::new(&afi, &safi);
-        if let Some(cap) = self.cap_map.entries.get(&afi)
-            && cap.send
-            && cap.recv
-        {
-            return true;
-        }
-        false
+        self.cap_map
+            .entries
+            .get(&CapMultiProtocol::new(&afi, &safi))
+            .is_some_and(|cap| cap.negotiated())
     }
 
     /// Whether this session enabled `afi`/`safi` on our side: our OPEN
@@ -5992,6 +5988,64 @@ mod cap_map_open_tests {
         );
         assert!(!peer.is_afi_safi(Afi::Ip, Safi::Unicast));
         assert!(peer.is_afi_safi(Afi::L2vpn, Safi::Evpn));
+    }
+
+    /// A neighbor whose OPEN carries no Multiprotocol capability is taken
+    /// to support the families FRR assumes, so the ones we enabled are
+    /// carried in both directions. VPNv4 is not on that list.
+    #[tokio::test]
+    async fn an_open_without_multiprotocol_capability_carries_the_enabled_families() {
+        let vpnv4 = AfiSafi::new(Afi::Ip, Safi::MplsVpn);
+        let mut peer = opensent_peer(&[V4, EVPN, vpnv4]);
+        let _ = build_open_packet(&mut peer);
+        let next = fsm_bgp_open(&mut peer, ConnTag::Primary, open_packet(&[]));
+        assert_eq!(next, State::OpenConfirm);
+
+        assert!(peer.is_afi_safi(Afi::Ip, Safi::Unicast));
+        assert!(peer.is_afi_safi(Afi::L2vpn, Safi::Evpn));
+        assert!(!peer.is_afi_safi(Afi::Ip, Safi::MplsVpn), "not assumed");
+        assert!(
+            !peer.is_afi_safi(Afi::Ip6, Safi::Unicast),
+            "assumed, but not enabled on our side"
+        );
+        let v4 = peer
+            .cap_map
+            .get(&CapMultiProtocol::new(&Afi::Ip, &Safi::Unicast))
+            .unwrap();
+        assert!(!v4.recv, "`recv` stays what was on the wire");
+        assert_eq!(
+            v4.desc(),
+            "advertised, taken as supported (no Multiprotocol capability received)"
+        );
+    }
+
+    /// One Multiprotocol capability, for any family, means the neighbor
+    /// negotiates: a family it left out is not carried.
+    #[tokio::test]
+    async fn an_open_with_a_multiprotocol_capability_is_not_assumed_to_have_more() {
+        let mut peer = opensent_peer(&[V4, EVPN]);
+        let _ = build_open_packet(&mut peer);
+        let next = fsm_bgp_open(&mut peer, ConnTag::Primary, open_packet(&[EVPN]));
+        assert_eq!(next, State::OpenConfirm);
+
+        assert!(!peer.is_afi_safi(Afi::Ip, Safi::Unicast));
+        assert!(peer.is_afi_safi(Afi::L2vpn, Safi::Evpn));
+    }
+
+    /// The assumption belongs to the OPEN it was made for: an attempt that
+    /// ends before Established does not pass it to the next one.
+    #[tokio::test]
+    async fn the_assumption_does_not_outlive_its_open() {
+        let mut peer = opensent_peer(&[V4, EVPN]);
+        let _ = build_open_packet(&mut peer);
+        let _ = fsm_bgp_open(&mut peer, ConnTag::Primary, open_packet(&[]));
+        assert!(peer.is_afi_safi(Afi::Ip, Safi::Unicast));
+
+        peer.state = State::OpenSent;
+        let _ = build_open_packet(&mut peer);
+        let next = fsm_bgp_open(&mut peer, ConnTag::Primary, open_packet(&[EVPN]));
+        assert_eq!(next, State::OpenConfirm);
+        assert!(!peer.is_afi_safi(Afi::Ip, Safi::Unicast));
     }
 }
 

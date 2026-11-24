@@ -200,7 +200,7 @@ impl PeerMap {
             .cap_map
             .entries
             .iter()
-            .filter(|(_, sr)| sr.send && sr.recv)
+            .filter(|(_, sr)| sr.negotiated())
             .map(|(mp, _)| {
                 (
                     AfiSafi::new(mp.afi, mp.safi),
@@ -263,7 +263,7 @@ impl PeerMap {
                 continue;
             }
             for (mp, sr) in peer.cap_map.entries.iter() {
-                if !(sr.send && sr.recv) {
+                if !sr.negotiated() {
                     continue;
                 }
                 let expected = peer.opt.is_add_path_send(mp.afi, mp.safi);
@@ -427,6 +427,28 @@ mod tests {
             m.membership().family(Afi::Ip, Safi::MplsVpn).is_none(),
             "non-negotiated family must not be enrolled"
         );
+    }
+
+    /// A family the neighbor is taken to support, its OPEN having no
+    /// Multiprotocol capability, is enrolled like one it advertised.
+    #[test]
+    fn membership_enroll_counts_an_assumed_family() {
+        let mut m = PeerMap::new();
+        let a: IpAddr = Ipv4Addr::new(10, 0, 0, 1).into();
+        let mut peer = make_peer(a);
+        peer.state = State::Established;
+        let key = CapMultiProtocol::new(&Afi::Ip, &Safi::Unicast);
+        let entry = peer.cap_map.entries.get_mut(&key).unwrap();
+        entry.send = true;
+        entry.assumed = true;
+        m.insert(a, peer);
+        let idx = m.get(&a).unwrap().ident;
+
+        m.membership_enroll(idx);
+        m.debug_verify_membership();
+
+        let v4 = m.membership().family(Afi::Ip, Safi::Unicast).unwrap();
+        assert_eq!(v4.classification(idx), Some(false));
     }
 
     /// The fan-out entry points: `established_addpath_idents` /
