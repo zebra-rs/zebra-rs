@@ -9,12 +9,25 @@ use serde::Serialize;
 pub struct SendRecv {
     pub send: bool,
     pub recv: bool,
+    /// The neighbor's OPEN carried no Multiprotocol capability, and this
+    /// is a family it is then taken to support; see [`cap_register_recv`].
+    pub assumed: bool,
 }
 
 impl SendRecv {
+    /// Whether the session carries the family: we advertised it, and the
+    /// neighbor advertised it or is taken to support it. FRR's
+    /// `peer->afc_nego`.
+    pub fn negotiated(&self) -> bool {
+        self.send && (self.recv || self.assumed)
+    }
+
     pub fn desc(&self) -> &str {
         match (self.send, self.recv) {
             (true, true) => "advertised and received",
+            (true, false) if self.assumed => {
+                "advertised, taken as supported (no Multiprotocol capability received)"
+            }
             (true, false) => "advertised",
             (false, true) => "received",
             (false, false) => "",
@@ -74,7 +87,13 @@ impl CapAfiMap {
     }
 }
 
+/// Record the families our current OPEN carries. Bits from an earlier
+/// OPEN of an attempt that never reached Established are cleared, so a
+/// family removed from the configuration since then is not kept.
 pub fn cap_register_send(bgp_cap: &BgpCap, cap_map: &mut CapAfiMap) {
+    for entry in cap_map.entries.values_mut() {
+        entry.send = false;
+    }
     for mp in bgp_cap.mp.values() {
         if let Some(entry) = cap_map.get_mut(mp) {
             entry.send = true;
@@ -82,10 +101,42 @@ pub fn cap_register_send(bgp_cap: &BgpCap, cap_map: &mut CapAfiMap) {
     }
 }
 
+/// The families a neighbor is taken to support when its OPEN carries no
+/// Multiprotocol capability at all: the list in FRR's `bgp_open_receive()`,
+/// less multicast, which zebra-rs does not have.
+const MP_ASSUMED: [(Afi, Safi); 7] = [
+    (Afi::Ip, Safi::Unicast),
+    (Afi::Ip, Safi::MplsLabel),
+    (Afi::Ip, Safi::Flowspec),
+    (Afi::Ip6, Safi::Unicast),
+    (Afi::Ip6, Safi::MplsLabel),
+    (Afi::Ip6, Safi::Flowspec),
+    (Afi::L2vpn, Safi::Evpn),
+];
+
+/// Record the families the neighbor's current OPEN carries, clearing
+/// those of an earlier OPEN as `cap_register_send` does.
+///
+/// A neighbor that sent no Multiprotocol capability, for any family, did
+/// not negotiate: it is taken to support the [`MP_ASSUMED`] families, so
+/// each of those we enabled is carried, as FRR does. Without this such a
+/// neighbor's IPv4 unicast would be taken while it was sent none. `recv`
+/// stays what was on the wire.
 pub fn cap_register_recv(bgp_cap: &BgpCap, cap_map: &mut CapAfiMap) {
+    for entry in cap_map.entries.values_mut() {
+        entry.recv = false;
+        entry.assumed = false;
+    }
     for mp in bgp_cap.mp.values() {
         if let Some(entry) = cap_map.get_mut(mp) {
             entry.recv = true;
+        }
+    }
+    if bgp_cap.mp.is_empty() {
+        for (afi, safi) in MP_ASSUMED {
+            if let Some(entry) = cap_map.get_mut(&CapMultiProtocol::new(&afi, &safi)) {
+                entry.assumed = true;
+            }
         }
     }
 }

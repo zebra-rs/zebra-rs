@@ -14079,6 +14079,27 @@ fn withdraw_mp_reach(
     }
 }
 
+/// Remove IPv4 unicast from `packet`: the NLRI and Withdrawn Routes
+/// fields, an IPv4-unicast MP_REACH_NLRI and MP_UNREACH_NLRI (End-of-RIB
+/// included). Returns whether there was any.
+pub(super) fn strip_ipv4_unicast(packet: &mut UpdatePacket) -> bool {
+    let mut stripped = !packet.ipv4_update.is_empty() || !packet.ipv4_withdraw.is_empty();
+    packet.ipv4_update.clear();
+    packet.ipv4_withdraw.clear();
+    if matches!(packet.mp_update, Some(MpReachAttr::Ipv4 { .. })) {
+        packet.mp_update = None;
+        stripped = true;
+    }
+    if matches!(
+        packet.mp_withdraw,
+        Some(MpUnreachAttr::Ipv4Nlri(_) | MpUnreachAttr::Ipv4Eor)
+    ) {
+        packet.mp_withdraw = None;
+        stripped = true;
+    }
+    stripped
+}
+
 pub fn route_from_peer(
     peer_id: usize,
     mut packet: UpdatePacket,
@@ -14093,6 +14114,31 @@ pub fn route_from_peer(
             withdraws = packet.ipv4_withdraw.len(),
             "recv UPDATE NLRI"
         );
+    }
+    // Our side did not enable IPv4 unicast on this session, so its IPv4
+    // unicast is not ours to take; FRR's `bgp_update_receive()` skips a
+    // family not enabled on the peer (`peer->afc`) the same way. A neighbor
+    // that sent no Multiprotocol capability still counts as enabled here.
+    // Each drop goes on the adj-in trace, next to the receive trace; it is
+    // logged at info once per session. After the strip, a withdraw-only UPDATE
+    // looks like an empty one: an End-of-RIB check added later has to run
+    // before this or apply the same test.
+    if let Some(peer) = peers.get_mut_by_idx(peer_id)
+        && !peer.is_afi_safi_enabled(Afi::Ip, Safi::Unicast)
+        && strip_ipv4_unicast(&mut packet)
+    {
+        bgp_adj_in_trace!(
+            peer,
+            "UPDATE for IPv4 unicast, which this session did not enable; ignored"
+        );
+        if !peer.v4_not_enabled_logged {
+            peer.v4_not_enabled_logged = true;
+            tracing::info!(
+                peer = %peer.display_name(),
+                "bgp: UPDATE for IPv4 unicast, which this session did not enable; ignored \
+                 (logged once per session)"
+            );
+        }
     }
     // enforce-first-as (RFC 4271 §6.3's optional first-AS check), judged
     // on the AS_PATH the neighbor sent: before the `local-as` ingress
@@ -15251,6 +15297,7 @@ pub fn route_clean(
 
     let peer = peers.get_mut_by_idx(peer_id).expect("peer must exist");
     peer.cap_map = CapAfiMap::new();
+    peer.v4_not_enabled_logged = false;
     peer.cap_recv = BgpCap::default();
     peer.opt.clear();
 
@@ -37283,6 +37330,13 @@ mod stale_sweep_per_family_tests {
         );
         peer.state = State::Established;
         peer.peer_type = PeerType::IBGP;
+        // The session enabled IPv4 unicast: the receive path ignores an
+        // IPv4-unicast End-of-RIB from one that did not.
+        peer.cap_map
+            .entries
+            .entry(bgp_packet::CapMultiProtocol::new(&Afi::Ip, &Safi::Unicast))
+            .or_default()
+            .send = true;
         peer
     }
 
@@ -37553,6 +37607,27 @@ mod stale_sweep_per_family_tests {
         eor(&mut top, &mut peers, id, MpUnreachAttr::Vpnv4Eor);
         assert!(timers(&peers, id).is_empty());
         assert_eq!(stale_v4vpn(&top, id), 0);
+    }
+
+    /// An IPv4-unicast End-of-RIB from a session that did not enable IPv4
+    /// unicast is dropped with the rest of its IPv4 unicast, so it does not
+    /// end the IPv4 stale period: the timer stays.
+    #[tokio::test]
+    async fn an_ipv4_eor_from_a_session_without_ipv4_unicast_leaves_the_timer() {
+        let mut fx = Fx::new();
+        let mut peer = established_peer();
+        peer.cap_map
+            .entries
+            .entry(bgp_packet::CapMultiProtocol::new(&Afi::Ip, &Safi::Unicast))
+            .or_default()
+            .send = false;
+        let (mut peers, id) = peers_with(peer);
+        arm(&mut peers, id, V4U);
+        let mut top = fx.top();
+
+        eor(&mut top, &mut peers, id, MpUnreachAttr::Ipv4Eor);
+
+        assert_eq!(timers(&peers, id), vec![V4U], "the IPv4 stale timer stays");
     }
 
     /// The backstop timer is per family too: the VPNv6 timer expiring

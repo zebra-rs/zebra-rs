@@ -204,12 +204,13 @@ fn mup_rib_count(
 }
 
 /// Has this peer negotiated a given AFI/SAFI? True iff we advertised the
-/// capability AND the peer advertised it back.
+/// capability AND the peer advertised it back, or sent no Multiprotocol
+/// capability and is taken to support it.
 fn peer_has_negotiated(peer: &Peer, afi: Afi, safi: Safi) -> bool {
     let mp = CapMultiProtocol::new(&afi, &safi);
     peer.cap_map
         .get(&mp)
-        .map(|sr| sr.send && sr.recv)
+        .map(|sr| sr.negotiated())
         .unwrap_or(false)
 }
 
