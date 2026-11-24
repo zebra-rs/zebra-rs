@@ -882,9 +882,7 @@ fn config_route_reflector(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option
     .unwrap_or(false);
     let ident = peer.ident;
     if apply_route_reflector_client(peer, want) {
-        let _ = bgp
-            .tx
-            .try_send(super::inst::Message::Event(ident, super::peer::Event::Stop));
+        bgp.stop_peer(ident);
     }
     Some(())
 }
@@ -1230,9 +1228,7 @@ fn config_route_server_client(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Op
         (peer.ident, apply_route_server_client(peer, want))
     };
     if bounce {
-        let _ = bgp
-            .tx
-            .try_send(super::inst::Message::Event(ident, super::peer::Event::Stop));
+        bgp.stop_peer(ident);
     }
     Some(())
 }
@@ -1305,9 +1301,7 @@ fn config_otc_local_role(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<
         (peer.ident, apply_otc_local_role(peer, want))
     };
     if bounce {
-        let _ = bgp
-            .tx
-            .try_send(super::inst::Message::Event(ident, super::peer::Event::Stop));
+        bgp.stop_peer(ident);
     }
     Some(())
 }
@@ -1338,9 +1332,7 @@ fn config_otc_local_role_strict(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> 
         (peer.ident, apply_otc_local_role(peer, want))
     };
     if bounce {
-        let _ = bgp
-            .tx
-            .try_send(super::inst::Message::Event(ident, super::peer::Event::Stop));
+        bgp.stop_peer(ident);
     }
     Some(())
 }
@@ -1484,9 +1476,7 @@ fn config_local_as(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
         (peer.ident, !matches!(peer.state, super::peer::State::Idle))
     };
     if bounce {
-        let _ = bgp
-            .tx
-            .try_send(super::inst::Message::Event(ident, super::peer::Event::Stop));
+        bgp.stop_peer(ident);
     }
     Some(())
 }
@@ -1998,9 +1988,7 @@ fn config_afi_safi(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     };
 
     if bounce {
-        let _ = bgp
-            .tx
-            .try_send(super::inst::Message::Event(ident, super::peer::Event::Stop));
+        bgp.stop_peer(ident);
     }
     Some(())
 }
@@ -3902,9 +3890,7 @@ fn graceful_restart_resync(bgp: &mut Bgp) {
         }
     }
     for ident in stops {
-        let _ = bgp
-            .tx
-            .try_send(super::inst::Message::Event(ident, super::peer::Event::Stop));
+        bgp.stop_peer(ident);
     }
 }
 
@@ -4557,9 +4543,7 @@ fn config_ttl_security(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()
         (peer.ident, apply_ttl_security(peer, want))
     };
     if bounce {
-        let _ = bgp
-            .tx
-            .try_send(super::inst::Message::Event(ident, super::peer::Event::Stop));
+        bgp.stop_peer(ident);
     }
     Some(())
 }
@@ -4620,9 +4604,7 @@ fn config_ebgp_multihop(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<(
         (peer.ident, apply_ebgp_multihop(peer, want))
     };
     if bounce {
-        let _ = bgp
-            .tx
-            .try_send(super::inst::Message::Event(ident, super::peer::Event::Stop));
+        bgp.stop_peer(ident);
     }
     Some(())
 }
@@ -4799,9 +4781,7 @@ fn config_peer_port(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
         (peer.ident, apply_port(peer, want))
     };
     if bounce {
-        let _ = bgp
-            .tx
-            .try_send(super::inst::Message::Event(ident, super::peer::Event::Stop));
+        bgp.stop_peer(ident);
     }
     Some(())
 }
@@ -4871,9 +4851,7 @@ fn config_disable_connected_check(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -
         (peer.ident, apply_disable_connected_check(peer, want))
     };
     if bounce {
-        let _ = bgp
-            .tx
-            .try_send(super::inst::Message::Event(ident, super::peer::Event::Stop));
+        bgp.stop_peer(ident);
     }
     Some(())
 }
@@ -4932,9 +4910,7 @@ fn config_ip_transparent(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<
     // after a group flip).
     apply_ip_transparent_refresh_all(bgp);
     if bounce {
-        let _ = bgp
-            .tx
-            .try_send(super::inst::Message::Event(ident, super::peer::Event::Stop));
+        bgp.stop_peer(ident);
     }
     Some(())
 }
@@ -5052,9 +5028,7 @@ fn config_peer_tcp_md5_password(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> 
     apply_md5_refresh_for(bgp, addr);
 
     if let Some(ident) = bounce_ident {
-        let _ = bgp
-            .tx
-            .try_send(super::inst::Message::Event(ident, super::peer::Event::Stop));
+        bgp.stop_peer(ident);
     }
 
     Some(())
@@ -5336,9 +5310,7 @@ pub(super) fn apply_ao_refresh_all(bgp: &mut Bgp) {
     // `clear … hard` teardown; the peer re-handshakes from Idle under
     // the new key.
     for ident in bounce {
-        let _ = bgp
-            .tx
-            .try_send(super::inst::Message::Event(ident, super::peer::Event::Stop));
+        bgp.stop_peer(ident);
     }
 }
 
@@ -9231,6 +9203,53 @@ mod neighbor_group_wiring_tests {
                 "{state:?}: a group add-path change",
             );
         }
+    }
+
+    /// A bounce is not lost when the event queue is full, as it is during
+    /// an ingest backlog: the reset waits in `pending_stops`, and the
+    /// event loop's upkeep runs it. It used to be dropped with the
+    /// `try_send` error, leaving the session up on its old OPEN.
+    #[tokio::test]
+    async fn a_bounce_survives_a_full_event_queue() {
+        use crate::bgp::inst::Message;
+        use crate::bgp::peer::State;
+
+        let mut bgp = fresh_bgp();
+        config_peer(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+        let peer_ident = bgp.peers.get(&peer_addr()).unwrap().ident;
+        bgp.peers.get_mut(&peer_addr()).unwrap().state = State::Established;
+        let _ = drain_stop_events(&mut bgp);
+
+        // With room on the queue the reset is queued, as before.
+        config_afi_safi(
+            &mut bgp,
+            arg_words(&["10.0.0.1", "evpn", "true"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+        assert!(bgp.pending_stops.is_empty());
+        assert_eq!(drain_stop_events(&mut bgp), vec![peer_ident]);
+
+        // The queue takes nothing more.
+        while bgp.tx.try_send(Message::Relisten).is_ok() {}
+        config_afi_safi(
+            &mut bgp,
+            arg_words(&["10.0.0.1", "evpn", "true"]),
+            ConfigOp::Delete,
+        )
+        .unwrap();
+        assert!(
+            bgp.pending_stops.contains(&peer_ident),
+            "the reset is kept, not dropped"
+        );
+
+        bgp.event_upkeep();
+        assert!(bgp.pending_stops.is_empty());
+        assert_eq!(
+            bgp.peers.get(&peer_addr()).unwrap().state,
+            State::Idle,
+            "the session is reset"
+        );
     }
 
     /// Enabling a VPN / Labeled-Unicast family takes no labels: labels

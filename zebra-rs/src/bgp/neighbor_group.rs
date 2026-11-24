@@ -33,9 +33,8 @@ use std::collections::BTreeMap;
 use bgp_packet::{AddPathSendReceive, AddPathValue, Afi, AfiSafi, AfiSafis, Safi};
 
 use super::Bgp;
-use super::inst::Message;
 use super::peer::{
-    ALLOWAS_IN_DEFAULT_COUNT, AllowAsIn, Event, Peer, PeerConfig, PeerType, RemovePrivateAs, State,
+    ALLOWAS_IN_DEFAULT_COUNT, AllowAsIn, Peer, PeerConfig, PeerType, RemovePrivateAs, State,
 };
 use super::peer_key::PeerOrigin;
 use super::update_source::UpdateSource;
@@ -1477,7 +1476,7 @@ pub(super) fn sweep_members(
         }
     }
     for ident in stops {
-        let _ = bgp.tx.try_send(Message::Event(ident, Event::Stop));
+        bgp.stop_peer(ident);
     }
 }
 
@@ -1913,7 +1912,7 @@ pub(super) fn sweep_members_inherit(bgp: &mut Bgp, name: &str) {
         }
     }
     for ident in stops {
-        let _ = bgp.tx.try_send(Message::Event(ident, Event::Stop));
+        bgp.stop_peer(ident);
     }
     // Inherited knobs may have changed update-group signature fields on
     // Established members (outbound bindings, as-override, next-hop
@@ -2086,7 +2085,7 @@ fn sweep_peers_for_group(bgp: &mut Bgp, name: &str, new_asn: Option<u32>) {
 
     super::dynamic_neighbors::remove_dynamic_peers(bgp, inactive_dynamic);
     for ident in stops {
-        let _ = bgp.tx.try_send(Message::Event(ident, Event::Stop));
+        bgp.stop_peer(ident);
     }
     for ident in retyped {
         let _ = super::config::bfd_apply_ident(bgp, ident);
