@@ -208,6 +208,22 @@ mod tests {
         }
     }
 
+    /// A neighbor that sets the Reserved octet of its Multiprotocol
+    /// capability still offers the family (RFC 4760 §8: the receiver
+    /// ignores the octet). The lookup used to miss, so the family was
+    /// not negotiated and the neighbor was sent none of it.
+    #[test]
+    fn a_capability_with_the_reserved_octet_set_is_registered() {
+        let (_, cap) = CapabilityPacket::parse_cap(&[1, 4, 0, 1, 0xff, 1]).unwrap();
+        let bgp_cap = BgpCap::from(vec![vec![cap]]);
+        let mut cap_map = CapAfiMap::new();
+        cap_register_recv(&bgp_cap, &mut cap_map);
+        let v4 = cap_map
+            .get(&CapMultiProtocol::new(&Afi::Ip, &Safi::Unicast))
+            .unwrap();
+        assert!(v4.recv, "IPv4 unicast is registered as received");
+    }
+
     /// Negotiated AddPath *send* is gated on the family having the
     /// per-path advertise pipeline. An RTC (or any unimplemented
     /// family) `add-path send` config against a peer offering Receive
