@@ -15321,6 +15321,9 @@ pub fn route_clean(
 
     let peer = peers.get_mut_by_idx(peer_id).expect("peer must exist");
     peer.cap_map = CapAfiMap::new();
+    // A session-up dump still in the pool is this session's: its
+    // completion must find no session to complete.
+    peer.dump_v4_req = None;
     peer.ignored_family_logged.clear();
     peer.cap_recv = BgpCap::default();
     peer.opt.clear();

@@ -8074,6 +8074,21 @@ impl Bgp {
                     sent,
                     advertised,
                 } => {
+                    // The dump belongs to the session that started it. If
+                    // that session has ended (`route_clean` cleared the
+                    // mark), or the peer is gone or runs a later dump, the
+                    // ack is only counted down: its rows would land in an
+                    // Adj-RIB-Out that `route_clean` emptied or that is the
+                    // next session's, and its End-of-RIB on a connection
+                    // that never ran this dump, in whatever state it is in.
+                    let current = self
+                        .peers
+                        .get_by_idx(ident)
+                        .is_some_and(|p| p.dump_v4_req == Some(req_id));
+                    if !current {
+                        let _ = self.pending_dumps_v4.ack(req_id, sent);
+                        continue;
+                    }
                     // At gate-on `adj_out` lives in the egress task (group or
                     // PET), so forward the dump rows there as record-only — the
                     // shard already put the bytes on the wire. Group-task first
@@ -8135,6 +8150,7 @@ impl Bgp {
                             self.enhe_catch_up_v4(done.ident);
                         }
                         if let Some(peer) = self.peers.get_mut_by_idx(done.ident) {
+                            peer.dump_v4_req = None;
                             super::route::send_eor_ipv4_unicast(peer);
                         }
                         tracing::debug!(
@@ -8242,6 +8258,9 @@ impl Bgp {
         };
         let ctx = std::sync::Arc::new(peer.sync_ctx(self.router_id, self.as_sets_withdraw));
         let req_id = self.pending_dumps_v4.start(ident, n, params.enhe);
+        if let Some(peer) = self.peers.get_mut_by_idx(ident) {
+            peer.dump_v4_req = Some(req_id);
+        }
         self.shards
             .as_ref()
             .expect("pool present (checked above)")

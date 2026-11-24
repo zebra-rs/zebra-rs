@@ -1250,6 +1250,12 @@ pub struct Peer {
     /// `ZEBRA_BGP_SYNC_CHUNK` (legacy one-shot `route_sync_ipv4` when
     /// the flag is off, so this stays `None`).
     pub sync_v4: Option<super::route::Ipv4SyncCursor>,
+    /// The `req_id` of the session-up IPv4-unicast dump the shard pool is
+    /// running for this session (N>1, `Bgp::broadcast_dump_v4`). Cleared
+    /// when the dump completes and when the session ends (`route_clean`),
+    /// so the completion of a dump whose session is gone matches nothing
+    /// and is dropped.
+    pub dump_v4_req: Option<u64>,
     /// Per-peer egress task (A2 ⑥ / (a′)). `Some` only at gate-on
     /// (`ZEBRA_BGP_PEER_TASK`) while Established: it owns the v4-unicast
     /// egress off the main loop. `None` at gate-off (egress on main via
@@ -1489,6 +1495,7 @@ impl Peer {
             adj_out: AdjRib::new(),
             max_prefix: Default::default(),
             sync_v4: None,
+            dump_v4_req: None,
             pet: None,
             enhe_next_hop: super::route::EnheNextHop::Off,
             egress_depth: Arc::new(AtomicUsize::new(0)),
