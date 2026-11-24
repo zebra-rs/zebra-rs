@@ -163,6 +163,31 @@ async fn dump(bgp: &mut Bgp, c: usize) -> bool {
     dumped
 }
 
+/// The session ends, as the FSM ends it on leaving Established.
+fn end_session(bgp: &mut Bgp, c: usize) {
+    let mut top = BgpTop {
+        router_id: &bgp.router_id,
+        srv6_ipv6_export: None,
+        local_rib: &mut bgp.local_rib,
+        shard: &mut bgp.shard,
+        tx: &bgp.tx,
+        rib_client: &bgp.ctx.rib,
+        attr_store: &mut bgp.attr_store,
+        update_groups: &mut bgp.update_groups,
+        interface_addrs: &bgp.interface_addrs,
+        vrf_export: None,
+        color_policy: None,
+        flex_algo_routes: None,
+        flex_algo_srv6_routes: None,
+        vrf_import: None,
+        nexthop_cache: None,
+        vrf_transport_v4: None,
+        vrf_transport_v6: None,
+        as_sets_withdraw: bgp.as_sets_withdraw,
+    };
+    crate::bgp::route::route_clean(c, &mut top, &mut bgp.peers, bgp.shards.as_ref());
+}
+
 /// What the neighbor was sent in IPv4 unicast: the prefixes, sorted, and
 /// the number of IPv4 End-of-RIB markers (the bare empty UPDATE).
 fn sent_v4(rx: &mut Rx) -> (Vec<String>, usize) {
@@ -298,4 +323,69 @@ async fn an_evpn_only_neighbor_gets_no_cursor_under_suppress_fib_pending() {
         "main's cursor does not either"
     );
     assert_eq!(sent_v4(&mut rx), (vec![], 0), "nothing in IPv4 unicast");
+}
+
+/// A dump still in the pool when its session ends is not completed: its
+/// rows are not recorded and no End-of-RIB is sent. The acks are matched
+/// to the session that started the dump, not to the peer alone, which may
+/// be down, in a handshake or in its next session by then.
+#[tokio::test]
+async fn a_dump_whose_session_ended_is_not_completed() {
+    let mut bgp = sharded_bgp();
+    bgp.route_redist_inject(RibType::Static, PREFIX.parse().unwrap(), 10);
+    settle(&mut bgp).await;
+
+    let (c, mut rx) = add_peer(&mut bgp, "10.0.0.2", &[(Afi::Ip, Safi::Unicast)]);
+    assert!(bgp.broadcast_dump_v4(c).is_some(), "the pool dumps");
+    end_session(&mut bgp, c);
+    settle(&mut bgp).await;
+
+    let peer = bgp.peers.get_by_idx(c).unwrap();
+    assert_eq!(
+        peer.adj_out.count(Afi::Ip, Safi::Unicast),
+        0,
+        "nothing is recorded for the session that ended"
+    );
+    assert_eq!(sent_v4(&mut rx).1, 0, "no End-of-RIB");
+    assert!(
+        bgp.pending_dumps_v4.inflight.is_empty(),
+        "the acks are still counted down"
+    );
+}
+
+/// The next session's dump is its own: the acks of the dump the ended
+/// session left in the pool do not send an End-of-RIB on it.
+#[tokio::test]
+async fn the_next_session_runs_its_own_dump() {
+    let mut bgp = sharded_bgp();
+    bgp.route_redist_inject(RibType::Static, PREFIX.parse().unwrap(), 10);
+    settle(&mut bgp).await;
+
+    let (c, mut rx) = add_peer(&mut bgp, "10.0.0.2", &[(Afi::Ip, Safi::Unicast)]);
+    let first = bgp.broadcast_dump_v4(c).expect("the pool dumps");
+    end_session(&mut bgp, c);
+
+    // The neighbor is back before the first dump's acks are reduced.
+    {
+        let peer = bgp.peers.get_mut_by_idx(c).unwrap();
+        let entry = peer
+            .cap_map
+            .entries
+            .entry(CapMultiProtocol::new(&Afi::Ip, &Safi::Unicast))
+            .or_default();
+        entry.send = true;
+        entry.recv = true;
+    }
+    let second = bgp.broadcast_dump_v4(c).expect("the pool dumps again");
+    assert_ne!(first, second);
+    settle(&mut bgp).await;
+
+    let peer = bgp.peers.get_by_idx(c).unwrap();
+    assert_eq!(
+        peer.adj_out.count(Afi::Ip, Safi::Unicast),
+        1,
+        "the second dump's row"
+    );
+    assert_eq!(peer.dump_v4_req, None, "the second dump completed");
+    assert_eq!(sent_v4(&mut rx).1, 1, "one End-of-RIB, the second dump's");
 }
