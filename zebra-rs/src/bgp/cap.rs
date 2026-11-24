@@ -166,7 +166,13 @@ pub fn addpath_send_implemented(afi: Afi, safi: Safi) -> bool {
     )
 }
 
+/// Record the ADD-PATH directions the neighbor's current OPEN negotiates.
+/// Those of an earlier OPEN are dropped first: an attempt that ended
+/// before Established never reaches `route_clean`, and a family it
+/// negotiated would otherwise still be parsed and sent with path
+/// identifiers on a session whose OPEN left ADD-PATH out.
 pub fn cap_addpath_recv(bgp_cap: &BgpCap, opt: &mut ParseOption, configs: &AfiSafis<AddPathValue>) {
+    opt.add_path.clear();
     for cap in bgp_cap.addpath.values() {
         for (_, config) in configs.iter() {
             if cap.afi == config.afi && cap.safi == config.safi {
@@ -309,5 +315,26 @@ mod tests {
                 "{afi} {safi} has no per-path advertise pipeline"
             );
         }
+    }
+
+    /// ADD-PATH is what the current OPEN negotiates: a family the
+    /// neighbor's earlier OPEN offered and this one leaves out is dropped.
+    #[test]
+    fn addpath_of_an_earlier_open_is_dropped() {
+        let key = AfiSafi::new(Afi::Ip, Safi::Unicast);
+        let both = || addpath_cap(Afi::Ip, Safi::Unicast, AddPathSendReceive::SendReceive);
+        let mut configs: AfiSafis<AddPathValue> = AfiSafis::new();
+        configs.insert(key, both());
+        let mut offered = BgpCap::default();
+        offered.addpath.insert(key, both());
+
+        let mut opt = ParseOption::default();
+        cap_addpath_recv(&offered, &mut opt, &configs);
+        assert!(opt.is_add_path_recv(Afi::Ip, Safi::Unicast));
+        assert!(opt.is_add_path_send(Afi::Ip, Safi::Unicast));
+
+        cap_addpath_recv(&BgpCap::default(), &mut opt, &configs);
+        assert!(!opt.is_add_path_recv(Afi::Ip, Safi::Unicast));
+        assert!(!opt.is_add_path_send(Afi::Ip, Safi::Unicast));
     }
 }
