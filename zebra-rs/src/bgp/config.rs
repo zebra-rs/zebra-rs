@@ -1984,14 +1984,16 @@ fn config_afi_safi(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
 
         // An AFI/SAFI is a Multiprotocol *capability*, advertised once in
         // the OPEN — the negotiated set is fixed for the life of the
-        // session. So changing the family set on an already-Established
-        // peer has no effect until the session renegotiates: bounce it with
+        // session. So changing the family set once our OPEN is out has no
+        // effect until the session renegotiates: bounce it with
         // `Event::Stop` (the `clear bgp ... hard` teardown) to force a
-        // reconnect that carries the new capability set. A peer still coming
-        // up includes the new family in its first OPEN, so startup config —
-        // applied before the session establishes — never bounces.
+        // reconnect that carries the new capability set. That includes a
+        // peer in OpenSent or OpenConfirm, which would otherwise come up
+        // on the OPEN already sent. A peer that has not sent one yet
+        // builds it from the new set, so startup config — applied before
+        // the connection is up — never bounces.
         let after: std::collections::BTreeSet<AfiSafi> = peer.config.mp.0.keys().copied().collect();
-        let bounce = before != after && matches!(peer.state, super::peer::State::Established);
+        let bounce = before != after && peer.open_sent();
         (peer.ident, bounce)
     };
 
@@ -9131,6 +9133,102 @@ mod neighbor_group_wiring_tests {
             assert!(
                 drain_stop_events(&mut bgp).contains(&peer_ident),
                 "{fam}: re-enabling on an Established peer must bounce",
+            );
+        }
+    }
+
+    /// The OPEN is what carries the family set, so the bounce follows the
+    /// OPEN, not Established: a change made while our OPEN is out
+    /// (OpenSent, OpenConfirm) restarts the attempt, which would otherwise
+    /// come up on the families already sent. Before the OPEN is built
+    /// (Idle, Connect, Active) nothing bounces.
+    #[tokio::test]
+    async fn afi_safi_change_bounces_a_peer_whose_open_is_out() {
+        use crate::bgp::peer::State;
+        for (state, bounces) in [
+            (State::Idle, false),
+            (State::Connect, false),
+            (State::Active, false),
+            (State::OpenSent, true),
+            (State::OpenConfirm, true),
+            (State::Established, true),
+        ] {
+            let mut bgp = fresh_bgp();
+            config_peer(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+            let peer_ident = bgp.peers.get(&peer_addr()).unwrap().ident;
+            bgp.peers.get_mut(&peer_addr()).unwrap().state = state;
+            let _ = drain_stop_events(&mut bgp);
+
+            config_afi_safi(
+                &mut bgp,
+                arg_words(&["10.0.0.1", "evpn", "true"]),
+                ConfigOp::Set,
+            )
+            .unwrap();
+            assert_eq!(
+                drain_stop_events(&mut bgp).contains(&peer_ident),
+                bounces,
+                "{state:?}: enabling a family",
+            );
+
+            config_afi_safi(
+                &mut bgp,
+                arg_words(&["10.0.0.1", "ipv4", "false"]),
+                ConfigOp::Set,
+            )
+            .unwrap();
+            assert_eq!(
+                drain_stop_events(&mut bgp).contains(&peer_ident),
+                bounces,
+                "{state:?}: disabling a family",
+            );
+        }
+    }
+
+    /// The same rule on the group path, for the family set and for
+    /// ADD-PATH, which the same OPEN carries.
+    #[tokio::test]
+    async fn group_afi_safi_change_bounces_a_member_whose_open_is_out() {
+        use super::super::neighbor_group::config_neighbor_group_afi_safi_add_path;
+        use crate::bgp::peer::State;
+        for (state, bounces) in [
+            (State::Connect, false),
+            (State::Active, false),
+            (State::OpenSent, true),
+            (State::OpenConfirm, true),
+        ] {
+            let mut bgp = fresh_bgp();
+            config_neighbor_group_remote_as(&mut bgp, arg_words(&["G", "65000"]), ConfigOp::Set)
+                .unwrap();
+            config_peer(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+            config_peer_neighbor_group(&mut bgp, arg_words(&["10.0.0.1", "G"]), ConfigOp::Set)
+                .unwrap();
+            let peer_ident = bgp.peers.get(&peer_addr()).unwrap().ident;
+            bgp.peers.get_mut(&peer_addr()).unwrap().state = state;
+            let _ = drain_stop_events(&mut bgp);
+
+            config_neighbor_group_afi_safi_enabled(
+                &mut bgp,
+                arg_words(&["G", "evpn", "true"]),
+                ConfigOp::Set,
+            )
+            .unwrap();
+            assert_eq!(
+                drain_stop_events(&mut bgp).contains(&peer_ident),
+                bounces,
+                "{state:?}: a group family change",
+            );
+
+            config_neighbor_group_afi_safi_add_path(
+                &mut bgp,
+                arg_words(&["G", "ipv4", "send-receive"]),
+                ConfigOp::Set,
+            )
+            .unwrap();
+            assert_eq!(
+                drain_stop_events(&mut bgp).contains(&peer_ident),
+                bounces,
+                "{state:?}: a group add-path change",
             );
         }
     }

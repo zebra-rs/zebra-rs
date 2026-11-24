@@ -2001,6 +2001,18 @@ impl Peer {
             .unwrap_or(false)
     }
 
+    /// Whether our OPEN is out on the current attempt (OpenSent,
+    /// OpenConfirm or Established). What an OPEN carries is fixed once it
+    /// is sent, so a change to it, such as the family set, needs the
+    /// session restarted from here on; before that the OPEN still to be
+    /// built carries the change.
+    pub fn open_sent(&self) -> bool {
+        matches!(
+            self.state,
+            State::OpenSent | State::OpenConfirm | State::Established
+        )
+    }
+
     pub fn is_afi_safi(&self, afi: Afi, safi: Safi) -> bool {
         self.cap_map
             .entries

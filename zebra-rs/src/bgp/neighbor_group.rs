@@ -546,7 +546,7 @@ pub fn config_neighbor_group_afi_safi_add_path(
             let after = peer.config.addpath.get(fam).map(|v| v.send_receive);
             changed |= before != after;
         }
-        changed && matches!(peer.state, State::Established)
+        changed && peer.open_sent()
     });
     Some(())
 }
@@ -1554,10 +1554,10 @@ fn sweep_group_afi_safi(bgp: &mut Bgp, name: &str) {
     sweep_members(bgp, name, |groups, peer| {
         // An AFI/SAFI is a Multiprotocol capability fixed at OPEN time, so a
         // change to a member's effective family set only takes effect on a
-        // session that renegotiates. Bounce an Established member whose set
-        // actually changed (mirrors the per-peer `config_afi_safi`); a member
-        // still coming up carries the new family in its first OPEN, and an
-        // unchanged set never bounces.
+        // session that renegotiates. Bounce a member whose set actually
+        // changed once its OPEN is out (mirrors the per-peer
+        // `config_afi_safi`); a member that has not sent one yet builds it
+        // from the new set, and an unchanged set never bounces.
         let before: std::collections::BTreeSet<AfiSafi> =
             peer.config.mp.0.keys().copied().collect();
         // ADD-PATH is negotiated in the same OPEN, so fold it into the
@@ -1579,8 +1579,7 @@ fn sweep_group_afi_safi(bgp: &mut Bgp, name: &str) {
             .iter()
             .map(|(k, v)| (*k, v.send_receive))
             .collect();
-        (before != after || addpath_before != addpath_after)
-            && matches!(peer.state, State::Established)
+        (before != after || addpath_before != addpath_after) && peer.open_sent()
     });
 }
 
