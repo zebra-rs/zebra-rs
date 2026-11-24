@@ -4116,16 +4116,30 @@ super::max_prefix::max_prefix_callbacks! { config_maximum_prefix:
 /// value; re-resolving afterwards matters for the delete case, where the
 /// effective mode must fall back to a referenced neighbor-group's
 /// opinion instead of vanishing.
+///
+/// ADD-PATH is a capability, sent once in the OPEN (RFC 7911 §4), so a
+/// session whose OPEN is out cannot adopt a changed mode without
+/// renegotiating: it is bounced, as the group's `add-path` and the family
+/// set already do. A statement that leaves the effective mode as it was,
+/// or one made before the OPEN is built, does not bounce.
 fn config_add_path(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let addr = args.addr()?;
     let afi_safi: AfiSafi = args.afi_safi()?;
-    let peer = bgp.peers.get_mut(&addr)?;
-    super::afi_knob::set_add_path(&mut peer.config, afi_safi, op, &mut args)?;
-    super::neighbor_group::apply_resolved_add_path(
-        &bgp.neighbor_groups,
-        &mut peer.config,
-        afi_safi,
-    );
+    let (ident, bounce) = {
+        let peer = bgp.peers.get_mut(&addr)?;
+        let before = peer.config.effective_add_path();
+        super::afi_knob::set_add_path(&mut peer.config, afi_safi, op, &mut args)?;
+        super::neighbor_group::apply_resolved_add_path(
+            &bgp.neighbor_groups,
+            &mut peer.config,
+            afi_safi,
+        );
+        let changed = before != peer.config.effective_add_path();
+        (peer.ident, changed && peer.open_sent())
+    };
+    if bounce {
+        bgp.stop_peer(ident);
+    }
     Some(())
 }
 
@@ -9153,6 +9167,54 @@ mod neighbor_group_wiring_tests {
                 drain_stop_events(&mut bgp).contains(&peer_ident),
                 bounces,
                 "{state:?}: disabling a family",
+            );
+        }
+    }
+
+    /// A neighbor's own `add-path` follows the same rule: the capability
+    /// is in the OPEN, so a change of the effective mode bounces a session
+    /// whose OPEN is out. It used not to bounce in any state, and the new
+    /// mode waited for a `clear bgp`. A statement that leaves the mode as
+    /// it was does not bounce.
+    #[tokio::test]
+    async fn add_path_change_bounces_a_peer_whose_open_is_out() {
+        use crate::bgp::peer::State;
+        for (state, bounces) in [
+            (State::Idle, false),
+            (State::Connect, false),
+            (State::Active, false),
+            (State::OpenSent, true),
+            (State::OpenConfirm, true),
+            (State::Established, true),
+        ] {
+            let mut bgp = fresh_bgp();
+            config_peer(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+            let peer_ident = bgp.peers.get(&peer_addr()).unwrap().ident;
+            bgp.peers.get_mut(&peer_addr()).unwrap().state = state;
+            let _ = drain_stop_events(&mut bgp);
+
+            let mut step = |mode: &str, op: ConfigOp| {
+                config_add_path(&mut bgp, arg_words(&["10.0.0.1", "ipv4", mode]), op).unwrap();
+                drain_stop_events(&mut bgp).contains(&peer_ident)
+            };
+            assert_eq!(
+                step("send-receive", ConfigOp::Set),
+                bounces,
+                "{state:?}: set"
+            );
+            assert!(
+                !step("send-receive", ConfigOp::Set),
+                "{state:?}: the same mode again"
+            );
+            assert_eq!(
+                step("receive", ConfigOp::Set),
+                bounces,
+                "{state:?}: another mode"
+            );
+            assert_eq!(
+                step("receive", ConfigOp::Delete),
+                bounces,
+                "{state:?}: delete"
             );
         }
     }
