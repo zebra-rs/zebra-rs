@@ -702,6 +702,16 @@ impl PeerConfig {
     /// latent bug — this method is the only supported way to set the
     /// pair, so the invariant is enforced by the type rather than by
     /// remembering it.
+    /// The effective `add-path` mode per family: what the next OPEN's
+    /// ADD-PATH capability is built from. Two snapshots compare equal
+    /// exactly when a session's OPEN would carry the same capability.
+    pub fn effective_add_path(&self) -> BTreeMap<AfiSafi, AddPathSendReceive> {
+        self.addpath
+            .iter()
+            .map(|(family, value)| (*family, value.send_receive))
+            .collect()
+    }
+
     pub fn stage_add_path(&mut self, afi_safi: AfiSafi, mode: Option<AddPathSendReceive>) {
         match mode {
             Some(send_receive) => {

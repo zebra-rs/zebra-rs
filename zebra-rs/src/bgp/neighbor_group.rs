@@ -1561,24 +1561,13 @@ fn sweep_group_afi_safi(bgp: &mut Bgp, name: &str) {
             peer.config.mp.0.keys().copied().collect();
         // ADD-PATH is negotiated in the same OPEN, so fold it into the
         // same bounce decision rather than adding a second one.
-        let addpath_before: BTreeMap<AfiSafi, AddPathSendReceive> = peer
-            .config
-            .addpath
-            .iter()
-            .map(|(k, v)| (*k, v.send_receive))
-            .collect();
+        let addpath_before = peer.config.effective_add_path();
         recompute_peer_mp(groups, &mut peer.config);
         recompute_peer_nhs(groups, peer);
         recompute_peer_addpath(groups, &mut peer.config);
         super::max_prefix::refresh(groups, peer);
         let after: std::collections::BTreeSet<AfiSafi> = peer.config.mp.0.keys().copied().collect();
-        let addpath_after: BTreeMap<AfiSafi, AddPathSendReceive> = peer
-            .config
-            .addpath
-            .iter()
-            .map(|(k, v)| (*k, v.send_receive))
-            .collect();
-        (before != after || addpath_before != addpath_after) && peer.open_sent()
+        (before != after || addpath_before != peer.config.effective_add_path()) && peer.open_sent()
     });
 }
 
