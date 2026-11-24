@@ -302,16 +302,18 @@ async fn evpn_next_to_ipv4_in_one_update_is_still_taken() {
     }
 }
 
+/// The once-per-session info lines in captured log output.
+fn info(out: &str) -> usize {
+    out.lines()
+        .filter(|l| l.starts_with("INFO ") && l.contains("(logged once per session)"))
+        .count()
+}
+
 /// The drop is logged at info once per session, not once per UPDATE. With
 /// `tracing adj-in` on, every drop, the first included, is also on the
 /// adj-in trace.
 #[tokio::test]
 async fn the_drop_is_logged_once_per_session() {
-    let info = |out: &str| {
-        out.lines()
-            .filter(|l| l.starts_with("INFO ") && l.contains("(logged once per session)"))
-            .count()
-    };
     let traced = |out: &str| {
         out.lines()
             .filter(|l| l.contains("did not enable; ignored") && l.contains("category=\"adj-in\""))
@@ -365,5 +367,13 @@ async fn the_next_session_logs_its_first_drop_again() {
     assert!(
         !bgp.peers.get_by_idx(id).unwrap().v4_not_enabled_logged,
         "the session that ended takes its mark with it"
+    );
+
+    let first = logs(|| from_peer(&mut bgp, id, plain()));
+    let second = logs(|| from_peer(&mut bgp, id, plain()));
+    assert_eq!(
+        [info(&first), info(&second)],
+        [1, 0],
+        "the next session's first drop is at info, and only that one:\n{first}{second}"
     );
 }
