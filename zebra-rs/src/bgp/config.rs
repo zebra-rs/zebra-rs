@@ -4269,7 +4269,7 @@ fn config_llgr(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let addr = args.addr()?;
     let afi_safi: AfiSafi = args.afi_safi()?;
     config_peer_restart_knob(bgp, addr, |config| {
-        super::afi_knob::set_llgr(config, afi_safi, op)
+        super::afi_knob::set_llgr(config, afi_safi, op, &mut args)
     })
 }
 
@@ -9291,7 +9291,12 @@ mod neighbor_group_wiring_tests {
             assert!(!stopped(&mut bgp), "{state:?}: disabled again");
 
             // long-lived-graceful-restart enabled, then its restart-time
-            config_llgr(&mut bgp, arg_words(&["10.0.0.1", "ipv4"]), ConfigOp::Set).unwrap();
+            config_llgr(
+                &mut bgp,
+                arg_words(&["10.0.0.1", "ipv4", "true"]),
+                ConfigOp::Set,
+            )
+            .unwrap();
             assert_eq!(stopped(&mut bgp), bounces, "{state:?}: llgr enable");
             let llgr_time = |bgp: &mut Bgp, op: ConfigOp| {
                 config_llgr_restart_time(bgp, arg_words(&["10.0.0.1", "ipv4", "300"]), op).unwrap()
@@ -9306,9 +9311,84 @@ mod neighbor_group_wiring_tests {
                 bounces,
                 "{state:?}: llgr restart-time deleted"
             );
-            config_llgr(&mut bgp, arg_words(&["10.0.0.1", "ipv4"]), ConfigOp::Delete).unwrap();
+            config_llgr(
+                &mut bgp,
+                arg_words(&["10.0.0.1", "ipv4", "true"]),
+                ConfigOp::Delete,
+            )
+            .unwrap();
             assert_eq!(stopped(&mut bgp), bounces, "{state:?}: llgr disable");
         }
+    }
+
+    /// `long-lived-graceful-restart enabled` is a boolean: `false` turns
+    /// LLGR off, where the statement's mere presence used to turn it on.
+    /// The two leaves resolve the same way in either order, so an
+    /// `enabled false` is not undone by a `restart-time`.
+    #[tokio::test]
+    async fn llgr_enabled_false_does_not_enable() {
+        let llgr = |bgp: &Bgp| {
+            bgp.peers
+                .get(&peer_addr())
+                .unwrap()
+                .config
+                .sub
+                .get(&v4())
+                .and_then(|sub| sub.llgr)
+        };
+        let enabled = |bgp: &mut Bgp, value: &str, op: ConfigOp| {
+            config_llgr(bgp, arg_words(&["10.0.0.1", "ipv4", value]), op).unwrap()
+        };
+        let time = |bgp: &mut Bgp, op: ConfigOp| {
+            config_llgr_restart_time(bgp, arg_words(&["10.0.0.1", "ipv4", "300"]), op).unwrap()
+        };
+        let fresh = || {
+            let mut bgp = fresh_bgp();
+            config_peer(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+            bgp
+        };
+
+        // `enabled false`, alone and with a restart-time on either side.
+        let mut bgp = fresh();
+        enabled(&mut bgp, "false", ConfigOp::Set);
+        assert_eq!(llgr(&bgp), None, "enabled false");
+        time(&mut bgp, ConfigOp::Set);
+        assert_eq!(llgr(&bgp), None, "enabled false, then a restart-time");
+        let mut bgp = fresh();
+        time(&mut bgp, ConfigOp::Set);
+        enabled(&mut bgp, "false", ConfigOp::Set);
+        assert_eq!(llgr(&bgp), None, "a restart-time, then enabled false");
+
+        // `enabled true`: the bare marker, or the restart-time in either
+        // order; deleting the restart-time leaves LLGR on.
+        let mut bgp = fresh();
+        enabled(&mut bgp, "true", ConfigOp::Set);
+        assert_eq!(llgr(&bgp), Some(1), "enabled true");
+        time(&mut bgp, ConfigOp::Set);
+        assert_eq!(llgr(&bgp), Some(300));
+        enabled(&mut bgp, "true", ConfigOp::Set);
+        assert_eq!(llgr(&bgp), Some(300), "enabled again keeps the time");
+        time(&mut bgp, ConfigOp::Delete);
+        assert_eq!(llgr(&bgp), Some(1), "restart-time deleted: still on");
+        enabled(&mut bgp, "true", ConfigOp::Delete);
+        assert_eq!(llgr(&bgp), None, "both leaves gone");
+
+        // Turning it off and on again keeps the configured time.
+        let mut bgp = fresh();
+        enabled(&mut bgp, "true", ConfigOp::Set);
+        time(&mut bgp, ConfigOp::Set);
+        enabled(&mut bgp, "false", ConfigOp::Set);
+        assert_eq!(llgr(&bgp), None);
+        enabled(&mut bgp, "true", ConfigOp::Set);
+        assert_eq!(llgr(&bgp), Some(300));
+
+        // With no `enabled` leaf a restart-time alone turns it on, as
+        // before; deleting it leaves no LLGR statement.
+        let mut bgp = fresh();
+        time(&mut bgp, ConfigOp::Set);
+        assert_eq!(llgr(&bgp), Some(300), "restart-time alone");
+        time(&mut bgp, ConfigOp::Delete);
+        assert_eq!(llgr(&bgp), None, "and deleted");
     }
 
     /// What an OPEN's graceful-restart capabilities are built from is the
