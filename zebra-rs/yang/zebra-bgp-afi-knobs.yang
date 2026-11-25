@@ -299,11 +299,10 @@ module zebra-bgp-afi-knobs {
         units "seconds";
         description
           "Stale-route retention time advertised for this family.
-           With 'enabled true', deleting only this leaf leaves LLGR
-           enabled with the bare marker value — it does not turn the
-           feature off. 'enabled false' turns LLGR off whatever this
-           leaf says. With no 'enabled' leaf, this leaf alone turns
-           LLGR on.";
+           It takes effect only with 'enabled true': this leaf alone
+           does not turn LLGR on. With 'enabled true', deleting only
+           this leaf leaves LLGR enabled with the bare marker value —
+           it does not turn the feature off.";
       }
     }
   }

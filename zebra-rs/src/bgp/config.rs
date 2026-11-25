@@ -9382,13 +9382,19 @@ mod neighbor_group_wiring_tests {
         enabled(&mut bgp, "true", ConfigOp::Set);
         assert_eq!(llgr(&bgp), Some(300));
 
-        // With no `enabled` leaf a restart-time alone turns it on, as
-        // before; deleting it leaves no LLGR statement.
+        // With no `enabled` leaf a restart-time alone does not turn it
+        // on: it only says how long. `enabled true` then picks the time
+        // up, and removing `enabled` turns LLGR off again with the time
+        // still configured.
         let mut bgp = fresh();
         time(&mut bgp, ConfigOp::Set);
-        assert_eq!(llgr(&bgp), Some(300), "restart-time alone");
+        assert_eq!(llgr(&bgp), None, "restart-time alone");
+        enabled(&mut bgp, "true", ConfigOp::Set);
+        assert_eq!(llgr(&bgp), Some(300), "enabled true picks the time up");
+        enabled(&mut bgp, "true", ConfigOp::Delete);
+        assert_eq!(llgr(&bgp), None, "enabled removed, time still set");
         time(&mut bgp, ConfigOp::Delete);
-        assert_eq!(llgr(&bgp), None, "and deleted");
+        assert_eq!(llgr(&bgp), None, "and the time deleted");
     }
 
     /// What an OPEN's graceful-restart capabilities are built from is the

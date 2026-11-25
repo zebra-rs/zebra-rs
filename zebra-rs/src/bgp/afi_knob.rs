@@ -107,10 +107,10 @@ pub(super) fn set_llgr(
 
 /// `afi-safi <name> long-lived-graceful-restart restart-time <SECS>`.
 ///
-/// Delete drops the configured time only. With `enabled true` LLGR stays
-/// on with the bare marker — dropping just the restart-time leaf must not
-/// also turn the feature off. With no `enabled` leaf there is no LLGR
-/// statement left, and the feature goes off.
+/// The time takes effect only with `enabled true`: this leaf says how
+/// long, and does not turn LLGR on by itself. Delete drops the configured
+/// time only. With `enabled true` LLGR stays on with the bare marker —
+/// dropping just the restart-time leaf must not also turn the feature off.
 pub(super) fn set_llgr_restart_time(
     cfg: &mut PeerConfig,
     afi_safi: AfiSafi,

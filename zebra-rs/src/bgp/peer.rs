@@ -760,14 +760,12 @@ impl PeerSubConfig {
     /// - `enabled false` turns LLGR off, whatever `restart-time` says;
     /// - `enabled true` turns it on, with `restart-time` or the bare
     ///   marker;
-    /// - with no `enabled` leaf, a `restart-time` alone turns it on, as it
-    ///   always has.
+    /// - with no `enabled` leaf it is off as well: `restart-time` only
+    ///   says how long, and `enabled` is what turns LLGR on. A
+    ///   `restart-time` alone used to turn it on.
     pub fn resolve_llgr(&mut self) {
-        self.llgr = match self.llgr_enabled {
-            Some(false) => None,
-            Some(true) => Some(self.llgr_restart_time.unwrap_or(Self::LLGR_BARE_STALE_TIME)),
-            None => self.llgr_restart_time,
-        };
+        self.llgr = (self.llgr_enabled == Some(true))
+            .then(|| self.llgr_restart_time.unwrap_or(Self::LLGR_BARE_STALE_TIME));
     }
 }
 
