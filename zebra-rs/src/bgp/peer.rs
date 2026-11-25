@@ -748,6 +748,29 @@ impl PeerConfig {
     }
 }
 
+impl PeerSubConfig {
+    /// The stale time advertised when LLGR is enabled and no
+    /// `restart-time` is configured: the bare marker.
+    pub const LLGR_BARE_STALE_TIME: u32 = 1;
+
+    /// Resolve the two `long-lived-graceful-restart` leaves into
+    /// [`Self::llgr`]. They are kept as configured and combined here, so
+    /// the result does not depend on which statement arrived last:
+    ///
+    /// - `enabled false` turns LLGR off, whatever `restart-time` says;
+    /// - `enabled true` turns it on, with `restart-time` or the bare
+    ///   marker;
+    /// - with no `enabled` leaf, a `restart-time` alone turns it on, as it
+    ///   always has.
+    pub fn resolve_llgr(&mut self) {
+        self.llgr = match self.llgr_enabled {
+            Some(false) => None,
+            Some(true) => Some(self.llgr_restart_time.unwrap_or(Self::LLGR_BARE_STALE_TIME)),
+            None => self.llgr_restart_time,
+        };
+    }
+}
+
 /// RFC 9234 BGP Role configured toward one neighbor —
 /// `neighbor X otc-local-role <role> [strict]` (zebra-bgp-otc.yang,
 /// Cisco IOS XR syntax).
@@ -964,7 +987,17 @@ pub struct PeerSubConfig {
     /// bare `1`, which the OPEN emitted verbatim — a helper then flushed
     /// retained routes after ~1 s, defeating the whole feature.
     pub graceful_restart: Option<u32>,
+    /// The Long-Lived Graceful Restart stale time (RFC 9494) to advertise
+    /// for this family, or `None` when LLGR is off: what the two
+    /// `long-lived-graceful-restart` leaves below resolve to
+    /// ([`Self::resolve_llgr`]). The OPEN is built from this.
     pub llgr: Option<u32>,
+    /// `afi-safi <name> long-lived-graceful-restart enabled <bool>` as
+    /// configured, or `None` while the leaf is absent.
+    pub llgr_enabled: Option<bool>,
+    /// `afi-safi <name> long-lived-graceful-restart restart-time` as
+    /// configured, or `None` while the leaf is absent.
+    pub llgr_restart_time: Option<u32>,
     /// `afi-safi <name> encapsulation-type` (ietf-bgp-neighbor). Only
     /// settable under `afi-safi ipv6` (YANG `when name = 'ipv6'`).
     /// `None` = no SRv6 encapsulation mode configured for this AF.

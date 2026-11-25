@@ -81,17 +81,36 @@ pub(super) fn set_graceful_restart(
     Some(())
 }
 
-/// `afi-safi <name> long-lived-graceful-restart enabled`.
-pub(super) fn set_llgr(cfg: &mut PeerConfig, afi_safi: AfiSafi, op: ConfigOp) -> Option<()> {
-    cfg.sub.entry(afi_safi).or_default().llgr = op.is_set().then_some(1);
+/// `afi-safi <name> long-lived-graceful-restart enabled <bool>` (RFC 9494).
+///
+/// `enabled` is a boolean leaf, so the value is honoured: `enabled false`
+/// must not enable LLGR, which keying off the statement's presence did.
+/// The leaf is recorded as configured and resolved together with
+/// `restart-time` ([`super::peer::PeerSubConfig::resolve_llgr`]), so an
+/// `enabled false` is not undone by a `restart-time` set after it.
+pub(super) fn set_llgr(
+    cfg: &mut PeerConfig,
+    afi_safi: AfiSafi,
+    op: ConfigOp,
+    args: &mut Args,
+) -> Option<()> {
+    let enabled = if op.is_set() {
+        Some(args.boolean()?)
+    } else {
+        None
+    };
+    let sub = cfg.sub.entry(afi_safi).or_default();
+    sub.llgr_enabled = enabled;
+    sub.resolve_llgr();
     Some(())
 }
 
 /// `afi-safi <name> long-lived-graceful-restart restart-time <SECS>`.
 ///
-/// Delete restores the bare enabled marker (`1`) rather than clearing
-/// LLGR outright — dropping just the restart-time leaf must not also
-/// turn the feature off.
+/// Delete drops the configured time only. With `enabled true` LLGR stays
+/// on with the bare marker — dropping just the restart-time leaf must not
+/// also turn the feature off. With no `enabled` leaf there is no LLGR
+/// statement left, and the feature goes off.
 pub(super) fn set_llgr_restart_time(
     cfg: &mut PeerConfig,
     afi_safi: AfiSafi,
@@ -99,7 +118,9 @@ pub(super) fn set_llgr_restart_time(
     args: &mut Args,
 ) -> Option<()> {
     let time = args.u32()?;
-    cfg.sub.entry(afi_safi).or_default().llgr = if op.is_set() { Some(time) } else { Some(1) };
+    let sub = cfg.sub.entry(afi_safi).or_default();
+    sub.llgr_restart_time = op.is_set().then_some(time);
+    sub.resolve_llgr();
     Some(())
 }
 

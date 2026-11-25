@@ -1482,6 +1482,10 @@ vrf_afi_knob! {
     config_vrf_neighbor_afi_safi_graceful_restart => set_graceful_restart
 }
 vrf_afi_knob! {
+    /// `… afi-safi <af> long-lived-graceful-restart enabled <bool>`.
+    config_vrf_neighbor_afi_safi_llgr => set_llgr
+}
+vrf_afi_knob! {
     /// `… afi-safi <af> long-lived-graceful-restart restart-time <secs>`.
     config_vrf_neighbor_afi_safi_llgr_restart_time => set_llgr_restart_time
 }
@@ -1501,22 +1505,6 @@ vrf_afi_knob! {
     /// which already holds the group map — the global neighbor does the
     /// same resolution in its own callback against `Bgp::neighbor_groups`.
     config_vrf_neighbor_afi_safi_next_hop_self => set_next_hop_self_explicit
-}
-
-/// `… afi-safi <af> long-lived-graceful-restart enabled` — the odd one
-/// out: [`super::afi_knob::set_llgr`] keys off presence alone and takes
-/// no value, so it doesn't fit the macro's `args`-consuming shape.
-pub fn config_vrf_neighbor_afi_safi_llgr(
-    bgp: &mut Bgp,
-    mut args: Args,
-    op: ConfigOp,
-) -> Option<()> {
-    let vrf = args.string()?;
-    let addr = args.addr()?;
-    let afi_safi: AfiSafi = args.afi_safi()?;
-    let cfg = vrf_entry(bgp, vrf, op)?;
-    let nbr = neighbor_entry(cfg, addr, op)?;
-    super::afi_knob::set_llgr(&mut nbr.config, afi_safi, op)
 }
 
 /// `set router bgp vrf <NAME> afi-safi ipv4` — presence container.
