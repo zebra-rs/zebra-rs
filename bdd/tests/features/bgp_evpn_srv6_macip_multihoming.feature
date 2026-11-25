@@ -57,12 +57,14 @@ Feature: EVPN Type-2 multihoming signals over SRv6 — ESI on the MAC route
     # interface, so the ES binding starts unresolvable and must catch up
     # on the LinkAdd event.
     And I execute "ip link add br10 type bridge" in namespace "z1"
+    And I wait for interface "vxlan10" in namespace "z1"
     And I execute "ip link set vxlan10 master br10" in namespace "z1"
     And I execute "ip link set br10 up" in namespace "z1"
     And I execute "ip link add host0 type dummy" in namespace "z1"
     And I execute "ip link set host0 master br10" in namespace "z1"
     And I execute "ip link set host0 up" in namespace "z1"
     And I execute "ip link add br10 type bridge" in namespace "z2"
+    And I wait for interface "vxlan10" in namespace "z2"
     And I execute "ip link set vxlan10 master br10" in namespace "z2"
     And I execute "ip link set br10 up" in namespace "z2"
     And I wait 12 seconds for BGP to operate

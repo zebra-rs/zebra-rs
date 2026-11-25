@@ -45,9 +45,11 @@ Feature: BGP EVPN BUM over SRv6 P2MP replication (RFC 9524) — cradle engine
     # Per-node L2 domain: the VNI-10 bridge holding the config-created
     # vxlan10. That pairing is the VNI declaration the EVI is derived from.
     And I execute "ip link add br10 type bridge" in namespace "z1"
+    And I wait for interface "vxlan10" in namespace "z1"
     And I execute "ip link set vxlan10 master br10" in namespace "z1"
     And I execute "ip link set br10 up" in namespace "z1"
     And I execute "ip link add br10 type bridge" in namespace "z2"
+    And I wait for interface "vxlan10" in namespace "z2"
     And I execute "ip link set vxlan10 master br10" in namespace "z2"
     And I execute "ip link set br10 up" in namespace "z2"
     And I wait 12 seconds for BGP to operate

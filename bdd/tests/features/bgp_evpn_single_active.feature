@@ -52,12 +52,14 @@ Feature: EVPN single-active — the elected role on the per-EVI Ethernet A-D
     # binding starts unresolvable and has to catch up on the LinkAdd event —
     # the per-EVI A-D only exists once the port's bridge ties it to a VNI.
     And I execute "ip link add br10 address 02:00:00:00:fe:01 type bridge" in namespace "z1"
+    And I wait for interface "vxlan10" in namespace "z1"
     And I execute "ip link set vxlan10 master br10" in namespace "z1"
     And I execute "ip link set br10 up" in namespace "z1"
     And I execute "ip link add host0 type dummy" in namespace "z1"
     And I execute "ip link set host0 master br10" in namespace "z1"
     And I execute "ip link set host0 up" in namespace "z1"
     And I execute "ip link add br10 address 02:00:00:00:fe:02 type bridge" in namespace "z2"
+    And I wait for interface "vxlan10" in namespace "z2"
     And I execute "ip link set vxlan10 master br10" in namespace "z2"
     And I execute "ip link set br10 up" in namespace "z2"
     And I execute "ip link add host0 type dummy" in namespace "z2"

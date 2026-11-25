@@ -49,9 +49,11 @@ Feature: BGP EVPN IGMP/MLD Proxy — Selective Multicast (RFC 9251)
     # zebra-rs created vxlan10 from config; enslave it to a snooping
     # bridge so membership (and received SMET) map to VNI 10.
     And I execute "ip link add br10 type bridge mcast_snooping 1" in namespace "z1"
+    And I wait for interface "vxlan10" in namespace "z1"
     And I execute "ip link set vxlan10 master br10" in namespace "z1"
     And I execute "ip link set br10 up" in namespace "z1"
     And I execute "ip link add br10 type bridge mcast_snooping 1" in namespace "z2"
+    And I wait for interface "vxlan10" in namespace "z2"
     And I execute "ip link set vxlan10 master br10" in namespace "z2"
     And I execute "ip link set br10 up" in namespace "z2"
     # z2's local host-facing port carries the snooped (*,G) membership.
