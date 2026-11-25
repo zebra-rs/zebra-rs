@@ -711,7 +711,7 @@ impl BgpShard {
             self.v4
                 .candidates(nlri.prefix)
                 .iter()
-                .filter(|rib| super::super::nht::nht_target(&rib.attr) == Some(nh))
+                .filter(|rib| super::super::nht::nht_tracked_target(rib) == Some(nh))
                 .cloned()
                 .collect()
         } else {
@@ -746,6 +746,7 @@ impl BgpShard {
             attr,
             label,
             nexthop,
+            enhe_egress,
             stale,
             nexthop_reachable,
             vrf_transit_only,
@@ -766,6 +767,7 @@ impl BgpShard {
             nexthop,
             stale,
         );
+        rib.enhe_egress = enhe_egress;
         rib.from_client = from_client;
         match rd {
             Some(rd) => self
@@ -1271,6 +1273,7 @@ mod tests {
             attr: attr.clone(),
             label: None,
             nexthop: None,
+            enhe_egress: None,
             stale: false,
             nexthop_reachable: true,
             vrf_transit_only: false,
@@ -1351,6 +1354,7 @@ mod tests {
             attr: attr.clone(),
             label: None,
             nexthop: None,
+            enhe_egress: None,
             stale: false,
             nexthop_reachable: true,
             vrf_transit_only: false,
@@ -1555,6 +1559,7 @@ mod tests {
             attr: attr.clone(),
             label: Some(bgp_packet::Label::new(16, 0, true)),
             nexthop: Some(super::super::super::route::VpnNexthop::V6(nhop)),
+            enhe_egress: None,
             stale: false,
             nexthop_reachable: true,
             vrf_transit_only: false,

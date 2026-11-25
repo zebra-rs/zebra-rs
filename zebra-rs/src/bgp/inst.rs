@@ -9778,6 +9778,10 @@ mod multipath_pool_tests;
 mod enhe_pool_tests;
 
 #[cfg(test)]
+#[path = "v6_link_local_pin_tests.rs"]
+mod v6_link_local_pin_tests;
+
+#[cfg(test)]
 #[path = "replica_flags_tests.rs"]
 mod replica_flags_tests;
 
