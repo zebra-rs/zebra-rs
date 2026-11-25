@@ -3791,6 +3791,9 @@ impl BgpVrf {
         // ADD-PATH rides the same OPEN (RFC 7911 §4), so a changed mode
         // needs the same bounce.
         let before_add_path = peer.config.effective_add_path();
+        // So do the per-family graceful-restart settings (RFC 4724 §3,
+        // RFC 9494 §3).
+        let before_restart = peer.config.effective_graceful_restart();
         peer.remote_as = remote_as;
         peer.peer_type = if remote_as == self.asn {
             PeerType::IBGP
@@ -3805,7 +3808,9 @@ impl BgpVrf {
         let mut bounce = super::super::neighbor_group::apply_resolved_session_knobs(peer, knobs);
         let after_mp: std::collections::BTreeSet<bgp_packet::AfiSafi> =
             peer.config.mp.0.keys().copied().collect();
-        bounce |= (before_mp != after_mp || before_add_path != peer.config.effective_add_path())
+        bounce |= (before_mp != after_mp
+            || before_add_path != peer.config.effective_add_path()
+            || before_restart != peer.config.effective_graceful_restart())
             && peer.open_sent();
         // The TCP-AO key-chain binding after the config swap (set by
         // `apply_resolved_session_knobs`'s `apply_ao_config`).
@@ -4808,6 +4813,87 @@ mod tests {
             State::Idle,
             "the session is reset"
         );
+    }
+
+    /// A `ReconfigurePeer` that changes only the neighbor's per-family
+    /// graceful-restart settings restarts a peer whose OPEN is out: the
+    /// Graceful Restart and Long-Lived Graceful Restart capabilities are in
+    /// the same OPEN as the family set.
+    #[tokio::test]
+    async fn reconfigure_graceful_restart_change_bounces_a_peer_whose_open_is_out() {
+        use crate::bgp::peer::{Event, State};
+        use bgp_packet::{Afi, AfiSafi, Safi};
+
+        let v4 = AfiSafi::new(Afi::Ip, Safi::Unicast);
+        let changes: [(&str, fn(&mut PeerConfig, AfiSafi)); 2] = [
+            ("graceful-restart", |cfg, family| {
+                cfg.sub.entry(family).or_default().graceful_restart = Some(120)
+            }),
+            ("long-lived", |cfg, family| {
+                cfg.sub.entry(family).or_default().llgr = Some(300)
+            }),
+        ];
+        for (what, change) in changes {
+            for (state, bounces) in [
+                (State::Connect, false),
+                (State::OpenSent, true),
+                (State::OpenConfirm, true),
+                (State::Established, true),
+            ] {
+                let (global_tx, _global_rx) = unbounded_channel::<BgpGlobalMsg>();
+                let ctx = test_ctx_for_vrf(8, "vrf-recfg-gr");
+                let (_rib_tx, rib_rx) = mpsc::unbounded_channel();
+                let (mut vrf, _inbox) = BgpVrf::new(
+                    "vrf-recfg-gr".to_string(),
+                    ctx,
+                    Ipv4Addr::UNSPECIFIED,
+                    65000,
+                    /* label */ 16,
+                    global_tx,
+                    rib_rx,
+                );
+
+                let a: std::net::IpAddr = "192.0.2.1".parse().unwrap();
+                let resolve = || {
+                    super::super::spawn::resolve_vrf_peer_config(
+                        &a,
+                        &crate::bgp::vrf_config::BgpVrfNeighborConfig {
+                            remote_as: Some(65001),
+                            ..Default::default()
+                        },
+                        &std::collections::BTreeMap::new(),
+                    )
+                    .unwrap()
+                };
+
+                let (ra, cfg, knobs) = resolve();
+                vrf.process_global_msg(BgpVrfMsg::AddPeer {
+                    addr: a,
+                    remote_as: ra,
+                    config: Box::new(cfg),
+                    knobs: Box::new(knobs),
+                    policy_refs: std::collections::BTreeMap::new(),
+                });
+                let ident = vrf.peers.get(&a).unwrap().ident;
+                vrf.peers.get_mut(&a).unwrap().state = state;
+                while vrf.rx.try_recv().is_ok() {}
+
+                let (ra, mut cfg, knobs) = resolve();
+                change(&mut cfg, v4);
+                vrf.process_global_msg(BgpVrfMsg::ReconfigurePeer {
+                    addr: a,
+                    remote_as: ra,
+                    config: Box::new(cfg),
+                    knobs: Box::new(knobs),
+                    policy_refs: std::collections::BTreeMap::new(),
+                });
+                let mut stopped = false;
+                while let Ok(msg) = vrf.rx.try_recv() {
+                    stopped |= matches!(msg, Message::Event(i, Event::Stop) if i == ident);
+                }
+                assert_eq!(stopped, bounces, "{what}, {state:?}");
+            }
+        }
     }
 
     /// A `ReconfigurePeer` for a peer that is not present is treated as an

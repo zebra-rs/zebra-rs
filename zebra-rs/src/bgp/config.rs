@@ -4151,11 +4151,44 @@ fn config_add_path(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
 /// old code stored a bare `1`, which the OPEN advertised verbatim, so
 /// the peer's helper flushed retained routes after ~1 s and graceful
 /// restart provided no forwarding continuity (review finding #15).
+///
+/// Graceful Restart is a capability, sent once in the OPEN, so a session
+/// whose OPEN is out is bounced when the statement changes what the next
+/// OPEN would carry ([`config_peer_restart_knob`]).
 fn config_restart(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let addr = args.addr()?;
     let afi_safi: AfiSafi = args.afi_safi()?;
-    let peer = bgp.peers.get_mut(&addr)?;
-    super::afi_knob::set_graceful_restart(&mut peer.config, afi_safi, op, &mut args)
+    config_peer_restart_knob(bgp, addr, |config| {
+        super::afi_knob::set_graceful_restart(config, afi_safi, op, &mut args)
+    })
+}
+
+/// Apply one per-family graceful-restart statement of a neighbor (`set`)
+/// and bounce its session when that changed what its OPEN is built from.
+///
+/// The Graceful Restart and Long-Lived Graceful Restart capabilities are
+/// sent once in the OPEN (RFC 4724 §3, RFC 9494 §3), so a session whose
+/// OPEN is out cannot adopt the change without renegotiating; it used to
+/// keep the old capability until the next reset. A statement that leaves
+/// the settings as they were, or one made before the OPEN is built, does
+/// not bounce. The instance-level statements bounce through
+/// [`graceful_restart_resync`].
+fn config_peer_restart_knob(
+    bgp: &mut Bgp,
+    addr: IpAddr,
+    set: impl FnOnce(&mut super::peer::PeerConfig) -> Option<()>,
+) -> Option<()> {
+    let (ident, bounce) = {
+        let peer = bgp.peers.get_mut(&addr)?;
+        let before = peer.config.effective_graceful_restart();
+        set(&mut peer.config)?;
+        let changed = before != peer.config.effective_graceful_restart();
+        (peer.ident, changed && peer.open_sent())
+    };
+    if bounce {
+        bgp.stop_peer(ident);
+    }
+    Some(())
 }
 
 /// `set/delete router bgp neighbor <addr> afi-safi <name> encapsulation-type
@@ -4235,15 +4268,17 @@ fn config_next_hop_unchanged(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Opt
 fn config_llgr(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let addr = args.addr()?;
     let afi_safi: AfiSafi = args.afi_safi()?;
-    let peer = bgp.peers.get_mut(&addr)?;
-    super::afi_knob::set_llgr(&mut peer.config, afi_safi, op)
+    config_peer_restart_knob(bgp, addr, |config| {
+        super::afi_knob::set_llgr(config, afi_safi, op)
+    })
 }
 
 fn config_llgr_restart_time(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let addr = args.addr()?;
     let afi_safi: AfiSafi = args.afi_safi()?;
-    let peer = bgp.peers.get_mut(&addr)?;
-    super::afi_knob::set_llgr_restart_time(&mut peer.config, afi_safi, op, &mut args)
+    config_peer_restart_knob(bgp, addr, |config| {
+        super::afi_knob::set_llgr_restart_time(config, afi_safi, op, &mut args)
+    })
 }
 
 fn config_local_identifier(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
@@ -9217,6 +9252,83 @@ mod neighbor_group_wiring_tests {
                 "{state:?}: delete"
             );
         }
+    }
+
+    /// A neighbor's per-family graceful-restart statements follow the same
+    /// rule: the Graceful Restart and Long-Lived Graceful Restart
+    /// capabilities are in the OPEN, so a change bounces a session whose
+    /// OPEN is out. They used not to bounce in any state. A statement that
+    /// leaves the settings as they were does not bounce.
+    #[tokio::test]
+    async fn graceful_restart_change_bounces_a_peer_whose_open_is_out() {
+        use crate::bgp::peer::State;
+        for (state, bounces) in [
+            (State::Idle, false),
+            (State::Connect, false),
+            (State::Active, false),
+            (State::OpenSent, true),
+            (State::OpenConfirm, true),
+            (State::Established, true),
+        ] {
+            let mut bgp = fresh_bgp();
+            config_peer(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+            let peer_ident = bgp.peers.get(&peer_addr()).unwrap().ident;
+            bgp.peers.get_mut(&peer_addr()).unwrap().state = state;
+            let _ = drain_stop_events(&mut bgp);
+            let stopped = |bgp: &mut Bgp| drain_stop_events(bgp).contains(&peer_ident);
+
+            // graceful-restart enabled
+            let gr = |bgp: &mut Bgp, value: &str| {
+                config_restart(bgp, arg_words(&["10.0.0.1", "ipv4", value]), ConfigOp::Set).unwrap()
+            };
+            gr(&mut bgp, "true");
+            assert_eq!(stopped(&mut bgp), bounces, "{state:?}: enable");
+            gr(&mut bgp, "true");
+            assert!(!stopped(&mut bgp), "{state:?}: enabled again");
+            gr(&mut bgp, "false");
+            assert_eq!(stopped(&mut bgp), bounces, "{state:?}: disable");
+            gr(&mut bgp, "false");
+            assert!(!stopped(&mut bgp), "{state:?}: disabled again");
+
+            // long-lived-graceful-restart enabled, then its restart-time
+            config_llgr(&mut bgp, arg_words(&["10.0.0.1", "ipv4"]), ConfigOp::Set).unwrap();
+            assert_eq!(stopped(&mut bgp), bounces, "{state:?}: llgr enable");
+            let llgr_time = |bgp: &mut Bgp, op: ConfigOp| {
+                config_llgr_restart_time(bgp, arg_words(&["10.0.0.1", "ipv4", "300"]), op).unwrap()
+            };
+            llgr_time(&mut bgp, ConfigOp::Set);
+            assert_eq!(stopped(&mut bgp), bounces, "{state:?}: llgr restart-time");
+            llgr_time(&mut bgp, ConfigOp::Set);
+            assert!(!stopped(&mut bgp), "{state:?}: the same restart-time");
+            llgr_time(&mut bgp, ConfigOp::Delete);
+            assert_eq!(
+                stopped(&mut bgp),
+                bounces,
+                "{state:?}: llgr restart-time deleted"
+            );
+            config_llgr(&mut bgp, arg_words(&["10.0.0.1", "ipv4"]), ConfigOp::Delete).unwrap();
+            assert_eq!(stopped(&mut bgp), bounces, "{state:?}: llgr disable");
+        }
+    }
+
+    /// What an OPEN's graceful-restart capabilities are built from is the
+    /// families that set a Restart Time or a long-lived stale time. A
+    /// `sub` entry another per-family knob created is not a change.
+    #[test]
+    fn effective_graceful_restart_ignores_families_without_a_setting() {
+        let mut config = crate::bgp::peer::PeerConfig::default();
+        assert!(config.effective_graceful_restart().is_empty());
+        config.sub.entry(v6()).or_default().next_hop_self = true;
+        assert!(config.effective_graceful_restart().is_empty());
+        config.sub.entry(v4()).or_default().graceful_restart = Some(120);
+        config.sub.entry(v6()).or_default().llgr = Some(300);
+        assert_eq!(
+            config.effective_graceful_restart(),
+            std::collections::BTreeMap::from([
+                (v4(), (Some(120), None)),
+                (v6(), (None, Some(300)))
+            ]),
+        );
     }
 
     /// The same rule on the group path, for the family set and for
