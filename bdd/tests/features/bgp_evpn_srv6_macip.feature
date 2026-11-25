@@ -43,12 +43,14 @@ Feature: EVPN Type-2 / Type-3 over SRv6 — End.DT2U and End.DT2M signalling
     # local MAC maps to VNI 10. host0 is a plain dummy port: a MAC parked
     # on it is a local host as far as the bridge FDB is concerned.
     And I execute "ip link add br10 type bridge" in namespace "z1"
+    And I wait for interface "vxlan10" in namespace "z1"
     And I execute "ip link set vxlan10 master br10" in namespace "z1"
     And I execute "ip link set br10 up" in namespace "z1"
     And I execute "ip link add host0 type dummy" in namespace "z1"
     And I execute "ip link set host0 master br10" in namespace "z1"
     And I execute "ip link set host0 up" in namespace "z1"
     And I execute "ip link add br10 type bridge" in namespace "z2"
+    And I wait for interface "vxlan10" in namespace "z2"
     And I execute "ip link set vxlan10 master br10" in namespace "z2"
     And I execute "ip link set br10 up" in namespace "z2"
     And I wait 12 seconds for BGP to operate

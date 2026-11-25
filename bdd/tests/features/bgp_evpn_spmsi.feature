@@ -37,6 +37,7 @@ Feature: BGP EVPN BUM segmentation — selective S-PMSI (RFC 9572 Type-10), Phas
     And I apply config "z3-1.yaml" to namespace "z3"
     # z1's snooping bridge: enslave vxlan10 + a host-facing port for membership.
     And I execute "ip link add br10 type bridge mcast_snooping 1" in namespace "z1"
+    And I wait for interface "vxlan10" in namespace "z1"
     And I execute "ip link set vxlan10 master br10" in namespace "z1"
     And I execute "ip link set br10 up" in namespace "z1"
     And I execute "ip link add host0 type dummy" in namespace "z1"

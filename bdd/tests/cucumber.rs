@@ -1226,6 +1226,43 @@ async fn execute_command(world: &mut World, command: String, namespace: String) 
     println!("✓ Executed '{}' in namespace {}", command, scoped);
 }
 
+/// Wait until the kernel has `interface` in `namespace`.
+///
+/// The daemon creates a configured device (a `vxlan`, for one) when its RIB
+/// task gets to the commit's message, which is after `I apply config`
+/// returns. A step that names the device straight away, such as `ip link
+/// set vxlan10 master br10`, can therefore run before the device exists:
+/// under a 32-way run it sometimes did, with "Cannot find device", and the
+/// rest of the feature failed with it. Stacked on all three keywords, as
+/// the other utility steps are, so that it matches after a `Then` too.
+#[given(expr = "I wait for interface {string} in namespace {string}")]
+#[when(expr = "I wait for interface {string} in namespace {string}")]
+#[then(expr = "I wait for interface {string} in namespace {string}")]
+async fn wait_for_interface(world: &mut World, interface: String, namespace: String) {
+    let scoped = world.ns(&namespace);
+    // 15 s in 100 ms steps: the device is normally there within a few
+    // milliseconds, so the common case costs one `ip` call.
+    const ATTEMPTS: u32 = 150;
+    for i in 0..ATTEMPTS {
+        if netns::exec_in_netns(&scoped, "ip", &["link", "show", "dev", &interface])
+            .await
+            .is_ok()
+        {
+            println!("✓ Interface {} exists in namespace {}", interface, scoped);
+            return;
+        }
+        if i + 1 < ATTEMPTS {
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        }
+    }
+    panic!(
+        "interface {} did not appear in namespace {} within {} s",
+        interface,
+        scoped,
+        ATTEMPTS / 10
+    );
+}
+
 /// SIGKILL the cradle engine running in `namespace`, and only that one.
 /// Network namespaces share the host's PID space, so a `pkill -x cradle`
 /// run inside one kills every concurrent feature's engine as well.

@@ -50,12 +50,14 @@ Feature: BGP EVPN Group-Based Policy via Lua scripting
     # Enslave each node's config-created vxlan10 to a learning bridge so a
     # local MAC maps to VNI 10 and originates a Type-2 route.
     And I execute "ip link add br10 type bridge" in namespace "z1"
+    And I wait for interface "vxlan10" in namespace "z1"
     And I execute "ip link set vxlan10 master br10" in namespace "z1"
     And I execute "ip link set br10 up" in namespace "z1"
     And I execute "ip link add host0 type dummy" in namespace "z1"
     And I execute "ip link set host0 master br10" in namespace "z1"
     And I execute "ip link set host0 up" in namespace "z1"
     And I execute "ip link add br10 type bridge" in namespace "z2"
+    And I wait for interface "vxlan10" in namespace "z2"
     And I execute "ip link set vxlan10 master br10" in namespace "z2"
     And I execute "ip link set br10 up" in namespace "z2"
     # z2's GBP enforcement table: the import hook adds set elements here.

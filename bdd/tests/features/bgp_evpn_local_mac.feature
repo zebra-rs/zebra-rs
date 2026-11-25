@@ -48,12 +48,14 @@ Feature: BGP EVPN — a node's own MAC addresses are neither originated nor over
     # a fixed address. The kernel records both addresses as `permanent`
     # rows in br10's FDB the moment the devices exist.
     And I execute "ip link add br10 address 02:00:00:00:fe:01 type bridge" in namespace "z1"
+    And I wait for interface "vxlan10" in namespace "z1"
     And I execute "ip link set vxlan10 master br10" in namespace "z1"
     And I execute "ip link set br10 up" in namespace "z1"
     And I execute "ip link add host0 address 02:00:00:00:0a:01 type dummy" in namespace "z1"
     And I execute "ip link set host0 master br10" in namespace "z1"
     And I execute "ip link set host0 up" in namespace "z1"
     And I execute "ip link add br10 address 02:00:00:00:fe:02 type bridge" in namespace "z2"
+    And I wait for interface "vxlan10" in namespace "z2"
     And I execute "ip link set vxlan10 master br10" in namespace "z2"
     And I execute "ip link set br10 up" in namespace "z2"
     And I execute "ip link add host0 address 02:00:00:00:0a:02 type dummy" in namespace "z2"
