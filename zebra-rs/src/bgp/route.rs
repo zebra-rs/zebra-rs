@@ -2285,10 +2285,51 @@ fn winner_changes(cands: &[BgpRib], current: Option<&BgpRib>, med: MedPolicy) ->
 /// - Flowspec (IPv4 and IPv6): propagate (advertise or withdraw, install).
 /// - BGP-LS: re-select only; the Loc-RIB records the winner and the
 ///   session-up dump reads it, nothing is propagated yet.
+/// - IPv6 unicast prefixes learned only over link-local next-hops pinned
+///   to their receiving interface (`BgpRib::enhe_egress`), which register
+///   nothing: install and advertise, as the replay does for a tracked
+///   prefix.
 ///
 /// Prefixes whose winner the new policy does not move are left alone.
 pub fn bestpath_recompute_untracked(bgp: &mut BgpTop, peers: &mut PeerMap) {
     let med = MedPolicy::current();
+
+    // A pinned link-local path is never tracked (`nht_tracked_target`), so
+    // a prefix whose learned paths are all pinned has no dep for the NHT
+    // replay to find, and two interface neighbors are enough for a MED
+    // choice between them. A prefix that also has a tracked path is the
+    // replay's: it re-selects over every candidate, so it is skipped here
+    // and each prefix runs once.
+    let pinned: Vec<Ipv6Net> = bgp
+        .shard
+        .v6
+        .0
+        .iter()
+        .filter(|(_, cands)| cands.iter().any(|rib| rib.enhe_egress.is_some()))
+        .map(|(prefix, _)| prefix)
+        .filter(|prefix| bgp.shard.v6.winner_would_change(*prefix, med))
+        .collect();
+    if !pinned.is_empty() {
+        let tracked: BTreeSet<Ipv6Net> = bgp
+            .nexthop_cache
+            .as_deref()
+            .into_iter()
+            .flat_map(|cache| cache.entries.values())
+            .flat_map(|entry| entry.deps.iter())
+            .filter_map(|dep| match dep {
+                super::nht::NhtDep::V6(prefix) => Some(*prefix),
+                _ => None,
+            })
+            .collect();
+        for prefix in pinned {
+            if tracked.contains(&prefix) {
+                continue;
+            }
+            let selected = bgp.shard.v6.select_best_path(prefix);
+            fib_install_v6(bgp, prefix, &selected);
+            route_advertise_to_peers_v6(prefix, &selected, bgp, peers);
+        }
+    }
 
     let evpn: Vec<(RouteDistinguisher, EvpnPrefix)> = bgp
         .local_rib

@@ -11,7 +11,7 @@ use crate::bgp::peer::{Peer, PeerType, State};
 use crate::bgp::peer_key::PeerOrigin;
 use crate::bgp::route::route_from_peer;
 use bgp_packet::{
-    Afi, AfiSafi, As4Path, BgpAttr, BgpNexthop, CapMultiProtocol, Ipv6Nlri, MpReachAttr,
+    Afi, AfiSafi, As4Path, BgpAttr, BgpNexthop, CapMultiProtocol, Ipv6Nlri, Med, MpReachAttr,
     MpUnreachAttr, Origin, Safi, UpdatePacket,
 };
 use ipnet::Ipv6Net;
@@ -24,6 +24,9 @@ const ROUTER_ID: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 9);
 const IFINDEX: u32 = 7;
 /// The neighbor's link-local: the session address and the next-hop.
 const LL: Ipv6Addr = Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 2);
+/// A second neighbor, on its own link.
+const IFINDEX2: u32 = 8;
+const LL2: Ipv6Addr = Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 3);
 const GLOBAL: Ipv6Addr = Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 2);
 const SID: Ipv6Addr = Ipv6Addr::new(0xfc00, 0, 1, 0, 0, 0, 0, 0);
 const V6: AfiSafi = AfiSafi {
@@ -69,9 +72,14 @@ fn bgp() -> (Bgp, RibRx) {
 /// An Established unnumbered eBGP neighbor on interface [`IFINDEX`] with
 /// IPv6 unicast negotiated.
 fn add_unnumbered(bgp: &mut Bgp) -> usize {
+    add_unnumbered_on(bgp, LL, IFINDEX)
+}
+
+/// The same neighbor with link-local `ll` on interface `ifindex`.
+fn add_unnumbered_on(bgp: &mut Bgp, ll: Ipv6Addr, ifindex: u32) -> usize {
     let (tx, rx) = mpsc::channel(64);
     Box::leak(Box::new(rx));
-    let ip = IpAddr::V6(LL);
+    let ip = IpAddr::V6(ll);
     let mut peer = Peer::new(
         0,
         65000,
@@ -84,8 +92,8 @@ fn add_unnumbered(bgp: &mut Bgp) -> usize {
     );
     peer.state = State::Established;
     peer.peer_type = PeerType::EBGP;
-    peer.origin = PeerOrigin::Interface { ifindex: IFINDEX };
-    peer.scope_id = Some(IFINDEX);
+    peer.origin = PeerOrigin::Interface { ifindex };
+    peer.scope_id = Some(ifindex);
     let entry = peer
         .cap_map
         .entries
@@ -153,6 +161,11 @@ fn announce(bgp: &mut Bgp, id: usize, nhop: Ipv6Addr, sid: Option<Ipv6Addr>) {
             )],
         });
     }
+    announce_attr(bgp, id, nhop, attr);
+}
+
+/// The neighbor announces [`PREFIX`] via `nhop` with `attr`.
+fn announce_attr(bgp: &mut Bgp, id: usize, nhop: Ipv6Addr, attr: BgpAttr) {
     let mut packet = UpdatePacket::new();
     packet.bgp_attr = Some(attr);
     packet.mp_update = Some(MpReachAttr::Ipv6 {
@@ -275,6 +288,50 @@ async fn a_link_local_route_with_an_srv6_sid_keeps_tracking_the_sid() {
         vec![format!("del {PREFIX}"), format!("register {SID}")]
     );
     assert_eq!(best_egress(&bgp), None);
+}
+
+/// A MED knob change re-runs best-path (`Bgp::bestpath_recompute_all`),
+/// and that finds the prefixes to re-run by their tracked next-hops. A
+/// prefix learned only over pinned link-locals has none and must be
+/// re-run all the same. The knobs are process-wide, so this sets none:
+/// it records as the winner the path `med missing-as-worst` would have
+/// chosen, then runs the recompute that deleting the knob runs.
+#[tokio::test]
+async fn a_best_path_recompute_reaches_a_prefix_with_only_pinned_paths() {
+    let (mut bgp, mut rx) = bgp();
+    let first = add_unnumbered(&mut bgp);
+    let second = add_unnumbered_on(&mut bgp, LL2, IFINDEX2);
+    let attr = |med: Option<u32>| BgpAttr {
+        origin: Some(Origin::Igp),
+        aspath: Some(As4Path::from_str("65002").unwrap()),
+        med: med.map(Med::new),
+        ..Default::default()
+    };
+    // Same neighboring AS, so MED decides: a missing MED reads as 0 and
+    // beats 5, unless it is read as the worst value.
+    announce_attr(&mut bgp, first, LL, attr(None));
+    announce_attr(&mut bgp, second, LL2, attr(Some(5)));
+    let winner = |bgp: &Bgp| bgp.shard.v6.1.get(&prefix()).map(|rib| rib.ident);
+    assert_eq!(winner(&bgp), Some(first));
+    assert!(
+        bgp.nexthop_cache.entries.is_empty(),
+        "neither path is tracked"
+    );
+    rib_msgs(&mut rx);
+
+    let other = bgp
+        .shard
+        .v6
+        .candidates(prefix())
+        .iter()
+        .find(|rib| rib.ident == second)
+        .expect("the second path is a candidate")
+        .clone();
+    bgp.shard.v6.1.insert(prefix(), other);
+    bgp.bestpath_recompute_all();
+
+    assert_eq!(winner(&bgp), Some(first));
+    assert_eq!(rib_msgs(&mut rx), vec![pinned()]);
 }
 
 /// A row for the same prefix with the same link-local but no scope is

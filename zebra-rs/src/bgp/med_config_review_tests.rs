@@ -78,6 +78,7 @@ fn probe_untracked_families(missing_as_worst: bool) {
         mac: [2, 0, 0, 0, 0, 1],
         ip: None,
     };
+    let v6: ipnet::Ipv6Net = "2001:db8:99::/64".parse().unwrap();
     let paths = if missing_as_worst {
         [path(1, 65001, None), path(2, 65001, Some(5))]
     } else {
@@ -86,6 +87,13 @@ fn probe_untracked_families(missing_as_worst: bool) {
     for rib in paths {
         bgp.local_rib
             .update_flowspec(Afi::Ip, fs.clone(), rib.clone());
+        // IPv6 unicast from an interface neighbor: the link-local next-hop
+        // is pinned to the receiving interface and never tracked.
+        let mut pinned = rib.clone();
+        let ll = std::net::Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, pinned.ident as u16);
+        std::sync::Arc::make_mut(&mut pinned.attr).nexthop = Some(bgp_packet::BgpNexthop::Ipv6(ll));
+        pinned.enhe_egress = Some((ll, pinned.ident as u32));
+        bgp.shard.update_v6(v6, pinned);
         let mut evpn_rib = rib;
         std::sync::Arc::make_mut(&mut evpn_rib.attr).nexthop = Some(bgp_packet::BgpNexthop::Evpn(
             std::net::IpAddr::V4(Ipv4Addr::new(10, 0, 0, evpn_rib.ident as u8)),
@@ -94,6 +102,7 @@ fn probe_untracked_families(missing_as_worst: bool) {
     }
     assert_eq!(bgp.local_rib.flowspec_v4.selected[&fs].ident, 1);
     assert_eq!(bgp.local_rib.evpn[&rd].selected[&evpn].ident, 1);
+    assert_eq!(bgp.shard.v6.1.get(&v6).unwrap().ident, 1);
     // These families legitimately have no NHT registrations.
     assert!(bgp.nexthop_cache.entries.is_empty());
     let args = Args(["true".to_string()].into_iter().collect());
@@ -105,6 +114,7 @@ fn probe_untracked_families(missing_as_worst: bool) {
     let cached = (
         bgp.local_rib.flowspec_v4.selected[&fs].ident,
         bgp.local_rib.evpn[&rd].selected[&evpn].ident,
+        bgp.shard.v6.1.get(&v6).unwrap().ident,
     );
     // Control: the new comparator policy works when explicitly invoked.
     assert_eq!(
@@ -112,10 +122,11 @@ fn probe_untracked_families(missing_as_worst: bool) {
         2
     );
     assert_eq!(bgp.local_rib.select_best_path_evpn(&rd, &evpn)[0].ident, 2);
+    assert_eq!(bgp.shard.v6.select_best_path(v6)[0].ident, 2);
     assert_eq!(
         cached,
-        (2, 2),
-        "config must recompute FlowSpec and EVPN Type-2 immediately"
+        (2, 2, 2),
+        "config must recompute FlowSpec, EVPN Type-2 and pinned IPv6 unicast immediately"
     );
     let args = Args(Default::default());
     if missing_as_worst {
@@ -125,6 +136,7 @@ fn probe_untracked_families(missing_as_worst: bool) {
     }
     assert_eq!(bgp.local_rib.flowspec_v4.selected[&fs].ident, 1);
     assert_eq!(bgp.local_rib.evpn[&rd].selected[&evpn].ident, 1);
+    assert_eq!(bgp.shard.v6.1.get(&v6).unwrap().ident, 1);
 }
 
 #[tokio::test]
