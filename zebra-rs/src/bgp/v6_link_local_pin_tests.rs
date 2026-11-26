@@ -453,3 +453,44 @@ fn an_enhe_row_is_not_matched_against_its_ignored_v4_next_hop() {
     shard.remove(None, prefix, 0, 2);
     assert!(shard.candidate_nexthops_v4(None, prefix).is_empty());
 }
+
+/// A pinned route is installed on its interface also when another path
+/// tracks the same link-local and the cache holds a resolution with an
+/// SRv6 segment list for it: that transport is the other path's. A
+/// tracked next-hop with such a resolution does inherit it.
+#[tokio::test]
+async fn a_pinned_route_does_not_inherit_the_transport_tracked_under_its_link_local() {
+    let (mut bgp, mut rx) = bgp();
+    let id = add_unnumbered(&mut bgp);
+    // Another path tracks `nh`, and the RIB resolved it through an
+    // SRv6-encapsulated route.
+    let resolved_over_srv6 = |bgp: &mut Bgp, nh: Ipv6Addr| {
+        let other = crate::bgp::nht::NhtDep::V6("2001:db8:77::/64".parse().unwrap());
+        bgp.nexthop_cache.track(0, IpAddr::V6(nh), other);
+        let entry = bgp
+            .nexthop_cache
+            .entries
+            .get_mut(&(0, IpAddr::V6(nh)))
+            .unwrap();
+        entry.reachable = true;
+        entry.nexthops = vec![crate::rib::nht::ResolvedNexthop {
+            addr: "2001:db8::1".parse().unwrap(),
+            ifindex: 3,
+            labels: Vec::new(),
+            segs: vec!["fc00:0:9::".parse().unwrap()],
+            seg_encap: None,
+        }];
+    };
+    resolved_over_srv6(&mut bgp, LL);
+    resolved_over_srv6(&mut bgp, GLOBAL);
+
+    announce(&mut bgp, id, LL, None);
+    assert_eq!(rib_msgs(&mut rx), vec![pinned()]);
+
+    announce(&mut bgp, id, GLOBAL, None);
+    assert_eq!(
+        rib_msgs(&mut rx),
+        vec![format!("add {PREFIX} via 2001:db8::1 ifindex Some(3)")],
+        "a tracked next-hop inherits its resolution's egress"
+    );
+}

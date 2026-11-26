@@ -317,6 +317,41 @@ async fn unnumbered_routes_are_installed_via_the_link_local() {
     }
 }
 
+/// The IPv4 NEXT_HOP an RFC 8950 UPDATE also carries is ignored (§4),
+/// and stays ignored when another path tracks that address and the RIB
+/// resolved it through an SRv6-encapsulated route: the unnumbered route
+/// is installed on its interface, not with that route's segment list.
+#[tokio::test]
+async fn an_unnumbered_route_does_not_inherit_the_transport_of_its_ignored_next_hop() {
+    for n in [1, 2] {
+        let (mut bgp, mut rx) = bgp_with(n);
+        let id = add_unnumbered(&mut bgp);
+        let p = prefixes(&bgp);
+        // The address `announce` puts in NEXT_HOP, as another path's
+        // tracked next-hop.
+        let nh = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let other = crate::bgp::nht::NhtDep::V4("192.0.2.0/24".parse().unwrap());
+        bgp.nexthop_cache.track(0, nh, other);
+        let entry = bgp.nexthop_cache.entries.get_mut(&(0, nh)).unwrap();
+        entry.reachable = true;
+        entry.nexthops = vec![crate::rib::nht::ResolvedNexthop {
+            addr: "2001:db8::1".parse().unwrap(),
+            ifindex: 3,
+            labels: Vec::new(),
+            segs: vec!["fc00:0:9::".parse().unwrap()],
+            seg_encap: None,
+        }];
+
+        announce(&mut bgp, id, &p);
+        settle(&mut bgp, id).await;
+        assert_eq!(
+            rib_msgs(&mut rx),
+            installed(&p),
+            "N={n}: each route is installed via the link-local on its interface"
+        );
+    }
+}
+
 #[tokio::test]
 async fn a_withdrawn_unnumbered_route_leaves_the_fib() {
     for n in [1, 2] {

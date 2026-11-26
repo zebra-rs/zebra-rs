@@ -834,6 +834,24 @@ fn is_vpn_fib_winner(best: &BgpRib, transport: Option<&[rib::nht::ResolvedNextho
     best.typ == BgpRibType::Originated && transport.is_some_and(|t| !t.is_empty())
 }
 
+/// The winner's NHT resolution (global instance only), read by the FIB
+/// install for the SRv6 segment list to inherit
+/// ([`inherited_seg6_egress`]). `None` for a winner carrying
+/// `enhe_egress`: it installs on its interface and is never tracked
+/// ([`super::nht::nht_tracked_target`]), so a cache entry under its
+/// attribute next-hop is another path's resolution. That next-hop is the
+/// IPv4 NEXT_HOP RFC 8950 §4 says to ignore, or a link-local some other
+/// path tracks.
+fn winner_nht_transport<'a>(
+    bgp: &'a super::peer::BgpTop,
+    best: Option<&BgpRib>,
+) -> Option<&'a [rib::nht::ResolvedNexthop]> {
+    let cache = bgp.nexthop_cache.as_deref()?;
+    let best = best.filter(|b| b.enhe_egress.is_none())?;
+    let nh = super::nht::bgp_nexthop_ip(&best.attr)?;
+    Some(cache.transport_for(0, nh))
+}
+
 /// The NHT egress a plain unicast winner should inherit SRv6 transport
 /// from: the first resolved egress, when it carries an H.Encap segment
 /// list — i.e. the BGP next-hop is covered by an SRv6-encapsulated
@@ -1078,10 +1096,7 @@ pub(super) fn fib_install_v4(bgp: &super::peer::BgpTop, prefix: Ipv4Net, selecte
     // The winner's NHT resolution (global instance only): carries the
     // SRv6 segment list to inherit when the next-hop is covered by an
     // SRv6-encapsulated route.
-    let nht_transport = bgp.nexthop_cache.as_deref().and_then(|cache| {
-        best.and_then(|b| super::nht::bgp_nexthop_ip(&b.attr))
-            .map(|nh| cache.transport_for(0, nh))
-    });
+    let nht_transport = winner_nht_transport(bgp, best);
     let entry = best.and_then(|b| select_fib_entry_v4(b, transport, nht_transport));
     // Pins the suppress-fib-pending gate's `fib_installable_v4` to this
     // derivation: the two must agree, or the gate arms holds no
@@ -1333,10 +1348,7 @@ pub(super) fn fib_installable_v4(
         selected.first(),
     );
     let best = best.as_deref();
-    let nht_transport = bgp.nexthop_cache.as_deref().and_then(|cache| {
-        best.and_then(|b| super::nht::bgp_nexthop_ip(&b.attr))
-            .map(|nh| cache.transport_for(0, nh))
-    });
+    let nht_transport = winner_nht_transport(bgp, best);
     best.and_then(|b| select_fib_entry_v4(b, transport, nht_transport))
         .is_some()
 }
@@ -1359,10 +1371,7 @@ pub(super) fn fib_installable_v6(
         selected.first(),
     );
     let best = best.as_deref();
-    let nht_transport = bgp.nexthop_cache.as_deref().and_then(|cache| {
-        best.and_then(|b| super::nht::bgp_nexthop_ip(&b.attr))
-            .map(|nh| cache.transport_for(0, nh))
-    });
+    let nht_transport = winner_nht_transport(bgp, best);
     best.and_then(|b| select_fib_entry_v6(b, transport, nht_transport))
         .is_some()
 }
@@ -1384,10 +1393,7 @@ pub(super) fn fib_install_v6(bgp: &super::peer::BgpTop, prefix: Ipv6Net, selecte
     let best = best.as_deref();
     // The winner's NHT resolution (global instance only) — see
     // `fib_install_v4`.
-    let nht_transport = bgp.nexthop_cache.as_deref().and_then(|cache| {
-        best.and_then(|b| super::nht::bgp_nexthop_ip(&b.attr))
-            .map(|nh| cache.transport_for(0, nh))
-    });
+    let nht_transport = winner_nht_transport(bgp, best);
     let entry = best.and_then(|b| select_fib_entry_v6(b, transport, nht_transport));
     // Same pinning as `fib_install_v4` — see the assert there.
     debug_assert_eq!(entry.is_some(), fib_installable_v6(bgp, prefix, selected));
