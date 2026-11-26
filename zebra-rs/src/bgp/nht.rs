@@ -276,6 +276,19 @@ pub fn nht_target(attr: &BgpAttr) -> Option<IpAddr> {
     bgp_nexthop_ip(attr)
 }
 
+/// [`nht_target`] of a stored row, or `None` for a row that is never
+/// tracked: one carrying `enhe_egress` (an RFC 8950 path, or a v6
+/// link-local pinned to its interface) installs on that interface and
+/// registers nothing. Sites that match stored rows against a tracked
+/// address use this, so such a row neither flips on a `NexthopUpdate`
+/// nor holds or releases another path's registration.
+pub fn nht_tracked_target(rib: &super::route::BgpRib) -> Option<IpAddr> {
+    if rib.enhe_egress.is_some() {
+        return None;
+    }
+    nht_target(&rib.attr)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

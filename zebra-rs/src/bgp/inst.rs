@@ -6862,7 +6862,10 @@ impl Bgp {
     ///   tracked v4 prefix is batched to its shard unfiltered.
     /// - Families whose rows carry no tracked next-hop — EVPN (all route
     ///   types), MUP, Flowspec, BGP-LS — are walked directly
-    ///   ([`super::route::bestpath_recompute_untracked`]).
+    ///   ([`super::route::bestpath_recompute_untracked`]). So are the IPv6
+    ///   unicast prefixes learned only over link-local next-hops pinned to
+    ///   their receiving interface: a pinned path registers no next-hop,
+    ///   so the first pass has no dep to find them by.
     ///
     /// SR-Policy has no best-path over paths that carry MED. Locally
     /// originated unicast routes carry no tracked next-hop; a prefix with
@@ -9776,6 +9779,10 @@ mod multipath_pool_tests;
 #[cfg(test)]
 #[path = "enhe_pool_tests.rs"]
 mod enhe_pool_tests;
+
+#[cfg(test)]
+#[path = "v6_link_local_pin_tests.rs"]
+mod v6_link_local_pin_tests;
 
 #[cfg(test)]
 #[path = "replica_flags_tests.rs"]

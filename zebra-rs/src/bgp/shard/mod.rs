@@ -441,7 +441,7 @@ impl BgpShard {
         cands
             .into_iter()
             .flatten()
-            .filter_map(|r| super::nht::nht_target(&r.attr))
+            .filter_map(super::nht::nht_tracked_target)
             .collect()
     }
 
@@ -458,7 +458,7 @@ impl BgpShard {
         cands
             .into_iter()
             .flatten()
-            .filter_map(|r| super::nht::nht_target(&r.attr))
+            .filter_map(super::nht::nht_tracked_target)
             .collect()
     }
 

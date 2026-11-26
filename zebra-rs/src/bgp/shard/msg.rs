@@ -337,6 +337,9 @@ pub struct ShardUpdateV6 {
     /// VPNv6 service label (`None` for plain v6 unicast).
     pub label: Option<Label>,
     pub nexthop: Option<VpnNexthop>,
+    /// Link-local next-hop plus the receiving ifindex for plain v6
+    /// unicast (see `BgpRib::enhe_egress`). `None` otherwise.
+    pub enhe_egress: Option<(std::net::Ipv6Addr, u32)>,
     pub stale: bool,
     /// See [`ShardUpdateV4::nexthop_reachable`].
     pub nexthop_reachable: bool,

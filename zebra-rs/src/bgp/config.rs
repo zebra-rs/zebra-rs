@@ -14154,6 +14154,7 @@ mod transit_label_tests {
             attr: attr.clone(),
             label: Some(Label::new(24, 0, true)),
             nexthop: Some(crate::bgp::route::VpnNexthop::V6(nhop)),
+            enhe_egress: None,
             stale: false,
             nexthop_reachable: true,
             vrf_transit_only: false,

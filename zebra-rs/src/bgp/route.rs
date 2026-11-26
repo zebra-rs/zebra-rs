@@ -1017,14 +1017,15 @@ fn widen_to_multipath(entry: &mut rib::entry::RibEntry, rest: &[BgpRib], v6: boo
     };
     multi.nexthops.push(base.clone());
     for path in rest {
-        // RFC 8950 ENHE member (IPv6-unnumbered interface neighbor):
-        // the gateway is the peer's v6 link-local pinned to the
-        // receiving interface — `ifindex_origin` makes the RIB
-        // resolver take it as-is, the same install shape
-        // `make_bgp_rib_entry_v4` gives an ENHE winner. The attribute
-        // next-hop (absent, or a v4 NEXT_HOP RFC 8950 §4 ignores) is
-        // irrelevant, and so is the family check below — a v6 gateway
-        // leg on a v4 prefix is the point (RFC 5549 style).
+        // Interface-neighbor member — an RFC 8950 ENHE path, or a plain
+        // v6 path whose next-hop is the peer's link-local: the gateway
+        // is that link-local pinned to the receiving interface —
+        // `ifindex_origin` makes the RIB resolver take it as-is, the
+        // same install shape `make_bgp_rib_entry_v4` /
+        // `make_bgp_rib_entry_v6` give the winner. For ENHE the
+        // attribute next-hop (absent, or an unused v4 NEXT_HOP) is
+        // irrelevant, and so is the family check below — a
+        // v6 gateway leg on a v4 prefix is the point (RFC 5549 style).
         if let Some((nh6, ifindex)) = path.enhe_egress {
             multi.nexthops.push(rib::NexthopUni {
                 addr: IpAddr::V6(nh6),
@@ -1183,9 +1184,10 @@ pub(super) fn fib_install_v4(bgp: &super::peer::BgpTop, prefix: Ipv4Net, selecte
 }
 
 /// IPv6 counterpart of [`make_bgp_rib_entry_v4`]. Reads the IPv6
-/// next-hop from `attr.nexthop` (`BgpNexthop::Ipv6`); there's no
-/// RFC 8950 ENHE case for native v6 unicast. Returns `None` when the
-/// best path lacks a usable v6 next-hop.
+/// next-hop from `attr.nexthop` (`BgpNexthop::Ipv6`). A link-local
+/// next-hop carries its receiving interface in `enhe_egress`, which
+/// becomes `ifindex_origin` as on the v4 ENHE path. Returns `None` when
+/// the best path lacks a usable v6 next-hop.
 fn make_bgp_rib_entry_v6(best: &BgpRib) -> Option<rib::entry::RibEntry> {
     let distance = match best.typ {
         BgpRibType::EBGP => 20,
@@ -1207,6 +1209,7 @@ fn make_bgp_rib_entry_v6(best: &BgpRib) -> Option<rib::entry::RibEntry> {
         metric,
         weight: 1,
         valid: true,
+        ifindex_origin: best.enhe_egress.map(|(_, ifindex)| ifindex),
         ..Default::default()
     });
 
@@ -1986,7 +1989,9 @@ pub struct BgpRib {
     /// meaningless without one). FIB install reads this and programs
     /// a v6-gateway nexthop (`via inet6 fe80::.. dev N`, RFC 5549
     /// style) instead of the v4 NEXT_HOP attribute, which RFC 8950 §4
-    /// says the receiver MUST ignore. `None` for normal v4 routes.
+    /// says the receiver MUST ignore. Plain IPv6 unicast uses the same
+    /// pair when its next-hop is a link-local, so the FIB entry is pinned
+    /// to the receiving interface. `None` otherwise.
     pub enhe_egress: Option<(Ipv6Addr, u32)>,
     // Stale.
     pub stale: bool,
@@ -2280,10 +2285,51 @@ fn winner_changes(cands: &[BgpRib], current: Option<&BgpRib>, med: MedPolicy) ->
 /// - Flowspec (IPv4 and IPv6): propagate (advertise or withdraw, install).
 /// - BGP-LS: re-select only; the Loc-RIB records the winner and the
 ///   session-up dump reads it, nothing is propagated yet.
+/// - IPv6 unicast prefixes learned only over link-local next-hops pinned
+///   to their receiving interface (`BgpRib::enhe_egress`), which register
+///   nothing: install and advertise, as the replay does for a tracked
+///   prefix.
 ///
 /// Prefixes whose winner the new policy does not move are left alone.
 pub fn bestpath_recompute_untracked(bgp: &mut BgpTop, peers: &mut PeerMap) {
     let med = MedPolicy::current();
+
+    // A pinned link-local path is never tracked (`nht_tracked_target`), so
+    // a prefix whose learned paths are all pinned has no dep for the NHT
+    // replay to find, and two interface neighbors are enough for a MED
+    // choice between them. A prefix that also has a tracked path is the
+    // replay's: it re-selects over every candidate, so it is skipped here
+    // and each prefix runs once.
+    let pinned: Vec<Ipv6Net> = bgp
+        .shard
+        .v6
+        .0
+        .iter()
+        .filter(|(_, cands)| cands.iter().any(|rib| rib.enhe_egress.is_some()))
+        .map(|(prefix, _)| prefix)
+        .filter(|prefix| bgp.shard.v6.winner_would_change(*prefix, med))
+        .collect();
+    if !pinned.is_empty() {
+        let tracked: BTreeSet<Ipv6Net> = bgp
+            .nexthop_cache
+            .as_deref()
+            .into_iter()
+            .flat_map(|cache| cache.entries.values())
+            .flat_map(|entry| entry.deps.iter())
+            .filter_map(|dep| match dep {
+                super::nht::NhtDep::V6(prefix) => Some(*prefix),
+                _ => None,
+            })
+            .collect();
+        for prefix in pinned {
+            if tracked.contains(&prefix) {
+                continue;
+            }
+            let selected = bgp.shard.v6.select_best_path(prefix);
+            fib_install_v6(bgp, prefix, &selected);
+            route_advertise_to_peers_v6(prefix, &selected, bgp, peers);
+        }
+    }
 
     let evpn: Vec<(RouteDistinguisher, EvpnPrefix)> = bgp
         .local_rib
@@ -2603,7 +2649,7 @@ impl<P: Prefix + Copy> LocalRibTable<P> {
         };
         let mut changed = false;
         for c in cands.iter_mut() {
-            if super::nht::nht_target(&c.attr) == Some(nh) && c.nexthop_reachable != reachable {
+            if super::nht::nht_tracked_target(c) == Some(nh) && c.nexthop_reachable != reachable {
                 c.nexthop_reachable = reachable;
                 changed = true;
             }
@@ -2966,11 +3012,14 @@ impl<P: Prefix + Copy> LocalRibTable<P> {
     /// `maximum-paths` silently did nothing on interface-neighbor
     /// fabrics (issue #2318). The ifindex is part of the identity: the
     /// same link-local on two different links is two distinct gateways.
+    /// A plain v6 path with a link-local next-hop carries the same pair
+    /// (its attribute next-hop is that link-local) and keys the same way.
     fn multipath_dedup_key(rib: &BgpRib) -> (Option<(Ipv6Addr, u32)>, Option<std::net::IpAddr>) {
         match rib.enhe_egress {
             // RFC 8950 §4: the receiver MUST ignore the v4 NEXT_HOP on
             // an ENHE path, so it must not separate two paths that
-            // share one ENHE egress.
+            // share one ENHE egress. For a v6 link-local path the
+            // attribute adds nothing the pair does not hold.
             Some(egress) => (Some(egress), None),
             None => (None, super::nht::nht_target(&rib.attr)),
         }
@@ -4528,14 +4577,10 @@ fn nht_untrack_withdrawn(
     let mut seen = std::collections::BTreeSet::new();
     let mut to_unregister = Vec::new();
     for r in removed {
-        // ENHE rows were never tracked (see the guard at the
-        // `nht_track_received` call) — their v4 NEXT_HOP attribute is
-        // ignored per RFC 8950 §4, so releasing it here could steal a
-        // registration a genuine v4 path holds on the same address.
-        if r.enhe_egress.is_some() {
-            continue;
-        }
-        let Some(nh) = super::nht::nht_target(&r.attr) else {
+        // A row with an `enhe_egress` was never tracked (see the guards
+        // at the `nht_track_received_attr` calls); releasing it here
+        // could steal a registration another path holds on the address.
+        let Some(nh) = super::nht::nht_tracked_target(r) else {
             continue;
         };
         if survivor_nhs.contains(&nh) || !seen.insert(nh) {
@@ -5504,7 +5549,7 @@ fn candidates_tracking<P: Prefix + Copy>(
     table.map_or_else(Vec::new, |t| {
         t.candidates(prefix)
             .iter()
-            .filter(|rib| super::nht::nht_target(&rib.attr) == Some(nh))
+            .filter(|rib| super::nht::nht_tracked_target(rib) == Some(nh))
             .cloned()
             .collect()
     })
@@ -8778,6 +8823,24 @@ pub fn route_ipv4_withdraw(
     }
 }
 
+/// `(link-local, ifindex)` egress of a plain v6 unicast path whose
+/// next-hop is a link-local, pinned to `scope_id` — the interface of the
+/// peer that delivered it. `None` for a global next-hop or no scope.
+/// Also `None` for a path carrying an SRv6 L3 service SID: a pinned row
+/// is not tracked, and that path must stay tracked on the SID
+/// (`nht_target`). Its H.Encaps entry still resolves the link-local
+/// gateway by table walk; pinning it also needs the seg6 next-hop keyed
+/// by interface.
+fn v6_link_local_egress(attr: &BgpAttr, scope_id: Option<u32>) -> Option<(Ipv6Addr, u32)> {
+    let Some(BgpNexthop::Ipv6(nh)) = attr.nexthop.as_ref() else {
+        return None;
+    };
+    if !nh.is_unicast_link_local() || attr.srv6_l3_sid().is_some() {
+        return None;
+    }
+    Some((*nh, scope_id?))
+}
+
 /// IPv6 unicast receive path — the v6 counterpart of
 /// [`route_ipv4_update`]. The MP_REACH next-hop is carried in
 /// `attr.nexthop` as `BgpNexthop::Ipv6` (stamped by the dispatch
@@ -8900,14 +8963,32 @@ pub fn route_ipv6_update(
         Some(rd) => super::nht::NhtDep::V6vpn(rd, nlri.prefix),
         None => super::nht::NhtDep::V6(nlri.prefix),
     };
+    // A link-local next-hop names a gateway only on the link it was
+    // received on, and every interface carries fe80::/64, so the RIB
+    // cannot resolve it by table walk. Pin it to the receiving interface,
+    // as the RFC 8950 path does for IPv4. This reads the post-policy
+    // attribute, the one the FIB installs.
+    let enhe_egress = if rd.is_none() {
+        decision
+            .as_ref()
+            .and_then(|d| v6_link_local_egress(&d.attr, peers.get_by_idx(ident)?.scope_id))
+    } else {
+        None
+    };
     // Main owns NHT (the shard has no `nexthop_cache`): resolve
     // reachability on the POST-policy next-hop (policy may rewrite it),
     // and compute the Inter-AS Option AB (VPNv6) transit flag against the
     // post-policy communities; a denied route resolves nothing.
     // `import_attr` feeds the VPNv6 import-withdraw dispatch below.
+    // A pinned link-local is not tracked, like an ENHE path:
+    // `nht_tracked_target` skips rows carrying `enhe_egress`.
     let (nexthop_reachable, vrf_transit_only, import_attr) = match &decision {
         Some(d) => {
-            let reachable = nht_track_received_attr(bgp, &d.attr, dep.clone());
+            let reachable = if enhe_egress.is_none() {
+                nht_track_received_attr(bgp, &d.attr, dep.clone())
+            } else {
+                true
+            };
             let transit = rd.is_some()
                 && peer_ident != ORIGINATED_PEER
                 && bgp.vrf_import.is_some_and(|disp| {
@@ -8930,6 +9011,7 @@ pub fn route_ipv6_update(
         attr: attr.clone(),
         label,
         nexthop,
+        enhe_egress,
         stale,
         nexthop_reachable,
         vrf_transit_only,
@@ -30371,6 +30453,64 @@ mod tests {
     }
 
     #[test]
+    fn fib_entry_v6_pins_link_local_next_hop_to_its_interface() {
+        // Every interface carries fe80::/64, so a table walk resolves a
+        // link-local next-hop to whichever connected entry comes first.
+        // The receiving interface must reach the RIB as `ifindex_origin`.
+        let ll: std::net::Ipv6Addr = "fe80::2".parse().unwrap();
+        let mut rib = bgp_rib_with_nexthop(Some(BgpNexthop::Ipv6(ll)), super::BgpRibType::EBGP);
+        rib.enhe_egress = Some((ll, 7));
+        let entry = super::make_bgp_rib_entry_v6(&rib).expect("must build");
+        match entry.nexthop {
+            crate::rib::Nexthop::Uni(ref uni) => {
+                assert_eq!(uni.addr, IpAddr::V6(ll));
+                assert_eq!(uni.ifindex_origin, Some(7));
+            }
+            other => panic!("expected Nexthop::Uni, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn fib_entry_v6_global_next_hop_is_left_to_the_resolver() {
+        let nh: std::net::Ipv6Addr = "2001:db8::1".parse().unwrap();
+        let rib = bgp_rib_with_nexthop(Some(BgpNexthop::Ipv6(nh)), super::BgpRibType::EBGP);
+        let entry = super::make_bgp_rib_entry_v6(&rib).expect("must build");
+        match entry.nexthop {
+            crate::rib::Nexthop::Uni(ref uni) => assert_eq!(uni.ifindex_origin, None),
+            other => panic!("expected Nexthop::Uni, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn v6_link_local_egress_needs_a_link_local_and_a_scope() {
+        let attr = |nh: Option<BgpNexthop>| BgpAttr {
+            nexthop: nh,
+            ..BgpAttr::default()
+        };
+        let ll: std::net::Ipv6Addr = "fe80::2".parse().unwrap();
+        let global: std::net::Ipv6Addr = "2001:db8::2".parse().unwrap();
+        let egress = super::v6_link_local_egress;
+        assert_eq!(
+            egress(&attr(Some(BgpNexthop::Ipv6(ll))), Some(7)),
+            Some((ll, 7))
+        );
+        assert_eq!(egress(&attr(Some(BgpNexthop::Ipv6(ll))), None), None);
+        assert_eq!(egress(&attr(Some(BgpNexthop::Ipv6(global))), Some(7)), None);
+        assert_eq!(
+            egress(
+                &attr(Some(BgpNexthop::Ipv4(Ipv4Addr::new(192, 0, 2, 1)))),
+                Some(7)
+            ),
+            None
+        );
+        assert_eq!(egress(&attr(None), Some(7)), None);
+        // An SRv6 L3 service SID keeps the path on the tracked SID.
+        let mut sid = srv6_l3_attr("fc00:0:1::".parse().unwrap());
+        sid.nexthop = Some(BgpNexthop::Ipv6(ll));
+        assert_eq!(egress(&sid, Some(7)), None);
+    }
+
+    #[test]
     fn fib_entry_v6_skipped_for_v4_nexthop() {
         // A v4 next-hop on a row reaching the v6 installer is a bug
         // upstream; the builder defensively declines rather than
@@ -36601,6 +36741,69 @@ mod multipath_tests {
                 "a link-local gateway must be pinned to its interface"
             );
         }
+    }
+
+    /// A plain IPv6 unicast path from an interface neighbor: the
+    /// next-hop attribute is the peer's link-local, pinned to the
+    /// receiving interface through `enhe_egress`.
+    fn v6_ll_row(ident: usize, ll_octet: u16, ifindex: u32) -> BgpRib {
+        let ll = Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, ll_octet);
+        let mut row = ebgp_row(ident, "65000 65042", [0, 0, 0, 0]);
+        let mut attr = (*row.attr).clone();
+        attr.nexthop = Some(BgpNexthop::Ipv6(ll));
+        row.attr = std::sync::Arc::new(attr);
+        row.enhe_egress = Some((ll, ifindex));
+        row
+    }
+
+    /// The same link-local on two links is two gateways for v6 unicast
+    /// too; keyed on the attribute alone the second would be dropped.
+    #[test]
+    fn v6_link_local_dedup_is_by_link_local_and_ifindex() {
+        let mut t = table(8, false);
+        let set = select(&mut t, vec![v6_ll_row(1, 0x1, 1), v6_ll_row(2, 0x1, 2)]);
+        assert_eq!(set.len(), 2, "the same LL on two links is two gateways");
+    }
+
+    #[test]
+    fn widening_pins_v6_unicast_link_local_legs() {
+        let mut entry = make_bgp_rib_entry_v6(&v6_ll_row(1, 0x1, 1)).expect("must build");
+        widen_to_multipath(
+            &mut entry,
+            &[v6_ll_row(2, 0x2, 2), v6_ll_row(3, 0x3, 3)],
+            true,
+        );
+        let rib::Nexthop::Multi(m) = entry.nexthop else {
+            panic!("expected Multi");
+        };
+        assert_eq!(m.nexthops.len(), 3);
+        for (uni, (octet, ifindex)) in m.nexthops.iter().zip([(0x1u16, 1u32), (0x2, 2), (0x3, 3)]) {
+            assert_eq!(
+                uni.addr,
+                IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, octet))
+            );
+            assert_eq!(
+                uni.ifindex_origin,
+                Some(ifindex),
+                "a link-local gateway must be pinned to its interface"
+            );
+        }
+    }
+
+    /// The main-side AddPath flip list skips an RFC 8950 row even when it
+    /// carries the sender's v4 NEXT_HOP, which the receiver ignores.
+    #[test]
+    fn candidates_tracking_skips_an_enhe_row_with_a_v4_next_hop() {
+        let mut t = table(8, false);
+        let mut enhe = ebgp_row(1, "65001", [192, 0, 2, 9]);
+        enhe.enhe_egress = Some((Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1), 1));
+        select(&mut t, vec![enhe, ebgp_row(2, "65002", [192, 0, 2, 9])]);
+        let nh = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 9));
+        let idents: Vec<_> = candidates_tracking(Some(&t), prefix(), nh)
+            .iter()
+            .map(|r| r.ident)
+            .collect();
+        assert_eq!(idents, vec![2]);
     }
 }
 
