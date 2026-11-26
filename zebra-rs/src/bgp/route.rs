@@ -16157,7 +16157,16 @@ pub fn route_update_ipv6(
     let nh_unchanged = !rib.is_originated()
         && (peer.next_hop_unchanged(Afi::Ip6, knob_safi)
             || (plain_unicast && peer.is_ebgp() && peer.config.route_server_client));
+    // A link-local next-hop names a gateway only on the link the route was
+    // learned on, so it is never passed along: not to an iBGP peer, and
+    // not under `next-hop-unchanged` or toward a route-server client. The
+    // v6 twin of the RFC 8950 rule in `route_update_ipv4`, and what FRR
+    // does (`subgroup_announce_check` resets a link-local next-hop
+    // whatever the knobs say).
+    let link_local_nh = plain_unicast
+        && matches!(attrs.nexthop, Some(BgpNexthop::Ipv6(nh)) if nh.is_unicast_link_local());
     let needs_self = rib.is_originated()
+        || link_local_nh
         || (peer.is_ebgp() && !nh_unchanged)
         || (peer.next_hop_self(Afi::Ip6, knob_safi) && !nh_unchanged);
     if needs_self {
@@ -16206,13 +16215,16 @@ pub fn route_update_ipv6(
                 })),
                 _ => Some(BgpNexthop::Ipv6(local_v6)),
             };
-        } else if !matches!(
-            attrs.nexthop,
-            Some(BgpNexthop::Ipv6(_)) | Some(BgpNexthop::Vpnv6(_))
-        ) {
+        } else if link_local_nh
+            || !matches!(
+                attrs.nexthop,
+                Some(BgpNexthop::Ipv6(_)) | Some(BgpNexthop::Vpnv6(_))
+            )
+        {
             // No v6 self next-hop available (v4-transport session whose
             // interface carries no global v6) and the route brings no
-            // usable v6 next-hop of its own. Emitting `::` is worse
+            // usable v6 next-hop of its own: none, or a link-local of
+            // another link. Emitting `::` or that link-local is worse
             // than not advertising — the peer would select a route it
             // can never resolve — so skip it.
             return None;
@@ -35949,6 +35961,117 @@ mod v6_empty_selection_tests {
                 .0
                 .contains_key(&nlri.prefix),
             "S, the source, no longer holds it"
+        );
+    }
+
+    /// A link-local next-hop names a gateway only on the link the route
+    /// was learned on, so it is never passed along. Each peer here would
+    /// keep a forwarded route's next-hop (iBGP, a route-server client,
+    /// `next-hop-unchanged`), and does for a global one; a link-local one
+    /// is replaced by our own address. With no address of ours to put
+    /// there the route is not advertised.
+    #[tokio::test]
+    async fn v6_link_local_next_hop_is_never_passed_along() {
+        use crate::bgp::peer::PeerType;
+        let router_id = Ipv4Addr::new(10, 0, 0, 9);
+        let ctx = crate::context::ProtoContext::default_table_no_rib();
+        let mut local_rib = LocalRib::default();
+        let mut shard = crate::bgp::shard::BgpShard::default();
+        let mut attr_store = crate::bgp::BgpAttrStore::default();
+        let mut update_groups = crate::bgp::update_group::empty_map();
+        let interface_addrs = crate::bgp::interface_addrs::InterfaceAddrs::default();
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        Box::leak(Box::new(rx));
+        let mut top = crate::bgp::peer::BgpTop {
+            router_id: &router_id,
+            srv6_ipv6_export: None,
+            local_rib: &mut local_rib,
+            shard: &mut shard,
+            tx: &tx,
+            rib_client: &ctx.rib,
+            attr_store: &mut attr_store,
+            update_groups: &mut update_groups,
+            interface_addrs: &interface_addrs,
+            vrf_export: None,
+            color_policy: None,
+            flex_algo_routes: None,
+            flex_algo_srv6_routes: None,
+            vrf_import: None,
+            nexthop_cache: None,
+            vrf_transport_v4: None,
+            vrf_transport_v6: None,
+            as_sets_withdraw: false,
+        };
+
+        let prefix: Ipv6Net = "2001:db8:beef::/64".parse().unwrap();
+        let link_local: Ipv6Addr = "fe80::1".parse().unwrap();
+        let global: Ipv6Addr = "2001:db8::1".parse().unwrap();
+        // `v6_peer`'s session-local address.
+        let ours: Ipv6Addr = "2001:db8::99".parse().unwrap();
+        // An eBGP-learned route from some other neighbor.
+        let learned = |nh: Ipv6Addr| {
+            let mut attr = BgpAttr::new();
+            attr.aspath = Some(bgp_packet::As4Path::from(vec![65002]));
+            attr.nexthop = Some(BgpNexthop::Ipv6(nh));
+            BgpRib::new(
+                7,
+                Ipv4Addr::new(10, 0, 0, 7),
+                BgpRibType::EBGP,
+                0,
+                0,
+                &attr,
+                None,
+                None,
+                false,
+            )
+        };
+        let mut sent = |peer: &mut Peer, nh: Ipv6Addr| {
+            route_update_ipv6(peer, &prefix, &learned(nh), &mut top, false)
+                .map(|(_, attrs)| attrs.nexthop)
+        };
+        let v6 = AfiSafi::new(Afi::Ip6, Safi::Unicast);
+
+        let (mut ibgp, _rx) = v6_peer("2001:db8::2", 65001);
+        ibgp.peer_type = PeerType::IBGP;
+        let (mut rs_client, _rx) = v6_peer("2001:db8::3", 65003);
+        rs_client.config.route_server_client = true;
+        let (mut unchanged, _rx) = v6_peer("2001:db8::4", 65004);
+        unchanged
+            .config
+            .sub
+            .entry(v6)
+            .or_default()
+            .next_hop_unchanged = true;
+        for (peer, name) in [
+            (&mut ibgp, "iBGP"),
+            (&mut rs_client, "route-server client"),
+            (&mut unchanged, "next-hop-unchanged"),
+        ] {
+            assert_eq!(
+                sent(peer, global),
+                Some(Some(BgpNexthop::Ipv6(global))),
+                "{name}: a global next-hop is kept"
+            );
+            assert_eq!(
+                sent(peer, link_local),
+                Some(Some(BgpNexthop::Ipv6(ours))),
+                "{name}: a link-local next-hop becomes our address"
+            );
+        }
+
+        // An IPv4-transport session whose interface has no global IPv6:
+        // nothing of ours to offer.
+        let (mut v4_session, _rx) = v6_peer("2001:db8::5", 65001);
+        v4_session.peer_type = PeerType::IBGP;
+        v4_session.param.local_addr = Some("10.0.0.9:179".parse().unwrap());
+        assert_eq!(
+            sent(&mut v4_session, global),
+            Some(Some(BgpNexthop::Ipv6(global)))
+        );
+        assert_eq!(
+            sent(&mut v4_session, link_local),
+            None,
+            "a link-local next-hop is not advertised without an address of ours"
         );
     }
 
