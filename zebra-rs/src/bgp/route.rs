@@ -8835,7 +8835,13 @@ fn v6_link_local_egress(attr: &BgpAttr, scope_id: Option<u32>) -> Option<(Ipv6Ad
     let Some(BgpNexthop::Ipv6(nh)) = attr.nexthop.as_ref() else {
         return None;
     };
-    if !nh.is_unicast_link_local() || attr.srv6_l3_sid().is_some() {
+    // The SID test is the installer's (`select_fib_entry_v6`): a route
+    // whose SIDs cannot serve an IPv6 destination, an End.DT4 alone, is
+    // installed as a plain route via this link-local and is pinned too.
+    if !nh.is_unicast_link_local()
+        || bgp_packet::srv6_l3_sid_for_dest(&attr.srv6_l3_sids().collect::<Vec<_>>(), false)
+            .is_some()
+    {
         return None;
     }
     Some((*nh, scope_id?))

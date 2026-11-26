@@ -290,6 +290,36 @@ async fn a_link_local_route_with_an_srv6_sid_keeps_tracking_the_sid() {
     assert_eq!(best_egress(&bgp), None);
 }
 
+/// A service SID that cannot serve an IPv6 destination (an End.DT4 alone)
+/// is not installed: the route goes in as a plain one via its link-local,
+/// so it is pinned like any other and waits for nothing.
+#[tokio::test]
+async fn a_link_local_route_whose_only_sid_is_end_dt4_is_pinned() {
+    let (mut bgp, mut rx) = bgp();
+    let id = add_unnumbered(&mut bgp);
+    let attr = BgpAttr {
+        origin: Some(Origin::Igp),
+        aspath: Some(As4Path::from_str("65002").unwrap()),
+        prefix_sid: Some(bgp_packet::PrefixSid {
+            tlvs: vec![bgp_packet::PrefixSidTlv::Srv6L3Service(
+                bgp_packet::Srv6ServiceTlv {
+                    sids: vec![bgp_packet::Srv6SidInfo::new(
+                        SID,
+                        0,
+                        bgp_packet::SRV6_BEHAVIOR_END_DT4,
+                        None,
+                    )],
+                    ..Default::default()
+                },
+            )],
+        }),
+        ..Default::default()
+    };
+    announce_attr(&mut bgp, id, LL, attr);
+    assert_eq!(rib_msgs(&mut rx), vec![pinned()]);
+    assert_eq!(best_egress(&bgp), Some((LL, IFINDEX)));
+}
+
 /// A MED knob change re-runs best-path (`Bgp::bestpath_recompute_all`),
 /// and that finds the prefixes to re-run by their tracked next-hops. A
 /// prefix learned only over pinned link-locals has none and must be
