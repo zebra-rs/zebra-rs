@@ -1888,6 +1888,17 @@ impl Peer {
         subnets.ifindex_for(self.address)
     }
 
+    /// The interface a link-local next-hop from this peer is on: the link
+    /// its session rides. An interface neighbor carries it as its scope.
+    /// A neighbor configured by address has it once its session
+    /// establishes ([`Self::session_ifindex`]): the local socket's scope
+    /// when the session itself runs between link-locals, else the
+    /// interface of the local address, as FRR reads `peer->nexthop.ifp`.
+    /// `None` when neither is known.
+    pub fn link_local_ifindex(&self) -> Option<u32> {
+        self.scope_id.or(self.session_ifindex)
+    }
+
     /// Effective BFD hop mode for this neighbour: the explicit
     /// `bfd multihop` override if set, else inferred from the BGP
     /// session type (iBGP ⇒ multihop), mirroring FRR's
