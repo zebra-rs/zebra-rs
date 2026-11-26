@@ -9,10 +9,10 @@
 use super::*;
 use crate::bgp::peer::{Peer, PeerType, State};
 use crate::bgp::peer_key::PeerOrigin;
-use crate::bgp::route::{route_clean, route_from_peer};
+use crate::bgp::route::{BgpRib, BgpRibType, MedPolicy, route_clean, route_from_peer};
 use bgp_packet::{
     Afi, AfiSafi, As4Path, BgpAttr, BgpNexthop, CapExtendedNextHop, CapMultiProtocol,
-    ExtendedNextHopValue, Ipv4Nlri, MpReachAttr, MpUnreachAttr, Origin, Safi, UpdatePacket,
+    ExtendedNextHopValue, Ipv4Nlri, Med, MpReachAttr, MpUnreachAttr, Origin, Safi, UpdatePacket,
 };
 use ipnet::Ipv4Net;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -25,6 +25,9 @@ const IFINDEX: u32 = 7;
 /// The neighbor's link-local: the session address and the MP_REACH
 /// next-hop.
 const LL: Ipv6Addr = Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 2);
+/// A second neighbor, on its own link.
+const IFINDEX2: u32 = 8;
+const LL2: Ipv6Addr = Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 3);
 const V4: AfiSafi = AfiSafi {
     afi: Afi::Ip,
     safi: Safi::Unicast,
@@ -86,9 +89,14 @@ fn enhe_cap() -> CapExtendedNextHop {
 /// An Established unnumbered eBGP neighbor on interface [`IFINDEX`], with
 /// the extended next-hop negotiated and soft-reconfiguration inbound on.
 fn add_unnumbered(bgp: &mut Bgp) -> usize {
+    add_unnumbered_on(bgp, LL, IFINDEX)
+}
+
+/// The same neighbor with link-local `ll` on interface `ifindex`.
+fn add_unnumbered_on(bgp: &mut Bgp, ll: Ipv6Addr, ifindex: u32) -> usize {
     let (tx, rx) = mpsc::channel(64);
     Box::leak(Box::new(rx));
-    let ip = IpAddr::V6(LL);
+    let ip = IpAddr::V6(ll);
     let mut peer = Peer::new(
         0,
         65000,
@@ -101,8 +109,8 @@ fn add_unnumbered(bgp: &mut Bgp) -> usize {
     );
     peer.state = State::Established;
     peer.peer_type = PeerType::EBGP;
-    peer.origin = PeerOrigin::Interface { ifindex: IFINDEX };
-    peer.scope_id = Some(IFINDEX);
+    peer.origin = PeerOrigin::Interface { ifindex };
+    peer.scope_id = Some(ifindex);
     peer.cap_send.extended_nexthop = Some(enhe_cap());
     peer.cap_recv.extended_nexthop = Some(enhe_cap());
     peer.config.soft_reconfig_in = true;
@@ -167,16 +175,22 @@ fn ingest(bgp: &mut Bgp, id: usize, packet: UpdatePacket) {
 /// tracked, it would be a fresh, unresolved next-hop that keeps the routes
 /// out of the FIB.
 fn announce(bgp: &mut Bgp, id: usize, prefixes: &[Ipv4Net]) {
+    announce_from(bgp, id, LL, None, prefixes);
+}
+
+/// The same from the neighbor whose link-local is `ll`, with `med`.
+fn announce_from(bgp: &mut Bgp, id: usize, ll: Ipv6Addr, med: Option<u32>, prefixes: &[Ipv4Net]) {
     let mut packet = UpdatePacket::new();
     packet.bgp_attr = Some(BgpAttr {
         origin: Some(Origin::Igp),
         aspath: Some(As4Path::from_str("65002").unwrap()),
         nexthop: Some(BgpNexthop::Ipv4(Ipv4Addr::new(10, 0, 0, 2))),
+        med: med.map(Med::new),
         ..Default::default()
     });
     packet.mp_update = Some(MpReachAttr::Ipv4 {
         snpa: 0,
-        nhop: IpAddr::V6(LL),
+        nhop: IpAddr::V6(ll),
         updates: prefixes
             .iter()
             .map(|p| Ipv4Nlri { id: 0, prefix: *p })
@@ -269,9 +283,13 @@ fn rib_msgs(rx: &mut RibRx) -> Vec<String> {
 }
 
 fn installed(prefixes: &[Ipv4Net]) -> Vec<String> {
+    installed_via(prefixes, LL, IFINDEX)
+}
+
+fn installed_via(prefixes: &[Ipv4Net], ll: Ipv6Addr, ifindex: u32) -> Vec<String> {
     prefixes
         .iter()
-        .map(|p| format!("add {p} via {LL} ifindex Some({IFINDEX})"))
+        .map(|p| format!("add {p} via {ll} ifindex Some({ifindex})"))
         .collect()
 }
 
@@ -375,5 +393,162 @@ async fn an_inbound_deny_removes_the_unnumbered_routes() {
             "N={n}: the denied routes leave the FIB"
         );
         assert!(selected(&bgp).is_empty(), "N={n}: nothing stays selected");
+    }
+}
+
+/// The neighbor whose path is best for each of `prefixes` in main's table
+/// (the read replica at N>1).
+fn winners(bgp: &Bgp, prefixes: &[Ipv4Net]) -> Vec<Option<usize>> {
+    prefixes
+        .iter()
+        .map(|p| bgp.shard.v4.1.get(p).map(|rib| rib.ident))
+        .collect()
+}
+
+/// A MED knob change re-runs best-path (`Bgp::bestpath_recompute_all`),
+/// which finds the prefixes to re-run by their tracked next-hops. An RFC
+/// 8950 path tracks none, so a prefix learned only from unnumbered
+/// neighbors must be re-run all the same. The knobs are process-wide, so
+/// this sets none: each prefix's recorded winner is the path `med
+/// missing-as-worst` would have chosen, and the recompute is the one that
+/// deleting the knob runs. At N>1 the pool's shards hold the rows.
+#[tokio::test]
+async fn a_best_path_recompute_reaches_unnumbered_routes() {
+    use crate::bgp::shard::BgpShard;
+    use crate::bgp::shard::pool::{ShardPool, shard_of};
+    for n in [1, 2] {
+        let (mut bgp, mut rx) = bgp_with(1);
+        let first = add_unnumbered(&mut bgp);
+        let second = add_unnumbered_on(&mut bgp, LL2, IFINDEX2);
+        let row = |ident: usize, ll: Ipv6Addr, ifindex: u32, med: Option<u32>| {
+            let attr = BgpAttr {
+                origin: Some(Origin::Igp),
+                aspath: Some(As4Path::from_str("65002").unwrap()),
+                med: med.map(Med::new),
+                ..Default::default()
+            };
+            let mut rib = BgpRib::new(
+                ident,
+                ROUTER_ID,
+                BgpRibType::EBGP,
+                0,
+                0,
+                &attr,
+                None,
+                None,
+                false,
+            );
+            rib.enhe_egress = Some((ll, ifindex));
+            rib
+        };
+        let p: Vec<Ipv4Net> = PREFIXES.iter().map(|s| s.parse().unwrap()).collect();
+        let mut shards: Vec<BgpShard> = (0..n).map(|_| Default::default()).collect();
+        for prefix in &p {
+            let shard = &mut shards[shard_of(IpAddr::V4(prefix.addr()), n)];
+            // Same neighboring AS, so MED decides: a missing MED reads as
+            // 0 and beats 5, unless it is read as the worst value.
+            shard.update(None, *prefix, row(first, LL, IFINDEX, None));
+            shard.update(None, *prefix, row(second, LL2, IFINDEX2, Some(5)));
+            assert_eq!(shard.v4.1.get(prefix).map(|rib| rib.ident), Some(first));
+            let other = shard
+                .v4
+                .candidates(*prefix)
+                .iter()
+                .find(|rib| rib.ident == second)
+                .expect("the second path is a candidate")
+                .clone();
+            shard.v4.1.insert(*prefix, other);
+        }
+        assert!(
+            shards
+                .iter()
+                .all(|shard| shard.v4.1.iter().next().is_some()),
+            "N={n}: the prefixes reach every shard"
+        );
+        if n > 1 {
+            let (tx, results) = mpsc::unbounded_channel();
+            bgp.shards = Some(ShardPool::spawn(shards, tx));
+            bgp.shard_results_rx = results;
+        } else {
+            bgp.shard = shards.pop().unwrap();
+        }
+
+        bgp.bestpath_recompute_all();
+        settle(&mut bgp, first).await;
+
+        assert_eq!(
+            rib_msgs(&mut rx),
+            installed(&p),
+            "N={n}: each prefix is installed on its new best path"
+        );
+        assert_eq!(
+            winners(&bgp, &p),
+            vec![Some(first); p.len()],
+            "N={n}: main's table records the new best path"
+        );
+    }
+}
+
+/// Puts the process-wide MED policy back when a knob test ends.
+struct RestoreMed(MedPolicy);
+impl Drop for RestoreMed {
+    fn drop(&mut self) {
+        self.0.install();
+    }
+}
+
+/// What the `bestpath` MED config handlers do with a new policy.
+fn set_med(bgp: &mut Bgp, policy: MedPolicy) {
+    bgp.bestpath_med = policy;
+    policy.install();
+    bgp.bestpath_recompute_all();
+}
+
+/// The same through the knob itself, on routes learned from two
+/// unnumbered neighbors: setting `med missing-as-worst` moves every prefix
+/// to the neighbor that sends a MED, and deleting it moves them back.
+#[tokio::test]
+#[ignore = "changes process-wide MED policy; run alone with --ignored --test-threads=1"]
+async fn a_med_knob_change_moves_the_best_path_of_unnumbered_routes() {
+    let _restore = RestoreMed(MedPolicy::current());
+    for n in [1, 2] {
+        MedPolicy::default().install();
+        let (mut bgp, mut rx) = bgp_with(n);
+        let first = add_unnumbered(&mut bgp);
+        let second = add_unnumbered_on(&mut bgp, LL2, IFINDEX2);
+        let p = prefixes(&bgp);
+        announce_from(&mut bgp, first, LL, None, &p);
+        announce_from(&mut bgp, second, LL2, Some(5), &p);
+        settle(&mut bgp, first).await;
+        rib_msgs(&mut rx);
+        assert_eq!(winners(&bgp, &p), vec![Some(first); p.len()], "N={n}");
+        assert!(
+            bgp.nexthop_cache.entries.is_empty(),
+            "N={n}: neither path is tracked"
+        );
+
+        set_med(
+            &mut bgp,
+            MedPolicy {
+                missing_as_worst: true,
+                ..Default::default()
+            },
+        );
+        settle(&mut bgp, first).await;
+        assert_eq!(
+            rib_msgs(&mut rx),
+            installed_via(&p, LL2, IFINDEX2),
+            "N={n}: a missing MED now loses to 5"
+        );
+        assert_eq!(winners(&bgp, &p), vec![Some(second); p.len()], "N={n}");
+
+        set_med(&mut bgp, MedPolicy::default());
+        settle(&mut bgp, first).await;
+        assert_eq!(
+            rib_msgs(&mut rx),
+            installed(&p),
+            "N={n}: deleting the knob moves the routes back"
+        );
+        assert_eq!(winners(&bgp, &p), vec![Some(first); p.len()], "N={n}");
     }
 }

@@ -2285,49 +2285,28 @@ fn winner_changes(cands: &[BgpRib], current: Option<&BgpRib>, med: MedPolicy) ->
 /// - Flowspec (IPv4 and IPv6): propagate (advertise or withdraw, install).
 /// - BGP-LS: re-select only; the Loc-RIB records the winner and the
 ///   session-up dump reads it, nothing is propagated yet.
-/// - IPv6 unicast prefixes learned only over link-local next-hops pinned
-///   to their receiving interface (`BgpRib::enhe_egress`), which register
-///   nothing: install and advertise, as the replay does for a tracked
-///   prefix.
+/// - IPv4 and IPv6 unicast prefixes learned only from interface
+///   neighbors ([`LocalRibTable::reselect_untracked`]): install and
+///   advertise, as the replay does for a tracked prefix. Their paths
+///   carry `BgpRib::enhe_egress` (an RFC 8950 path, or an IPv6 link-local
+///   pinned to its receiving interface) and register nothing.
 ///
 /// Prefixes whose winner the new policy does not move are left alone.
-pub fn bestpath_recompute_untracked(bgp: &mut BgpTop, peers: &mut PeerMap) {
+///
+/// `v4_in_pool`: a shard pool owns IPv4-unicast selection (N>1) and this
+/// table is its read replica, so the caller hands that walk to the shards
+/// ([`ShardMsg::ReselectUntrackedV4`]).
+pub fn bestpath_recompute_untracked(bgp: &mut BgpTop, peers: &mut PeerMap, v4_in_pool: bool) {
     let med = MedPolicy::current();
 
-    // A pinned link-local path is never tracked (`nht_tracked_target`), so
-    // a prefix whose learned paths are all pinned has no dep for the NHT
-    // replay to find, and two interface neighbors are enough for a MED
-    // choice between them. A prefix that also has a tracked path is the
-    // replay's: it re-selects over every candidate, so it is skipped here
-    // and each prefix runs once.
-    let pinned: Vec<Ipv6Net> = bgp
-        .shard
-        .v6
-        .0
-        .iter()
-        .filter(|(_, cands)| cands.iter().any(|rib| rib.enhe_egress.is_some()))
-        .map(|(prefix, _)| prefix)
-        .filter(|prefix| bgp.shard.v6.winner_would_change(*prefix, med))
-        .collect();
-    if !pinned.is_empty() {
-        let tracked: BTreeSet<Ipv6Net> = bgp
-            .nexthop_cache
-            .as_deref()
-            .into_iter()
-            .flat_map(|cache| cache.entries.values())
-            .flat_map(|entry| entry.deps.iter())
-            .filter_map(|dep| match dep {
-                super::nht::NhtDep::V6(prefix) => Some(*prefix),
-                _ => None,
-            })
-            .collect();
-        for prefix in pinned {
-            if tracked.contains(&prefix) {
-                continue;
-            }
-            let selected = bgp.shard.v6.select_best_path(prefix);
-            fib_install_v6(bgp, prefix, &selected);
-            route_advertise_to_peers_v6(prefix, &selected, bgp, peers);
+    for (prefix, selected) in bgp.shard.v6.reselect_untracked(med) {
+        fib_install_v6(bgp, prefix, &selected);
+        route_advertise_to_peers_v6(prefix, &selected, bgp, peers);
+    }
+    if !v4_in_pool {
+        for (prefix, selected) in bgp.shard.v4.reselect_untracked(med) {
+            fib_install_v4(bgp, prefix, &selected);
+            route_advertise_to_peers(None, prefix, &selected, 0, bgp, peers);
         }
     }
 
@@ -2745,6 +2724,34 @@ impl<P: Prefix + Copy> LocalRibTable<P> {
             }
         }
         changed
+    }
+
+    /// Re-run best-path for the prefixes no tracked next-hop names, after
+    /// a MED knob change, and return those whose winner `med` moves, each
+    /// with its new selection. Such a prefix is learned only from
+    /// interface neighbors: it has a path carrying `enhe_egress` and no
+    /// tracked one ([`super::nht::nht_tracked_target`]), so the NHT replay
+    /// in `Bgp::bestpath_recompute_all` has no dep to find it by, and two
+    /// interface neighbors are enough for a MED choice between them. A
+    /// prefix that also has a tracked path is the replay's, which
+    /// re-selects over every candidate, so each prefix runs once.
+    pub fn reselect_untracked(&mut self, med: MedPolicy) -> Vec<(P, Vec<BgpRib>)> {
+        let prefixes: Vec<P> = self
+            .0
+            .iter()
+            .filter(|(_, cands)| {
+                cands.iter().any(|rib| rib.enhe_egress.is_some())
+                    && cands
+                        .iter()
+                        .all(|rib| super::nht::nht_tracked_target(rib).is_none())
+            })
+            .map(|(prefix, _)| prefix)
+            .filter(|prefix| self.winner_would_change(*prefix, med))
+            .collect();
+        prefixes
+            .into_iter()
+            .map(|prefix| (prefix, self.select_best_path(prefix)))
+            .collect()
     }
 
     /// The best candidate, independent of candidate order — deterministic
@@ -33589,6 +33596,66 @@ mod med_knob_tests {
             table.winner_would_change(prefix, DEFAULT),
             "multipath: always"
         );
+    }
+
+    /// The untracked walk takes a prefix only when the NHT replay cannot
+    /// reach it. Each prefix has X{no MED} and Z{MED 5} from one
+    /// neighboring AS, with Z recorded as the winner where noted, as
+    /// `med missing-as-worst` leaves it; the default policy moves it back
+    /// to X. An interface-neighbor path carries `enhe_egress` and is not
+    /// tracked, even when its attribute holds a next-hop.
+    #[test]
+    fn reselect_untracked_takes_only_prefixes_without_a_tracked_path() {
+        let interface = |mut rib: BgpRib| {
+            let ll = Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, rib.ident as u16);
+            rib.enhe_egress = Some((ll, rib.ident as u32));
+            rib
+        };
+        let net = |s: &str| s.parse::<Ipv4Net>().unwrap();
+        let (untracked, mixed, tracked, settled, local) = (
+            net("10.1.0.0/24"),
+            net("10.2.0.0/24"),
+            net("10.3.0.0/24"),
+            net("10.4.0.0/24"),
+            net("10.5.0.0/24"),
+        );
+        let mut table: LocalRibTable<Ipv4Net> = LocalRibTable::default();
+        for prefix in [untracked, settled] {
+            table.update(prefix, interface(rib(1, 65001, None)));
+            table.update(prefix, interface(rib(3, 65001, Some(5))));
+        }
+        table.update(mixed, interface(rib(1, 65001, None)));
+        table.update(mixed, rib(3, 65001, Some(5)));
+        table.update(tracked, rib(1, 65001, None));
+        table.update(tracked, rib(3, 65001, Some(5)));
+        // A locally originated path: no next-hop, nothing tracked.
+        let mut originated = rib(9, 65001, None);
+        Arc::make_mut(&mut originated.attr).nexthop = None;
+        table.update(local, originated);
+        for prefix in [untracked, mixed, tracked] {
+            let z = table.candidates(prefix)[1].clone();
+            assert_eq!(z.ident, 3);
+            table.1.insert(prefix, z);
+        }
+        let winner = |table: &LocalRibTable<Ipv4Net>, prefix| table.1.get(&prefix).unwrap().ident;
+        let taken = |table: &mut LocalRibTable<Ipv4Net>| -> Vec<(Ipv4Net, usize)> {
+            table
+                .reselect_untracked(DEFAULT)
+                .into_iter()
+                .map(|(prefix, set)| (prefix, set[0].ident))
+                .collect()
+        };
+
+        assert_eq!(taken(&mut table), vec![(untracked, 1)]);
+        assert_eq!(winner(&table, untracked), 1);
+        assert_eq!(winner(&table, mixed), 3, "the NHT replay's");
+        assert_eq!(winner(&table, tracked), 3, "the NHT replay's");
+        assert!(taken(&mut table).is_empty(), "nothing left to move");
+
+        // With multipath on every prefix replays, but still only those
+        // learned from interface neighbors alone.
+        table.2.max_paths = 2;
+        assert_eq!(taken(&mut table), vec![(untracked, 1), (settled, 1)]);
     }
 
     /// Multipath eligibility reads MED under the same policy as the ladder:

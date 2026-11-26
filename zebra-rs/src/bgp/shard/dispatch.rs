@@ -107,6 +107,7 @@ impl BgpShard {
                 Vec::new()
             }
             ShardMsg::MultipathResyncV4 { cfg } => self.handle_multipath_resync_v4(cfg),
+            ShardMsg::ReselectUntrackedV4 => self.handle_reselect_untracked_v4(),
             ShardMsg::NexthopReachableBatchV4 {
                 nlris,
                 nh,
@@ -686,6 +687,28 @@ impl BgpShard {
             .reselect_changed()
             .into_iter()
             .map(|(prefix, selected)| ShardOut::MultipathV4 { prefix, selected })
+            .collect()
+    }
+
+    /// Re-run best-path for the IPv4-unicast prefixes this shard learned
+    /// only over RFC 8950 paths, after a MED knob change: the pool half of
+    /// `bestpath_recompute_untracked`. Replies only for the prefixes whose
+    /// winner moves; nothing is removed, and such a prefix has no tracked
+    /// next-hop to report. `ident` is left 0, as in `reeval_nexthop_v4`.
+    fn handle_reselect_untracked_v4(&mut self) -> Vec<ShardOut> {
+        self.v4
+            .reselect_untracked(super::super::route::MedPolicy::current())
+            .into_iter()
+            .map(|(prefix, selected)| ShardOut::BestPathV4 {
+                ident: 0,
+                rd: None,
+                prefix: Ipv4Nlri { id: 0, prefix },
+                selected,
+                replaced: Vec::new(),
+                added: None,
+                survivor_nexthops: Default::default(),
+                nexthop_flipped: Vec::new(),
+            })
             .collect()
     }
 
