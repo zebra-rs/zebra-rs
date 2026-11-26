@@ -6862,10 +6862,12 @@ impl Bgp {
     ///   tracked v4 prefix is batched to its shard unfiltered.
     /// - Families whose rows carry no tracked next-hop — EVPN (all route
     ///   types), MUP, Flowspec, BGP-LS — are walked directly
-    ///   ([`super::route::bestpath_recompute_untracked`]). So are the IPv6
-    ///   unicast prefixes learned only over link-local next-hops pinned to
-    ///   their receiving interface: a pinned path registers no next-hop,
-    ///   so the first pass has no dep to find them by.
+    ///   ([`super::route::bestpath_recompute_untracked`]). So are the
+    ///   IPv4 and IPv6 unicast prefixes learned only from interface
+    ///   neighbors: an RFC 8950 path, or an IPv6 link-local pinned to its
+    ///   receiving interface, registers no next-hop, so the first pass has
+    ///   no dep to find them by. At N>1 the pool's shards walk their own
+    ///   IPv4 prefixes ([`super::shard::ShardMsg::ReselectUntrackedV4`]).
     ///
     /// SR-Policy has no best-path over paths that carry MED. Locally
     /// originated unicast routes carry no tracked next-hop; a prefix with
@@ -6938,6 +6940,12 @@ impl Bgp {
         for ((vrf_id, nh, reachable), deps) in batches {
             self.nht_reeval_deps(vrf_id, nh, reachable, deps);
         }
+        // The pool owns IPv4-unicast selection at N>1, so its shards walk
+        // their own untracked prefixes; main walks the rest below.
+        let v4_in_pool = self.shards.is_some();
+        if let Some(pool) = self.shards.as_ref() {
+            pool.broadcast(|| super::shard::ShardMsg::ReselectUntrackedV4);
+        }
 
         let import_dispatcher = super::vrf::VrfImportDispatcher {
             rib_known_vrfs: &self.rib_known_vrfs,
@@ -6963,7 +6971,7 @@ impl Bgp {
             vrf_transport_v6: None,
             as_sets_withdraw: self.as_sets_withdraw,
         };
-        super::route::bestpath_recompute_untracked(&mut top, &mut self.peers);
+        super::route::bestpath_recompute_untracked(&mut top, &mut self.peers, v4_in_pool);
     }
 
     pub(super) fn nht_reeval_dep(

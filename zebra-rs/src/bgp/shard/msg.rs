@@ -180,6 +180,16 @@ pub enum ShardMsg {
         cfg: super::super::route::MultipathCfg,
     },
 
+    /// Re-run best-path for the IPv4-unicast prefixes no tracked next-hop
+    /// names (those learned only over RFC 8950 paths), after a MED knob
+    /// change, replying with one [`ShardOut::BestPathV4`] per prefix whose
+    /// winner moves. Broadcast by
+    /// [`crate::bgp::inst::Bgp::bestpath_recompute_all`] at N>1: main finds
+    /// the tracked prefixes by their NHT deps and batches them
+    /// ([`Self::NexthopReachableBatchV4`]), but these have no dep, and the
+    /// pool's tables are the ones selection runs on.
+    ReselectUntrackedV4,
+
     /// Re-evaluate a batch of IPv4-unicast prefixes that share a next-hop,
     /// after that next-hop's reachability flipped (`RibRx::NexthopUpdate`).
     /// All of the next-hop's dependent prefixes hashing to this shard ride
