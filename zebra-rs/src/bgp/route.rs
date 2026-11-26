@@ -8906,13 +8906,15 @@ pub fn route_ipv6_update(
         // drop a SID-less route before it reaches the Adj-RIB-In /
         // Loc-RIB. VPNv6 rows (rd = Some) are unaffected — they carry
         // their own service SID and have a separate filter contract.
+        // Like an OTC deny, the drop takes the path this UPDATE replaces
+        // with it (below).
         if rd.is_none() && peer.ipv6_srv6_strict() && attr.srv6_l3_sid().is_none() {
             tracing::debug!(
                 peer = %peer.address,
                 prefix = %nlri.prefix,
                 "bgp: drop SID-less IPv6 route from encapsulation-type srv6 peer",
             );
-            return;
+            break 'checks None;
         }
 
         let typ = if peer.is_ibgp() {
@@ -8924,8 +8926,9 @@ pub fn route_ipv6_update(
         Some((peer.ident, peer.remote_id, typ, from_client, otc_stamp))
     };
     let Some((peer_ident, peer_router_id, typ, from_client, otc_stamp)) = checks else {
-        // An RFC 9234 leak: the UPDATE replaces the neighbor's earlier
-        // path for this prefix, so that path goes too.
+        // A refused route (an RFC 9234 leak, or one without a SID from an
+        // SRv6-only peer): the UPDATE replaces the neighbor's earlier
+        // path for this prefix (RFC 4271 §3.1), so that path goes too.
         route_ipv6_withdraw(ident, nlri, rd, bgp, peers, true);
         return;
     };
@@ -35990,6 +35993,112 @@ mod v6_empty_selection_tests {
                 .contains_key(&nlri.prefix),
             "peer B's Adj-RIB-Out must be pruned by the withdraw"
         );
+    }
+
+    /// An UPDATE replaces the neighbor's earlier path for the prefix
+    /// (RFC 4271 §3.1), also when the new path is refused. A neighbor
+    /// under `encapsulation-type srv6` announces a prefix with an SRv6
+    /// service SID, then again without one: the SID-less route is
+    /// dropped, and the earlier path must go with it, here and at the
+    /// peer that was sent it.
+    #[tokio::test]
+    async fn v6_sidless_update_from_a_strict_srv6_peer_withdraws_its_earlier_path() {
+        use bgp_packet::{
+            PrefixSid, PrefixSidTlv, SRV6_BEHAVIOR_END_DT6, Srv6ServiceTlv, Srv6SidInfo,
+        };
+        let v6 = AfiSafi::new(Afi::Ip6, Safi::Unicast);
+        let mut peers = PeerMap::new();
+        let (mut peer_a, _rx_a) = v6_peer("2001:db8::1", 65002);
+        peer_a.config.sub.entry(v6).or_default().encapsulation_type =
+            Some(crate::bgp::peer::AfiSafiEncapType::Srv6);
+        assert!(peer_a.ipv6_srv6_strict());
+        let (peer_b, mut rx_b) = v6_peer("2001:db8::2", 65003);
+        peers.insert("2001:db8::1".parse().unwrap(), peer_a);
+        peers.insert("2001:db8::2".parse().unwrap(), peer_b);
+        let a = peers.get(&"2001:db8::1".parse().unwrap()).unwrap().ident;
+        let b = peers.get(&"2001:db8::2".parse().unwrap()).unwrap().ident;
+        peers.membership_enroll(a);
+        peers.membership_enroll(b);
+
+        let router_id = Ipv4Addr::new(10, 0, 0, 9);
+        let ctx = crate::context::ProtoContext::default_table_no_rib();
+        let mut local_rib = LocalRib::default();
+        let mut shard = crate::bgp::shard::BgpShard::default();
+        let mut attr_store = crate::bgp::BgpAttrStore::default();
+        let mut update_groups = crate::bgp::update_group::empty_map();
+        let interface_addrs = crate::bgp::interface_addrs::InterfaceAddrs::default();
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        Box::leak(Box::new(rx));
+        let mut top = crate::bgp::peer::BgpTop {
+            router_id: &router_id,
+            srv6_ipv6_export: None,
+            local_rib: &mut local_rib,
+            shard: &mut shard,
+            tx: &tx,
+            rib_client: &ctx.rib,
+            attr_store: &mut attr_store,
+            update_groups: &mut update_groups,
+            interface_addrs: &interface_addrs,
+            vrf_export: None,
+            color_policy: None,
+            flex_algo_routes: None,
+            flex_algo_srv6_routes: None,
+            vrf_import: None,
+            nexthop_cache: None,
+            vrf_transport_v4: None,
+            vrf_transport_v6: None,
+            as_sets_withdraw: false,
+        };
+
+        let nlri = Ipv6Nlri {
+            id: 0,
+            prefix: "2001:db8:5::/48".parse().unwrap(),
+        };
+        let mut sidless = BgpAttr::new();
+        sidless.aspath = Some(bgp_packet::As4Path::from(vec![65002]));
+        sidless.nexthop = Some(BgpNexthop::Ipv6("2001:db8::1".parse().unwrap()));
+        let mut with_sid = sidless.clone();
+        with_sid.prefix_sid = Some(PrefixSid {
+            tlvs: vec![PrefixSidTlv::Srv6L3Service(Srv6ServiceTlv {
+                sids: vec![Srv6SidInfo::new(
+                    "fc00:0:1::".parse().unwrap(),
+                    0,
+                    SRV6_BEHAVIOR_END_DT6,
+                    None,
+                )],
+                ..Default::default()
+            })],
+        });
+
+        route_ipv6_update(
+            a, &nlri, None, None, &with_sid, None, &mut top, &mut peers, false,
+        );
+        assert_eq!(top.shard.v6.candidates(nlri.prefix).len(), 1);
+        let b_holds = |peers: &PeerMap| {
+            peers
+                .get_by_idx(b)
+                .unwrap()
+                .adj_out
+                .v6
+                .0
+                .contains_key(&nlri.prefix)
+        };
+        assert!(b_holds(&peers), "the SID-bearing route is advertised to B");
+        drain(&mut rx_b);
+
+        route_ipv6_update(
+            a, &nlri, None, None, &sidless, None, &mut top, &mut peers, false,
+        );
+        assert!(
+            top.shard.v6.candidates(nlri.prefix).is_empty(),
+            "the earlier SID-bearing path leaves the Loc-RIB"
+        );
+        assert!(
+            top.shard.v6.1.get(&nlri.prefix).is_none(),
+            "nothing stays selected"
+        );
+        assert!(!b_holds(&peers), "and B is sent the withdraw");
+        assert!(!drain(&mut rx_b).is_empty(), "B is sent an UPDATE");
     }
 }
 
