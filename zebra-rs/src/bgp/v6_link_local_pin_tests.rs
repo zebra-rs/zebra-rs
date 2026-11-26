@@ -77,6 +77,20 @@ fn add_unnumbered(bgp: &mut Bgp) -> usize {
 
 /// The same neighbor with link-local `ll` on interface `ifindex`.
 fn add_unnumbered_on(bgp: &mut Bgp, ll: Ipv6Addr, ifindex: u32) -> usize {
+    add_neighbor(bgp, ll, |peer| {
+        peer.origin = PeerOrigin::Interface { ifindex };
+        peer.scope_id = Some(ifindex);
+    })
+}
+
+/// An Established eBGP neighbor configured by its link-local address
+/// [`LL`]. It has no scope of its own; `session_ifindex` is the interface
+/// its session was pinned to when it established, if any.
+fn add_addressed(bgp: &mut Bgp, session_ifindex: Option<u32>) -> usize {
+    add_neighbor(bgp, LL, |peer| peer.session_ifindex = session_ifindex)
+}
+
+fn add_neighbor(bgp: &mut Bgp, ll: Ipv6Addr, setup: impl FnOnce(&mut Peer)) -> usize {
     let (tx, rx) = mpsc::channel(64);
     Box::leak(Box::new(rx));
     let ip = IpAddr::V6(ll);
@@ -92,8 +106,7 @@ fn add_unnumbered_on(bgp: &mut Bgp, ll: Ipv6Addr, ifindex: u32) -> usize {
     );
     peer.state = State::Established;
     peer.peer_type = PeerType::EBGP;
-    peer.origin = PeerOrigin::Interface { ifindex };
-    peer.scope_id = Some(ifindex);
+    setup(&mut peer);
     let entry = peer
         .cap_map
         .entries
@@ -228,6 +241,32 @@ async fn a_link_local_next_hop_is_pinned_to_the_receiving_interface_and_not_trac
     announce(&mut bgp, id, LL, None);
     assert_eq!(rib_msgs(&mut rx), vec![pinned()]);
     assert_eq!(best_egress(&bgp), Some((LL, IFINDEX)));
+}
+
+/// A neighbor configured by its link-local address is on one link too:
+/// the one its session rides.
+#[tokio::test]
+async fn a_neighbor_configured_by_link_local_address_is_pinned_to_its_session_interface() {
+    let (mut bgp, mut rx) = bgp();
+    let id = add_addressed(&mut bgp, Some(IFINDEX));
+    assert_eq!(bgp.peers.get_by_idx(id).unwrap().scope_id, None);
+    announce(&mut bgp, id, LL, None);
+    assert_eq!(rib_msgs(&mut rx), vec![pinned()]);
+    assert_eq!(best_egress(&bgp), Some((LL, IFINDEX)));
+}
+
+/// With no interface known for the session there is nothing to pin to:
+/// the link-local is tracked and left to the resolver, as before.
+#[tokio::test]
+async fn a_link_local_next_hop_with_no_known_interface_is_tracked() {
+    let (mut bgp, mut rx) = bgp();
+    let id = add_addressed(&mut bgp, None);
+    announce(&mut bgp, id, LL, None);
+    assert_eq!(
+        rib_msgs(&mut rx),
+        vec![format!("del {PREFIX}"), format!("register {LL}")]
+    );
+    assert_eq!(best_egress(&bgp), None);
 }
 
 #[tokio::test]

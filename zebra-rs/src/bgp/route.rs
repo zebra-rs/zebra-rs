@@ -8831,21 +8831,23 @@ pub fn route_ipv4_withdraw(
 }
 
 /// `(link-local, ifindex)` egress of a plain v6 unicast path whose
-/// next-hop is a link-local, pinned to `scope_id` — the interface of the
-/// peer that delivered it. `None` for a global next-hop or no scope.
+/// next-hop is a link-local, pinned to `ifindex` — the interface the
+/// session of the peer that delivered it rides
+/// ([`Peer::link_local_ifindex`]). `None` for a global next-hop, or when
+/// that interface is not known.
 /// Also `None` for a path carrying an SRv6 L3 service SID: a pinned row
 /// is not tracked, and that path must stay tracked on the SID
 /// (`nht_target`). Its H.Encaps entry still resolves the link-local
 /// gateway by table walk; pinning it also needs the seg6 next-hop keyed
 /// by interface.
-fn v6_link_local_egress(attr: &BgpAttr, scope_id: Option<u32>) -> Option<(Ipv6Addr, u32)> {
+fn v6_link_local_egress(attr: &BgpAttr, ifindex: Option<u32>) -> Option<(Ipv6Addr, u32)> {
     let Some(BgpNexthop::Ipv6(nh)) = attr.nexthop.as_ref() else {
         return None;
     };
     if !nh.is_unicast_link_local() || attr.srv6_l3_sid().is_some() {
         return None;
     }
-    Some((*nh, scope_id?))
+    Some((*nh, ifindex?))
 }
 
 /// IPv6 unicast receive path — the v6 counterpart of
@@ -8976,9 +8978,9 @@ pub fn route_ipv6_update(
     // as the RFC 8950 path does for IPv4. This reads the post-policy
     // attribute, the one the FIB installs.
     let enhe_egress = if rd.is_none() {
-        decision
-            .as_ref()
-            .and_then(|d| v6_link_local_egress(&d.attr, peers.get_by_idx(ident)?.scope_id))
+        decision.as_ref().and_then(|d| {
+            v6_link_local_egress(&d.attr, peers.get_by_idx(ident)?.link_local_ifindex())
+        })
     } else {
         None
     };
