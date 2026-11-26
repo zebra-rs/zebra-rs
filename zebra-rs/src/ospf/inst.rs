@@ -3872,7 +3872,8 @@ impl Ospf<Ospfv2> {
     ///
     /// A new VL's first Hello waits for the kernel route to
     /// `peer_addr`, which the RIB reports (`vl_route_watch`,
-    /// `VirtualLinkState::hello_hold`).
+    /// `VirtualLinkState::hello_hold`). A directly adjacent peer has a
+    /// connected route already, so its Hello does not wait.
     ///
     /// Loop-safety: `router_lsa_originate` fires only when something
     /// actually changed, so a converged topology re-floods nothing and
@@ -3978,10 +3979,18 @@ impl Ospf<Ospfv2> {
                 Self::vl_apply_config(link, cfg);
                 let prefix = Ipv4Net::new(v.local_addr, 32).unwrap();
                 let vl = link.vl.as_mut().unwrap();
-                // The first Hello still waits for a route, and the far
-                // end's address is another one now: wait for that one.
-                let moved = (vl.hello_hold.is_some() && vl.peer_addr != v.peer_addr)
-                    .then_some((vl.peer_addr, v.peer_addr));
+                // The address the first Hello still waits for a route
+                // to, if it does.
+                let waiting = vl.hello_hold.is_some().then_some(vl.peer_addr);
+                let adjacent = v.peer_addr == v.first_hop_addr;
+                if waiting.is_some() && adjacent {
+                    // The far end is a neighbour now, on a connected
+                    // subnet: the wait is over.
+                    vl.hello_hold = None;
+                    if std::mem::take(&mut vl.hello_due) {
+                        let _ = self.tx.send(Message::HelloTimer(idx));
+                    }
+                }
                 if vl.peer_addr != v.peer_addr
                     || vl.first_hop_addr != v.first_hop_addr
                     || vl.first_hop_ifindex != v.first_hop_ifindex
@@ -4011,9 +4020,15 @@ impl Ospf<Ospfv2> {
                         v.peer_addr
                     );
                 }
-                if let Some((old, new)) = moved {
-                    self.vl_route_watch(new);
-                    self.vl_route_unwatch(old);
+                match waiting {
+                    Some(old) if adjacent => self.vl_route_unwatch(old),
+                    // The far end's address is another one now: wait
+                    // for the route to that one.
+                    Some(old) if old != v.peer_addr => {
+                        self.vl_route_watch(v.peer_addr);
+                        self.vl_route_unwatch(old);
+                    }
+                    _ => {}
                 }
             } else {
                 let idx = self.vl_ifindex_next;
@@ -4037,10 +4052,16 @@ impl Ospf<Ospfv2> {
                     secondary: false,
                 }];
                 link.ident.prefix = prefix;
-                // A restarting router's kernel kept the routes it had
-                // (RFC 3623), whatever the RIB knows of them by now:
-                // nothing to wait for.
-                let hello_hold = (!self.in_restart()).then(|| {
+                // The first Hello waits for the route to the far end,
+                // unless there is nothing to wait for:
+                // - A far end that is a neighbour is on a connected
+                //   subnet, which the kernel routes to already. Asking
+                //   the RIB would only hold the Hello behind whatever
+                //   the RIB has queued.
+                // - A restarting router's kernel kept the routes it had
+                //   (RFC 3623), whatever the RIB knows of them by now.
+                let adjacent = v.peer_addr == v.first_hop_addr;
+                let hello_hold = (!adjacent && !self.in_restart()).then(|| {
                     tokio::time::Instant::now() + Duration::from_secs(link.hello_interval().into())
                 });
                 {
@@ -29736,18 +29757,23 @@ mod virtual_link_tests {
 
     use std::net::IpAddr;
 
-    use super::link_scope_tests::{P, v2_addr, v2_top};
+    use super::link_scope_tests::{P, live, v2_addr, v2_top};
     use super::*;
     use crate::rib::client::{ProtoId, RibClient, RibInbound};
     use crate::rib::nht::NexthopResolution;
 
     const AREA1: Ipv4Addr = Ipv4Addr::new(0, 0, 0, 1);
+    /// The far end of the virtual link: an ABR one router beyond P.
+    const FAR: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 9);
+    /// FAR's address on its link to P, where the virtual link's packets
+    /// go. No subnet of this router's holds it.
+    const FAR_ADDR: Ipv4Addr = Ipv4Addr::new(203, 0, 113, 9);
     const NO_HELLO: [Ipv4Addr; 0] = [];
     const NO_WATCH: [(bool, Ipv4Addr); 0] = [];
 
     /// `v2_top` with link 3 in transit area 1, a virtual link through
-    /// that area to P configured, and the area's SPF reaching P as link
-    /// 3's neighbour: all `vl_reconcile` needs to bring the link up.
+    /// that area configured, and the area's SPF reaching its far end:
+    /// all `vl_reconcile` needs to bring the link up.
     struct Lab {
         top: Ospf,
         /// The packets the instance queued for sending.
@@ -29756,7 +29782,8 @@ mod virtual_link_tests {
         rib: UnboundedReceiver<RibInbound>,
     }
 
-    fn lab() -> Lab {
+    /// Link 3 in transit area 1, and no virtual link yet.
+    fn transit() -> Lab {
         let mut top = v2_top();
         top.in_commit = false;
         let (ptx, sent) = mpsc::unbounded_channel();
@@ -29765,19 +29792,77 @@ mod virtual_link_tests {
         top.ctx.rib = RibClient::new(rib_tx, ProtoId::from_raw(1));
 
         top.areas.get_mut(AREA0).unwrap().links.remove(&3);
-        let area = top.areas.fetch(AREA1);
-        area.links.insert(3);
-        area.virtual_links.insert(P, Default::default());
-        let vertex = top.lsp_map.get(P);
-        let mut path = spf::Path::new(vertex);
-        path.cost = 10;
-        path.nexthops.insert(vec![vertex]);
-        top.spf_results
-            .insert(AREA1, BTreeMap::from([(vertex, path)]));
+        top.areas.fetch(AREA1).links.insert(3);
         Lab { top, sent, rib }
     }
 
+    /// A virtual link to FAR, two hops away: the area's SPF reaches it
+    /// through P, link 3's neighbour, and FAR's Router-LSA names the
+    /// address it has on its link to P.
+    fn lab() -> Lab {
+        let mut lab = transit();
+        let area = lab.top.areas.fetch(AREA1);
+        area.virtual_links.insert(FAR, Default::default());
+        lab.far_addr(FAR_ADDR, 0x8000_0001);
+        let p = lab.top.lsp_map.get(P);
+        let far = lab.top.lsp_map.get(FAR);
+        let mut path = spf::Path::new(far);
+        path.cost = 20;
+        path.paths.push(vec![p, far]);
+        path.nexthops.insert(vec![p]);
+        lab.top
+            .spf_results
+            .insert(AREA1, BTreeMap::from([(far, path)]));
+        lab
+    }
+
+    /// A virtual link to P, link 3's neighbour.
+    fn lab_adjacent() -> Lab {
+        let mut lab = transit();
+        let area = lab.top.areas.fetch(AREA1);
+        area.virtual_links.insert(P, Default::default());
+        let p = lab.top.lsp_map.get(P);
+        lab.reach(p, vec![p]);
+        lab
+    }
+
     impl Lab {
+        /// The transit area's SPF reaches `vertex` by the first hop
+        /// `nexthop`, itself for a neighbour.
+        fn reach(&mut self, vertex: usize, nexthop: Vec<usize>) {
+            let mut path = spf::Path::new(vertex);
+            path.cost = 10;
+            path.nexthops.insert(nexthop);
+            self.top
+                .spf_results
+                .insert(AREA1, BTreeMap::from([(vertex, path)]));
+        }
+
+        /// FAR's Router-LSA in the transit area: a link to P, with
+        /// `addr` as FAR's address on it.
+        fn far_addr(&mut self, addr: Ipv4Addr, seq: u32) {
+            let mut h = OspfLsaHeader::new(OspfLsType::Router, FAR, FAR);
+            h.ls_seq_number = seq;
+            let mut lsa = OspfLsa::from(
+                h,
+                OspfLsp::Router(RouterLsa {
+                    flags: 0,
+                    links: vec![RouterLsaLink {
+                        link_id: P,
+                        link_data: addr,
+                        link_type: OspfLinkType::P2p,
+                        num_tos: 0,
+                        tos_0_metric: 10,
+                        toses: vec![],
+                    }],
+                }),
+            );
+            lsa.update();
+            let (tx, tracing) = (self.top.tx.clone(), self.top.tracing.clone());
+            let area = self.top.areas.fetch(AREA1);
+            area.lsdb.insert_received(lsa, &tx, Some(AREA1), &tracing);
+        }
+
         /// The virtual link's index.
         fn vl(&self) -> u32 {
             let vl = self.top.links.values().find(|l| l.vl.is_some());
@@ -29860,13 +29945,13 @@ mod virtual_link_tests {
     #[tokio::test(start_paused = true)]
     async fn the_first_hello_waits_for_the_route() {
         let mut lab = lab();
-        let peer = v2_addr(P);
+        let peer = FAR_ADDR;
         lab.top.vl_reconcile();
 
         assert_eq!(lab.watches(), [(true, peer)]);
         assert_eq!(lab.hellos().await, NO_HELLO, "held: no route yet");
         lab.route(peer, false);
-        lab.route(Ipv4Addr::new(203, 0, 113, 1), true);
+        lab.route(Ipv4Addr::new(192, 0, 2, 99), true);
         assert_eq!(lab.hellos().await, NO_HELLO, "nor now");
 
         lab.route(peer, true);
@@ -29885,7 +29970,7 @@ mod virtual_link_tests {
     #[tokio::test(start_paused = true)]
     async fn a_route_reported_first_holds_nothing() {
         let mut lab = lab();
-        let peer = v2_addr(P);
+        let peer = FAR_ADDR;
         lab.top.vl_reconcile();
         lab.route(peer, true);
 
@@ -29900,7 +29985,7 @@ mod virtual_link_tests {
     #[tokio::test(start_paused = true)]
     async fn the_hello_is_sent_after_one_interval_without_a_route() {
         let mut lab = lab();
-        let peer = v2_addr(P);
+        let peer = FAR_ADDR;
         lab.top.vl_reconcile();
         assert_eq!(lab.hellos().await, NO_HELLO);
 
@@ -29917,14 +30002,13 @@ mod virtual_link_tests {
     #[tokio::test(start_paused = true)]
     async fn the_wait_follows_the_far_end_to_another_address() {
         let mut lab = lab();
-        let peer = v2_addr(P);
-        let moved = Ipv4Addr::new(198, 51, 100, 9);
+        let peer = FAR_ADDR;
+        let moved = Ipv4Addr::new(203, 0, 113, 77);
         lab.top.vl_reconcile();
         assert_eq!(lab.hellos().await, NO_HELLO);
         assert_eq!(lab.watches(), [(true, peer)]);
 
-        let nbrs = &mut lab.top.links.get_mut(&3).unwrap().nbrs;
-        nbrs.get_mut(&peer).unwrap().ident.prefix = Ipv4Net::new(moved, 24).unwrap();
+        lab.far_addr(moved, 0x8000_0002);
         lab.top.vl_reconcile();
         assert_eq!(lab.watches(), [(true, moved), (false, peer)]);
 
@@ -29938,7 +30022,7 @@ mod virtual_link_tests {
     #[tokio::test(start_paused = true)]
     async fn a_link_gone_while_waiting_stops_watching() {
         let mut lab = lab();
-        let peer = v2_addr(P);
+        let peer = FAR_ADDR;
         lab.top.vl_reconcile();
         assert_eq!(lab.watches(), [(true, peer)]);
 
@@ -29948,13 +30032,53 @@ mod virtual_link_tests {
         assert_eq!(lab.watches(), [(false, peer)]);
     }
 
+    /// A far end that is a neighbour is on a connected subnet, which the
+    /// kernel routes to whatever the RIB has queued: the Hello goes out
+    /// at once, and the RIB is not asked.
+    #[tokio::test(start_paused = true)]
+    async fn an_adjacent_far_end_does_not_wait() {
+        let mut lab = lab_adjacent();
+        lab.top.vl_reconcile();
+
+        assert_eq!(lab.watches(), NO_WATCH);
+        assert_eq!(lab.hellos().await, [v2_addr(P)]);
+        assert_eq!(lab.hello_due().await, [v2_addr(P)], "and from then on");
+    }
+
+    /// The far end becomes a neighbour while the Hello waits: the wait
+    /// ends there, and the Hello owed goes to the neighbour's address.
+    #[tokio::test(start_paused = true)]
+    async fn a_far_end_that_becomes_adjacent_stops_waiting() {
+        let mut lab = lab();
+        lab.top.vl_reconcile();
+        assert_eq!(lab.hellos().await, NO_HELLO);
+        assert_eq!(lab.watches(), [(true, FAR_ADDR)]);
+
+        let prefix: Ipv4Net = "198.51.100.9/24".parse().unwrap();
+        let mut nbr = Neighbor::new(lab.top.tx.clone(), 3, prefix, &FAR, 40, live());
+        nbr.state = NfsmState::Full;
+        let link = lab.top.links.get_mut(&3).unwrap();
+        link.nbrs.insert(prefix.addr(), nbr);
+        let far = lab.top.lsp_map.get(FAR);
+        lab.reach(far, vec![far]);
+        lab.top.vl_reconcile();
+
+        assert_eq!(lab.watches(), [(false, FAR_ADDR)]);
+        assert_eq!(lab.hellos().await, [prefix.addr()]);
+        // Nothing is held or owed afterwards.
+        lab.route(FAR_ADDR, true);
+        assert_eq!(lab.hellos().await, NO_HELLO);
+        assert_eq!(lab.hello_due().await, [prefix.addr()]);
+        assert_eq!(lab.watches(), NO_WATCH);
+    }
+
     /// A restarting router's kernel kept its routes (RFC 3623): the
     /// link's Hello goes out at once, as it needs to for the adjacency to
     /// be back within the grace period.
     #[tokio::test(start_paused = true)]
     async fn a_restarting_router_does_not_wait() {
         let mut lab = lab();
-        let peer = v2_addr(P);
+        let peer = FAR_ADDR;
         lab.top.restarting = Some(super::super::neigh::RestartingState {
             grace_period: 120,
             reason: ospf_packet::GraceRestartReason::SoftwareRestart,

@@ -608,7 +608,9 @@ pub struct VirtualLinkState {
     pub first_hop_ifindex: u32,
     /// `Some` while the link's first Hello waits for a route to
     /// `peer_addr`, holding the time after which it is sent without
-    /// one.
+    /// one. Never set while the far end is directly adjacent
+    /// (`peer_addr == first_hop_addr`): the kernel has a connected
+    /// route to it.
     ///
     /// Packets on a virtual link are routed by the kernel. The link
     /// comes up in the pass that hands the transit area's routes to
