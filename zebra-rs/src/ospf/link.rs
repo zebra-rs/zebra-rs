@@ -606,6 +606,31 @@ pub struct VirtualLinkState {
     /// area — the ifindex handed to `Message::Send` in place of the
     /// synthetic one.
     pub first_hop_ifindex: u32,
+    /// `Some` while the link's first Hello waits for a route to
+    /// `peer_addr`, holding the time after which it is sent without
+    /// one. Never set while the far end is directly adjacent
+    /// (`peer_addr == first_hop_addr`): the kernel has a connected
+    /// route to it.
+    ///
+    /// Packets on a virtual link are routed by the kernel. The link
+    /// comes up in the pass that hands the transit area's routes to
+    /// the RIB, so when the far end is more than one hop away the
+    /// kernel has no route to it yet, and a Hello sent at once is
+    /// refused ("Network is unreachable") and lost: the adjacency then
+    /// starts one HelloInterval late. `Ospf::vl_reconcile` asks the
+    /// RIB to report the route instead (`RibRx::NexthopUpdate`, which
+    /// it sends after the kernel install), and the Hello goes out
+    /// then.
+    ///
+    /// The time held here is one HelloInterval after the link came up,
+    /// which is when the second Hello was sent before. The RIB's
+    /// tracking does not count every route the kernel would use (a
+    /// default route, for one); a far end reached that way gets its
+    /// Hello no later than it used to.
+    pub hello_hold: Option<tokio::time::Instant>,
+    /// A Hello came due while `hello_hold` was set, so one is owed the
+    /// moment the route is reported.
+    pub hello_due: bool,
 }
 
 #[derive(Default)]
@@ -736,6 +761,8 @@ where
                 peer_router_id,
                 peer_addr: Ipv4Addr::UNSPECIFIED,
                 first_hop_addr: Ipv4Addr::UNSPECIFIED,
+                hello_hold: None,
+                hello_due: false,
                 first_hop_ifindex: 0,
             }),
         }
