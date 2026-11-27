@@ -58,4 +58,36 @@ module zebra-features {
        A leaf AC needs the cradle data plane; a commit naming one
        without it is refused.";
   }
+
+  feature sonic {
+    description
+      "zebra-rs runs on a SONiC device, where CONFIG_DB is the device's
+       configuration. It adds:
+         - `sonic`, a configuration subtree whose schema is SONiC's own
+           YANG models (sonic-yang-models), read from the directory
+           `sonic` under the YANG path: one keyword for each list of a
+           table (`sonic PORT Ethernet0 …`);
+         - a document `{\"CONFIG_DB\": {…}}` given to `vtyctl apply`,
+           which is copied into that subtree in place of what is there.
+
+       The running subtree is a copy of CONFIG_DB, kept by a process
+       that reads it (docs/design/sonic-junos-style-config.md). A copy
+       is not a commit of the commit history, and is not held to the
+       models' mandatory leaves. `save` leaves the subtree out, and
+       `rollback` and a whole document given to `vtyctl apply` keep it
+       as it is.
+
+       The subtree is edited in the candidate like the rest of the
+       configuration. `compare config-db`, which this feature adds to
+       configure mode, prints the pending edits as the JSON Patch that
+       SONiC's `config apply-patch` takes. `commit` has that patch
+       written by a writer process on the device
+       (proto/configdb.proto, `vtyctl config-db`), and is made when
+       the writer has answered; with no writer it is refused. Nothing
+       else changes the subtree: a document given to `vtyctl apply`
+       that would is refused.
+
+       Without SONiC's models under the YANG path the feature is
+       reported at startup and adds nothing.";
+  }
 }

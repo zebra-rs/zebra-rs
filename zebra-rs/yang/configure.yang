@@ -20,6 +20,10 @@ module configure {
     prefix config;
   }
 
+  import zebra-features {
+    prefix feat;
+  }
+
   import iana-bgp-community-types {
     prefix bct;
     reference
@@ -126,6 +130,14 @@ module configure {
     presence "Compare in the indented block format";
     leaf formal {
       ext:help "Set-style flat statement listing";
+      type empty;
+    }
+    // On a SONiC device (`--feature sonic`): what the pending edits of
+    // `sonic` change in CONFIG_DB, as the JSON Patch SONiC's
+    // `config apply-patch` takes.
+    leaf config-db {
+      if-feature feat:sonic;
+      ext:help "Pending changes of sonic, as a patch of CONFIG_DB";
       type empty;
     }
     // `compare rollback <n>` and `compare rollback revision <id>`: the

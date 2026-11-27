@@ -47,6 +47,23 @@ impl State {
         }
     }
 
+    /// Which key of its list the next word is, while a list's keys are
+    /// being read: 0 for the first.
+    pub(super) fn key_index(&self) -> usize {
+        self.index
+    }
+
+    /// A state at key `index` of a list, for the tests of what is
+    /// offered there.
+    #[cfg(test)]
+    pub(super) fn at_key(index: usize) -> Self {
+        State {
+            ymatch: YangMatch::Key,
+            index,
+            ..State::new()
+        }
+    }
+
     pub fn set_active_choice_case(&mut self, choice_name: &str, case_name: &str) {
         self.choice_states
             .insert(choice_name.to_string(), case_name.to_string());
@@ -118,7 +135,14 @@ fn match_regexp(s: &str, regstr: &str) -> (MatchType, usize) {
         }
     }
 
-    let Ok(regex) = Regex::new(regstr) else {
+    // A YANG pattern is matched against the whole value (RFC 7950
+    // §9.4.5), so it is compiled anchored at both ends. Searching for it
+    // and then asking whether the match found spans the value is not the
+    // same: with alternatives the search settles on the first that
+    // matches at all, `[0-9]` of `([0-9])|([1-2][0-9])`, and the match
+    // it reports stops short of a value the pattern accepts (`/3` of
+    // `10.0.0.0/31`).
+    let Ok(regex) = Regex::new(&format!("^(?:{regstr})$")) else {
         return (MatchType::None, 0);
     };
     let result = regex_match_full(&regex, trimmed, trimmed_len);
@@ -129,27 +153,38 @@ fn match_regexp(s: &str, regstr: &str) -> (MatchType, usize) {
     result
 }
 
-/// Helper for `match_regexp`: full anchored match of the trimmed
-/// remainder against the compiled regex. Partial / interior matches
-/// are rejected so an under-specified pattern can't silently leak past
-/// the value into later command tokens.
+/// Helper for `match_regexp`: whether the trimmed remainder is a value
+/// of the pattern, whole. `regex` is anchored at both ends, so partial
+/// and interior matches are rejected and an under-specified pattern
+/// can't silently leak past the value into later command tokens.
 fn regex_match_full(regex: &Regex, trimmed: &str, pos: usize) -> (MatchType, usize) {
-    if let Some(m) = regex.find(trimmed)
-        && m.start() == 0
-        && m.end() == trimmed.len()
-    {
+    if regex.is_match(trimmed) {
         (MatchType::Exact, pos)
     } else {
         (MatchType::None, 0)
     }
 }
 
+/// Match a string value. With a `pattern`, the value is the rest of the
+/// line when the whole of it satisfies the pattern (`description LINE`
+/// under `.*`), and otherwise the first word when that does. The second
+/// is what lets a patterned value be followed by more of the command: a
+/// list key (`VLAN Vlan100 vlanid 100`, where the key is
+/// `Vlan[0-9]+`), or the first of two keys. A word that fails the
+/// pattern is refused either way.
 fn match_string(s: &str, node: &TypeNode) -> (MatchType, usize) {
-    if let Some(pattern) = node.pattern.as_ref() {
-        match_regexp(s, pattern)
-    } else {
-        match_word(s)
+    let Some(pattern) = node.pattern.as_ref() else {
+        return match_word(s);
+    };
+    let whole = match_regexp(s, pattern);
+    if whole.0 != MatchType::None {
+        return whole;
     }
+    let (_, word) = match_word(s);
+    if word < s.trim_end().len() {
+        return match_regexp(&s[..word], pattern);
+    }
+    whole
 }
 
 fn match_range<T: MinMax<T> + PartialOrd + Copy + std::str::FromStr>(
@@ -743,6 +778,9 @@ pub fn parse(
     // Transition to next yang match state.
     let mut next = entry.clone();
     let mut key_presence = false;
+    // This token is the value of a key, as opposed to the keyword of
+    // the list, which also leaves the state at `Key`.
+    let key_value = s.ymatch == YangMatch::Key;
     match s.ymatch {
         YangMatch::Dir | YangMatch::DirMatched | YangMatch::KeyMatched => {
             next = mx.matched_entry.clone();
@@ -827,7 +865,22 @@ pub fn parse(
         _ => Vec::new(),
     };
 
-    let path = if ymatch_complete(s.ymatch, mx.matched_entry.presence, s.delete) {
+    let path = if key_value && s.ymatch == YangMatch::Key {
+        // The value of a key that is not the list's last (`key "name
+        // port"`, and this is the name). It is a key value like the
+        // last one, which the next token is: the entry is the node
+        // under both, each a key node under the one before it.
+        CommandPath {
+            name: input[0..mx.pos].to_string(),
+            ymatch: YangMatch::KeyMatched.into(),
+            key: mx.matched_entry.name.to_owned(),
+            mandatory,
+            sort_priority,
+            non_empty,
+            choice_exclude,
+            ordered_by_user,
+        }
+    } else if ymatch_complete(s.ymatch, mx.matched_entry.presence, s.delete) {
         // KeyMatched / LeafMatched / LeafListMatched carry the user-
         // typed value (the list key, the leaf value, ...). DirMatched
         // for a presence container has no user-typed value — the
@@ -1035,6 +1088,62 @@ mod tests {
         let (m, pos) = match_regexp("   ", pat);
         assert_eq!(m, MatchType::None);
         assert_eq!(pos, 0);
+    }
+
+    /// A pattern with alternatives matches the whole value when one of
+    /// them does, whichever comes first: the ietf-inet-types prefix
+    /// pattern ends `/(([0-9])|([1-2][0-9])|(3[0-2]))`, and `/31` is a
+    /// value of it although `/3` matches the first alternative.
+    #[test]
+    fn match_regexp_tries_every_alternative() {
+        let pat = r"(([0-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][0-9]|25[0-5])\.){3}([0-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][0-9]|25[0-5])/(([0-9])|([1-2][0-9])|(3[0-2]))";
+        assert_eq!(match_regexp("10.0.0.0/31", pat), (MatchType::Exact, 11));
+        assert_eq!(match_regexp("10.0.0.0/3", pat), (MatchType::Exact, 10));
+        assert_eq!(match_regexp("10.0.0.0/33", pat), (MatchType::None, 0));
+        assert_eq!(match_regexp("a|bc", "a|bc"), (MatchType::None, 0));
+        assert_eq!(match_regexp("bc", "a|bc"), (MatchType::Exact, 2));
+        // A pattern that carries its own anchors is still one.
+        assert_eq!(match_regexp("abc", "^abc$"), (MatchType::Exact, 3));
+    }
+
+    fn patterned(pattern: &str) -> TypeNode {
+        let mut node = TypeNode::new("string".to_string(), YangType::String);
+        node.pattern = Some(pattern.to_string());
+        node
+    }
+
+    /// A patterned string followed by more of the command is its first
+    /// word, when the whole remainder does not satisfy the pattern: a
+    /// list key ahead of the entry's leaves.
+    #[test]
+    fn match_string_takes_the_first_word_before_more_tokens() {
+        let key = patterned(r"Vlan[0-9]+");
+        assert_eq!(match_string("Vlan100", &key), (MatchType::Exact, 7));
+        assert_eq!(
+            match_string("Vlan100 vlanid 100", &key),
+            (MatchType::Exact, 7)
+        );
+        // A word that fails the pattern is refused, alone or not.
+        assert_eq!(match_string("Vxlan100", &key), (MatchType::None, 0));
+        assert_eq!(
+            match_string("Vxlan100 vlanid 100", &key),
+            (MatchType::None, 0)
+        );
+        // Part of a word is not the word.
+        assert_eq!(match_string("Vlan100x vlanid", &key), (MatchType::None, 0));
+    }
+
+    /// The rest of the line is still the value where the pattern takes
+    /// all of it: a description is not cut at its first word.
+    #[test]
+    fn match_string_prefers_the_rest_of_the_line() {
+        let line = patterned(r".*");
+        assert_eq!(match_string("abc def ghi", &line), (MatchType::Exact, 11));
+        let words = patterned(r"[a-z ]+");
+        assert_eq!(match_string("abc def", &words), (MatchType::Exact, 7));
+        // No pattern: one word, as before.
+        let plain = TypeNode::new("string".to_string(), YangType::String);
+        assert_eq!(match_string("abc def", &plain), (MatchType::Partial, 3));
     }
 
     /// Interior matches don't count — a leaf value must satisfy the

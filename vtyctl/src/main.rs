@@ -6,6 +6,7 @@ pub mod vty {
 }
 pub mod apply;
 pub mod clear;
+pub mod configdb;
 pub mod endpoint;
 pub mod frr;
 pub mod mcp;
@@ -35,6 +36,24 @@ fn endpoint<'a>(host: &'a Option<String>, vty_socket: &'a Option<String>) -> &'a
     host.as_deref()
         .or(vty_socket.as_deref())
         .unwrap_or(DEFAULT_ENDPOINT)
+}
+
+#[derive(Subcommand)]
+enum ConfigDbAction {
+    /// Print the next order as `{"id": N, "patch": [...]}`, or nothing
+    /// when none comes in time.
+    Wait {
+        #[arg(long, default_value_t = 30, help = "Seconds to wait for an order")]
+        timeout: u32,
+    },
+    /// Report on an order: written, or with --error not written and why.
+    Done {
+        #[arg(help = "The order's id")]
+        id: u64,
+
+        #[arg(long, help = "Why the change was not written")]
+        error: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -68,6 +87,20 @@ enum Commands {
 
         #[arg(help = "Show command to execute")]
         command: String,
+    },
+    /// The writer of CONFIG_DB on a SONiC device: take the next change a
+    /// commit needs written, and say what became of it.
+    #[command(name = "config-db")]
+    ConfigDb {
+        #[arg(
+            short = 'H',
+            long,
+            help = "Server endpoint URI (overrides --vty-socket)"
+        )]
+        host: Option<String>,
+
+        #[command(subcommand)]
+        action: ConfigDbAction,
     },
     #[command(disable_help_flag = true)]
     Watch {
@@ -135,6 +168,7 @@ fn print_help() {
     eprintln!("  clear       Clear commands.");
     eprintln!("  show        Show commands.");
     eprintln!("  watch       Watch running-config commits.");
+    eprintln!("  config-db   Take and answer CONFIG_DB changes (SONiC).");
     eprintln!("  vtysh       Take an FRR vtysh command line (-c 'show ...').");
     eprintln!("  mcp         Start MCP server for AI assistant integration.");
 }
@@ -171,6 +205,15 @@ async fn main() -> Result<()> {
         Some(Commands::Vtysh { args }) => {
             let code = frr::run(endpoint(&None, &cli.vty_socket), args.clone()).await;
             std::process::exit(code);
+        }
+        Some(Commands::ConfigDb { host, action }) => {
+            let host = endpoint(host, &cli.vty_socket);
+            match action {
+                ConfigDbAction::Wait { timeout } => configdb::wait(host, *timeout).await?,
+                ConfigDbAction::Done { id, error } => {
+                    configdb::done(host, *id, error.clone()).await?
+                }
+            }
         }
         Some(Commands::Watch { host, json, path }) => {
             watch::watch(endpoint(host, &cli.vty_socket), *json, path.clone()).await?;

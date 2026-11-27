@@ -13,25 +13,52 @@ use std::rc::{Rc, Weak};
 
 const INDENT_LEVEL: usize = 2;
 
-/// Format a value for JSON output, preserving boolean and numeric types
+/// Format a value for JSON output, preserving boolean and numeric types.
+///
+/// A number is what JSON calls one (RFC 8259 §6), and is written as it
+/// is. Asking Rust's parsers instead took `007`, `+5`, `.5`, `nan` and
+/// `inf` for numbers too, none of which a JSON reader takes: one such
+/// value made the whole document unreadable. Anything else is a string,
+/// with what a string has to escape escaped: a value is free text where
+/// its leaf is (a description, a banner).
 fn format_json_value(value: &str) -> String {
-    // Check if it's a boolean
     if value == "true" || value == "false" {
         return value.to_string();
     }
-
-    // Check if it's an integer (positive or negative)
-    if value.parse::<i64>().is_ok() {
+    if is_json_number(value) {
         return value.to_string();
     }
+    serde_json::Value::String(value.to_string()).to_string()
+}
 
-    // Check if it's a floating point number
-    if value.parse::<f64>().is_ok() {
-        return value.to_string();
+/// Whether `text` is a JSON number: `-`, an integer with no leading
+/// zero, a fraction, an exponent.
+fn is_json_number(text: &str) -> bool {
+    fn digits(text: &str) -> usize {
+        text.bytes().take_while(u8::is_ascii_digit).count()
     }
-
-    // Default case: treat as string and add quotes
-    format!("\"{}\"", value)
+    let rest = text.strip_prefix('-').unwrap_or(text);
+    let int = digits(rest);
+    if int == 0 || (int > 1 && rest.starts_with('0')) {
+        return false;
+    }
+    let mut rest = &rest[int..];
+    if let Some(fraction) = rest.strip_prefix('.') {
+        let len = digits(fraction);
+        if len == 0 {
+            return false;
+        }
+        rest = &fraction[len..];
+    }
+    if let Some(exponent) = rest.strip_prefix(['e', 'E']) {
+        let exponent = exponent.strip_prefix(['+', '-']).unwrap_or(exponent);
+        let len = digits(exponent);
+        if len == 0 {
+            return false;
+        }
+        rest = &exponent[len..];
+    }
+    rest.is_empty()
 }
 
 #[derive(Clone, Debug)]
@@ -296,7 +323,23 @@ impl Config {
                 }
             }
 
-            if !self.list.borrow().is_empty() {
+            // A member that begins with `#` would be read back as a
+            // comment where a statement begins, which is where the block
+            // below puts it. Such a leaf-list is written one statement
+            // to a member, each after the name: the same lines to the
+            // loader, in the same order.
+            let hash = self.list.borrow().iter().any(|v| v.starts_with('#'));
+            if hash && !brace {
+                let indent = " ".repeat(depth * INDENT_LEVEL);
+                for (at, value) in self.list.borrow().iter().enumerate() {
+                    if at != 0 {
+                        out.push_str(&indent);
+                        self.prefix_write(out);
+                        out.push_str(&self.name);
+                    }
+                    out.push_str(&format!(" {value};\n"));
+                }
+            } else if !self.list.borrow().is_empty() {
                 out.push_str(" {\n");
                 for value in self.list.borrow().iter() {
                     out.push_str(&" ".repeat((depth + 1) * INDENT_LEVEL));
@@ -378,11 +421,23 @@ impl Config {
         }
     }
 
-    /// Helper method to marshal keys (list entries)
-    fn marshal_keys(&self, out: &mut String) {
-        let keys = self.keys.borrow();
-        for (pos, key) in keys.iter().enumerate() {
-            key.json_marshal(pos, out);
+    /// Helper method to marshal the entries of a list node. An entry is
+    /// one object with all its keys, also where the list has several
+    /// (RFC 7951 §5.4): the nodes of the keys before the last are not
+    /// objects of their own.
+    fn marshal_entries(&self, out: &mut String) {
+        for (pos, (keys, entry)) in self.entries().iter().enumerate() {
+            self.append_comma_if_needed(pos, out);
+            out.push('{');
+            let keys: Vec<String> = keys
+                .iter()
+                .map(|(leaf, value)| format!("\"{leaf}\":{}", format_json_value(value)))
+                .collect();
+            out.push_str(&keys.join(","));
+            entry.marshal_configs(out);
+            if entry.configs.borrow().is_empty() {
+                out.push('}');
+            }
         }
     }
 
@@ -416,21 +471,8 @@ impl Config {
         if has_keys {
             // This is a list node
             out.push_str(&format!("\"{}\": [", self.name));
-            self.marshal_keys(out);
+            self.marshal_entries(out);
             out.push(']');
-        } else if self.has_prefix() {
-            // This is a keyed entry
-            out.push('{');
-            out.push_str(&format!(
-                "\"{}\":{}",
-                self.prefix,
-                format_json_value(&self.name)
-            ));
-            self.marshal_keys(out);
-            self.marshal_configs(out);
-            if !has_configs && self.keys.borrow().is_empty() {
-                out.push('}');
-            }
         } else {
             // This is a regular node
             self.marshal_key_value(out);
@@ -453,15 +495,9 @@ impl Config {
     }
 
     pub fn json(&self, out: &mut String) {
-        let keys = self.keys.borrow();
-        if !keys.is_empty() {
+        if !self.keys.borrow().is_empty() {
             out.push('[');
-            for (pos, key) in keys.iter().enumerate() {
-                if pos != 0 {
-                    out.push(',');
-                }
-                key.json_marshal(0, out);
-            }
+            self.marshal_entries(out);
             out.push(']');
             return;
         }
@@ -512,8 +548,40 @@ impl Config {
         commands
     }
 
+    /// Whether this is the node of a key that is not its list's last:
+    /// the first of `key "name port"`. The entry is a key node further
+    /// down, and this one is only the way to it. It has no line and no
+    /// leaves of its own, and does not outlive the entries under it.
+    ///
+    /// A key node holds key nodes only then: the lists inside an entry
+    /// are among its `configs`.
+    pub fn is_partial_key(&self) -> bool {
+        !self.prefix.is_empty() && !self.keys.borrow().is_empty()
+    }
+
+    /// The entries of this list node: the key nodes under it, or for a
+    /// list with several keys the nodes of the last key. Each comes
+    /// with all its keys in order, as (key leaf, value).
+    pub fn entries(&self) -> Vec<(Vec<(String, String)>, Rc<Config>)> {
+        type Entries = Vec<(Vec<(String, String)>, Rc<Config>)>;
+        fn walk(node: &Config, keys: &[(String, String)], out: &mut Entries) {
+            for key in node.keys.borrow().iter() {
+                let mut keys = keys.to_vec();
+                keys.push((key.prefix.clone(), key.name.clone()));
+                if key.is_partial_key() {
+                    walk(key, &keys, out);
+                } else {
+                    out.push((keys, key.clone()));
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(self, &[], &mut out);
+        out
+    }
+
     pub fn list(&self, output: &mut String) {
-        if !self.has_dir() || self.presence || !self.prefix.is_empty() {
+        if (!self.has_dir() || self.presence || !self.prefix.is_empty()) && !self.is_partial_key() {
             let commands = self.list_command();
             if !commands.is_empty() {
                 let base = commands.join(" ");
@@ -580,13 +648,20 @@ impl Config {
     }
 
     pub fn validate(&self, errors: &mut Vec<String>) {
+        // A list's requirements are of its entries. A node of a key
+        // that is not the last has entries under it and is not one.
+        let entries = if self.prefix.is_empty() {
+            self.entries()
+        } else {
+            Vec::new()
+        };
         for m in self.mandatory.iter() {
-            for key in self.keys.borrow().iter() {
+            for (keys, key) in entries.iter() {
                 if !key.has_mandatory(m) {
                     let mut parents = VecDeque::<String>::new();
                     self.parents(&mut parents);
                     parents.push_back(self.name.clone());
-                    parents.push_back(key.name.clone());
+                    parents.extend(keys.iter().map(|(_, value)| value.clone()));
                     let parents = Vec::from(parents);
                     let parents = parents.join(" ");
                     errors.push(format!("'{}' missing mandatory node '{}'", parents, m));
@@ -605,12 +680,12 @@ impl Config {
         // entry must carry at least one child (`configs`/`keys`) or a
         // leaf-list value (`list`); a bare `... <key>` is rejected.
         if !self.non_empty.is_empty() {
-            for key in self.keys.borrow().iter() {
+            for (keys, key) in entries.iter() {
                 if !key.has_dir() && key.list.borrow().is_empty() {
                     let mut parents = VecDeque::<String>::new();
                     self.parents(&mut parents);
                     parents.push_back(self.name.clone());
-                    parents.push_back(key.name.clone());
+                    parents.extend(keys.iter().map(|(_, value)| value.clone()));
                     let parents = Vec::from(parents);
                     let parents = parents.join(" ");
                     errors.push(format!("'{}' requires {}", parents, self.non_empty));
@@ -643,6 +718,17 @@ impl Config {
 /// it. A root has none.
 fn under(parent: Option<&Rc<Config>>) -> Weak<Config> {
     parent.map(Rc::downgrade).unwrap_or_default()
+}
+
+/// Make the child `name` of `parent` a copy of `child`, or remove it
+/// for `None`. The copy is `parent`'s own: `child` stays where it is.
+pub fn replace_child(parent: &Rc<Config>, name: &str, child: Option<&Rc<Config>>) {
+    let mut configs = parent.configs.borrow_mut();
+    configs.retain(|config| config.name != name);
+    if let Some(child) = child {
+        configs.push(carbon_copy(child, Some(parent.clone())));
+        configs.sort_by(compare_configs);
+    }
 }
 
 pub fn carbon_copy(conf: &Rc<Config>, parent: Option<Rc<Config>>) -> Rc<Config> {
@@ -812,7 +898,11 @@ fn config_delete(config: Rc<Config>, name: &String) {
 pub fn delete(paths: Vec<CommandPath>, mut config: Rc<Config>) -> bool {
     // Leaf-list members the path names, and how many of them were there.
     let (mut named, mut removed) = (0, 0);
-    for path in paths.iter() {
+    // The nodes on the way that are keys before their list's last: a
+    // key value followed by another.
+    let mut partial_keys: Vec<Rc<Config>> = Vec::new();
+    let key_matched = |path: &CommandPath| ymatch_enum(path.ymatch) == YangMatch::KeyMatched;
+    for (at, path) in paths.iter().enumerate() {
         match ymatch_enum(path.ymatch) {
             YangMatch::Dir | YangMatch::DirMatched | YangMatch::Leaf | YangMatch::Key => {
                 let Some(next) = config.lookup(&path.name) else {
@@ -825,6 +915,9 @@ pub fn delete(paths: Vec<CommandPath>, mut config: Rc<Config>) -> bool {
                     return false;
                 };
                 config = next;
+                if paths.get(at + 1).is_some_and(key_matched) {
+                    partial_keys.push(config.clone());
+                }
             }
             YangMatch::LeafMatched => {
                 // `as_str()` (not `as_ref()`): the `lua` feature pulls in
@@ -867,6 +960,11 @@ pub fn delete(paths: Vec<CommandPath>, mut config: Rc<Config>) -> bool {
     while let Some(parent) = config.parent.upgrade() {
         config_delete(parent.clone(), &config.name);
         config = parent;
+        // A key before the last, with no entry left under it, is not
+        // an entry: it goes with the last of them.
+        if !config.has_dir() && partial_keys.iter().any(|k| Rc::ptr_eq(k, &config)) {
+            continue;
+        }
         if config.has_dir() || config.has_prefix() || config.presence {
             // Exception: an empty entry of an `ext:non-empty` list is dead
             // config — a bare `... <key>` (e.g. `router isis afi-safi ipv4`)
@@ -1175,6 +1273,65 @@ mod tests {
         // the enabled handlers fan it out to both MUP AFIs (draft-ietf-bess-mup-safi).
         let mut args = Args(["mup".to_string()].into_iter().collect());
         assert_eq!(args.afi_safi(), Some(AfiSafi::new(Afi::Ip, Safi::Mup)));
+    }
+
+    /// A member of a leaf-list is written where a statement begins, and
+    /// one that begins with a bracket or a quote is read back as it was
+    /// written. One that begins with `#` would be read as a comment
+    /// there, so a leaf-list that has one is written a statement to a
+    /// member, after the name. Either way the file loads into the lines
+    /// the tree lists, in their order.
+    #[test]
+    fn a_leaf_list_member_is_read_back_whatever_it_begins_with() {
+        let member = |root: &Rc<Config>, list: &str, value: &str| {
+            let paths = vec![
+                CommandPath {
+                    name: "prefix-test".to_string(),
+                    ymatch: YangMatch::Dir as i32,
+                    ..Default::default()
+                },
+                CommandPath {
+                    name: list.to_string(),
+                    ymatch: YangMatch::LeafList as i32,
+                    ..Default::default()
+                },
+                CommandPath {
+                    name: value.to_string(),
+                    ymatch: YangMatch::LeafListMatched as i32,
+                    ..Default::default()
+                },
+            ];
+            set(paths, root.clone());
+        };
+        let root = Rc::new(Config::new("".to_string(), None));
+        for value in ["[0-9]+:100", "]x", "\"quoted\"", "plain"] {
+            member(&root, "member", value);
+        }
+        for value in ["first", "#3", "[spare]", "last"] {
+            member(&root, "tag", value);
+        }
+
+        let mut file = String::new();
+        root.format(&mut file);
+        assert_eq!(
+            file,
+            "prefix-test {\n\
+             \x20 member {\n\
+             \x20   [0-9]+:100;\n\
+             \x20   ]x;\n\
+             \x20   \"quoted\";\n\
+             \x20   plain;\n\
+             \x20 }\n\
+             \x20 tag first;\n\
+             \x20 tag #3;\n\
+             \x20 tag [spare];\n\
+             \x20 tag last;\n\
+             }\n"
+        );
+        let mut formal = String::new();
+        root.formal(&mut formal);
+        let listed: Vec<&str> = formal.lines().collect();
+        assert_eq!(crate::config::files::load_config_file(file), listed);
     }
 
     #[test]
@@ -1740,6 +1897,90 @@ mod tests {
         // No member named: the whole leaf-list.
         assert!(delete(label(&[]), root.clone()));
         assert_eq!(members(&root), None);
+    }
+
+    /// A value is written as a JSON number only where it is one, and as
+    /// a string with its quotes, backslashes and control characters
+    /// escaped: whatever the value, what is written is JSON, and reads
+    /// back as the value.
+    #[test]
+    fn a_value_is_written_as_json() {
+        for (value, written) in [
+            ("9100", "9100"),
+            ("0", "0"),
+            ("-5", "-5"),
+            ("1.5", "1.5"),
+            ("1e5", "1e5"),
+            ("-0.5E-3", "-0.5E-3"),
+            ("true", "true"),
+            ("false", "false"),
+            // What Rust's parsers take for a number and JSON does not.
+            ("007", "\"007\""),
+            ("+5", "\"+5\""),
+            (".5", "\".5\""),
+            ("5.", "\"5.\""),
+            ("1e", "\"1e\""),
+            ("-", "\"-\""),
+            ("nan", "\"nan\""),
+            ("inf", "\"inf\""),
+            ("-inf", "\"-inf\""),
+            ("infinity", "\"infinity\""),
+            // Free text.
+            ("uplink", "\"uplink\""),
+            ("rack \"A\"", "\"rack \\\"A\\\"\""),
+            ("a\\b", "\"a\\\\b\""),
+            ("tab\there", "\"tab\\there\""),
+        ] {
+            assert_eq!(format_json_value(value), written, "{value:?}");
+            let read: serde_json::Value =
+                serde_json::from_str(&format_json_value(value)).expect(value);
+            if let serde_json::Value::String(read) = read {
+                assert_eq!(read, value);
+            }
+        }
+
+        // A tree with such values is a JSON document, and a YAML one.
+        let root = Rc::new(Config::new("".to_string(), None));
+        let leaf = |name: &str, value: &str| {
+            vec![
+                CommandPath {
+                    name: "port".to_string(),
+                    ymatch: YangMatch::Dir as i32,
+                    ..Default::default()
+                },
+                CommandPath {
+                    name: name.to_string(),
+                    ymatch: YangMatch::Leaf as i32,
+                    ..Default::default()
+                },
+                CommandPath {
+                    name: value.to_string(),
+                    ymatch: YangMatch::LeafMatched as i32,
+                    ..Default::default()
+                },
+            ]
+        };
+        set(leaf("description", "rack \"A\", row \\7"), root.clone());
+        set(leaf("alias", "007"), root.clone());
+        set(leaf("gain", "nan"), root.clone());
+        set(leaf("mtu", "9100"), root.clone());
+        let mut json = String::new();
+        root.json(&mut json);
+        let read: serde_json::Value = serde_json::from_str(&json).expect(&json);
+        assert_eq!(
+            read,
+            serde_json::json!({"port": {
+                "alias": "007",
+                "description": "rack \"A\", row \\7",
+                "gain": "nan",
+                "mtu": 9100,
+            }})
+        );
+        let mut yaml = String::new();
+        root.yaml(&mut yaml);
+        assert!(!yaml.contains("failed"), "{yaml}");
+        let read: serde_json::Value = serde_yaml::from_str(&yaml).expect(&yaml);
+        assert_eq!(read["port"]["description"], "rack \"A\", row \\7");
     }
 
     #[test]

@@ -1,0 +1,56 @@
+module sonic-static-route {
+  yang-version 1.1;
+  namespace "http://github.com/sonic-net/sonic-static-route";
+  prefix sroute;
+
+  // Two lists of one table, and a third with as many keys as the
+  // second: a row's list is told by the number of its keys, and then
+  // by their types.
+  container sonic-static-route {
+    container STATIC_ROUTE {
+      list STATIC_ROUTE_TEMPLATE_LIST {
+        key "prefix";
+        leaf prefix {
+          type string {
+            pattern '[0-9a-fA-F:.]+/[0-9]+';
+          }
+        }
+        leaf nexthop {
+          type string;
+        }
+      }
+      list STATIC_ROUTE_LIST {
+        key "vrf_name prefix";
+        leaf vrf_name {
+          type string {
+            pattern 'default|Vrf[a-zA-Z0-9_-]+';
+          }
+        }
+        leaf prefix {
+          type string {
+            pattern '[0-9a-fA-F:.]+/[0-9]+';
+          }
+        }
+        leaf nexthop {
+          type string;
+        }
+        leaf-list ifname {
+          type string;
+        }
+      }
+      list STATIC_ROUTE_IFACE_LIST {
+        key "ifname prefix";
+        leaf ifname {
+          type string {
+            pattern 'Ethernet[0-9]+';
+          }
+        }
+        leaf prefix {
+          type string {
+            pattern '[0-9a-fA-F:.]+/[0-9]+';
+          }
+        }
+      }
+    }
+  }
+}

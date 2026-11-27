@@ -1,0 +1,3 @@
+module sonic-broken {
+  this is not YANG
+}

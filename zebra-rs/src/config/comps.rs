@@ -331,7 +331,10 @@ pub fn comps_add_all(
             }
         }
         YangMatch::Key => {
-            for key in entry.key.iter() {
+            // The key that is typed next, not every key of the list: a
+            // list with several (`member <vlan> <port>`) offered the
+            // hints and the candidates of all of them at each.
+            for key in entry.key.iter().skip(s.key_index()).take(1) {
                 for subent in entry.dir.borrow().iter() {
                     if &subent.name == key {
                         comps_as_leaf(comps, subent);
@@ -413,6 +416,43 @@ mod tests {
         let mut comps = Vec::new();
         comps_add_all(&mut comps, YangMatch::Key, entry, &s, false);
         comps.into_iter().map(|c| c.name).collect()
+    }
+
+    /// A list with several keys offers, at each, what that key takes:
+    /// its own hint, and its own candidates where it has them.
+    #[test]
+    fn each_key_of_a_list_has_its_own_completions() {
+        let leaf = |name: &str, kind: (&str, YangType), dynamic: Option<&str>| {
+            let mut leaf = Entry::new_leaf(name.to_string());
+            leaf.type_node = Some(TypeNode::new(kind.0.to_string(), kind.1));
+            if let Some(dynamic) = dynamic {
+                leaf.extension
+                    .insert("ext:dynamic".to_string(), dynamic.to_string());
+            }
+            Rc::new(leaf)
+        };
+        let list = Rc::new(Entry::new_list(
+            "member".to_string(),
+            vec!["vlan".to_string(), "port".to_string()],
+        ));
+        list.dir.borrow_mut().extend([
+            leaf("vlan", ("string", YangType::String), None),
+            leaf("port", ("string", YangType::String), Some("rib:interface")),
+            leaf("mode", ("string", YangType::String), None),
+        ]);
+        let at = |index: usize| {
+            let mut s = State::at_key(index);
+            s.dynamic.insert(
+                "rib:interface".to_string(),
+                vec!["Ethernet0".to_string(), "Ethernet4".to_string()],
+            );
+            let mut comps = Vec::new();
+            comps_add_all(&mut comps, YangMatch::Key, &list, &s, false);
+            comps.into_iter().map(|c| c.name).collect::<Vec<_>>()
+        };
+        assert_eq!(at(0), ["<vlan:string>"]);
+        assert_eq!(at(1), ["<port:string>", "Ethernet0", "Ethernet4"]);
+        assert_eq!(at(2), Vec::<String>::new());
     }
 
     /// `ext:no-sort` keeps the enum key completions in their YANG

@@ -1,0 +1,22 @@
+module sonic-device_metadata {
+  yang-version 1.1;
+  namespace "http://github.com/sonic-net/sonic-device_metadata";
+  prefix dm;
+
+  container sonic-device_metadata {
+    container DEVICE_METADATA {
+      description "DEVICE_METADATA part of config_db.json";
+      container localhost {
+        leaf hostname {
+          description "Host name of the device";
+          type string {
+            pattern '[a-zA-Z0-9_-]+';
+          }
+        }
+        leaf bgp_asn {
+          type uint32;
+        }
+      }
+    }
+  }
+}
