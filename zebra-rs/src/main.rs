@@ -62,6 +62,13 @@ struct Arg {
     config_file: Option<String>,
 
     #[arg(
+        long = "commit-history-dir",
+        value_name = "DIR",
+        help = "Directory the commit history is kept in; by default the config file's name with .commits appended"
+    )]
+    commit_history_dir: Option<String>,
+
+    #[arg(
         long = "feature",
         value_name = "[MODULE:]FEATURE",
         help = "Enable a YANG feature (RFC 7950); schema nodes guarded by if-feature exist only while their feature is enabled. A bare name refers to the zebra-features module. Repeatable."
@@ -288,6 +295,8 @@ async fn run(arg: Arg) -> anyhow::Result<()> {
         policy.tx.clone(),
         rib.label_space.clone(),
     )?;
+
+    config.keep_history(arg.commit_history_dir.as_deref().map(std::path::Path::new));
 
     config.subscribe("rib", rib.cm.tx.clone());
     config.subscribe("policy", policy.cm.tx.clone());

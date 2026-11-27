@@ -9,12 +9,33 @@
 # Behaviour is driven by the environment:
 #   STUB_LOG           file every invocation is appended to, one line of
 #                      arguments per call (the harness asserts on order)
-#   STUB_UNCOMMITTED   exit code for `-u`: 0 dirty, 1 clean, 2 unknown
-#   STUB_COMMIT_RC     exit code for `-m configure commit|discard`
-#   STUB_COMMIT_OUT    stdout for those, minus the `Show` marker line
-#                      the real helper always prints first
+#   STUB_UNCOMMITTED   exit code for `-u`: 0 dirty, 1 clean, 2 unknown.
+#                      Once a commit was made or the edits discarded it
+#                      is 1, as the daemon would then answer.
+#   STUB_COMMIT_SEQ    what each `-m configure commit` in turn comes to,
+#                      the last one repeating:
+#                        ok           made (status 0, nothing printed)
+#                        noted        made, with STUB_COMMIT_OUT printed
+#                        refused      not made: STUB_COMMIT_OUT, status 0
+#                        denied       no admin role: status 4, no output
+#                        unreachable  status 3, a warning on stderr
+#                        failed       status 1, a reason on stderr
+#   STUB_COMMIT_RC     without STUB_COMMIT_SEQ: exit code of every
+#                      `-m configure commit`
+#   STUB_COMMIT_OUT    its stdout, minus the `Show` marker line the real
+#                      helper always prints first. Without
+#                      STUB_COMMIT_SEQ a commit that prints it is one
+#                      the daemon refused.
+#   STUB_ENABLE_RC     exit code for `-e` (0: the role is given)
 #   STUB_FIRST         newline-separated first-level commands for `-f`
 set -u
+
+# What the daemon would remember between two calls: how many commits
+# were asked for, and whether anything is still uncommitted.
+state="${STUB_LOG:+${STUB_LOG}.state}"
+commits_asked () { [[ -n ${state} && -f ${state}.commits ]] && cat "${state}.commits" || echo 0; }
+mark_clean () { [[ -n ${state} ]] && : >"${state}.clean"; }
+is_clean () { [[ -n ${state} && -f ${state}.clean ]]; }
 
 # The vty passes `--` before the operator's words; logged without it.
 logargs=()
@@ -26,7 +47,9 @@ args=()
 while [[ $# -gt 0 ]]; do
   case $1 in
     -m) mode=$2; shift 2 ;;
-    -u|--uncommitted) exit "${STUB_UNCOMMITTED:-1}" ;;
+    -u|--uncommitted)
+      is_clean && exit 1
+      exit "${STUB_UNCOMMITTED:-1}" ;;
     -l|--logout) exit 0 ;;
     -H|--hostname) echo "teststub"; exit 0 ;;
     -S|--state) printf '%s\n\n' "teststub"; exit 0 ;;
@@ -36,7 +59,14 @@ while [[ $# -gt 0 ]]; do
       printf '%b\n' "${STUB_FIRST:-configure}"
       exit 0 ;;
     -c|--completion|-t|--trailing) exit 0 ;;
-    -e|--enable|-d|--disable) exit 0 ;;
+    -e|--enable)
+      if [[ ${STUB_ENABLE_RC:-0} -eq 0 ]]; then
+        echo "% Enabled (admin role active for 900 seconds)"
+      else
+        echo "% Enable failed: authentication failed"
+      fi
+      exit "${STUB_ENABLE_RC:-0}" ;;
+    -d|--disable) exit 0 ;;
     -j|--json) shift ;;
     --) shift; args+=("$@"); break ;;
     *) args+=("$1"); shift ;;
@@ -44,10 +74,43 @@ while [[ $# -gt 0 ]]; do
 done
 
 case "${mode}:${args[0]:-}" in
-  configure:commit|configure:discard)
+  configure:discard)
     echo "Show"
-    [[ -n ${STUB_COMMIT_OUT:-} ]] && printf '%s\n' "${STUB_COMMIT_OUT}"
-    exit "${STUB_COMMIT_RC:-0}"
+    mark_clean
+    exit 0
+    ;;
+  configure:commit)
+    n=$(commits_asked)
+    [[ -n ${state} ]] && echo $(( n + 1 )) >"${state}.commits"
+    if [[ -n ${STUB_COMMIT_SEQ:-} ]]; then
+      read -r -a seq <<<"${STUB_COMMIT_SEQ}"
+      (( n >= ${#seq[@]} )) && n=$(( ${#seq[@]} - 1 ))
+      outcome=${seq[n]}
+    elif [[ ${STUB_COMMIT_RC:-0} -ne 0 ]]; then
+      outcome="rc"
+    elif [[ -n ${STUB_COMMIT_OUT:-} ]]; then
+      outcome="refused"
+    else
+      outcome="ok"
+    fi
+    case ${outcome} in
+      ok)
+        echo "Show"; mark_clean; exit 0 ;;
+      noted)
+        echo "Show"; printf '%s\n' "${STUB_COMMIT_OUT:-}"; mark_clean; exit 0 ;;
+      refused)
+        echo "Show"; printf '%s\n' "${STUB_COMMIT_OUT:-% refused}"; exit 0 ;;
+      denied)
+        exit 4 ;;
+      unreachable)
+        echo "% Cannot reach zebra-rs: stub" >&2; exit 3 ;;
+      failed)
+        echo "% stub failure" >&2; exit 1 ;;
+      rc)
+        echo "Show"
+        [[ -n ${STUB_COMMIT_OUT:-} ]] && printf '%s\n' "${STUB_COMMIT_OUT}"
+        exit "${STUB_COMMIT_RC}" ;;
+    esac
     ;;
   *:configure)
     # Entering configure mode: the reply vty.sh evals to switch modes.

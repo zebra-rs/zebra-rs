@@ -10,6 +10,7 @@ this chapter explains what each option does and how they interact.
 |---|---|---|---|---|
 | `--yang-path` | `-y` | `PATH` | search order (below) | Directory the YANG schema is loaded from |
 | `--config-file` | `-c` | `FILENAME` | search order (below) | Configuration file loaded at startup |
+| `--commit-history-dir` | | `DIR` | the config file's name + `.commits` | Directory the commit history is kept in |
 | `--feature` | | `[MODULE:]FEATURE` | none | Turn on an optional part of the schema; repeatable |
 | `--daemon` | `-d` | — | foreground | Detach and run in the background |
 | `--log-output` | | `stdout \| syslog \| file` | `stdout` | Where log records are written |
@@ -91,6 +92,24 @@ the document references a key the YANG schema does not recognize, the
 file is rejected as a whole — no partial configuration is applied — and
 the offending key is reported on the error log so a typo cannot silently
 leave a half-applied configuration.
+
+## `--commit-history-dir DIR`
+
+Where the configurations of the last 50 commits are kept, for
+`rollback` (see [Show Config Commands](ch-06-02-show-config-commands.md)).
+The default is a directory beside the config file, named after it:
+`/etc/zebra-rs/zebra-rs.conf.commits` for the default config file. The
+daemon creates it, mode 0700.
+
+There is no default when the config file is not a regular file, as with
+`-c /dev/null` to start with no configuration: every daemon started that
+way would otherwise share `/dev/null.commits`. The history is then kept
+in memory only, unless this option names a directory.
+
+Give a directory on storage that outlives the daemon's own filesystem
+when that one does not, as in a container. A directory that cannot be
+created or read is reported in the log, and the history is then kept in
+memory only.
 
 ## `-y`, `--yang-path PATH`
 

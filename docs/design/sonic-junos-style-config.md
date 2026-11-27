@@ -57,7 +57,7 @@ candidate and a running configuration, and `commit` that validates the
 candidate and dispatches the difference, refusing the whole commit when one
 line is rejected. Configure mode has `set`, `delete`, `commit`, `discard`,
 `load`, `save`, `compare` and `rollback` (*read*: `yang/configure.yang`), over
-a history of the last 50 commits that is kept in memory. It has no `commit
+a history of the last 50 commits that is kept on disk, and `commit
 confirmed`.
 
 **zebra-rs on SONiC today.** Routing configuration flows one way:
@@ -71,9 +71,9 @@ container restarts.
   Subscribe` (*read*: `proto/config.proto`) streams a snapshot and then one
   event per commit, as `set`/`delete` path changes or as a JSON subtree. An
   out-of-process daemon consumes its part of the configuration this way now.
-- zebra-rs has **one candidate, shared by every configure-mode session**. A
-  writer that applies a document no longer commits what a session has pending
-  in it (§8.1).
+- zebra-rs has **a candidate for each session**. A commit, by another session
+  or by a writer that applies a document, commits nothing a session has
+  pending, and the session keeps its edits over it (§8.1).
 
 ## 3. The central decision: who owns the truth
 
@@ -252,7 +252,7 @@ persistence of SONiC configuration stays `config save` and `config_db.json`
 
 ## 8. What zebra-rs needs first
 
-### 8.1 A candidate per session — the apply half is done
+### 8.1 A candidate per session — done
 
 *Measured, before the fix.* zebra-rs has one candidate. An uncommitted `set`
 typed in one configure session was committed by an unrelated `vtyctl apply`
@@ -279,32 +279,47 @@ fix: an uncommitted neighbor description stayed out of the running config
 while bgpcfgd committed a static route. The version that is merged has run in
 the unit suite and BDD only.
 
+**Closed between sessions.** Each vty session that enters configure mode now
+has a candidate of its own (`zebra-rs/src/config/private.rs`). What one
+operator types is not in another's `show`, and `commit`, `discard`, `load` and
+`rollback` are of the session that typed them. A commit by anyone else is
+carried into a session's candidate the same way: the session's edits are then
+edits of the new running config. The candidate ends with the session's shell.
+*Measured* on a SONiC VS: a session's uncommitted neighbor description stayed
+out of the running config while a second session committed another one, and
+was still the first session's only pending change afterwards.
+
+This is Junos `configure private` as the only mode, with one difference. A
+global configure lock (`configure exclusive`) was not built: bgpcfgd must
+never be blocked by an idle operator.
+
 What that does not give:
 
-- **Sessions still share one candidate.** Two operators in configure mode edit
-  the same tree, and either one's `commit` commits both. So does `load`.
-- **A conflict is settled, not reported.** Where an apply and an edit set the
-  same leaf, the candidate takes the applied value and the operator is not
-  told. The rebase of §7 wants the commit refused until the operator has looked.
-- **A whole-config document** (CLI block, JSON, YAML) replaces the
-  configuration and the pending edits with it. Only an apply of `set`/`delete`
-  lines keeps them.
-
-What remains to build is therefore the private candidate per session (Junos
-`configure private`), with the machine writers — bgpcfgd's `vtyctl apply`, and
-the bridge — each using their own. A global configure lock (`configure
-exclusive`) is simpler and is not enough here, because bgpcfgd must never be
-blocked by an idle operator.
+- **A lock.** There is no `configure exclusive`, for the reason above.
+- **An `update` step.** Where a commit and a session's edit set the same leaf,
+  the session keeps its edit and its next `commit` is refused once, naming the
+  leaf with both values (IOS-XR warns at commit in the same way; Junos refuses
+  a private commit until the operator has run `update`). Other commits made
+  meanwhile are mentioned when the session's commit goes through, not shown
+  line by line. The import of §7 can use the same notice for a CONFIG_DB
+  change made behind an open candidate.
+- **The machine writers have no candidate of their own to keep.** An apply
+  builds its candidate, commits it and is done, which is all bgpcfgd needs.
+  The bridge of §6 can work the same way.
 
 ### 8.2 History, compare, rollback, commit confirmed
 
-- **History** is built, in memory: the configurations of the last 50
-  commits, with the time and the revision of each (`show commit history`). A
-  commit's number is its place in the list and moves with every commit after
-  it; its revision (`<daemon start>-<count>`) does not, and is what a writer
-  that is not alone on the box names a commit by. Still to do: keep it
-  across a restart, and record the user and a comment (`commit comment
-  "…"`).
+- **History** is built: the configurations of the last 50 commits, with the
+  time and the revision of each (`show commit history`), kept in a directory
+  and read back at start (`--commit-history-dir`). A commit's number is its
+  place in the list and moves with every commit after it; its revision
+  (`<daemon start>-<count>`) does not, and is what a writer that is not alone
+  on the box names a commit by. On SONiC the default directory is inside
+  the `bgp` container; the image has to point it at storage that outlives
+  the container. Each commit has its user, how it was made (`commit`,
+  `apply`, the config file, an unconfirmed rollback) and a comment (`commit
+  comment …`). bgpcfgd's applies cannot push operators' commits out: each
+  kind keeps at least half of the history.
 - **`show | compare`** is built: configure mode has `compare` and `compare
   formal`, and `show | compare` reaches the same command. `compare rollback
   N` compares the candidate with commit N.
@@ -312,10 +327,16 @@ blocked by an idle operator.
   that configuration into the candidate and takes effect on `commit`, like
   any other change, and so goes through the same validation and ordered
   write.
-- **`commit confirmed M`** commits, then reverts after M minutes unless a
-  plain `commit` arrives. The revert must survive the loss of the session that
-  asked for it — that is the case it exists for — so the timer belongs to the
-  daemon, not the shell.
+- **`commit confirmed M`** is built. It commits, then the daemon rolls the
+  commit back after M minutes unless a plain `commit` arrives. The timer
+  belongs to the daemon, not the shell, so the rollback survives the loss of
+  the session that asked for it, which is the case it exists for. Only the
+  unconfirmed commit is rolled back: what bgpcfgd applied meanwhile is kept.
+  Where those applies have left the configuration to go back to invalid, the
+  rollback is refused. The commit then stays pending and is shown as that in
+  `show commit history`, and the daemon tries again every minute: bgpcfgd's
+  next apply may cure it. A `commit` line in a document bgpcfgd applies is
+  bgpcfgd's commit and confirms nothing.
 
 These are useful to zebra-rs off SONiC as well and can ship first.
 

@@ -17,9 +17,10 @@ use crate::config::session::{
 };
 
 use super::api::{
-    ClearTxRequest, CompletionRequest, CompletionResponse, DisplayRequest, DisplayTxRequest,
-    ExecuteRequest, ExecuteResponse, Message,
+    ClearTxRequest, CompletionRequest, CompletionResponse, Context, DisplayRequest,
+    DisplayTxRequest, ExecuteRequest, ExecuteResponse, Message,
 };
+use super::commands::ungated_in_configure;
 use super::show_provider::{ShowProviderBridge, ShowProviderServiceServer};
 use super::subscribe::{ConfigServiceServer, ConfigSubscribeService};
 use super::vty;
@@ -88,19 +89,6 @@ fn admin_lease(sessions: &SessionTable, key: Option<SessionKey>) -> vty::AdminLe
     vty::AdminLease { secs }
 }
 
-/// Configure-mode lines that need no admin role: `exit` and `help`, or a
-/// prefix of either, alone on the line. Decided on the words, before
-/// anything runs, since other configure-mode commands change the
-/// candidate when they run. A prefix that the parser finds ambiguous runs
-/// nothing either.
-fn ungated_in_configure(line: &str) -> bool {
-    let mut words = line.split_whitespace();
-    match (words.next(), words.next()) {
-        (Some(word), None) => "exit".starts_with(word) || "help".starts_with(word),
-        _ => false,
-    }
-}
-
 /// Does this exec-mode line enter configure mode? Asked of what the line
 /// resolved to, so that an abbreviation (`conf`) counts as the whole
 /// word does.
@@ -144,9 +132,16 @@ async fn spawn_vtypam(username: &str, password: &str) -> std::io::Result<i32> {
 }
 
 impl ExecService {
-    async fn execute_request(&self, mode: &str, input: &str) -> ExecuteResponse {
+    async fn execute_request(
+        &self,
+        mode: &str,
+        input: &str,
+        session: Option<SessionKey>,
+    ) -> ExecuteResponse {
         let (tx, rx) = oneshot::channel();
-        let req = ExecuteRequest::new(mode, input, tx);
+        let mut req = ExecuteRequest::new(mode, input, tx);
+        let user = session.and_then(|key| self.sessions.username(&key));
+        req.ctx = Context::session(session, user);
         self.tx.send(Message::Execute(req)).await.unwrap();
         rx.await.unwrap()
     }
@@ -156,9 +151,11 @@ impl ExecService {
         mode: &str,
         input: &str,
         interactive: bool,
+        session: Option<SessionKey>,
     ) -> CompletionResponse {
         let (tx, rx) = oneshot::channel();
-        let req = CompletionRequest::new(mode, input, interactive, tx);
+        let mut req = CompletionRequest::new(mode, input, interactive, tx);
+        req.session = session;
         self.tx.send(Message::Completion(req)).await.unwrap();
         rx.await.unwrap()
     }
@@ -239,7 +236,9 @@ impl Exec for ExecService {
         let request = request.get_ref();
         match request.r#type {
             x if x == ExecType::Exec as i32 => {
-                let resp = self.execute_request(&request.mode, &request.line).await;
+                let resp = self
+                    .execute_request(&request.mode, &request.line, key)
+                    .await;
                 if request.mode == "exec" && enters_configure(&resp) {
                     enforce_admin_key(&self.sessions, key)?;
                 }
@@ -258,13 +257,13 @@ impl Exec for ExecService {
             })),
             x if x == ExecType::CompleteFirstCommands as i32 => {
                 let resp = self
-                    .completion_request(&request.mode, &request.line, request.interactive)
+                    .completion_request(&request.mode, &request.line, request.interactive, key)
                     .await;
                 self.reply(ExecCode::Success, first_commands(&resp))
             }
             x if x == ExecType::Complete as i32 => {
                 let resp = self
-                    .completion_request(&request.mode, &request.line, request.interactive)
+                    .completion_request(&request.mode, &request.line, request.interactive, key)
                     .await;
                 self.reply(ExecCode::Success, comp_commands(&resp))
             }
@@ -272,7 +271,7 @@ impl Exec for ExecService {
                 let mut input = request.line.clone();
                 input.push(' ');
                 let resp = self
-                    .completion_request(&request.mode, &input, request.interactive)
+                    .completion_request(&request.mode, &input, request.interactive, key)
                     .await;
                 self.reply(ExecCode::Success, comp_commands(&resp))
             }
@@ -285,6 +284,23 @@ impl Exec for ExecService {
         request: tonic::Request<LogoutRequest>,
     ) -> Result<Response<LogoutReply>, tonic::Status> {
         if let Some(ctx) = request.extensions().get::<SessionContext>() {
+            // A logout ends the session: its role, and its candidate
+            // with every uncommitted edit in it. It is the shell's own
+            // to ask for. A vty started inside the vty (or a script)
+            // shares the session of the shell above it, and logs out as
+            // it exits: that must not end the session of a shell that
+            // is still there.
+            if !SessionTable::is_shell_of(&ProcfsReader, &ctx.key, ctx.peer_pid) {
+                if super::tracing::vty() {
+                    tracing::info!(
+                        uid = ctx.key.0,
+                        bash_pid = ctx.key.1,
+                        pid = ctx.peer_pid,
+                        "vty logout from below the session's shell; session kept",
+                    );
+                }
+                return Ok(Response::new(LogoutReply { ok: true }));
+            }
             let removed = self.sessions.remove(&ctx.key);
             if super::tracing::vty() {
                 tracing::info!(uid = ctx.key.0, bash_pid = ctx.key.1, removed, "vty logout",);
@@ -511,11 +527,15 @@ impl Show for ShowService {
         &self,
         request: tonic::Request<ShowRequest>,
     ) -> std::result::Result<Response<Self::ShowStream>, tonic::Status> {
+        // The session that asks: what is shown of a session's own (its
+        // candidate) is that one's.
+        let session = request.extensions().get::<SessionContext>().map(|c| c.key);
         let request = request.get_ref();
 
         let (tx, rx) = oneshot::channel();
         let query = DisplayTxRequest {
             paths: request.paths.clone(),
+            session,
             resp: tx,
         };
         self.tx.send(Message::DisplayTx(query)).await.unwrap();
@@ -619,6 +639,10 @@ impl Apply for ApplyService {
         request: tonic::Request<tonic::Streaming<ApplyRequest>>,
     ) -> Result<tonic::Response<ApplyReply>, tonic::Status> {
         enforce_admin(&self.sessions, &request)?;
+        let user = request
+            .extensions()
+            .get::<SessionContext>()
+            .and_then(|ctx| self.sessions.username(&ctx.key));
 
         let mut stream = request.into_inner();
 
@@ -637,7 +661,11 @@ impl Apply for ApplyService {
         }
 
         let (tx, rx) = oneshot::channel();
-        let deploy = DeployRequest { config, resp: tx };
+        let deploy = DeployRequest {
+            config,
+            user,
+            resp: tx,
+        };
         self.tx.send(Message::Deploy(deploy)).await.unwrap();
         let resp = rx.await.unwrap();
 
@@ -816,6 +844,7 @@ impl tonic::service::Interceptor for VtyPeerInterceptor {
                 Ok(((skey_uid, bash_pid), is_new)) => {
                     req.extensions_mut().insert(SessionContext {
                         key: (skey_uid, bash_pid),
+                        peer_pid: pid,
                     });
                     if is_new {
                         if super::tracing::vty() {
@@ -871,6 +900,22 @@ pub fn serve(cli: Cli, addr: VtyAddr) -> anyhow::Result<()> {
         tracing::debug!("VTY configure-authorization group not found; PAM-only fallback");
     }
     let sessions = SessionTable::with_config_group(config_group_gid);
+    // A session's candidate lives in the config manager and ends with
+    // the session's shell.
+    let ended_tx = cli.tx.clone();
+    sessions.on_shell_gone(move |key| {
+        let tx = ended_tx.clone();
+        match tokio::runtime::Handle::try_current() {
+            Ok(runtime) => {
+                runtime.spawn(async move {
+                    let _ = tx.send(Message::SessionEnd { key }).await;
+                });
+            }
+            Err(_) => {
+                let _ = tx.try_send(Message::SessionEnd { key });
+            }
+        }
+    });
     let enable_rate = EnableRateLimiter::new();
 
     let exec_service = ExecService {
@@ -1118,6 +1163,55 @@ mod tests {
         assert_eq!(status.code(), tonic::Code::NotFound);
         assert!(status.message().contains("show nosuch"));
         assert!(rx.recv().await.is_none());
+    }
+}
+
+#[cfg(test)]
+mod logout_tests {
+    use super::*;
+
+    /// A logout ends the session of the shell that sent it. One sent
+    /// from below that shell (a vty started inside the vty logs out as
+    /// it exits) ends nothing: the shell above is still there, with its
+    /// role and its uncommitted edits.
+    #[tokio::test]
+    async fn only_the_session_s_own_shell_logs_it_out() {
+        let (tx, _rx) = mpsc::channel(4);
+        let sessions = SessionTable::with_config_group(None);
+        let gone = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let told = gone.clone();
+        sessions.on_shell_gone(move |key| told.lock().unwrap().push(key));
+        let service = ExecService {
+            tx,
+            sessions: sessions.clone(),
+            enable_rate: EnableRateLimiter::new(),
+        };
+        // This process stands in for `vtyhelper -l`; what ran it for the
+        // shell that owns the session.
+        let me = std::process::id() as i32;
+        let shell = unsafe { libc::getppid() } as u32;
+        assert!(shell > 1, "the test has a parent to stand for a shell");
+        let logout = |key: SessionKey| {
+            let mut request = tonic::Request::new(LogoutRequest {});
+            request
+                .extensions_mut()
+                .insert(SessionContext { key, peer_pid: me });
+            service.logout(request)
+        };
+
+        // A session further up: this process only shares it.
+        let above = (1000, 1);
+        sessions.insert_for_test(above, std::time::Instant::now());
+        assert!(logout(above).await.unwrap().into_inner().ok);
+        assert!(sessions.get(&above).is_some(), "ended from below");
+        assert!(gone.lock().unwrap().is_empty());
+
+        // Its own shell's.
+        let own = (1000, shell);
+        sessions.insert_for_test(own, std::time::Instant::now());
+        assert!(logout(own).await.unwrap().into_inner().ok);
+        assert!(sessions.get(&own).is_none());
+        assert_eq!(*gone.lock().unwrap(), [own]);
     }
 }
 
