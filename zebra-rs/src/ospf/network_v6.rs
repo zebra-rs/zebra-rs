@@ -25,6 +25,7 @@ use tokio::io::Interest;
 use tokio::io::unix::AsyncFd;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
+use super::network::{LOG_INTERVAL, LogLimit, RECV_BUF_LEN, ifname};
 use super::{OspfVersion, Ospfv3};
 use ospf_packet::{Ospfv3Packet, ospfv3_verify_checksum, parse_v3};
 
@@ -67,9 +68,21 @@ pub struct Ospfv3Recv {
 /// — the kernel strips the IPv6 header on receive — so there's no
 /// `IPV4_HEADER_LEN` skip to mirror.
 pub async fn read_packet_v6(sock: Arc<AsyncFd<Socket>>, tx: UnboundedSender<Ospfv3Recv>) {
-    let mut buf = [0u8; 1024 * 16];
+    read_packet_v6_into(sock, tx, RECV_BUF_LEN).await
+}
+
+/// [`read_packet_v6`] with the buffer size given, so that a test can
+/// receive a datagram longer than the buffer.
+async fn read_packet_v6_into(
+    sock: Arc<AsyncFd<Socket>>,
+    tx: UnboundedSender<Ospfv3Recv>,
+    buf_len: usize,
+) {
+    // On the heap: the task's future would otherwise carry the 64 KB.
+    let mut buf = vec![0u8; buf_len];
     let mut iov = [IoSliceMut::new(&mut buf)];
     let mut cmsgspace = nix::cmsg_space!(libc::in6_pktinfo);
+    let mut truncated = LogLimit::new(LOG_INTERVAL);
 
     loop {
         let _ = sock
@@ -102,6 +115,23 @@ pub async fn read_packet_v6(sock: Arc<AsyncFd<Socket>>, tx: UnboundedSender<Ospf
                 let Some(input) = msg.iovs().next() else {
                     return Err(ErrorKind::UnexpectedEof.into());
                 };
+
+                // The datagram is longer than the buffer and the kernel
+                // has discarded the rest. What is left would fail the
+                // length check below, silently, and every retransmission
+                // after it: say so.
+                if msg.flags.contains(socket::MsgFlags::MSG_TRUNC) {
+                    if let Some(held) = truncated.pass() {
+                        tracing::warn!(
+                            src = %src,
+                            interface = %ifname(ifindex),
+                            buffer = buf_len,
+                            suppressed = held,
+                            "ospfv3: dropped a received packet longer than the receive buffer"
+                        );
+                    }
+                    return Err(ErrorKind::InvalidData.into());
+                }
 
                 if input.len() < 16 {
                     return Err(ErrorKind::UnexpectedEof.into());
@@ -147,6 +177,8 @@ pub async fn read_packet_v6(sock: Arc<AsyncFd<Socket>>, tx: UnboundedSender<Ospf
 /// items from `rx` and pushes them onto the wire with the IPv6
 /// pseudo-header checksum stamped in.
 pub async fn write_packet_v6(sock: Arc<AsyncFd<Socket>>, mut rx: UnboundedReceiver<Ospfv3Send>) {
+    let mut failed = LogLimit::new(LOG_INTERVAL);
+
     while let Some(item) = rx.recv().await {
         let Ospfv3Send {
             packet,
@@ -186,7 +218,7 @@ pub async fn write_packet_v6(sock: Arc<AsyncFd<Socket>>, mut rx: UnboundedReceiv
         };
         let cmsg = [socket::ControlMessage::Ipv6PacketInfo(&pktinfo)];
 
-        let _ = sock
+        let sent = sock
             .async_io(Interest::WRITABLE, |sock| {
                 socket::sendmsg(
                     sock.as_raw_fd(),
@@ -199,5 +231,168 @@ pub async fn write_packet_v6(sock: Arc<AsyncFd<Socket>>, mut rx: UnboundedReceiv
                 Ok(())
             })
             .await;
+        // The packet is lost and nothing above this task learns of it. A
+        // packet of more than 65,535 bytes fails here with EMSGSIZE on
+        // every retransmission.
+        if let Err(err) = sent
+            && let Some(held) = failed.pass()
+        {
+            tracing::warn!(
+                dest = %dest,
+                interface = %ifname(ifindex),
+                packet = %packet.typ,
+                bytes = buf.len(),
+                error = %err,
+                suppressed = held,
+                "ospfv3: failed to send a packet"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::{Ipv4Addr, SocketAddrV6};
+    use std::time::Duration;
+
+    use ospf_packet::{Ospfv3LsRequest, Ospfv3LsRequestEntry, Ospfv3Payload};
+    use socket2::{Domain, Type};
+    use tokio::sync::mpsc;
+
+    use super::*;
+
+    /// A UDP socket on loopback in place of the raw socket. It needs no
+    /// privilege, carries `IPV6_PKTINFO` like the raw one and, like it,
+    /// delivers the packet with no IPv6 header in front.
+    fn udp() -> Arc<AsyncFd<Socket>> {
+        let sock = Socket::new(Domain::IPV6, Type::DGRAM, None).unwrap();
+        sock.set_nonblocking(true).unwrap();
+        sock.bind(&SocketAddrV6::new(Ipv6Addr::LOCALHOST, 0, 0, 0).into())
+            .unwrap();
+        crate::ospf::socket::set_ipv6_pktinfo(&sock);
+        Arc::new(crate::async_fd::register(sock).unwrap())
+    }
+
+    /// An LS Request with `entries` entries: 16 + 12 × `entries` bytes.
+    fn ls_request(entries: u32) -> Ospfv3Packet {
+        let reqs = (0..entries)
+            .map(|n| Ospfv3LsRequestEntry::new(0x4005, n, Ipv4Addr::new(10, 0, 0, 2)))
+            .collect();
+        Ospfv3Packet::new(
+            &Ipv4Addr::new(10, 0, 0, 2),
+            &Ipv4Addr::UNSPECIFIED,
+            0,
+            Ospfv3Payload::LsRequest(Ospfv3LsRequest { reqs }),
+        )
+    }
+
+    fn send(from: &AsyncFd<Socket>, to: &AsyncFd<Socket>, packet: &Ospfv3Packet) {
+        let mut buf = BytesMut::new();
+        packet.emit_with_checksum(&mut buf, &Ipv6Addr::LOCALHOST, &Ipv6Addr::LOCALHOST);
+        let to = to.get_ref().local_addr().unwrap();
+        assert_eq!(from.get_ref().send_to(&buf, &to).unwrap(), buf.len());
+    }
+
+    /// The number of entries of the next LS Request the reader delivers.
+    async fn received(rx: &mut mpsc::UnboundedReceiver<Ospfv3Recv>) -> usize {
+        let recv = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("the reader delivers the packet")
+            .unwrap();
+        let Ospfv3Payload::LsRequest(req) = recv.packet.payload else {
+            panic!("not an LS Request");
+        };
+        req.reqs.len()
+    }
+
+    fn runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+    }
+
+    /// 60,016 bytes of OSPFv3, as a neighbor that does not size its packets
+    /// to the MTU sends for a request list of 5,000 LSAs. The 16 KB buffer
+    /// dropped it.
+    #[tokio::test]
+    async fn reader_accepts_a_60_kb_packet() {
+        let (ours, theirs) = (udp(), udp());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let reader = tokio::spawn(read_packet_v6(ours.clone(), tx));
+
+        send(&theirs, &ours, &ls_request(5000));
+
+        assert_eq!(received(&mut rx).await, 5000);
+        reader.abort();
+    }
+
+    /// With a buffer shorter than the datagram: one warning for the two
+    /// packets dropped, and the packet after them is read.
+    #[test]
+    fn reader_reports_a_packet_longer_than_its_buffer() {
+        let logged = crate::test_log::warnings(|| {
+            runtime().block_on(async {
+                let (ours, theirs) = (udp(), udp());
+                let (tx, mut rx) = mpsc::unbounded_channel();
+                let reader = tokio::spawn(read_packet_v6_into(ours.clone(), tx, 1024));
+
+                send(&theirs, &ours, &ls_request(200));
+                send(&theirs, &ours, &ls_request(201));
+                send(&theirs, &ours, &ls_request(3));
+
+                assert_eq!(received(&mut rx).await, 3);
+                reader.abort();
+            })
+        });
+
+        assert_eq!(logged.lines().count(), 1, "{logged}");
+        assert!(
+            logged.contains("dropped a received packet longer than the receive buffer")
+                && logged.contains("src=::1")
+                && logged.contains("interface=lo")
+                && logged.contains("buffer=1024"),
+            "{logged}"
+        );
+    }
+
+    /// A send that fails is reported, once per interval, and the writer
+    /// goes on to the next packet. The failure here is the UDP socket's:
+    /// it refuses the port 0 the writer addresses a raw socket with.
+    #[test]
+    fn writer_reports_a_send_that_fails() {
+        let logged = crate::test_log::warnings(|| {
+            runtime().block_on(async {
+                let (ptx, prx) = mpsc::unbounded_channel();
+                let writer = tokio::spawn(write_packet_v6(udp(), prx));
+
+                let lo = nix::net::if_::if_nametoindex("lo").unwrap();
+                for _ in 0..2 {
+                    ptx.send(Ospfv3Send {
+                        packet: ls_request(3),
+                        ifindex: lo,
+                        dest: Some(Ipv6Addr::LOCALHOST),
+                        src: Ipv6Addr::LOCALHOST,
+                    })
+                    .unwrap();
+                }
+                drop(ptx);
+
+                tokio::time::timeout(Duration::from_secs(5), writer)
+                    .await
+                    .expect("the writer drains its queue and ends")
+                    .unwrap();
+            })
+        });
+
+        assert_eq!(logged.lines().count(), 1, "{logged}");
+        assert!(
+            logged.contains("failed to send a packet")
+                && logged.contains("dest=::1")
+                && logged.contains("interface=lo")
+                && logged.contains("bytes=52")
+                && logged.contains("error="),
+            "{logged}"
+        );
     }
 }

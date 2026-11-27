@@ -1,6 +1,7 @@
 # OSPF: sizing packets to the MTU
 
-Status: **Plan, 2026-11-19. Not implemented.** This is step 1 of the
+Status: **Plan, 2026-11-19. Pull request 1 of §7, the receive buffer, is
+implemented; pull requests 2 to 4 are not.** This is step 1 of the
 order of work in
 [`ospf-rfc4222-applicability.md`](ospf-rfc4222-applicability.md) (§6),
 and it removes the limit reproduced in that memo's §4.2: two zebra-rs
@@ -344,6 +345,25 @@ until every packet type fits. Pull requests 1 to 3 are covered by their
 unit tests and by re-running the lab at the sizes they unlock.
 
 Pull request 1 is a few lines and could ship at once.
+
+**Pull request 1, as built.** `network::RECV_BUF_LEN` is 65,536 for both
+readers. A truncated packet and a failed send are each logged at most
+once per 10 s per task, with the count of those not logged. Re-running
+the lab, in OSPFv2 and in OSPFv3:
+
+| Routes | Before | After |
+|---|---|---|
+| 454 (OSPFv2), 500 (OSPFv3) | Loading for good | Full |
+| 816 (OSPFv2) | Exchange for good | Full |
+| 1,819 (both) | not run | Full |
+| 1,820 (both) | not run | Loading for good, and logged |
+
+At 1,820 the LS Update answering the request is 65,548 bytes of OSPFv2
+(65,568 with its IP header) and 65,540 of OSPFv3, and the sender logs:
+
+```
+WARN ospf: failed to send a packet dest=10.0.12.1 interface=etha packet=LS Update bytes=65548 error=Message too long (os error 90) suppressed=1
+```
 
 ---
 

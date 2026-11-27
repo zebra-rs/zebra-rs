@@ -1,7 +1,8 @@
 # OSPF: applicability of RFC 4222 (packet priority and congestion avoidance)
 
 Status: **Assessment, 2026-11-18, with two findings reproduced on
-2026-11-19. Nothing in this document is implemented.**
+2026-11-19. One thing is implemented since: the 64 KB receive buffer
+(§4.2). Nothing else is.**
 zebra-rs OSPF was read at `main` `f59b36fe` against RFC 4222 (BCP 112,
 "Prioritized Treatment of Specific OSPF Version 2 Packets and Congestion
 Avoidance"). FRR, holo and BIRD were read in source. Commercial behaviour
@@ -11,9 +12,11 @@ What is and is not verified:
 
 - **zebra-rs, reproduced:** the packet-size limit (§4.2) and the
   re-origination of every redistributed LSA (§4.5), both for OSPFv2, in
-  a two-router lab on a release build of `main` `bd2cebd0`.
-- **zebra-rs, read only:** everything else, including all of OSPFv3. No
-  backlog depth was measured.
+  a two-router lab on a release build of `main` `bd2cebd0`. The
+  packet-size limit was later reproduced for OSPFv3 too, with the
+  26.11.4 package.
+- **zebra-rs, read only:** everything else, including the rest of
+  OSPFv3. No backlog depth was measured.
 - **FRR:** read directly at `9b9c7c4138` (2026-11-18, `frr-10.8.0-dev`).
 - **holo, BIRD:** read by a research agent (holo `af71aedb`, BIRD master
   `94568d7`, version 2.20.0). The dead-timer and retransmission points
@@ -42,7 +45,8 @@ large networks the RFC is about (§4):
 
 - **No OSPF packet is sized to the MTU, and the receive buffer is
   16 KB.** Reproduced: two zebra-rs routers synchronize 453 Type-5 LSAs
-  and fail, silently and for good, from 454.
+  and fail, silently and for good, from 454. (The buffer is 64 KB since;
+  the limit is now 1,819 and it is logged. See §4.2.)
 - **Every redistributed route re-originates every Type-5 LSA.**
   Reproduced: adding 199 routes sent 20,102 LS Updates to one neighbor.
   This is a storm of the router's own making, the case the RFC's
@@ -299,12 +303,36 @@ LSAs one router lacks total more than about 16.3 KB. That is 453 Type-5
 LSAs at 36 bytes each, and fewer of anything larger. A Router-LSA with
 many links, or an Opaque LSA, counts for more.
 
+**OSPFv3 (2026-11-19, the 26.11.4 package).** The same lab with `N`
+static `/64` routes, whose AS-External-LSAs are also 36 bytes: 440 reach
+Full, and at 500 `a` stays in Loading with none of them.
+
 Not reproduced, from reading:
 
-- **OSPFv3** has the same 16 KB buffer and the same whole-list packets.
 - **Toward FRR**, which accepts packets up to 65,535 bytes and sends
   MTU-sized ones, the limit should be the 64 KB of §4.1: about 3,270
   LSAs in the Database Description zebra-rs sends.
+
+**Since fixed in part (2026-11-19).** Both readers now receive into
+65,536 bytes, which holds any IPv4 datagram and any OSPFv3 packet short
+of a jumbogram, and they log a packet that is truncated all the same.
+Both writers log a send that fails. The same lab afterwards, as `a`
+sees `b`:
+
+| `N` | OSPFv2 | OSPFv3 |
+|---|---|---|
+| 454 | Full | not run |
+| 500 | not run | Full |
+| 816 | Full | not run |
+| 1,819 | Full | Full |
+| 1,820 | Loading, no LSAs | Loading, no LSAs |
+
+The limit is now the 64 KB of §4.1. At 1,820 the LS Update answering the
+request is 65,568 bytes with its IP header, `sendmsg` refuses it, and
+`b` logs `failed to send a packet ... packet=LS Update bytes=65548
+error=Message too long`. Packets above the MTU still travel as IP
+fragments. Sizing them is
+[`ospf-packet-sizing-plan.md`](ospf-packet-sizing-plan.md).
 
 ### 4.3 Flooding is unicast on broadcast networks
 
@@ -342,7 +370,10 @@ redistributed, 199 more routes were applied in one commit. `b` sent
 (`2 + 3 + … + 200 = 20,099`). The same step with 1,000 routes would send
 about 500,000 to every neighbor.
 
-`as_external_redist_resync_v3` has the same loop; OSPFv3 was not run.
+`as_external_redist_resync_v3` has the same loop, and OSPFv3 shows the
+same pattern: with five static routes the AS-External-LSAs carry
+sequence numbers `0x80000005` down to `0x80000001`. The LS Updates were
+not counted for OSPFv3.
 
 This is an LSA storm of the router's own making, and it is the case the
 RFC's Appendix A names as "(g) injecting a large number of external
