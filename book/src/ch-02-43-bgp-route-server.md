@@ -28,7 +28,7 @@ re-advertises. Toward a `route-server-client` neighbor zebra-rs:
 | RFC 7947 | Ordinary eBGP advertisement | Toward a route-server client |
 |---|---|---|
 | §2.2.2 AS_PATH | prepend the local AS (after `remove-private-as` / `as-override` / `local-as` rewrites) | **leave it untouched** — no prepend, and none of the rewrites, which only exist to shape a prepended path |
-| §2.2.1 NEXT_HOP | rewrite to this router's address | **keep the received next-hop** on forwarded routes, so the client forwards straight to the originating member on the exchange LAN. Locally originated routes still carry this router's address |
+| §2.2.1 NEXT_HOP | rewrite to this router's address | **keep the received next-hop** on forwarded routes, so the client forwards straight to the originating member on the exchange LAN. Locally originated routes still carry this router's address, and so does a route whose IPv6 next-hop is a link-local (see [Interplay and precedence](#interplay-and-precedence)) |
 | §2.2.2.1 MED | pass through | pass through |
 | §2.2.2.2 communities | pass through | pass through |
 
@@ -156,6 +156,16 @@ member's.
   prepend for them to shape.
 - `afi-safi … next-hop-self` does not override the transparent next-hop
   for forwarded routes; `next-hop-unchanged` is implied.
+- A link-local IPv6 next-hop is never passed along, here or under
+  `next-hop-unchanged`: the address names a gateway only on the link the
+  route was learned on, so the route is advertised with this router's own
+  address instead (FRR does the same). A member that announces only a
+  link-local next-hop, as one peering with the server by link-local
+  address may, therefore has its traffic pass through the server. Members
+  that peer over global addresses, the usual exchange setup, are not
+  affected. Over an IPv4-transport session whose interface has no global
+  IPv6 address there is no address to put in, and the route is not
+  advertised to that client.
 - Outbound policy still applies per client — this is how an exchange
   implements member-specific export filtering.
 - Update groups: route-server clients form their own update group (the
