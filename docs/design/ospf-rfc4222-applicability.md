@@ -1,8 +1,9 @@
 # OSPF: applicability of RFC 4222 (packet priority and congestion avoidance)
 
 Status: **Assessment, 2026-11-18, with two findings reproduced on
-2026-11-19. One thing is implemented since: the 64 KB receive buffer
-(§4.2). Nothing else is.**
+2026-11-19. Two things are implemented since: the 64 KB receive buffer
+(§4.2), and originating a redistributed LSA only when it is new or
+changed (§4.5). Nothing else is.**
 zebra-rs OSPF was read at `main` `f59b36fe` against RFC 4222 (BCP 112,
 "Prioritized Treatment of Specific OSPF Version 2 Packets and Congestion
 Avoidance"). FRR, holo and BIRD were read in source. Commercial behaviour
@@ -12,9 +13,8 @@ What is and is not verified:
 
 - **zebra-rs, reproduced:** the packet-size limit (§4.2) and the
   re-origination of every redistributed LSA (§4.5), both for OSPFv2, in
-  a two-router lab on a release build of `main` `bd2cebd0`. The
-  packet-size limit was later reproduced for OSPFv3 too, with the
-  26.11.4 package.
+  a two-router lab on a release build of `main` `bd2cebd0`. Both were
+  later reproduced for OSPFv3 too, with the 26.11.4 package.
 - **zebra-rs, read only:** everything else, including the rest of
   OSPFv3. No backlog depth was measured.
 - **FRR:** read directly at `9b9c7c4138` (2026-11-18, `frr-10.8.0-dev`).
@@ -51,6 +51,7 @@ large networks the RFC is about (§4):
   Reproduced: adding 199 routes sent 20,102 LS Updates to one neighbor.
   This is a storm of the router's own making, the case the RFC's
   Appendix A lists as "injecting a large number of external routes".
+  (Fixed since; the same 199 routes now cost 199 LS Updates. See §4.5.)
 - **OSPFv3 can take a live neighbor down** when its dead-timer event
   overtakes queued Hellos (§3.1). Read, not reproduced.
 
@@ -545,7 +546,9 @@ Each step is the same change in OSPFv2 and OSPFv3.
    the interface MTU; receive up to 65,535 bytes. This comes first: it
    is reproduced, it stops adjacencies from forming at a few hundred
    LSAs, and pacing and retransmission limits mean little while one
-   packet carries a whole list.
+   packet carries a whole list. *The receive buffer is done (§4.2). The
+   splitting is not; its plan is
+   [`ospf-packet-sizing-plan.md`](ospf-packet-sizing-plan.md).*
 2. **Originate only what changed when redistributing** (§4.5): skip a
    prefix whose LSA would be identical, and put the path under
    `min-ls-interval`. It is independent of the other steps and small, so
@@ -586,8 +589,8 @@ it).
   throwaway. Two BDD features would hold the fixes: one that
   synchronizes 1,000 redistributed routes, one that counts the LS
   Updates sent when routes are added.
-- **Run the same lab for OSPFv3**, where both findings are read, not
-  reproduced.
+- **Run the same lab for OSPFv3**, where both findings were read, not
+  reproduced. *Done for both (§4.2, §4.5).*
 - **Measure the backlog.** §3.1 and §3.2 state the condition for a false
   neighbor-down, not how easily it is met. A storm test of 10,000 to
   100,000 LSAs with short Hello timers would show it.
